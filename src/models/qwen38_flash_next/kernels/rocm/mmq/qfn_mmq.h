@@ -80,4 +80,18 @@ int qfn_mmq_q5_K_moe_raw(
     int M, int K, int n_tokens, int n_experts, int n_expert_used,
     hipStream_t stream);
 
+// IQ experts (e.g. unsloth UD-IQ4_XS: IQ3_S/IQ4_XS gate/up, IQ4_NL down).
+int qfn_mmq_iq3_s_moe_raw(
+    const void * W, const float * X_f32, const int32_t * ids, float * out,
+    int M, int K, int n_tokens, int n_experts, int n_expert_used,
+    hipStream_t stream);
+int qfn_mmq_iq4_xs_moe_raw(
+    const void * W, const float * X_f32, const int32_t * ids, float * out,
+    int M, int K, int n_tokens, int n_experts, int n_expert_used,
+    hipStream_t stream);
+int qfn_mmq_iq4_nl_moe_raw(
+    const void * W, const float * X_f32, const int32_t * ids, float * out,
+    int M, int K, int n_tokens, int n_experts, int n_expert_used,
+    hipStream_t stream);
+
 }

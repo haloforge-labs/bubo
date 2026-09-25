@@ -3,9 +3,14 @@
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <cmath>
+#include <cstring>
 #include <initializer_list>
+#include <thread>
+#include <vector>
 
 #include "src/core/hip/weight_upload.hpp"
+#include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
 
@@ -24,6 +29,35 @@ struct Conversion {
   void* destination;
   std::size_t count;
 };
+
+/// Re-encodes Q6_K rows as Q8_0 (fp16 scale + 32 int8 per block).
+/// Q8_0's per-32 step is about a quarter of Q6_K's per-16 step, so the added
+/// rounding is small next to the Q6_K quantization it sits on.
+void Q6KRowsToQ8_0(const std::uint8_t* src, std::uint8_t* dst, std::size_t rows,
+                   std::size_t cols) {
+  const std::size_t src_row = cols / 256 * 210;
+  const std::size_t dst_row = cols / 32 * 34;
+  std::vector<float> values(cols);
+  for (std::size_t r = 0; r < rows; ++r) {
+    gufo::quant::DequantizeQ6_K(src + r * src_row, values.data(), cols);
+    std::uint8_t* out = dst + r * dst_row;
+    for (std::size_t b = 0; b < cols / 32; ++b) {
+      const float* x = values.data() + b * 32;
+      float amax = 0.0F;
+      for (int i = 0; i < 32; ++i)
+        amax = std::max(amax, std::fabs(x[i]));
+      const auto scale = static_cast<_Float16>(amax / 127.0F);
+      const float d = static_cast<float>(scale);
+      const float inverse = d != 0.0F ? 1.0F / d : 0.0F;
+      std::memcpy(out + b * 34, &scale, sizeof(scale));
+      auto* q = reinterpret_cast<std::int8_t*>(out + b * 34 + 2);
+      for (int i = 0; i < 32; ++i) {
+        const float v = std::nearbyint(x[i] * inverse);
+        q[i] = static_cast<std::int8_t>(std::clamp(v, -127.0F, 127.0F));
+      }
+    }
+  }
+}
 
 struct Uploader {
   hip::WeightUpload& stager;
@@ -75,6 +109,62 @@ struct Uploader {
     if (t.type == core::GgmlType::kQ8_0 && t.experts == 1) {
       max_q8_cols = std::max<std::size_t>(max_q8_cols, t.cols);
     }
+    return d;
+  }
+
+  /// A Q6_K matrix (the output head of unsloth UD-IQ4_XS) re-encoded as
+  /// Q8_0 on the host, so it runs on the tuned Q8_0 dense tier instead of a
+  /// path the HIP kernels do not have.
+  DeviceTensor CopyQ6KAsQ8_0(const TensorRef& t) {
+    DeviceTensor d;
+    if (t.empty() || !ok) {
+      return d;
+    }
+    if (t.cols % 256 != 0 || t.experts != 1) {
+      Fail("Q6_K tensor " + std::string(t.name) + " has an unsupported shape");
+      return d;
+    }
+    const std::size_t src_row = t.cols / 256 * 210;
+    const std::size_t dst_row = t.cols / 32 * 34;
+    const std::size_t size = dst_row * t.rows;
+    void* ptr = nullptr;
+    if (hipMalloc(&ptr, size + kTailMargin) != hipSuccess) {
+      Fail("hipMalloc failed for " + std::string(t.name));
+      return d;
+    }
+    allocations.push_back(ptr);
+    bytes += size + kTailMargin;
+    const auto* src = static_cast<const std::uint8_t*>(t.data);
+    constexpr std::size_t kChunkRows = 16384;
+    std::vector<std::uint8_t> host(kChunkRows * dst_row);
+    const std::size_t workers =
+        std::max<std::size_t>(1, std::thread::hardware_concurrency());
+    for (std::size_t r0 = 0; r0 < t.rows; r0 += kChunkRows) {
+      const std::size_t rows = std::min<std::size_t>(kChunkRows, t.rows - r0);
+      const std::size_t per = (rows + workers - 1) / workers;
+      std::vector<std::jthread> pool;
+      for (std::size_t w = 0; w < workers && w * per < rows; ++w) {
+        const std::size_t begin = w * per;
+        const std::size_t count = std::min(per, rows - begin);
+        pool.emplace_back([&, begin, count] {
+          Q6KRowsToQ8_0(src + (r0 + begin) * src_row,
+                        host.data() + begin * dst_row, count, t.cols);
+        });
+      }
+      pool.clear();
+      if (hipMemcpy(static_cast<std::uint8_t*>(ptr) + r0 * dst_row, host.data(),
+                    rows * dst_row, hipMemcpyHostToDevice) != hipSuccess) {
+        Fail("upload failed for " + std::string(t.name));
+        return d;
+      }
+    }
+    (void)hipMemset(static_cast<std::uint8_t*>(ptr) + size, 0, kTailMargin);
+    d.data = ptr;
+    d.type = core::GgmlType::kQ8_0;
+    d.cols = static_cast<std::uint32_t>(t.cols);
+    d.rows = static_cast<std::uint32_t>(t.rows);
+    d.experts = 1;
+    max_q8_cols = std::max<std::size_t>(max_q8_cols, t.cols);
     return d;
   }
 
@@ -269,9 +359,11 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     const MtpWeights* mtp, const core::GgufReader* mtp_reader,
     std::string* error_msg) {
   // The CPU reference also reads Q6_K, but the production embedding, dense
-  // and routed kernels do not. Reject it before allocating device weights.
+  // and routed kernels do not. Reject it before allocating device weights;
+  // the embedding and output head are re-encoded as Q8_0 instead.
   const auto supported = [&](const TensorRef& t) {
-    if (t.type != core::GgmlType::kQ6_K)
+    if (t.type != core::GgmlType::kQ6_K || &t == &w.token_embd ||
+        &t == &w.output)
       return true;
     if (error_msg != nullptr)
       *error_msg = "unsupported HIP tensor format Q6_K: " + std::string(t.name);
@@ -307,9 +399,12 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
   std::vector<Conversion> conversions;
   Uploader up{*stager,           conversions,     m->allocations_, m->bytes_,
               m->max_half_cols_, m->max_q8_cols_, error_msg};
-  m->token_embd_ = up.Copy(w.token_embd);
+  const auto head = [&](const TensorRef& t) {
+    return t.type == core::GgmlType::kQ6_K ? up.CopyQ6KAsQ8_0(t) : up.Copy(t);
+  };
+  m->token_embd_ = head(w.token_embd);
   m->output_ =
-      w.output.data == w.token_embd.data ? m->token_embd_ : up.Copy(w.output);
+      w.output.data == w.token_embd.data ? m->token_embd_ : head(w.output);
   m->hc_head_ = up.Mixer(w.hc_head);
   m->layers_.reserve(w.layers.size());
   for (const auto& l : w.layers) {

@@ -5,6 +5,13 @@ Supported target: `unsloth/Qwen3.8-Flash-Next-GGUF`, **UD-Q4_K_XL** (four shards
 Optional shared-Q8 MTP predictor; optional BF16 vision projector.
 Original unquantized-model and GGUF-conversion parity remain unqualified.
 
+**UD-IQ4_XS** also loads (unqualified): its IQ3_S/IQ4_XS gate/up and IQ4_NL
+down experts run on the vendored MMQ/MMVQ kernels, and its Q6_K embedding and
+output head are re-encoded to Q8_0 at load (Q8_0's step is about a quarter of
+Q6_K's, so the added rounding is small, but it is not bit-identical).
+`qwen38_flash_next_iq_experts_ops_test` checks those expert paths against a
+double-precision reference.
+
 [Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md)
 
 ## Load and run
