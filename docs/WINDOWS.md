@@ -83,6 +83,19 @@ script clears any left in the calling shell.
   collides with clang's HIP math declarations.
 - Executables reserve an 8 MiB stack, Linux's default (Windows: 1 MiB).
 
+## Windows-validated switches
+
+Some behaviour changes were developed and measured on Windows only. They live
+in `src/core/platform/tuning.hpp`: each is on by default on Windows and off
+elsewhere, so Linux runs exactly the code it ran before. None changes model
+arithmetic. `GUFO_PLATFORM_TUNING` overrides the defaults on any platform, for
+example `GUFO_PLATFORM_TUNING=+prompt_checkpoint` to try one on Linux, or
+`GUFO_PLATFORM_TUNING=none` to run the Linux path on Windows.
+
+| Switch | What it does | Measured on Windows |
+| --- | --- | --- |
+| `prompt_checkpoint` | Qwen serving keeps a checkpoint before the generation suffix for every prompt, not only with tools or without preserved thinking | A client that re-sends the previous turn without its reasoning hits the cache instead of re-prefilling everything: follow-up TTFT 0.52 s at 82K context |
+
 ## Memory
 
 On Windows, HIP allocations are not limited to the dedicated carve-out that

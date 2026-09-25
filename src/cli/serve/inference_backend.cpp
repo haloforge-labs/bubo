@@ -26,6 +26,7 @@
 #include "src/core/gguf_identity.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/json.hpp"
+#include "src/core/platform/tuning.hpp"
 #include "src/core/sampling.hpp"
 #include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen/generator.hpp"
@@ -93,8 +94,14 @@ TextPreparedPrompt PrepareQwenPrompt(
   // Agent clients may discard an interrupted assistant entirely and append
   // the next user turn directly after tool results. Preserve a checkpoint
   // before the generation suffix even when reasoning itself is retained.
+  // With Tuning::prompt_checkpoint (src/core/platform/tuning.hpp) every
+  // prompt keeps it: clients
+  // re-send the previous assistant turn in many forms (without its
+  // reasoning, reformatted), each changing the prompt right where the suffix
+  // was, and the recurrent state cannot rewind even one token.
   std::size_t cache_prefix = 0;
-  if (!options.preserve_thinking || !request.tools.empty()) {
+  if (gufo::platform::PlatformTuning().prompt_checkpoint ||
+      !options.preserve_thinking || !request.tools.empty()) {
     const auto generation = tokenizer.Encode(
         tokenization::GenerationPrompt(options.enable_thinking),
         {.add_bos = false, .add_eos = false, .parse_special_tokens = true});
