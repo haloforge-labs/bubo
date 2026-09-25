@@ -143,6 +143,9 @@ struct TextDecodeStep {
   /// dispatch. A runner's advertised maximum is not evidence of batching.
   TextExecutionPlan execution_plan{};
   std::exception_ptr failure{};
+  /// Of draft_tokens: proposals copied from the context (prompt lookup).
+  std::size_t lookup_tokens{0};
+  std::size_t lookup_accepted_tokens{0};
 };
 
 /// Model-private state driven only through TextModelRunner work units.

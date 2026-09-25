@@ -457,6 +457,9 @@ void PrintServeHelp(std::string_view program_name,
     std::string vision_model_path;
     std::size_t draft_tokens = 7;
     std::size_t min_draft_tokens = 1;
+    std::string mtp_policy = "length";
+    std::string mtp_draft_vocab = "full";
+    bool prompt_lookup = false;
     std::size_t prefill_chunk_tokens =
         server::kDefaultDecodeActivePrefillTokens;
     std::size_t max_pending_requests = 16;
@@ -536,6 +539,23 @@ void PrintServeHelp(std::string_view program_name,
     parser.AddOption("", "--min-draft-tokens", "N",
                      "Adaptive draft floor (default: 1)", "Speculative",
                      &min_draft_tokens);
+    parser.AddOption(
+        "", "--mtp-policy", "POLICY",
+        "Qwen3.8-Flash-Next sampled draft length: length (acceptance-history "
+        "controller) or survival (stop on the draft head's confidence) "
+        "(default: length)",
+        "Speculative", &mtp_policy);
+    parser.AddOption(
+        "", "--mtp-draft-vocab", "VOCAB",
+        "Qwen3.8-Flash-Next draft head vocabulary: full, or latin (special and "
+        "ASCII/Latin-script text tokens; half the output head per draft step) "
+        "(default: full)",
+        "Speculative", &mtp_draft_vocab);
+    parser.AddFlag(
+        "", "--prompt-lookup",
+        "Qwen3.8-Flash-Next: after an MTP draft, propose the tokens that "
+        "followed a 12+ token match earlier in the conversation",
+        "Speculative", &prompt_lookup);
     parser.AddOption(
         "", "--prefill-chunk", "N",
         "Maximum prompt tokens between active decode rounds (default: 512)",
@@ -907,6 +927,9 @@ int RunServe(std::span<const char* const> args) {
     std::string vision_model_path;
     std::size_t draft_tokens = 7;
     std::size_t min_draft_tokens = 1;
+    std::string mtp_policy = "length";
+    std::string mtp_draft_vocab = "full";
+    bool prompt_lookup = false;
     std::size_t prefill_chunk_tokens =
         server::kDefaultDecodeActivePrefillTokens;
     std::size_t max_pending_requests = 16;
@@ -980,6 +1003,23 @@ int RunServe(std::span<const char* const> args) {
     llm_parser.AddOption("", "--min-draft-tokens", "N",
                          "Adaptive draft floor (default: 1)", "Speculative",
                          &min_draft_tokens);
+    llm_parser.AddOption(
+        "", "--mtp-policy", "POLICY",
+        "Qwen3.8-Flash-Next sampled draft length: length (acceptance-history "
+        "controller) or survival (stop on the draft head's confidence) "
+        "(default: length)",
+        "Speculative", &mtp_policy);
+    llm_parser.AddOption(
+        "", "--mtp-draft-vocab", "VOCAB",
+        "Qwen3.8-Flash-Next draft head vocabulary: full, or latin (special and "
+        "ASCII/Latin-script text tokens; half the output head per draft step) "
+        "(default: full)",
+        "Speculative", &mtp_draft_vocab);
+    llm_parser.AddFlag(
+        "", "--prompt-lookup",
+        "Qwen3.8-Flash-Next: after an MTP draft, propose the tokens that "
+        "followed a 12+ token match earlier in the conversation",
+        "Speculative", &prompt_lookup);
     llm_parser.AddOption(
         "", "--prefill-chunk", "N",
         "Maximum prompt tokens between active decode rounds (default: 512)",
@@ -1112,6 +1152,15 @@ int RunServe(std::span<const char* const> args) {
       std::cerr << "Error: --model <PATH> is required\n";
       return 2;
     }
+    if ((mtp_policy != "length" && mtp_policy != "survival") ||
+        (mtp_draft_vocab != "full" && mtp_draft_vocab != "latin")) {
+      std::cerr << "Error: --mtp-policy is length or survival, "
+                   "--mtp-draft-vocab is full or latin\n";
+      return 2;
+    }
+    speculative_config.mtp_survival = mtp_policy == "survival";
+    speculative_config.mtp_latin_draft_vocabulary = mtp_draft_vocab == "latin";
+    speculative_config.prompt_lookup = prompt_lookup;
     std::string err;
     ModelLoadLog load_log("text", model);
     backend = std::make_shared<server::InferenceBackend>();

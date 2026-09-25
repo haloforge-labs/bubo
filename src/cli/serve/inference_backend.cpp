@@ -2522,6 +2522,9 @@ public:
     const auto stats_after = qfn.session().Statistics();
     step.draft_tokens = stats_after.drafted - stats_before.drafted;
     step.draft_accepted_tokens = stats_after.accepted - stats_before.accepted;
+    step.lookup_tokens = stats_after.lookup - stats_before.lookup;
+    step.lookup_accepted_tokens =
+        stats_after.lookup_accepted - stats_before.lookup_accepted;
     return step;
   }
 
@@ -2955,6 +2958,12 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
             .vision_model_path = vision_model_path,
             .decode_concurrency = static_cast<std::uint32_t>(
                 std::clamp<std::size_t>(session_count, 1, 8)),
+            .mtp_survival = speculative_config.mtp_survival,
+            .prompt_lookup = speculative_config.prompt_lookup,
+            .draft_vocabulary =
+                speculative_config.mtp_latin_draft_vocabulary
+                    ? models::qwen38_flash_next::DraftVocabulary::kLatinText
+                    : models::qwen38_flash_next::DraftVocabulary::kFull,
         },
         &load_error);
     if (model == nullptr) {

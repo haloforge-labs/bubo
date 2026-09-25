@@ -5500,6 +5500,102 @@ void PleInject(float* res, const float* gated, const float* conv,
                      stream, res, gated, conv, count);
 }
 
+void CopyDevice(const float* src, float* dst, std::size_t count,
+                hipStream_t stream) {
+  hipLaunchKernelGGL(CopyKernel, dim3(Blocks(count)), dim3(kThreads), 0, stream,
+                     src, dst, count);
+}
+
+namespace {
+__global__ void CopyWordsKernel(const std::uint32_t* src, std::uint32_t* dst,
+                                std::size_t count) {
+  const std::size_t i =
+      blockIdx.x * static_cast<std::size_t>(blockDim.x) + threadIdx.x;
+  if (i < count) {
+    dst[i] = src[i];
+  }
+}
+__global__ void CopyBytesKernel(const std::uint8_t* src, std::uint8_t* dst,
+                                std::size_t count) {
+  const std::size_t i =
+      blockIdx.x * static_cast<std::size_t>(blockDim.x) + threadIdx.x;
+  if (i < count) {
+    dst[i] = src[i];
+  }
+}
+}  // namespace
+
+namespace {
+__global__ void SignalDoneKernel(volatile std::uint32_t* flag,
+                                 std::uint32_t value) {
+  __threadfence_system();
+  *flag = value;
+  __threadfence_system();
+}
+}  // namespace
+
+void SignalDone(std::uint32_t* flag, std::uint32_t value, hipStream_t stream) {
+  hipLaunchKernelGGL(SignalDoneKernel, dim3(1), dim3(1), 0, stream, flag,
+                     value);
+}
+
+namespace {
+__global__ void GatherRowsKernel(const std::uint32_t* __restrict__ src,
+                                 std::uint32_t* __restrict__ dst,
+                                 const std::int32_t* __restrict__ ids,
+                                 std::size_t words) {
+  const std::size_t row = blockIdx.x;
+  const std::uint32_t* from = src + static_cast<std::size_t>(ids[row]) * words;
+  std::uint32_t* to = dst + row * words;
+  for (std::size_t w = threadIdx.x; w < words; w += blockDim.x) {
+    to[w] = from[w];
+  }
+}
+
+__global__ void RemapIdsKernel(std::uint32_t* ids, std::uint32_t count,
+                               const std::int32_t* map) {
+  const std::uint32_t i = threadIdx.x;
+  if (i < count) {
+    ids[i] = static_cast<std::uint32_t>(map[ids[i]]);
+  }
+}
+}  // namespace
+
+void GatherRows(const void* src, void* dst, const std::int32_t* ids,
+                std::uint32_t rows, std::size_t row_bytes, hipStream_t stream) {
+  if (rows == 0) {
+    return;
+  }
+  hipLaunchKernelGGL(GatherRowsKernel, dim3(rows), dim3(256), 0, stream,
+                     static_cast<const std::uint32_t*>(src),
+                     static_cast<std::uint32_t*>(dst), ids, row_bytes / 4);
+}
+
+void RemapIds(std::uint32_t* ids, std::uint32_t count, const std::int32_t* map,
+              hipStream_t stream) {
+  hipLaunchKernelGGL(RemapIdsKernel, dim3(1), dim3(64), 0, stream, ids, count,
+                     map);
+}
+
+void CopyMapped(const void* src, void* dst, std::size_t bytes,
+                hipStream_t stream) {
+  if (bytes == 0) {
+    return;
+  }
+  const bool words = bytes % 4 == 0 &&
+                     reinterpret_cast<std::uintptr_t>(src) % 4 == 0 &&
+                     reinterpret_cast<std::uintptr_t>(dst) % 4 == 0;
+  if (words) {
+    hipLaunchKernelGGL(CopyWordsKernel, dim3(Blocks(bytes / 4)), dim3(kThreads),
+                       0, stream, static_cast<const std::uint32_t*>(src),
+                       static_cast<std::uint32_t*>(dst), bytes / 4);
+  } else {
+    hipLaunchKernelGGL(CopyBytesKernel, dim3(Blocks(bytes)), dim3(kThreads), 0,
+                       stream, static_cast<const std::uint8_t*>(src),
+                       static_cast<std::uint8_t*>(dst), bytes);
+  }
+}
+
 void RestoreGdnState(float* state, RollbackRows snapshots, std::uint32_t keep,
                      std::uint32_t k_heads, std::uint32_t v_heads,
                      hipStream_t stream) {

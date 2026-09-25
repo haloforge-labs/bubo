@@ -33,6 +33,28 @@ constexpr std::size_t GdnRollbackRowFloats(std::uint32_t row,
 void RestoreGdnState(float* state, RollbackRows snapshots, std::uint32_t keep,
                      std::uint32_t k_heads, std::uint32_t v_heads,
                      hipStream_t stream);
+/// Device-to-device float copy as a kernel on `stream`. A hipMemcpyAsync
+/// between device buffers runs on the copy engine, and every switch between
+/// it and the compute queue costs a cross-engine wait.
+void CopyDevice(const float* src, float* dst, std::size_t count,
+                hipStream_t stream);
+/// Copies `bytes` between device memory and pinned host memory
+/// (hipHostMalloc) with a kernel: on this APU the GPU reads and writes the
+/// pinned pages directly, while a host<->device hipMemcpyAsync costs a copy
+/// engine hand-off (~30 us per graph node).
+void CopyMapped(const void* src, void* dst, std::size_t bytes,
+                hipStream_t stream);
+/// Writes `value` to `flag` (coherent pinned memory) with system-scope
+/// fences once the stream reaches this point: a completion signal the host
+/// can spin on instead of hipStreamSynchronize.
+void SignalDone(std::uint32_t* flag, std::uint32_t value, hipStream_t stream);
+/// Copies rows `ids[0..rows)` of `src` (row_bytes each, a multiple of 4)
+/// into consecutive rows of `dst`.
+void GatherRows(const void* src, void* dst, const std::int32_t* ids,
+                std::uint32_t rows, std::size_t row_bytes, hipStream_t stream);
+/// ids[i] = map[ids[i]] for i < count (subset index -> token id).
+void RemapIds(std::uint32_t* ids, std::uint32_t count, const std::int32_t* map,
+              hipStream_t stream);
 
 /// GGUF type ids the runtime accepts for the small-matrix and lookup paths.
 enum class WeightType : std::uint32_t {

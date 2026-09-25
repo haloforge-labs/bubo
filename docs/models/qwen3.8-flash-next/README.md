@@ -36,6 +36,17 @@ requests use deterministic acceptance/cost control for seeded replay; all-greedy
 C>1 batches may use measured cycle costs. Each request keeps private caches,
 rollback and RNG. See [MTP qualification](QUALITY.md).
 
+Three opt-in MTP options change only what the draft side proposes; verification
+is unchanged, so sampled outputs keep the target distribution and greedy text is
+byte-identical. They apply to single-session decoding (measured on Windows,
+sampled, thinking on, 3 seeds per prompt, against the default):
+
+| Option | What it does | Measured |
+| --- | --- | --- |
+| `--mtp-draft-vocab latin` | The draft head scores only special and ASCII/Latin-script text tokens (130K of 248K), reading half of the output head per draft step; ids map back on the GPU | +4.9% decode, identical texts and acceptance |
+| `--mtp-policy survival` | Sampled drafting stops when the product of per-proposal acceptance estimates (from the draft head's top probability, by depth) falls below 0.40, instead of the per-cycle length controller | With the draft vocabulary: +8.7% over the default (prose +7%, code +7%, reasoning +13%) |
+| `--prompt-lookup` | After each kept MTP draft, a match of 12+ tokens in the conversation proposes the tokens that followed it (point-mass proposals, exact under rejection sampling). Shorter matches propose nothing: an ungated 3-token rule lost 6-8% at temperature 1 | File-editing replies +10% sampled; log quoting +23% greedy; prose unchanged. Timings report `lookup_n` / `lookup_n_accepted` |
+
 The official template defaults to thinking on, `xhigh` effort and preserving
 prior reasoning. Use the [reasoning controls](../../SERVER.md#reasoning-controls)
 for explicit effort/thinking overrides. Native context is 262144; YaRN extension

@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "src/core/hip/weight_upload.hpp"
+#include "src/core/platform/tuning.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
@@ -69,6 +70,8 @@ struct Uploader {
   std::string* error;
   bool ok{true};
   std::uint32_t shard_base{0};
+  /// Layer() leaves the routed experts for a later Experts() pass.
+  bool defer_experts{false};
 
   void Fail(const std::string& message) {
     if (ok && error != nullptr) {
@@ -331,9 +334,9 @@ struct Uploader {
     d.ple_norm_conv = Copy(l.ple_norm_conv);
     d.ple_conv1d = Copy(l.ple_conv1d);
     d.router = Stack({&l.router, &l.shexp_gate_inp});
-    d.ffn_gate_exps = Copy(l.ffn_gate_exps);
-    d.ffn_up_exps = Copy(l.ffn_up_exps);
-    d.ffn_down_exps = Copy(l.ffn_down_exps);
+    if (!defer_experts) {
+      Experts(l, d);
+    }
     d.shexp_gate = Copy(l.shexp_gate);
     d.shexp_up = Copy(l.shexp_up);
     d.shexp_down = Copy(l.shexp_down);
@@ -343,6 +346,12 @@ struct Uploader {
                        d.nextn_fc_hidden);
     d.nextn_head = Mixer(l.nextn_head);
     return d;
+  }
+
+  void Experts(const LayerWeights& l, DeviceLayer& d) {
+    d.ffn_gate_exps = Copy(l.ffn_gate_exps);
+    d.ffn_up_exps = Copy(l.ffn_up_exps);
+    d.ffn_down_exps = Copy(l.ffn_down_exps);
   }
 };
 
@@ -402,10 +411,21 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
   const auto head = [&](const TensorRef& t) {
     return t.type == core::GgmlType::kQ6_K ? up.CopyQ6KAsQ8_0(t) : up.Copy(t);
   };
-  m->token_embd_ = head(w.token_embd);
-  m->output_ =
-      w.output.data == w.token_embd.data ? m->token_embd_ : head(w.output);
+  // Tuning::hot_first_upload: allocation order decides placement. Once most
+  // of the GPU memory is taken, later allocations get slower memory (up to
+  // ~20% lower GEMV bandwidth at the tail on gfx1151 under Windows).
+  // Everything read in full on every token goes first: the output head,
+  // then every dense projection (target and MTP). The routed experts follow
+  // (each byte is read by a few percent of tokens), and the token embedding,
+  // a row gather, comes last.
+  const bool hot_first = platform::PlatformTuning().hot_first_upload;
+  const bool tied = w.output.data == w.token_embd.data;
+  if (tied || !hot_first) {
+    m->token_embd_ = head(w.token_embd);
+  }
+  m->output_ = tied ? m->token_embd_ : head(w.output);
   m->hc_head_ = up.Mixer(w.hc_head);
+  up.defer_experts = hot_first;
   m->layers_.reserve(w.layers.size());
   for (const auto& l : w.layers) {
     m->layers_.push_back(up.Layer(l));
@@ -419,6 +439,20 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     up.shard_base = shard_count;
     m->mtp_ = up.Layer(mtp->block);
     m->has_mtp_ = true;
+    up.shard_base = 0;
+  }
+  if (hot_first) {
+    for (std::size_t i = 0; i < w.layers.size() && up.ok; ++i) {
+      up.Experts(w.layers[i], m->layers_[i]);
+    }
+    if (mtp != nullptr && up.ok) {
+      up.shard_base = shard_count;
+      up.Experts(mtp->block, m->mtp_);
+      up.shard_base = 0;
+    }
+    if (!tied) {
+      m->token_embd_ = head(w.token_embd);
+    }
   }
   if (!up.ok || !stager->Finish(error_msg)) {
     return nullptr;

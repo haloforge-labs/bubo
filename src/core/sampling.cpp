@@ -522,6 +522,86 @@ SamplingDistribution SamplerState::Distribution(
   return DistributionWithPenalties(logits, config_, penalties);
 }
 
+std::optional<SamplingDistribution> SamplerState::DistributionFromTop(
+    std::span<const float> values, std::span<const TokenId> ids,
+    std::size_t vocab) const {
+  if (values.size() != ids.size() || values.empty() ||
+      config_.temperature == 0 || config_.top_k <= 0 ||
+      !penalty_counts_.empty()) {
+    return std::nullopt;
+  }
+  std::vector<Probability> candidates;
+  candidates.reserve(values.size());
+  bool complete = false;  // the list holds every finite logit of the row
+  for (std::size_t i = 0; i < values.size(); ++i) {
+    if (!std::isfinite(values[i])) {
+      complete = true;  // non-finite entries sort last: finite ones ran out
+      continue;
+    }
+    if (ids[i] >= vocab) {
+      return std::nullopt;
+    }
+    candidates.push_back(
+        {.token = ids[i], .value = static_cast<double>(values[i])});
+  }
+  if (candidates.empty()) {
+    return std::nullopt;
+  }
+  // The same strict order select_best produces (value, then token).
+  std::ranges::sort(candidates, IsBetterProbability);
+  for (std::size_t i = 1; i < candidates.size(); ++i) {
+    if (candidates[i].token == candidates[i - 1].token) {
+      return std::nullopt;
+    }
+  }
+  const std::size_t keep = std::min(
+      vocab, std::max<std::size_t>(static_cast<std::size_t>(config_.top_k),
+                                   std::max<std::size_t>(config_.min_keep, 1)));
+  if (!complete) {
+    // Every token outside the list scores at most the list's last value, so
+    // a strictly higher k-th value means the list holds the whole top-k,
+    // ties included.
+    if (keep >= candidates.size() ||
+        !(candidates[keep - 1].value > candidates.back().value)) {
+      return std::nullopt;
+    }
+  }
+  if (candidates.size() > keep) {
+    candidates.resize(keep);
+  }
+  auto working = *this;
+  working.candidate_scratch_ = std::move(candidates);
+  working.FinishSelected(0.0, false);
+  auto& kept = working.candidate_scratch_;
+  const double maximum = kept.front().value;
+  double total = 0;
+  for (auto& candidate : kept) {
+    candidate.value =
+        std::exp((candidate.value - maximum) / config_.temperature);
+    total += candidate.value;
+  }
+  return SamplingDistribution(std::move(kept), total);
+}
+
+std::optional<TokenId> SamplerState::SampleFromTop(
+    std::span<const float> values, std::span<const TokenId> ids,
+    std::size_t vocab) {
+  config_.Validate();
+  if (pending_sample_) {
+    if (*pending_sample_ >= vocab) {
+      throw std::invalid_argument("pending sample exceeds vocabulary");
+    }
+    const auto token = *pending_sample_;
+    pending_sample_.reset();
+    return token;
+  }
+  auto distribution = DistributionFromTop(values, ids, vocab);
+  if (!distribution) {
+    return std::nullopt;
+  }
+  return distribution->Sample(&rng_state_);
+}
+
 void SamplerState::DeferSample(TokenId token) {
   if (pending_sample_) {
     throw std::logic_error("a sampled token is already pending");
@@ -783,6 +863,11 @@ void SamplerState::PrepareSelected(std::span<const float> logits) {
   } else {
     select_all();
   }
+  FinishSelected(full_softmax_sum, has_full_softmax_sum);
+}
+
+void SamplerState::FinishSelected(double full_softmax_sum,
+                                  bool has_full_softmax_sum) {
   if (candidate_scratch_.empty()) {
     throw std::runtime_error("logit distribution contains no finite values");
   }

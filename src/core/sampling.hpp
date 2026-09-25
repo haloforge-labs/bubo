@@ -122,6 +122,21 @@ public:
   /// Compact logits use token_ids for penalties; returned IDs index logits.
   [[nodiscard]] SamplingDistribution Distribution(
       std::span<const float> logits, std::span<const TokenId> token_ids) const;
+  /// Distribution(logits) computed from a candidate list instead of the full
+  /// row: `values`/`ids` are a correct top-N of the row's logits (by value,
+  /// any tie order). Exact whenever it returns a value: it needs top_k > 0,
+  /// temperature > 0 and no active penalties, and a list that provably holds
+  /// every token of the top-k (the k-th value strictly above the list's
+  /// last, or a list that already contains every finite logit). Otherwise it
+  /// returns nothing and callers use the full row.
+  [[nodiscard]] std::optional<SamplingDistribution> DistributionFromTop(
+      std::span<const float> values, std::span<const TokenId> ids,
+      std::size_t vocab) const;
+  /// Sample(logits) from a candidate list (see DistributionFromTop), with the
+  /// same pending-draw handling and RNG use. Nothing when not applicable.
+  [[nodiscard]] std::optional<TokenId> SampleFromTop(
+      std::span<const float> values, std::span<const TokenId> ids,
+      std::size_t vocab);
   /// Retain a speculative residual draw for the next Sample call. Copies
   /// preserve this draw along with the RNG; resetting history discards it.
   void DeferSample(TokenId token);
@@ -140,6 +155,9 @@ private:
   [[nodiscard]] SamplingDistribution LinearDistribution(
       std::span<const float> logits) const;
   void PrepareSelected(std::span<const float> logits);
+  /// top-p and min-p over the sorted candidate_scratch_ (PrepareSelected's
+  /// second half).
+  void FinishSelected(double full_softmax_sum, bool has_full_softmax_sum);
 
   SamplingConfig config_;
   std::vector<TokenId> history_;

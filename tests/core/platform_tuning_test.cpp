@@ -43,6 +43,15 @@ int main() {
   Expect(!Parse("none").prompt_checkpoint, "none disables every switch");
   Expect(Parse("bogus").prompt_checkpoint == platform_default,
          "an unknown name changes nothing");
+  const auto mixed = Parse("none,+fast_sampling");
+  Expect(mixed.fast_sampling && !mixed.flag_waits && !mixed.prompt_checkpoint,
+         "switches are independent");
+  const auto all = Parse("all");
+  Expect(all.copy_kernels && all.flag_waits && all.flush_before_wait &&
+             all.recorded_rollback && all.keep_rollback_rows &&
+             all.fused_hc_down && all.fast_sampling &&
+             all.verify_graph_candidates && all.hot_first_upload,
+         "all reaches every switch");
   if (failures == 0) {
     std::cout << "platform_tuning_test: ok\n";
   }

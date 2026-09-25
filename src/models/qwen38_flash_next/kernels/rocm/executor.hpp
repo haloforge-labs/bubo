@@ -142,6 +142,9 @@ public:
     std::uint32_t max_logit_rows{1};
     /// Longest speculative batch; bounds the recurrent snapshot storage.
     std::uint32_t max_speculative{1};
+    /// Optional draft vocabulary: token ids the MTP draft head may propose
+    /// (it scores only these rows of the output head). Empty = every token.
+    std::vector<std::int32_t> draft_vocab;
   };
 
   ~Executor();
@@ -172,10 +175,14 @@ public:
   /// the device for MtpForward. kVerify permits Rollback (at most
   /// max_speculative rows). kPrefill uses consistent prompt arithmetic at
   /// every chunk width.
+  /// `verify_candidates` (kVerify with null logits): the pass also selects
+  /// every row's candidate list for VerifyCandidates inside its own graph,
+  /// saving the separate launch and synchronization afterwards.
   [[nodiscard]] bool Forward(Session& session,
                              std::span<const std::int32_t> tokens,
                              std::uint32_t n_logits, float* logits,
-                             ForwardMode mode, std::string* error_msg) const;
+                             ForwardMode mode, std::string* error_msg,
+                             bool verify_candidates = false) const;
 
   struct BatchItem {
     Session* session;
@@ -239,6 +246,18 @@ public:
   /// Plain greedy verification keeps full logit rows on the GPU.
   [[nodiscard]] bool GreedyMtpPredictions(
       std::span<ArgmaxCandidate> predictions, std::string* error_msg) const;
+
+  /// The top kMtpCandidates logits of each of the last forward's first
+  /// rows.size() rows, selected on the GPU like the draft candidates. Lets
+  /// sampled verification build exact target distributions without
+  /// scanning full rows on the host (SamplerState::DistributionFromTop).
+  [[nodiscard]] bool VerifyCandidates(std::span<MtpCandidateLogits> rows,
+                                      std::string* error_msg) const;
+  /// Copies the first `rows` logit rows of the last verify pass that kept
+  /// them on the GPU (Forward with null logits) into `logits`. Valid until
+  /// the next forward.
+  [[nodiscard]] bool DownloadVerification(std::uint32_t rows, float* logits,
+                                          std::string* error_msg) const;
 
   /// A session's complete context as one host byte payload: recurrent and
   /// PLE state, KV and indexer caches up to the position, and the draft
@@ -534,8 +553,29 @@ private:
   mutable std::uint32_t routed_tile_rows_{48};  ///< token rows per tile
   mutable int routed_tile_cols_{0};
   float* logits_host_{nullptr};
+  /// Options::draft_vocab: the draft head scores only these output rows (a copy
+  /// of the selected rows of the output head); draft_ids_ maps a subset row
+  /// back to its token id. Empty = the full vocabulary.
+  DeviceTensor draft_head_{};
+  std::int32_t* draft_ids_{nullptr};
   std::int32_t* mtp_token_host_{nullptr};
   MtpCandidateLogits* mtp_candidates_host_{nullptr};
+  /// max_logit_rows candidate lists for VerifyCandidates.
+  MtpCandidateLogits* verify_candidates_host_{nullptr};
+  /// Completion flag for Wait (coherent pinned memory) and its sequence.
+  std::uint32_t* done_flag_{nullptr};
+  mutable std::uint32_t done_counter_{0};
+  /// Waits for the stream: spins on a completion kernel's flag, which
+  /// returns ~0.4 ms sooner than hipStreamSynchronize after a large graph
+  /// on Windows. Falls back to hipStreamSynchronize after 1 s (and so still
+  /// reports a failed launch).
+  [[nodiscard]] bool Wait(const char* what, std::string* error_msg) const;
+  /// While capturing or running a verify body: append the candidate
+  /// selection of every logit row (Forward's verify_candidates).
+  mutable bool candidates_in_body_{false};
+  /// Rows whose candidate lists the last verify pass already downloaded;
+  /// any later forward invalidates them.
+  mutable std::uint32_t verify_candidates_ready_{0};
   /// The model geometry allows the wide mixer route (see Combine).
   bool wide_mixer_{false};
   /// Set by Moe when its epilogue is left for the combine that follows.

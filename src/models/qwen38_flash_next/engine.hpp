@@ -17,6 +17,8 @@
 #include "src/models/qwen/vision/prompt.hpp"
 #include "src/models/qwen38_flash_next/config.hpp"
 #include "src/models/qwen38_flash_next/mtp_policy.hpp"
+#include "src/models/qwen38_flash_next/mtp_sampling.hpp"
+#include "src/models/qwen38_flash_next/prompt_lookup.hpp"
 
 namespace gufo::core {
 class GgufReader;
@@ -34,6 +36,16 @@ class Executor;
 class Session;
 }  // namespace rocm
 
+/// Tokens the MTP draft head may propose.
+enum class DraftVocabulary {
+  kFull,
+  /// Special tokens plus every token whose text is ASCII (English, code,
+  /// numbers, markup and the unaccented pieces of Latin-script languages)
+  /// or ASCII with common typographic marks: about half of the vocabulary,
+  /// so each draft step reads half of the output head.
+  kLatinText,
+};
+
 struct ModelOptions {
   std::uint32_t max_context = 4096;
   /// Optional MTP draft sidecar (`mtp-...-shared-*.gguf`). Empty leaves
@@ -45,6 +57,16 @@ struct ModelOptions {
   /// Fixed serving capacity used by the calibrated MTP cost model. Keeping
   /// it independent of scheduler timing preserves seeded request replay.
   std::uint32_t decode_concurrency = 1;
+  /// Opt-in MTP draft policies. Verification is unchanged, so outputs keep
+  /// the target distribution (greedy text is byte-identical); they change
+  /// how many tokens a cycle proposes and how cheaply.
+  /// Sampled single-session drafting stops on a chain-survival estimate
+  /// from the draft head's own confidence instead of the length controller.
+  bool mtp_survival = false;
+  /// Single-session prompt lookup: after an MTP draft, a match of 12+ tokens
+  /// in the conversation proposes the tokens that followed it (PromptLookup).
+  bool prompt_lookup = false;
+  DraftVocabulary draft_vocabulary = DraftVocabulary::kFull;
 };
 
 class Session;
@@ -128,6 +150,17 @@ public:
                           std::string* error_msg = nullptr);
   [[nodiscard]] bool Evaluate(std::int32_t token,
                               std::string* error_msg = nullptr);
+  /// Appends `tokens` through the decode arithmetic: one token as a decode
+  /// step, more as a fully accepted speculative verification (at most
+  /// MaxVerifyWidth()). With `prefill`, through the prompt arithmetic
+  /// instead (a session without MTP). `rows` receives every token's
+  /// next-token logits (tokens.size() * vocab). For numerical A/B of the
+  /// kernels.
+  [[nodiscard]] bool TeacherForce(std::span<const std::int32_t> tokens,
+                                  std::vector<float>* rows,
+                                  std::string* error_msg = nullptr,
+                                  bool prefill = false);
+  [[nodiscard]] std::uint32_t MaxVerifyWidth() const noexcept;
   struct DecodeResult {
     std::vector<std::int32_t> tokens;
     bool stop{false};
@@ -189,6 +222,9 @@ public:
     std::uint64_t cycles{0};
     std::uint64_t drafted{0};
     std::uint64_t accepted{0};
+    /// Of drafted/accepted: proposals copied from the context.
+    std::uint64_t lookup{0};
+    std::uint64_t lookup_accepted{0};
   };
   [[nodiscard]] const SpeculativeStats& Statistics() const noexcept {
     return stats_;
@@ -238,6 +274,8 @@ private:
                      std::string* error_msg, bool defer_head = false,
                      std::optional<std::uint32_t> batch_drafts = {});
   static void AppendDraft(PendingDecode& pending);
+  /// Prompt lookup: appends copied proposals up to `cap` chain tokens.
+  bool AppendLookup(PendingDecode& pending, std::size_t cap);
   bool FinishDecode(const DecodeRequest& request, const PendingDecode& pending,
                     std::string* error_msg);
 
@@ -245,10 +283,16 @@ private:
   std::unique_ptr<rocm::Session> session_;
   std::vector<std::int32_t> tokens_;
   std::vector<float> logits_;
+  /// GPU-selected top candidates of logits_, valid only from a sampled MTP
+  /// cycle's FinishDecode until the next PrepareDecode consumes them.
+  MtpCandidateLogits anchor_candidates_{};
+  bool anchor_candidates_valid_{false};
   std::int32_t draft_token_{0};
   std::vector<float> verify_logits_;
   std::uint32_t hidden_base_{0};  ///< first position whose hidden row is kept
   MtpLengthController draft_length_;
+  /// Index of tokens_ for ModelOptions::prompt_lookup.
+  PromptLookup lookup_;
   SpeculativeStats stats_;
   std::vector<std::uint8_t> image_identity_;
   bool valid_{true};
