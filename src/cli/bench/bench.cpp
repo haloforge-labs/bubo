@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -172,6 +173,21 @@ void RegisterBenchOptions(ArgParser& parser, BenchOptions& opt,
         opt.validate_prefill_tokens = num;
         return true;
       });
+
+  parser.AddOption(
+      "", "--logit-eval", "TEXT",
+      "Flash-Next: teacher-force this text file through the decode and "
+      "verify arithmetic and dump per-position log-probabilities",
+      "Validation", &opt.logit_eval_path);
+  parser.AddOption("", "--logit-out", "PREFIX",
+                   "Output prefix for --logit-eval (PREFIX-s<i>.bin)",
+                   "Validation", &opt.logit_out);
+  parser.AddOption(
+      "", "--logit-schedules", "W:W,...",
+      "Verify-width cycles for --logit-eval, one output per schedule "
+      "(default: 1:1,2,3,4,5,6,7,8); a 'p' prefix (p8) uses the prefill "
+      "arithmetic",
+      "Validation", &opt.logit_schedules);
 
   const auto parse_speculative_backend =
       [&opt, &speculative_explicit](std::string_view, std::string_view value,
@@ -871,6 +887,135 @@ bool IsQwen38FlashNext(const core::GgufReader& reader) {
   return reader.GetMetadataString("general.architecture") == "qwen4exp";
 }
 
+// Teacher-forced logit dump through the decode arithmetic: every schedule
+// feeds the same tokens in chunks of its cycling widths (1 = decode step,
+// 2+ = fully accepted verify pass) and records, per position, the target
+// token's log-probability and the top-64 log-probabilities. Two dumps are
+// compared by logit-eval.py (perplexity, KL, top-1 agreement).
+int RunFlashNextLogitEval(models::qwen38_flash_next::Model& model,
+                          const BenchOptions& options, std::uint32_t context) {
+  constexpr std::uint32_t kTop = 64;
+  std::ifstream in(options.logit_eval_path, std::ios::binary);
+  if (!in) {
+    std::cerr << "Error: cannot read " << options.logit_eval_path << '\n';
+    return 1;
+  }
+  const std::string text((std::istreambuf_iterator<char>(in)),
+                         std::istreambuf_iterator<char>());
+  const auto tokens = model.Tokenize(text);
+  if (tokens.size() < 2 || tokens.size() >= context) {
+    std::cerr << "Error: logit-eval text is " << tokens.size()
+              << " tokens; it needs 2.." << context - 1 << '\n';
+    return 1;
+  }
+  // A schedule prefixed with 'p' uses the prompt (prefill) arithmetic.
+  std::vector<std::vector<std::size_t>> schedules;
+  std::vector<bool> prefill;
+  for (std::size_t start = 0; start <= options.logit_schedules.size();) {
+    const auto colon = options.logit_schedules.find(':', start);
+    const auto end =
+        colon == std::string::npos ? options.logit_schedules.size() : colon;
+    auto spec =
+        std::string_view(options.logit_schedules).substr(start, end - start);
+    prefill.push_back(!spec.empty() && spec.front() == 'p');
+    if (prefill.back())
+      spec.remove_prefix(1);
+    auto widths = ParseCommaSeparatedSizes(spec);
+    if (!widths || widths->empty()) {
+      std::cerr << "Error: bad --logit-schedules\n";
+      return 1;
+    }
+    schedules.push_back(std::move(*widths));
+    start = end + 1;
+  }
+  const std::string prefix =
+      options.logit_out.empty() ? "logit-eval" : options.logit_out;
+  const std::uint32_t vocab = model.VocabSize();
+  std::cout << "[Logit Eval] " << tokens.size() << " tokens, vocab " << vocab
+            << ", " << schedules.size() << " schedule(s)\n";
+
+  std::vector<float> rows;
+  std::vector<std::int32_t> order(vocab);
+  for (std::size_t s = 0; s < schedules.size(); ++s) {
+    std::string error;
+    auto session =
+        model.CreateSession(model.HasMtp() && !prefill[s]
+                                ? gufo::core::SessionMode::kSpeculative
+                                : gufo::core::SessionMode::kAutoregressive,
+                            context, &error);
+    if (!session || !session->Sync(std::span(tokens).first(1), &error)) {
+      std::cerr << "Error: logit-eval session: " << error << '\n';
+      return 1;
+    }
+    for (const auto width : schedules[s]) {
+      if (!prefill[s] && width > session->MaxVerifyWidth()) {
+        std::cerr << "Error: width " << width << " exceeds the verify limit "
+                  << session->MaxVerifyWidth() << '\n';
+        return 1;
+      }
+    }
+    const std::string path = prefix + "-s" + std::to_string(s) + ".bin";
+    std::ofstream out(path, std::ios::binary);
+    const auto put = [&out](const auto& value) {
+      out.write(reinterpret_cast<const char*>(&value), sizeof(value));
+    };
+    out.write("GFLE", 4);
+    put(std::uint32_t{1});
+    put(vocab);
+    put(kTop);
+    double nll = 0;
+    std::size_t count = 0;
+    const auto start = std::chrono::steady_clock::now();
+    std::size_t p = 1;
+    for (std::size_t k = 0; p + 1 < tokens.size(); ++k) {
+      const std::size_t width = std::min(schedules[s][k % schedules[s].size()],
+                                         tokens.size() - 1 - p);
+      if (!session->TeacherForce(std::span(tokens).subspan(p, width), &rows,
+                                 &error, prefill[s])) {
+        std::cerr << "Error: teacher forcing at " << p << ": " << error << '\n';
+        return 1;
+      }
+      for (std::size_t j = 0; j < width; ++j) {
+        const float* row = rows.data() + j * vocab;
+        const float peak = *std::max_element(row, row + vocab);
+        double sum = 0;
+        for (std::uint32_t v = 0; v < vocab; ++v)
+          sum += std::exp(static_cast<double>(row[v]) - peak);
+        const double lse = peak + std::log(sum);
+        std::iota(order.begin(), order.end(), 0);
+        std::partial_sort(order.begin(), order.begin() + kTop, order.end(),
+                          [row](std::int32_t a, std::int32_t b) {
+                            return row[a] > row[b] ||
+                                   (row[a] == row[b] && a < b);
+                          });
+        const std::int32_t target = tokens[p + j + 1];
+        const float target_lp = static_cast<float>(row[target] - lse);
+        put(static_cast<std::int32_t>(p + j));
+        put(static_cast<std::int32_t>(width));
+        put(target);
+        put(order[0]);
+        put(target_lp);
+        put(static_cast<float>(lse));
+        for (std::uint32_t t = 0; t < kTop; ++t)
+          put(order[t]);
+        for (std::uint32_t t = 0; t < kTop; ++t)
+          put(static_cast<float>(row[order[t]] - lse));
+        nll -= target_lp;
+        ++count;
+      }
+      p += width;
+    }
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+            .count();
+    std::cout << "[Logit Eval] schedule " << s << ": " << count
+              << " positions, perplexity " << std::setprecision(6)
+              << std::exp(nll / static_cast<double>(count)) << ", "
+              << std::setprecision(3) << seconds << " s -> " << path << '\n';
+  }
+  return 0;
+}
+
 int RunQwen38FlashNextBenchmark(
     const BenchOptions& options,
     const std::shared_ptr<const core::GgufReader>& reader,
@@ -895,10 +1040,15 @@ int RunQwen38FlashNextBenchmark(
     std::cerr << "Error: benchmark workload exceeds the context range\n";
     return 1;
   }
-  const std::size_t required_context =
+  const std::size_t base_context =
       std::max({std::size_t{4096}, max_depth + max_prompt + 1,
                 std::max<std::size_t>(max_depth, 16) + max_generation + 1,
                 options.validate_prefill_tokens + 1});
+  // Logit-eval texts are short; 32K covers any sensible corpus.
+  const std::size_t required_context =
+      options.logit_eval_path.empty()
+          ? base_context
+          : std::max<std::size_t>(base_context, 32768);
   const bool mtp = options.speculative_backend == "mtp";
   if (!options.speculative_backend.empty() && !mtp) {
     std::cerr << "Error: Qwen3.8-Flash-Next supports only --speculative mtp "
@@ -938,6 +1088,10 @@ int RunQwen38FlashNextBenchmark(
     return 1;
   }
   PrintModelLoadTime(model_load_start);
+  if (!options.logit_eval_path.empty()) {
+    return RunFlashNextLogitEval(*model, options,
+                                 static_cast<std::uint32_t>(required_context));
+  }
 
   // Repeat a fixed token pattern for reproducible timing. It uses far fewer
   // distinct PLE rows than varied requests.
