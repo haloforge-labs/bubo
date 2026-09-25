@@ -19,6 +19,7 @@
 #include <thread>
 
 #include "src/cli/serve/logging.hpp"
+#include "src/core/platform/socket.hpp"
 
 namespace {
 
@@ -177,9 +178,8 @@ public:
   int Connect() {
     const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     assert(fd >= 0);
-    const timeval timeout{3, 0};
-    assert(::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout,
-                        sizeof(timeout)) == 0);
+    assert(gufo::platform::SetSocketTimeout(fd, SO_RCVTIMEO,
+                                            std::chrono::seconds{3}) == 0);
     sockaddr_in address{};
     address.sin_family = AF_INET;
     address.sin_port = htons(server.port());
@@ -203,14 +203,14 @@ public:
     std::string response;
     char buffer[4096];
     for (;;) {
-      const auto count = ::read(fd, buffer, sizeof(buffer));
+      const auto count = gufo::platform::SocketRead(fd, buffer, sizeof(buffer));
       assert(count >= 0);
       if (count == 0) {
         break;
       }
       response.append(buffer, static_cast<std::size_t>(count));
     }
-    ::close(fd);
+    gufo::platform::CloseSocket(fd);
     return response;
   }
 
@@ -580,7 +580,7 @@ void TestPeerDisconnect() {
   assert(::send(fd, request.data(), request.size(), MSG_NOSIGNAL) ==
          static_cast<ssize_t>(request.size()));
   assert(server.backend->entered.try_acquire_for(std::chrono::seconds(2)));
-  ::close(fd);
+  gufo::platform::CloseSocket(fd);
   assert(server.backend->finished.try_acquire_for(std::chrono::seconds(2)));
   assert(server.backend->disconnected);
 }
@@ -696,39 +696,51 @@ void TestSignalShutdown() {
   // both idle listeners and active generation return through normal cleanup.
   for (const int signal : {SIGINT, SIGTERM}) {
     for (const bool active : {false, true}) {
+      const auto run_case = [&] {
+        RunningServer server({}, true);
+        // Accepting a request proves run() installed its handlers.
+        ExpectStatus(server.Post("/echo", "ready"), 200);
+        int fd = -1;
+        if (active) {
+          server.backend->wait_for_disconnect = true;
+          fd = server.Connect();
+          const std::string body = R"({"prompt":"hello"})";
+          const std::string request =
+              "POST /v1/completions HTTP/1.1\r\nContent-Length: " +
+              std::to_string(body.size()) + "\r\n\r\n" + body;
+          assert(::send(fd, request.data(), request.size(), MSG_NOSIGNAL) ==
+                 static_cast<ssize_t>(request.size()));
+          assert(
+              server.backend->entered.try_acquire_for(std::chrono::seconds(2)));
+        }
+#ifdef _WIN32
+        assert(::raise(signal) == 0);
+#else
+        assert(::kill(::getpid(), signal) == 0);
+#endif
+        assert(server.run_finished.try_acquire_for(std::chrono::seconds(2)));
+        if (active) {
+          assert(server.backend->disconnected);
+          gufo::platform::CloseSocket(fd);
+        }
+      };
+#ifdef _WIN32
+      // No fork() on Windows: run in-process. The CRT calls the handler
+      // synchronously on this thread, and without one SIGINT/SIGTERM would
+      // end the runner, which fails the test just as loudly.
+      run_case();
+#else
       const pid_t child = ::fork();
       assert(child >= 0);
       if (child == 0) {
         ::alarm(5);
-        {
-          RunningServer server({}, true);
-          // Accepting a request proves run() installed its handlers.
-          ExpectStatus(server.Post("/echo", "ready"), 200);
-          int fd = -1;
-          if (active) {
-            server.backend->wait_for_disconnect = true;
-            fd = server.Connect();
-            const std::string body = R"({"prompt":"hello"})";
-            const std::string request =
-                "POST /v1/completions HTTP/1.1\r\nContent-Length: " +
-                std::to_string(body.size()) + "\r\n\r\n" + body;
-            assert(::send(fd, request.data(), request.size(), MSG_NOSIGNAL) ==
-                   static_cast<ssize_t>(request.size()));
-            assert(server.backend->entered.try_acquire_for(
-                std::chrono::seconds(2)));
-          }
-          assert(::kill(::getpid(), signal) == 0);
-          assert(server.run_finished.try_acquire_for(std::chrono::seconds(2)));
-          if (active) {
-            assert(server.backend->disconnected);
-            ::close(fd);
-          }
-        }
+        run_case();
         ::_exit(0);
       }
       int status = 0;
       assert(::waitpid(child, &status, 0) == child);
       assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+#endif
     }
   }
 }

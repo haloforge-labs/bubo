@@ -28,7 +28,10 @@ void Require(bool ok, const std::string& message) {
 struct Files {
   std::filesystem::path directory;
   Files() {
-    char path[] = "/tmp/gufo-weight-upload-XXXXXX";
+    std::string path_storage =
+        (std::filesystem::temp_directory_path() / "gufo-weight-upload-XXXXXX")
+            .string();
+    char* path = path_storage.data();
     const char* result = ::mkdtemp(path);
     Require(result != nullptr, "mkdtemp");
     directory = result;
@@ -99,6 +102,9 @@ int main() {
   Device device(expected.size());
   Require(hipMemset(device.data, 0xa5, expected.size()) == hipSuccess,
           "initialize guards");
+  // The uploads run on non-blocking streams, which do not order after the
+  // null-stream memset; the Windows runtime completes it asynchronously.
+  Require(hipDeviceSynchronize() == hipSuccess, "initialize guards");
   std::string error;
   auto upload = WeightUpload::Create(regions, &error);
   Require(upload != nullptr, error);

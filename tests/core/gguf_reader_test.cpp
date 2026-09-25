@@ -601,7 +601,10 @@ void TestIntegerRoutingTensor() {
 }
 
 void TestMappedPrefetch() {
-  char path[] = "/tmp/gufo-prefetch-XXXXXX";
+  std::string path_storage =
+      (std::filesystem::temp_directory_path() / "gufo-prefetch-XXXXXX")
+          .string();
+  char* path = path_storage.data();
   const int fd = mkstemp(path);
   Expect(fd >= 0, "create prefetch fixture");
   unlink(path);
@@ -616,6 +619,9 @@ void TestMappedPrefetch() {
   Expect(data[13] == 0 && data[bytes - 1] == marker,
          "parallel unaligned prefetch preserves the complete readable range");
   gufo::core::PrefaultMappedRange(nullptr, 0);
+#ifndef _WIN32
+  // Windows refuses to shrink a file while a view maps it, so the failing
+  // read this provokes on Linux cannot be produced there.
   Expect(ftruncate(fd, 4096) == 0, "truncate mapped fixture");
   bool rejected = false;
   try {
@@ -624,6 +630,7 @@ void TestMappedPrefetch() {
     rejected = true;
   }
   Expect(rejected, "failed parallel reads are joined and propagated");
+#endif
   munmap(const_cast<char*>(data), bytes);
   close(fd);
 }

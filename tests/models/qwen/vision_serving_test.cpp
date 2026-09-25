@@ -389,9 +389,9 @@ int main(int argc, char** argv) {
     if (flash)
       CheckFlashIncrementalOracle(qfn, continuation, continued);
 
-    std::array<char, 64> pattern{};
-    const std::string temporary = "/tmp/gufo-vision-cache-XXXXXX";
-    std::copy(temporary.begin(), temporary.end(), pattern.begin());
+    std::string pattern =
+        (std::filesystem::temp_directory_path() / "gufo-vision-cache-XXXXXX")
+            .string();
     Require(::mkdtemp(pattern.data()) != nullptr, "cannot create test cache");
     struct Cleanup {
       std::filesystem::path path;

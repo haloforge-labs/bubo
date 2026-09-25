@@ -11,6 +11,7 @@
 #include <string_view>
 #include <thread>
 
+#include "src/core/platform/socket.hpp"
 #include "src/eval/http_client.hpp"
 
 namespace {
@@ -38,12 +39,16 @@ void CheckTransfer(bool post, std::string_view response, bool stalls) {
       "read fixture port");
   std::binary_semaphore release(0);
   std::jthread server([&] {
-    pollfd pending{listener, POLLIN, 0};
+    pollfd pending{static_cast<decltype(pollfd::fd)>(listener), POLLIN, 0};
     Expect(poll(&pending, 1, 2000) == 1, "client connects");
+#ifdef _WIN32
+    const int peer = static_cast<int>(accept(listener, nullptr, nullptr));
+#else
     const int peer = accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
+#endif
     Expect(peer >= 0, "accept client");
     char request[4096];
-    pending = {peer, POLLIN, 0};
+    pending = {static_cast<decltype(pollfd::fd)>(peer), POLLIN, 0};
     Expect(poll(&pending, 1, 2000) == 1 &&
                recv(peer, request, sizeof(request), 0) > 0,
            "client sends request");
@@ -54,7 +59,7 @@ void CheckTransfer(bool post, std::string_view response, bool stalls) {
     // Also bounds this test if the timeout regresses.
     if (stalls)
       (void)release.try_acquire_for(std::chrono::seconds(2));
-    close(peer);
+    gufo::platform::CloseSocket(peer);
   });
   const gufo::eval::HttpClient client(
       "http://127.0.0.1:" + std::to_string(ntohs(address.sin_port)), "",
@@ -63,7 +68,7 @@ void CheckTransfer(bool post, std::string_view response, bool stalls) {
       post ? client.PostJson("/completion", "{}") : client.Get("/models");
   release.release();
   server.join();
-  close(listener);
+  gufo::platform::CloseSocket(listener);
   if (stalls) {
     Expect(!result.transport_ok && result.transport_code == "request_timeout",
            "stalled request reports a bounded transport timeout");

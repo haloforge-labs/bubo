@@ -42,8 +42,9 @@ void Expect(bool condition, const std::string& message) {
 
 struct TemporaryDirectory {
   TemporaryDirectory() {
-    std::array<char, 64> pattern{};
-    std::strcpy(pattern.data(), "/tmp/gufo-h3-runtime-XXXXXX");
+    std::string pattern =
+        (std::filesystem::temp_directory_path() / "gufo-h3-runtime-XXXXXX")
+            .string();
     char* result = mkdtemp(pattern.data());
     if (result == nullptr) {
       throw std::runtime_error("mkdtemp failed");

@@ -729,7 +729,11 @@ void TestStartupRejectsUnsafeAndInvalidFiles() {
     output << "must survive";
   }
   const auto unsafe_link = directory.path() / "unsafe.kvc";
-  std::filesystem::create_symlink(target.filename(), unsafe_link);
+  // Windows needs Developer Mode or elevation to create symlinks; without
+  // one the symlink-specific expectations below are vacuous.
+  std::error_code link_error;
+  std::filesystem::create_symlink(target.filename(), unsafe_link, link_error);
+  const bool have_link = !link_error;
 
   std::vector<ContinuationDiskEvent> events;
   ContinuationDiskStore restarted(
@@ -738,9 +742,9 @@ void TestStartupRejectsUnsafeAndInvalidFiles() {
   Expect(
       restarted.entry_count() == 2 && CacheFiles(directory.path()).size() == 2,
       "startup indexes only checksum-valid regular entries");
-  Expect(
-      std::filesystem::exists(target) && !std::filesystem::exists(unsafe_link),
-      "unsafe symlink is removed without following its target");
+  Expect(std::filesystem::exists(target) &&
+             (!have_link || !std::filesystem::exists(unsafe_link)),
+         "unsafe symlink is removed without following its target");
   Expect(
       std::ranges::any_of(events,
                           [](const ContinuationDiskEvent& event) {
@@ -753,11 +757,12 @@ void TestStartupRejectsUnsafeAndInvalidFiles() {
                 return event.reason ==
                        ContinuationDiskEventReason::kChecksumMismatch;
               }) &&
-          std::ranges::any_of(events,
-                              [](const ContinuationDiskEvent& event) {
-                                return event.reason ==
-                                       ContinuationDiskEventReason::kUnsafeFile;
-                              }),
+          (!have_link || std::ranges::any_of(
+                             events,
+                             [](const ContinuationDiskEvent& event) {
+                               return event.reason ==
+                                      ContinuationDiskEventReason::kUnsafeFile;
+                             })),
       "startup reports sanitized invalid-file reasons");
 
   std::size_t compatible_hits = 0;
@@ -783,7 +788,14 @@ void TestRootSymlinkIsRejected() {
   const auto target = directory.path() / "target";
   const auto link = directory.path() / "cache-link";
   std::filesystem::create_directory(target);
-  std::filesystem::create_directory_symlink(target.filename(), link);
+  std::error_code link_error;
+  std::filesystem::create_directory_symlink(target.filename(), link,
+                                            link_error);
+  if (link_error) {
+    std::cout << "skipping root symlink check: " << link_error.message()
+              << '\n';
+    return;
+  }
   bool rejected = false;
   try {
     ContinuationDiskStore store(StoreOptions(link));
