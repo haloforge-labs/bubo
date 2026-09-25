@@ -45,7 +45,8 @@ public:
   Value(long long v) : type_(Type::kNumber), num_(static_cast<double>(v)) {}
   Value(unsigned long long v)
       : type_(Type::kNumber), num_(static_cast<double>(v)) {}
-  Value(std::size_t v) : type_(Type::kNumber), num_(static_cast<double>(v)) {}
+  // size_t is unsigned long on Linux and unsigned long long on Windows.
+  Value(unsigned long v) : type_(Type::kNumber), num_(static_cast<double>(v)) {}
   Value(const char* v) : type_(Type::kString), str_(v) {}
   Value(const std::string& v) : type_(Type::kString), str_(v) {}
   Value(std::string&& v) : type_(Type::kString), str_(std::move(v)) {}

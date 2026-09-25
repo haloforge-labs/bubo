@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 project(gufo LANGUAGES C CXX)
-if (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
-  message(FATAL_ERROR "Gufo requires Linux x86-64 with an AMD gfx1151 GPU")
+if (NOT CMAKE_SYSTEM_NAME MATCHES "^(Linux|Windows)$" OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+  message(FATAL_ERROR "Gufo requires Linux or Windows x86-64 with an AMD gfx1151 GPU")
 endif()
 if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
@@ -17,6 +17,22 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(GUFO_VERSION "development" CACHE STRING "Gufo build revision")
 include_directories(${CMAKE_SOURCE_DIR})
+if (WIN32)
+  # Windows: POSIX shadow headers (compat/win32/include) plus their Win32
+  # implementation, linked into every target. The UCRT's own deprecated POSIX
+  # aliases are disabled so they cannot collide with the shim.
+  include_directories(BEFORE ${CMAKE_SOURCE_DIR}/compat/win32/include)
+  add_compile_definitions(_CRT_DECLARE_NONSTDC_NAMES=0 WIN32_LEAN_AND_MEAN
+    NOMINMAX _CRT_SECURE_NO_WARNINGS _USE_MATH_DEFINES)
+  # Linux gives every thread 8 MiB of stack; Windows defaults to 1 MiB, and
+  # std::thread inherits the executable's reserve size. Match Linux.
+  add_link_options(LINKER:/STACK:8388608)
+  add_library(gufo_posix_compat STATIC
+    compat/win32/posix.cpp
+    compat/win32/spawn.cpp)
+  target_link_libraries(gufo_posix_compat PUBLIC ws2_32 psapi)
+  link_libraries(gufo_posix_compat)
+endif()
 find_package(ICU REQUIRED COMPONENTS uc i18n)
 find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
@@ -38,8 +54,18 @@ endif()
 if (EXISTS /opt/rocm)
   list(APPEND CMAKE_PREFIX_PATH /opt/rocm)
 endif()
+if (WIN32 AND DEFINED ENV{HIP_PATH})
+  list(APPEND CMAKE_PREFIX_PATH $ENV{HIP_PATH})
+endif()
 
 if (ENGINE_ENABLE_HIP)
+  if (WIN32 AND NOT CMAKE_HIP_FLAGS MATCHES "compat/win32/hip_include")
+    # Before enable_language so CMake's compiler probe gets it too; see the
+    # header for the MSVC 14.5x <cmath> conflict it works around.
+    set(CMAKE_HIP_FLAGS
+      "${CMAKE_HIP_FLAGS} -I${CMAKE_SOURCE_DIR}/compat/win32/hip_include"
+      CACHE STRING "HIP flags" FORCE)
+  endif()
   enable_language(HIP)
   find_package(hip REQUIRED)
   find_package(hipblas REQUIRED)
@@ -164,6 +190,10 @@ if (ENGINE_ENABLE_HIP)
     src/core/hip/weight_upload.cpp
     src/core/speculative/speculative_verifier.cpp
   )
+  if (WIN32)
+    target_sources(gufo_core PRIVATE src/core/platform/device_memory.cpp)
+    target_link_libraries(gufo_core PUBLIC dxgi)
+  endif()
   target_compile_definitions(gufo_core PUBLIC ENGINE_ENABLE_HIP=1)
   target_include_directories(gufo_core SYSTEM PRIVATE
     ${HIPCUB_INCLUDE_DIR}
@@ -227,10 +257,18 @@ if (ENGINE_ENABLE_HIP)
 endif()
 target_link_libraries(gufo PRIVATE gufo_qwen3_tts gufo_qwen3_asr)
 
-add_custom_target(gufo-server ALL
-  COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE_NAME:gufo> ${CMAKE_CURRENT_BINARY_DIR}/gufo-server
-  DEPENDS gufo
-)
+if (WIN32)
+  # Symlinks need Developer Mode or elevation on Windows; ship a copy.
+  add_custom_target(gufo-server ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:gufo> ${CMAKE_CURRENT_BINARY_DIR}/gufo-server.exe
+    DEPENDS gufo
+  )
+else()
+  add_custom_target(gufo-server ALL
+    COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE_NAME:gufo> ${CMAKE_CURRENT_BINARY_DIR}/gufo-server
+    DEPENDS gufo
+  )
+endif()
 if (BUILD_TESTING OR GUFO_BUILD_TOOLS)
   add_library(gufo_kernel_bench_support STATIC
     src/cli/bench/kernel_bench.cpp)
@@ -238,20 +276,32 @@ if (BUILD_TESTING OR GUFO_BUILD_TOOLS)
 endif()
 
 if (ENGINE_ENABLE_HIP AND GUFO_BUILD_TOOLS)
-  find_path(ROCTX_INCLUDE_DIR rocprofiler-sdk-roctx/roctx.h REQUIRED)
-  find_library(ROCTX_LIBRARY NAMES rocprofiler-sdk-roctx REQUIRED)
+  # TheRock's Windows distribution has no rocprofiler-sdk; the markers are
+  # optional there and the benchmark runs without them.
+  if (WIN32)
+    find_path(ROCTX_INCLUDE_DIR rocprofiler-sdk-roctx/roctx.h)
+    find_library(ROCTX_LIBRARY NAMES rocprofiler-sdk-roctx)
+  else()
+    find_path(ROCTX_INCLUDE_DIR rocprofiler-sdk-roctx/roctx.h REQUIRED)
+    find_library(ROCTX_LIBRARY NAMES rocprofiler-sdk-roctx REQUIRED)
+  endif()
   add_executable(gufo-kernel-bench
     src/cli/bench/kernel_bench_main.cpp
   )
   target_compile_definitions(gufo-kernel-bench PRIVATE
     GUFO_VERSION="${GUFO_VERSION}")
-  target_include_directories(gufo-kernel-bench SYSTEM PRIVATE
-    ${ROCTX_INCLUDE_DIR})
   target_link_libraries(gufo-kernel-bench PRIVATE
     gufo_kernel_bench_support
     gufo_diagnostics
-    gufo_core
-    ${ROCTX_LIBRARY})
+    gufo_core)
+  if (ROCTX_INCLUDE_DIR AND ROCTX_LIBRARY)
+    target_include_directories(gufo-kernel-bench SYSTEM PRIVATE
+      ${ROCTX_INCLUDE_DIR})
+    target_link_libraries(gufo-kernel-bench PRIVATE ${ROCTX_LIBRARY})
+  else()
+    message(STATUS "gufo: rocprofiler-sdk roctx not found; kernel-bench markers disabled")
+    target_compile_definitions(gufo-kernel-bench PRIVATE GUFO_NO_ROCTX=1)
+  endif()
 
   add_executable(tune_hipblaslt tools/bench/tune_hipblaslt.cpp)
   target_link_libraries(tune_hipblaslt PRIVATE gufo_core hip::host)
@@ -270,7 +320,11 @@ install(FILES
 install(FILES LICENSE NOTICE THIRD_PARTY_NOTICES.md DESTINATION share/licenses/gufo)
 install(DIRECTORY licenses/ DESTINATION share/licenses/gufo/third-party)
 install(FILES src/models/deepseek_v4_flash/LICENSE.ds4 DESTINATION share/licenses/gufo/third-party)
-install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E create_symlink gufo \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufo-server\")")
+if (WIN32)
+  install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/gufo-server.exe DESTINATION bin)
+else()
+  install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E create_symlink gufo \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufo-server\")")
+endif()
 if (ENGINE_ENABLE_HIP AND GUFO_BUILD_TOOLS)
   install(TARGETS gufo-kernel-bench tune_hipblaslt
     DESTINATION bin)

@@ -1,6 +1,18 @@
 #include <hip/hip_runtime.h>
 #include <hipblas/hipblas.h>
+#ifdef GUFO_NO_ROCTX
+// Profiler markers are no-ops where rocprofiler-sdk is unavailable (Windows).
+inline void roctxProfilerResume(int) {}
+inline void roctxProfilerPause(int) {}
+inline int roctxRangePushA(const char*) {
+  return 0;
+}
+inline int roctxRangePop() {
+  return 0;
+}
+#else
 #include <rocprofiler-sdk-roctx/roctx.h>
+#endif
 
 #include <algorithm>
 #include <array>

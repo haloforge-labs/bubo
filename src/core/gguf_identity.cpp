@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <future>
 #include <memory>
+#include <new>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -58,6 +59,12 @@ std::string FileStamp(int fd, std::size_t size) {
 int OpenCacheDirectory() {
   const char* base = std::getenv("XDG_CACHE_HOME");
   std::filesystem::path path;
+#ifdef _WIN32
+  // %LOCALAPPDATA% is the per-user cache root on Windows; HOME is usually
+  // unset outside POSIX shells.
+  if (!base || !*base)
+    base = std::getenv("LOCALAPPDATA");
+#endif
   if (base && *base)
     path = base;
   else {
@@ -135,9 +142,15 @@ void HashFile(crypto::Sha256Hasher& hash, int fd, std::size_t size) {
       size >= kChunk ? open(("/proc/self/fd/" + std::to_string(fd)).c_str(),
                             O_RDONLY | O_CLOEXEC | O_DIRECT)
                      : -1);
+  // Aligned operator new rather than std::aligned_alloc, which the MSVC
+  // runtime does not provide.
+  struct AlignedDelete {
+    void operator()(std::uint8_t* pointer) const noexcept {
+      ::operator delete(pointer, std::align_val_t{kAlignment});
+    }
+  };
   struct Slot {
-    std::unique_ptr<std::uint8_t, decltype(&std::free)> buffer{nullptr,
-                                                               std::free};
+    std::unique_ptr<std::uint8_t, AlignedDelete> buffer;
     std::future<void> read;
     std::size_t size{0};
   };
@@ -147,8 +160,8 @@ void HashFile(crypto::Sha256Hasher& hash, int fd, std::size_t size) {
     if (next == size)
       return;
     if (!slot.buffer) {
-      slot.buffer.reset(
-          static_cast<std::uint8_t*>(std::aligned_alloc(kAlignment, kChunk)));
+      slot.buffer.reset(static_cast<std::uint8_t*>(
+          ::operator new(kChunk, std::align_val_t{kAlignment}, std::nothrow)));
       if (!slot.buffer)
         throw std::bad_alloc();
     }

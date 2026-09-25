@@ -49,7 +49,8 @@ std::string CurrentTimestamp() {
   return {buffer.data(), written};
 }
 
-std::size_t ReadMemoryKiB(const char* path, std::string_view field) {
+[[maybe_unused]] std::size_t ReadMemoryKiB(const char* path,
+                                           std::string_view field) {
   std::ifstream input(path);
   for (std::string line; std::getline(input, line);) {
     if (line.starts_with(field)) {
@@ -89,9 +90,15 @@ void Logger::Log(LogLevel level, std::string_view component,
 
 std::string Logger::MemoryStatus() {
   std::ostringstream output;
+#ifdef _WIN32
+  output << "rss_mib=" << gufo_resident_bytes() / (1024 * 1024)
+         << " host_available_mib="
+         << gufo_available_physical_bytes() / (1024 * 1024);
+#else
   output << "rss_mib=" << ReadMemoryKiB("/proc/self/status", "VmRSS:") / 1024
          << " host_available_mib="
          << ReadMemoryKiB("/proc/meminfo", "MemAvailable:") / 1024;
+#endif
   return output.str();
 }
 

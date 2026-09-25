@@ -127,7 +127,8 @@ ssize_t CancellableWrite(int descriptor, const void* data, std::size_t bytes,
     if (errno != EAGAIN && errno != EWOULDBLOCK) {
       return -1;
     }
-    struct pollfd readiness{descriptor, POLLOUT, 0};
+    struct pollfd readiness{static_cast<decltype(pollfd::fd)>(descriptor),
+                            POLLOUT, 0};
     const int result = poll(&readiness, 1, 50);
     if (result < 0 && errno != EINTR) {
       return -1;

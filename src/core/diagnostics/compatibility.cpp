@@ -45,15 +45,22 @@ CompatibilityReport EvaluateCompatibility(const SystemInventory& inventory,
   if (section == "all" || section == "platform" || section == "inventory") {
     CompatibilityItem platform_item;
     platform_item.component = "platform";
-    platform_item.detected_value = inventory.cpu.architecture + "-linux";
-    platform_item.required_value = "x86_64-linux";
+#ifdef _WIN32
+    constexpr std::string_view kHostOs = "-windows";
+#else
+    constexpr std::string_view kHostOs = "-linux";
+#endif
+    platform_item.detected_value =
+        inventory.cpu.architecture + std::string(kHostOs);
+    platform_item.required_value = "x86_64" + std::string(kHostOs);
     platform_item.evidence = "CPU architecture / host OS";
     if (inventory.cpu.architecture == "x86_64") {
       platform_item.verdict = CompatibilityVerdict::kSupported;
       platform_item.remediation_hint = "None";
     } else {
       platform_item.verdict = CompatibilityVerdict::kUnsupported;
-      platform_item.remediation_hint = "gufo only supports Linux x86-64";
+      platform_item.remediation_hint =
+          "gufo only supports Linux or Windows x86-64";
       overall = CompatibilityVerdict::kUnsupported;
     }
     report.items.push_back(std::move(platform_item));

@@ -32,6 +32,8 @@
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime_api.h>
+
+#include "src/core/platform/device_memory.hpp"
 #endif
 #include "src/cli/serve/tts_service.hpp"
 #include "src/cli/serve/video_jobs.hpp"
@@ -69,7 +71,8 @@ public:
         << ' ' << details << ' ' << server::Logger::MemoryStatus();
 #if defined(ENGINE_ENABLE_HIP)
     std::size_t free = 0, total = 0;
-    if (gpu_loaded && hipMemGetInfo(&free, &total) == hipSuccess) {
+    if (gpu_loaded &&
+        gufo::platform::DeviceMemoryInfo(&free, &total) == hipSuccess) {
       out << " gpu_device_used_mib=" << (total - free) / (1024 * 1024)
           << " gpu_device_total_mib=" << total / (1024 * 1024);
     }

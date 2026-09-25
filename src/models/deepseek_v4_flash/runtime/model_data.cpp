@@ -18,6 +18,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <string>
+
 #include <algorithm>
 #include <array>
 #include <memory>
@@ -1699,7 +1701,16 @@ static void ds4_release_instance_lock(void) {
  * stale accidental second run is more dangerous than a normal CLI error. */
 static void ds4_acquire_instance_lock(void) {
     const char *path = getenv("DS4_LOCK_FILE");
+#ifdef _WIN32
+    std::string default_path;
+    if (!path || !path[0]) {
+        const char *temp = getenv("TEMP");
+        default_path = std::string(temp && temp[0] ? temp : ".") + "/ds4.lock";
+        path = default_path.c_str();
+    }
+#else
     if (!path || !path[0]) path = "/tmp/ds4.lock";
+#endif
 
     const int fd = open(path, O_RDWR | O_CREAT, 0600);
     if (fd < 0) {

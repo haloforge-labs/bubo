@@ -2,6 +2,7 @@
 
 #include <iomanip>
 #include <sstream>
+#include <string>
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
@@ -60,6 +61,15 @@ SystemInventory CollectSystemInventory(const LinuxSysfs& sysfs) {
   } else {
     inv.toolchain.kernel_release = "unknown";
   }
+#if defined(_WIN32) && defined(ENGINE_ENABLE_HIP)
+  // No pinned toolchain on Windows: report the HIP runtime actually loaded
+  // (HIP encodes major * 10^7 + minor * 10^5 + patch).
+  if (int version = 0; hipRuntimeGetVersion(&version) == hipSuccess) {
+    inv.toolchain.rocm_version = std::to_string(version / 10000000) + "." +
+                                 std::to_string(version / 100000 % 100) + "." +
+                                 std::to_string(version % 100000);
+  }
+#endif
 
   // 4. GPU (Sysfs + HIP query)
   const auto gpus = sysfs.QueryDrmGpuDevices();

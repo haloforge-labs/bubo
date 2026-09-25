@@ -17,6 +17,7 @@ namespace {
 constexpr std::size_t kPage = 4096;
 // Keep enough direct reads outstanding while layer 0 runs.
 constexpr std::size_t kWorkers = 32;
+[[maybe_unused]] constexpr std::size_t kWindowsWorkers = 128;
 constexpr std::size_t kReadBatch = 8;
 constexpr std::size_t kBatchJobs = 1024;
 constexpr std::size_t kCacheBytes = 8 * 1024 * 1024;
@@ -97,8 +98,17 @@ std::unique_ptr<NgramTable> NgramTable::Open(
   // Direct I/O bypasses the page cache; the mapping used for the rest of the
   // model must not be used here or every touched row would stay resident.
   const auto path = "/proc/self/fd/" + std::to_string(file_descriptor);
+#ifdef _WIN32
+  // NTFS serializes direct reads of a file that is also mapped (the rest of
+  // the model is): 32 readers got ~5K rows/s. Cached overlapped reads keep
+  // ~70K/s at 32 readers and ~128K/s at 128; the pages go to the standby
+  // list, which Windows reclaims first, not to this process.
+  t->fd_ = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_CONCURRENT_RANDOM);
+  t->direct_ = false;
+#else
   t->fd_ = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECT);
   t->direct_ = t->fd_ >= 0;
+#endif
   if (t->fd_ < 0) {
     t->fd_ = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
   }
@@ -109,8 +119,13 @@ std::unique_ptr<NgramTable> NgramTable::Open(
     }
     return nullptr;
   }
+#ifdef _WIN32
+  // Readers block in the kernel, not on a core; the drive wants depth.
+  const std::size_t workers = kWindowsWorkers;
+#else
   const std::size_t workers = std::min(
       kWorkers, static_cast<std::size_t>(std::thread::hardware_concurrency()));
+#endif
   for (std::size_t i = 0; i < std::max<std::size_t>(1, workers); ++i) {
     t->workers_.emplace_back([raw = t.get()] { raw->Worker(); });
   }

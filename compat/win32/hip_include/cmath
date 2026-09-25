@@ -1,0 +1,27 @@
+// HIP-only shadow of <cmath> for MSVC STL 14.5x (Visual Studio 2026).
+//
+// That STL declares isgreater/isless/... as unconditionally constexpr
+// overloads when __clang__ is defined. Under HIP, constexpr makes them
+// implicitly __host__ __device__, and clang's own __device__ declarations of
+// the same functions (__clang_cuda_math_forward_declares.h) then fail with
+// "__device__ function cannot overload __host__ __device__ function".
+// Hiding __clang__ while <cmath>'s body is parsed selects the STL's MSVC path,
+// which leaves those functions host-only; device code keeps using clang's
+// __device__ overloads. Every header <cmath> depends on is included first,
+// with __clang__ still defined, so only <cmath>'s own body is affected.
+#pragma once
+#include <yvals.h>
+#include <cstdlib>
+#include <xtr1common>
+#include <type_traits>
+#include <limits>
+// Without __clang__ the STL would assume MSVC's __ceilf-style intrinsics;
+// _M_CEE (C++/CLI) is the one switch that selects plain CRT calls instead,
+// and <cmath> uses it for nothing else.
+#pragma push_macro("__clang__")
+#pragma push_macro("_M_CEE")
+#undef __clang__
+#define _M_CEE 1
+#include_next <cmath>
+#pragma pop_macro("_M_CEE")
+#pragma pop_macro("__clang__")

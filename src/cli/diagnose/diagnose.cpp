@@ -109,8 +109,13 @@ diagnostics::DiagnosticReport CollectDiagnostics(
     check.name = "platform";
     if (inventory.cpu.architecture == "x86_64") {
       check.status = diagnostics::DiagnosticStatus::kPass;
+#ifdef _WIN32
+      check.message = "Supported architecture: Windows x86-64";
+      check.details["targetArchitecture"] = "x86_64-windows";
+#else
       check.message = "Supported architecture: Linux x86-64";
       check.details["targetArchitecture"] = "x86_64-linux";
+#endif
     } else {
       check.status = diagnostics::DiagnosticStatus::kFail;
       check.message =
