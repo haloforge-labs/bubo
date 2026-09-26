@@ -95,10 +95,52 @@ inline std::optional<SamplingRequestError> ParseSamplingConfig(
 
   // These controls alter proposal/target probabilities. Reject unsupported
   // spellings instead of accepting a request with a different distribution.
+  // llama.cpp clients send many of them at their disabled values on every
+  // request; those leave the distribution unchanged and are accepted.
+  const auto number = [&body](const char* name, double otherwise) {
+    const json::Value* value = body.find(name);
+    return value != nullptr && value->is_number() ? value->as_double()
+                                                  : otherwise;
+  };
+  const bool mirostat_off = number("mirostat", 0.0) == 0.0;
+  const bool dynatemp_off = number("dynatemp_range", 0.0) == 0.0;
+  const bool xtc_off = number("xtc_probability", 0.0) == 0.0;
+  const bool dry_off = number("dry_multiplier", 0.0) == 0.0;
+  const auto disabled = [&](const std::string& field,
+                            const json::Value& value) {
+    if (value.is_null()) {
+      return true;
+    }
+    const double v = value.is_number() ? value.as_double() : -1e300;
+    if (field == "typical_p" || field == "tfs_z")
+      return v == 1.0;
+    if (field == "mirostat")
+      return v == 0.0;
+    if (field == "mirostat_eta" || field == "mirostat_tau")
+      return mirostat_off;
+    if (field == "dynatemp_range")
+      return v == 0.0;
+    if (field == "dynatemp_exponent")
+      return dynatemp_off;
+    if (field == "xtc_probability")
+      return v == 0.0;
+    if (field.starts_with("xtc_"))
+      return xtc_off;
+    if (field == "dry_multiplier")
+      return v == 0.0;
+    if (field.starts_with("dry_"))
+      return dry_off;
+    if (field == "top_n_sigma")
+      return value.is_number() && v <= 0.0;
+    if (field == "logit_bias") {
+      return (value.is_object() || value.is_array()) && value.empty();
+    }
+    return false;
+  };
   for (const auto& [field, value] : body.members()) {
-    if (field == "logit_bias" &&
-        (value.is_null() || (value.is_object() && value.empty())))
+    if (disabled(field, value)) {
       continue;
+    }
     const bool draft_control = field.starts_with("draft_") ||
                                field.ends_with("_draft") || field == "draft" ||
                                field == "speculative";

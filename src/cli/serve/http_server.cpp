@@ -294,7 +294,7 @@ std::string BuildResponseHead(const HttpResponse& resp,
   out += resp.reason;
   out += "\r\n";
   if (resp.status != 101 && !HasHeader(resp, "content-type")) {
-    out += "Content-Type: application/json\r\n";
+    out += "Content-Type: application/json; charset=utf-8\r\n";
   }
   if (content_length.has_value()) {
     out += "Content-Length: " + std::to_string(*content_length) + "\r\n";

@@ -948,11 +948,53 @@ void TestUnsupportedSamplingControlsAreRejected() {
         R"({"model":"test-model","messages":[{"role":"user","content":"hello"}]})");
     auto body = gufo::json::parse(request.body);
     body[field] = 0.8;
+    // Dependent controls only matter while their sampler is enabled.
+    const std::string name = field;
+    if (name.starts_with("mirostat_"))
+      body["mirostat"] = 2;
+    if (name == "dynatemp_exponent")
+      body["dynatemp_range"] = 0.5;
+    if (name == "xtc_threshold")
+      body["xtc_probability"] = 0.5;
+    if (name.starts_with("dry_") && name != "dry_multiplier") {
+      body["dry_multiplier"] = 0.8;
+    }
     request.body = body.dump();
     const auto response = gufo::server::HandleOpenAiChat(request, backend);
     Expect(response.status == 400 &&
                response.body.find("unsupported_sampling") != std::string::npos,
            "unsupported sampling must not be silently ignored");
+  }
+  // Disabled values, as OpenAI SDKs and llama.cpp front ends send them, leave
+  // the output unchanged and are accepted.
+  {
+    auto request = Request(
+        R"({"model":"test-model","messages":[{"role":"user","content":"hello"}],
+            "stop":null,"logprobs":false,"top_logprobs":0,"n":1,
+            "response_format":{"type":"text"},"modalities":["text"],
+            "typical_p":1.0,"tfs_z":1.0,"mirostat":0,"mirostat_eta":0.1,
+            "mirostat_tau":5.0,"dynatemp_range":0,"dynatemp_exponent":1.0,
+            "xtc_probability":0,"xtc_threshold":0.1,"dry_multiplier":0,
+            "dry_base":1.75,"dry_allowed_length":2,"dry_penalty_last_n":-1,
+            "dry_sequence_breakers":["\n"],"top_n_sigma":-1,"logit_bias":{}})");
+    Expect(gufo::server::HandleOpenAiChat(request, backend).status == 200,
+           "disabled compatibility fields are accepted");
+    auto body = gufo::json::parse(request.body);
+    body["stop"] = gufo::json::Value::array();
+    request.body = body.dump();
+    Expect(gufo::server::HandleOpenAiChat(request, backend).status == 200,
+           "an empty stop list is accepted");
+  }
+  // SDK message objects serialize absent tool fields as null.
+  {
+    auto request = Request(
+        R"({"model":"test-model","tools":null,"tool_choice":null,
+            "messages":[{"role":"user","content":"hello"},
+                        {"role":"assistant","content":"hi","tool_calls":null,
+                         "reasoning_content":null},
+                        {"role":"user","content":"again"}]})");
+    Expect(gufo::server::HandleOpenAiChat(request, backend).status == 200,
+           "null tools, tool_choice and tool_calls mean absent");
   }
 }
 

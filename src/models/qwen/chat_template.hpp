@@ -101,7 +101,10 @@ struct ChatTemplateOptions {
   bool preserve_thinking{true};
   bool add_vision_id{false};
   bool require_tool_call{false};
-  std::size_t max_output_bytes{1024ULL * 1024ULL};  ///< 1 MiB upper bound
+  /// Upper bound on the rendered prompt. 8 MiB matches the default HTTP body
+  /// limit: 1 MiB rejected full-context prompts (262144 tokens of prose is
+  /// about 1 MB of text).
+  std::size_t max_output_bytes{8ULL * 1024ULL * 1024ULL};
 };
 
 /// Suffix opened for a new assistant turn, outside the stable conversation.
