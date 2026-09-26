@@ -105,6 +105,11 @@ if ($gpu) {
   Report "AMD GPU" $false "no Radeon adapter found" "Gufo needs a gfx1151 GPU (Ryzen AI Max+ 395 / Radeon 8060S)"
 }
 
+# The model download (docs\WINDOWS.md) uses the Hugging Face CLI.
+if (-not (Get-Command hf -ErrorAction SilentlyContinue)) {
+  Note "hf (Hugging Face CLI)" "not on PATH; needed to download models: pip install -U huggingface_hub"
+}
+
 # Stray diagnostic switches change the engine's behaviour.
 $diagnostics = @(Get-ChildItem Env: | Where-Object { $_.Name -like "GUFO_*" })
 if ($diagnostics.Count -gt 0) {

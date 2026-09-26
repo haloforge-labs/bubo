@@ -37,6 +37,13 @@ if ($rockVersion -ne $validatedRock) {
   Write-Warning "TheRock $rockVersion at $Rocm; this port is validated on $validatedRock"
 }
 
+# Ninja: the -Ninja path, else the one on PATH (as tools\windows\check.ps1 accepts).
+if (-not (Test-Path $Ninja)) {
+  $onPath = Get-Command ninja -ErrorAction SilentlyContinue
+  if (-not $onPath) { throw "ninja not found at $Ninja or on PATH (see tools\windows\check.ps1)" }
+  $Ninja = $onPath.Source
+}
+
 # Import the MSVC developer environment (headers, libs, link.exe).
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath

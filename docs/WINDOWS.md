@@ -45,8 +45,10 @@ the model's own sampler). `-Think off`, `-Draft mtp3|off`, `-Context N` and
 `-Mode bench` (pp2048/tg128 at depths 0..128K) are the common variations. The
 server is ready when the log shows `event=load_completed`.
 
-Gufo reads `GUFO_*` environment variables as diagnostic switches; the run
-script clears any left in the calling shell.
+The script picks the newest Hugging Face snapshot that holds each file, so
+files downloaded at different revisions are found. `GUFO_*` environment
+variables (`GUFO_PLATFORM_TUNING`, diagnostics) reach the server; the script
+lists any set in the calling shell.
 
 ## How the port works
 

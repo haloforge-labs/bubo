@@ -24,20 +24,35 @@ param(
   [string]$MtpModel = ""
 )
 $ErrorActionPreference = "Stop"
-$bin = Resolve-Path "$PSScriptRoot\..\..\build\release"
+$bin = Join-Path $PSScriptRoot "..\..\build\release"
+if (-not (Test-Path "$bin\gufo.exe")) {
+  throw "gufo.exe not found in $bin; build first: powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1"
+}
 
+$modelFile = "UD-Q4_K_XL\Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf"
+$mtpFile = "MTP\mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"
+# Each Hugging Face revision is its own snapshot folder, holding only the files
+# downloaded at that revision: pick the newest one that has each file.
+$snapshots = @()
 if (-not $Snapshot) {
   $cache = if ($env:HF_HUB_CACHE) { $env:HF_HUB_CACHE }
            elseif ($env:HF_HOME) { Join-Path $env:HF_HOME "hub" }
            else { Join-Path $env:USERPROFILE ".cache\huggingface\hub" }
-  $snapshots = Join-Path $cache "models--unsloth--Qwen3.8-Flash-Next-GGUF\snapshots"
-  $Snapshot = Get-ChildItem $snapshots -Directory -ErrorAction SilentlyContinue |
-    Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
-  if (-not $Snapshot) { throw "unsloth/Qwen3.8-Flash-Next-GGUF not found under $cache; see docs\WINDOWS.md or pass -Snapshot" }
+  $snapshots = @(Get-ChildItem (Join-Path $cache "models--unsloth--Qwen3.8-Flash-Next-GGUF\snapshots") `
+    -Directory -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending |
+    Select-Object -ExpandProperty FullName)
+  $Snapshot = $snapshots | Where-Object { Test-Path (Join-Path $_ $modelFile) } | Select-Object -First 1
+  if (-not $Snapshot) {
+    throw "$modelFile not found in unsloth/Qwen3.8-Flash-Next-GGUF under $cache; see docs\WINDOWS.md or pass -Snapshot"
+  }
 }
-$model = "$Snapshot\UD-Q4_K_XL\Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf"
-if (-not $MtpModel) { $MtpModel = "$Snapshot\MTP\mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf" }
+$model = Join-Path $Snapshot $modelFile
 if (-not (Test-Path $model)) { throw "model not found: $model" }
+if (-not $MtpModel) {
+  $MtpModel = @($Snapshot) + $snapshots | ForEach-Object { Join-Path $_ $mtpFile } |
+    Where-Object { Test-Path $_ } | Select-Object -First 1
+  if (-not $MtpModel) { $MtpModel = Join-Path $Snapshot $mtpFile }
+}
 if ($Draft -ne "off" -and -not (Test-Path $MtpModel)) { throw "MTP model not found: $MtpModel (or use -Draft off)" }
 
 # Never greedy by default. Thinking uses the sampler embedded in the GGUF
@@ -65,7 +80,7 @@ if ($Draft -ne "off" -and $Mode -eq "serve") {
 if ($Mode -eq "serve") {
   $arguments = @("serve", "--host", "127.0.0.1", "--port", "$Port", "--sessions", "1",
     "llm", "--model", $model, "--served-model-name", "flash-next",
-    "--context", "$Context", "--max-tokens", "32768",
+    "--context", "$Context",
     "--think", $Think) + $sampling + $speculative
 } else {
   # Same shape as upstream's single-user table: pp2048/tg128 per depth.
@@ -75,11 +90,10 @@ if ($Mode -eq "serve") {
     $sampling + $speculative
 }
 
-# GUFO_* variables left in a shell switch on diagnostics or change decoding;
-# the server gets none of them.
+# GUFO_* variables (GUFO_PLATFORM_TUNING, diagnostics) reach the server; show
+# them, since one left in a shell changes what runs.
 Get-ChildItem Env: | Where-Object { $_.Name -like "GUFO_*" } | ForEach-Object {
-  Write-Host "ignoring $($_.Name)=$($_.Value) from this shell" -ForegroundColor Yellow
-  Remove-Item "Env:$($_.Name)"
+  Write-Host "using $($_.Name)=$($_.Value) from this shell" -ForegroundColor Yellow
 }
 Write-Host "gufo $($arguments -join ' ')"
 & "$bin\gufo.exe" @arguments
