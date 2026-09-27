@@ -70,14 +70,6 @@ tokenization::ChatTemplateOptions QwenChatOptions(const ChatRequest& request,
   return options;
 }
 
-std::size_t StablePromptPrefix(std::span<const TextRunnerToken> tokens,
-                               std::span<const TextRunnerToken> generation) {
-  if (generation.empty() || tokens.size() <= generation.size() ||
-      !std::ranges::equal(tokens.last(generation.size()), generation))
-    return 0;
-  return tokens.size() - generation.size();
-}
-
 TextPreparedPrompt PrepareQwenPrompt(
     const ChatRequest& request, const tokenization::QwenTokenizer& tokenizer,
     const std::shared_ptr<models::qwen::vision::Encoder>& encoder,
@@ -94,16 +86,7 @@ TextPreparedPrompt PrepareQwenPrompt(
           options,
           encoder && has_images ? encoder->identity() : std::string_view{},
           max_context));
-  // Agent clients may discard an interrupted assistant entirely and append
-  // another user turn, with or without thinking/tools. Always preserve a
-  // checkpoint before the mutable assistant-generation suffix.
-  // With thinking enabled the suffix ends in "<think>\n"; a later turn that
-  // renders this assistant with empty reasoning emits "<think>\n\n", which
-  // BPE merges into one token, so the full prompt is no longer a prefix.
-  const auto generation = tokenizer.Encode(
-      tokenization::GenerationPrompt(options.enable_thinking),
-      {.add_bos = false, .add_eos = false, .parse_special_tokens = true});
-  const auto cache_prefix = StablePromptPrefix(prompt->tokens, generation);
+  const auto cache_prefix = prompt->stable_prefix_tokens;
   if (prompt->images.empty())
     return {std::move(prompt->tokens), {}, cache_prefix};
   if (!encoder)
@@ -111,6 +94,11 @@ TextPreparedPrompt PrepareQwenPrompt(
         "image input requires a matching --mmproj BF16 sidecar");
   auto context = std::make_shared<QwenImageContext>();
   context->cache_identity = prompt->cache_identity;
+  for (const auto& image : prompt->images) {
+    const auto identity = prompt->IdentityForPrefix(image.grid.offset);
+    context->cache_prefixes.push_back(
+        {image.grid.offset, {identity.begin(), identity.end()}});
+  }
   context->prompt = prompt;
   return {prompt->tokens, std::move(context), cache_prefix};
 }
@@ -383,6 +371,10 @@ public:
       verifier_ = std::make_unique<speculative::SpeculativeVerifier>(
           *executor_, std::move(draft_backend), speculative_options);
     }
+  }
+
+  void SetCancellationCheck(const CancellationCheck& check) override {
+    executor_->SetCancellationCheck(check);
   }
 
   void Invalidate() noexcept override {
@@ -681,7 +673,10 @@ public:
     }
     checked_add(logits_count * sizeof(float));
     checked_add(resume_tokens_.size() * sizeof(TextRunnerToken));
-    checked_add(executor_->VisionLayout().images.size() *
+    checked_add(std::ranges::count_if(executor_->VisionLayout().images,
+                                      [this](const auto& image) {
+                                        return image.offset < position_;
+                                      }) *
                 sizeof(models::qwen::vision::ImageGrid));
     if (verifier_ != nullptr) {
       checked_add(verifier_->SnapshotPayloadBytes());
