@@ -28,23 +28,23 @@ gufo::platform::Tuning Parse(const char* spec) {
 
 int main() {
   constexpr bool platform_default = gufo::platform::detail::kWindowsDefault;
-  Expect(Parse(nullptr).prompt_checkpoint == platform_default,
+  Expect(Parse(nullptr).copy_kernels == platform_default,
          "without the variable every switch has its platform default");
-  Expect(Parse("").prompt_checkpoint == platform_default,
+  Expect(Parse("").copy_kernels == platform_default,
          "an empty variable keeps the defaults");
-  Expect(Parse("+prompt_checkpoint").prompt_checkpoint, "+name enables");
-  Expect(Parse("prompt_checkpoint").prompt_checkpoint, "a bare name enables");
-  Expect(!Parse("-prompt_checkpoint").prompt_checkpoint, "-name disables");
-  Expect(Parse("none, +prompt_checkpoint").prompt_checkpoint,
+  Expect(Parse("+copy_kernels").copy_kernels, "+name enables");
+  Expect(Parse("copy_kernels").copy_kernels, "a bare name enables");
+  Expect(!Parse("-copy_kernels").copy_kernels, "-name disables");
+  Expect(Parse("none, +copy_kernels").copy_kernels,
          "items apply left to right, spaces are ignored");
-  Expect(!Parse("all,-prompt_checkpoint").prompt_checkpoint,
+  Expect(!Parse("all,-copy_kernels").copy_kernels,
          "a later item overrides all");
-  Expect(Parse("all").prompt_checkpoint, "all enables every switch");
-  Expect(!Parse("none").prompt_checkpoint, "none disables every switch");
-  Expect(Parse("bogus").prompt_checkpoint == platform_default,
+  Expect(Parse("all").copy_kernels, "all enables every switch");
+  Expect(!Parse("none").copy_kernels, "none disables every switch");
+  Expect(Parse("bogus").copy_kernels == platform_default,
          "an unknown name changes nothing");
   const auto mixed = Parse("none,+fast_sampling");
-  Expect(mixed.fast_sampling && !mixed.flag_waits && !mixed.prompt_checkpoint,
+  Expect(mixed.fast_sampling && !mixed.flag_waits && !mixed.copy_kernels,
          "switches are independent");
   const auto all = Parse("all");
   Expect(all.copy_kernels && all.flag_waits && all.flush_before_wait &&

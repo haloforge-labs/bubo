@@ -7,13 +7,10 @@
 // runs the code it ran before the Windows port. The decode switches change
 // timing and memory placement only: outputs are bit-identical either way
 // (`gufo bench --logit-eval` dumps and fixed-seed sampled texts match).
-// prompt_checkpoint also splits prefill at the generation suffix, which
-// changes rounding the way a different prefill chunk size does, so sampled
-// texts differ from an unsplit prefill (as equally valid samples).
 // GUFO_PLATFORM_TUNING overrides the defaults on any platform, which is
 // how a switch is tried on Linux or the Linux path is exercised on Windows:
 //
-//   GUFO_PLATFORM_TUNING=+prompt_checkpoint,-hot_first_upload
+//   GUFO_PLATFORM_TUNING=+fast_sampling,-hot_first_upload
 //   GUFO_PLATFORM_TUNING=all        (every switch on)
 //   GUFO_PLATFORM_TUNING=none       (every switch off)
 //
@@ -26,10 +23,6 @@
 namespace gufo::platform {
 
 struct Tuning {
-  /// Qwen serving: checkpoint every prompt before the generation suffix, so a
-  /// client that re-sends the previous turn in another form (without its
-  /// reasoning, reformatted) still hits the cache.
-  bool prompt_checkpoint;
   /// Qwen3.8-Flash-Next decode (all bit-identical outputs):
   /// Small host<->device and device<->device copies as kernels instead of
   /// hipMemcpyAsync (a copy-engine hand-off per graph node on Windows).
@@ -75,7 +68,6 @@ struct TuningField {
 };
 
 inline constexpr TuningField kTuningFields[] = {
-    {"prompt_checkpoint", &Tuning::prompt_checkpoint},
     {"copy_kernels", &Tuning::copy_kernels},
     {"flag_waits", &Tuning::flag_waits},
     {"flush_before_wait", &Tuning::flush_before_wait},
