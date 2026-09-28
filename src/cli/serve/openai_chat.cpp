@@ -209,6 +209,24 @@ bool ParseContent(const json::Value* content,
   return true;
 }
 
+// A tool name reaches the Qwen and DeepSeek renderers unescaped, inside
+// "<function=NAME>" and "name=\"NAME\"", so the characters that frame a call
+// are excluded. The dots, colons and slashes that agent harnesses give bridged
+// tool names are data and are kept. Non-ASCII bytes are excluded as well: a
+// name is placed in a prompt the model reads and in operator logs, where
+// confusable and invisible characters buy a client nothing.
+constexpr std::string_view kToolNameRule =
+    "function names require 1-64 printable ASCII characters other than "
+    "spaces, '<', '>', '\"' and '\\'";
+
+bool RenderableToolName(std::string_view name) {
+  return !name.empty() && name.size() <= 64 &&
+         std::ranges::none_of(name, [](unsigned char c) {
+           return c <= 0x20 || c >= 0x7F || c == '<' || c == '>' || c == '"' ||
+                  c == '\\';
+         });
+}
+
 bool ParseArguments(std::string_view arguments,
                     std::vector<tokenization::ChatMessage::ToolArgument>* out,
                     std::string* error) {
@@ -288,6 +306,12 @@ bool ParseMessage(const json::Value& value, tokenization::ChatMessage* message,
     call.id = item.member_str("id");
     call.name = function->member_str("name");
     const std::string arguments = function->member_str("arguments");
+    // A replayed call is rendered like a fresh one, so it carries the same
+    // name rule: a name that cannot be framed is rejected wherever it enters.
+    if (!call.name.empty() && !RenderableToolName(call.name)) {
+      *error = std::string(kToolNameRule);
+      return false;
+    }
     if (call.name.empty() || arguments.empty() ||
         !ParseArguments(arguments, &call.arguments, error)) {
       if (error->empty()) {
@@ -335,8 +359,14 @@ bool ParseTools(const json::Value* tools,
     tokenization::ChatTool tool;
     tool.name = src->member_str("name");
     tool.description = src->member_str("description");
-    if (tool.name.empty()) {
-      *error = "function tools require a nonempty name";
+    if (!RenderableToolName(tool.name)) {
+      *error = std::string(kToolNameRule);
+      return false;
+    }
+    if (std::ranges::any_of(*output, [&](const auto& previous) {
+          return previous.name == tool.name;
+        })) {
+      *error = "function names must be unique";
       return false;
     }
     if (params_src != nullptr && !params_src->is_null() &&
