@@ -56,7 +56,8 @@ struct QwenSampledVerificationResult {
 
 struct QwenGpuWeightRegion {
   // Original reader address for tensor offsets; host_copy owns GPU-visible
-  // immutable bytes, backed by transparent huge pages when available.
+  // immutable bytes, backed by transparent huge pages when available. On
+  // Windows host_copy is null and device_data owns a device allocation.
   const void* host_data{nullptr};
   void* device_data{nullptr};
   void* host_copy{nullptr};

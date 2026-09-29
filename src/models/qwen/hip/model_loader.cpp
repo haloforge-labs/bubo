@@ -1,12 +1,19 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <sys/mman.h>
+#ifdef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string_view>
 #include <system_error>
 #include <thread>
@@ -24,6 +31,9 @@ void ReleaseWeightRegions(std::vector<QwenGpuWeightRegion>& regions) noexcept {
     if (region.host_copy != nullptr) {
       (void)hipHostUnregister(region.host_copy);
       (void)munmap(region.host_copy, region.size);
+    } else if (region.device_data != nullptr) {
+      // Uploaded to device memory (UploadDeviceRegions).
+      (void)hipFree(region.device_data);
     }
     region = {};
   }
@@ -96,6 +106,136 @@ void CopyMappedWeights(const core::GgufMappedRegion& source, void* copy) {
   return hipSuccess;
 }
 
+#ifdef _WIN32
+// Windows: copy each shard into device memory, which is the dedicated VRAM
+// carve-out. A registered host copy lands in shared GPU memory instead, which
+// WDDM caps at half of system RAM (~16 GiB beside a 96 GiB carve-out): the
+// 16.7 GiB UD-Q4_K_XL target does not fit, and the load stalls once the GPU
+// touches it. Kernels read the same bytes either way.
+//
+// The shards are read here rather than through core's WeightUpload, which
+// opens O_DIRECT: NTFS serializes O_DIRECT reads of a file that is also
+// mapped (16 readers managed 0.03 GiB/s each). A cached overlapped handle
+// (O_CONCURRENT_RANDOM, compat/win32/posix.cpp) keeps full speed.
+[[nodiscard]] bool UploadDeviceRegions(
+    std::span<const core::GgufMappedRegion> source_regions,
+    std::vector<QwenGpuWeightRegion>& weight_regions, std::string* error_msg) {
+  constexpr std::size_t kTailMargin = 4096;
+  constexpr std::size_t kChunkBytes = 16ULL << 20;
+  constexpr std::size_t kReaders = 16;
+  const auto started = std::chrono::steady_clock::now();
+  std::mutex error_mutex;
+  std::string error;
+  std::atomic<bool> failed{false};
+  const auto fail = [&](std::string message) {
+    std::lock_guard lock(error_mutex);
+    if (!failed.exchange(true))
+      error = std::move(message);
+  };
+
+  weight_regions.resize(source_regions.size());
+  std::vector<int> fds(source_regions.size(), -1);
+  struct Chunk {
+    std::size_t shard;
+    std::size_t offset;
+  };
+  std::vector<Chunk> chunks;
+  std::size_t total_bytes = 0;
+  for (std::size_t i = 0; i < source_regions.size() && !failed; ++i) {
+    const auto& source = source_regions[i];
+    void* device = nullptr;
+    if (hipMalloc(&device, source.size + kTailMargin) != hipSuccess) {
+      fail("hipMalloc failed for GGUF shard " + std::to_string(i) + " (" +
+           std::to_string(source.size) + " bytes)");
+      break;
+    }
+    weight_regions[i] = {.host_data = source.data,
+                         .device_data = device,
+                         .host_copy = nullptr,
+                         .size = source.size};
+    (void)hipMemset(static_cast<std::uint8_t*>(device) + source.size, 0,
+                    kTailMargin);
+    const auto path = "/proc/self/fd/" + std::to_string(source.file_descriptor);
+    fds[i] = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_CONCURRENT_RANDOM);
+    if (fds[i] < 0) {
+      fail("cannot reopen GGUF shard " + std::to_string(i) + ": " +
+           std::strerror(errno));
+      break;
+    }
+    for (std::size_t offset = 0; offset < source.size; offset += kChunkBytes)
+      chunks.push_back({i, offset});
+    total_bytes += source.size;
+  }
+
+  std::atomic<std::size_t> next{0};
+  const auto reader = [&] {
+    void* staging = nullptr;
+    hipStream_t stream = nullptr;
+    if (hipHostMalloc(&staging, kChunkBytes) != hipSuccess ||
+        hipStreamCreateWithFlags(&stream, hipStreamNonBlocking) != hipSuccess) {
+      fail("weight upload staging allocation failed");
+    }
+    while (!failed) {
+      const auto index = next.fetch_add(1);
+      if (index >= chunks.size())
+        break;
+      const auto [shard, offset] = chunks[index];
+      const auto bytes =
+          std::min(kChunkBytes, source_regions[shard].size - offset);
+      for (std::size_t got = 0; got < bytes && !failed;) {
+        const auto n = ::pread(fds[shard], static_cast<char*>(staging) + got,
+                               bytes - got, static_cast<off_t>(offset + got));
+        if (n <= 0) {
+          fail("GGUF shard read failed: " +
+               std::string(n == 0 ? "unexpected end of file"
+                                  : std::strerror(errno)));
+          break;
+        }
+        got += static_cast<std::size_t>(n);
+      }
+      if (failed)
+        break;
+      auto* destination =
+          static_cast<std::uint8_t*>(weight_regions[shard].device_data) +
+          offset;
+      auto status = hipMemcpyAsync(destination, staging, bytes,
+                                   hipMemcpyHostToDevice, stream);
+      if (status == hipSuccess)
+        status = hipStreamSynchronize(stream);
+      if (status != hipSuccess)
+        fail("weight upload failed: " + std::string(hipGetErrorString(status)));
+    }
+    if (stream != nullptr)
+      (void)hipStreamDestroy(stream);
+    if (staging != nullptr)
+      (void)hipHostFree(staging);
+  };
+  if (!failed) {
+    std::vector<std::jthread> readers;
+    for (std::size_t i = 1; i < kReaders; ++i)
+      readers.emplace_back(reader);
+    reader();
+  }
+  for (const int fd : fds) {
+    if (fd >= 0)
+      (void)::close(fd);
+  }
+  if (failed) {
+    ReleaseWeightRegions(weight_regions);
+    if (error_msg != nullptr)
+      *error_msg = "Qwen weight upload failed: " + error;
+    return false;
+  }
+  const double seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - started)
+          .count();
+  const double gib = static_cast<double>(total_bytes) / (1ULL << 30);
+  std::fprintf(stderr, "qwen weight upload: %.1f GiB in %.1f s (%.2f GiB/s)\n",
+               gib, seconds, seconds > 0 ? gib / seconds : 0.0);
+  return true;
+}
+#endif
+
 [[nodiscard]] bool CreateWeightRegions(
     const core::GgufReader& reader,
     std::vector<QwenGpuWeightRegion>& weight_regions, std::string* error_msg) {
@@ -106,6 +246,13 @@ void CopyMappedWeights(const core::GgufMappedRegion& source, void* copy) {
     }
     return false;
   }
+#ifdef _WIN32
+  if (std::ranges::all_of(source_regions, [](const auto& region) {
+        return region.file_descriptor >= 0;
+      })) {
+    return UploadDeviceRegions(source_regions, weight_regions, error_msg);
+  }
+#endif
 
   weight_regions.resize(source_regions.size());
   for (std::size_t i = 0; i < source_regions.size(); ++i) {

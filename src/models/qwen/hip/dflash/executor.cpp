@@ -15,8 +15,10 @@
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/hip/snapshot_transfer.hpp"
 #include "src/models/qwen/dflash_weights.hpp"
+#include "src/models/qwen/hip/cycle_profile.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/kernels/dflash_kernels.hpp"
+#include "src/models/qwen/hip/kernels/verify_gemm_27b.hpp"
 #include "src/models/qwen/hip/mtp/detail/allocation.hpp"
 #include "src/models/qwen/hip/ops.hpp"
 
@@ -405,6 +407,9 @@ void QwenDFlashGpuExecutor::RunBlockGemm(const models::QwenTensorRef& weight,
     // matrix-core W8A8 route once the shared kernel read activations as float4
     // (11.3 vs 12.2 ms per draft block), so there is one route here.
     if (batch_size <= kDFlashMaxSharedBatch) {
+      if (TryLaunchVerifyGemm27(weight.type, weight.data, input, output,
+                                batch_size, output_size, input_size, stream_))
+        return;
       LaunchBatchedQuantGEMMFp32(weight.type, weight.data, input, output,
                                  batch_size, output_size, input_size, stream_);
       return;
@@ -469,7 +474,9 @@ void QwenDFlashGpuExecutor::RunInjectGemm(const models::QwenTensorRef& weight,
       LaunchExactBf16GEMMFp32SmallBatch(weight.data, chunk_input, chunk_output,
                                         chunk, output_size, input_size,
                                         stream_);
-    } else {
+    } else if (!TryLaunchVerifyGemm27(weight.type, weight.data, chunk_input,
+                                      chunk_output, chunk, output_size,
+                                      input_size, stream_)) {
       LaunchBatchedQuantGEMMFp32(weight.type, weight.data, chunk_input,
                                  chunk_output, chunk, output_size, input_size,
                                  stream_);
@@ -821,6 +828,7 @@ bool QwenDFlashGpuExecutor::InjectTargetContextChunk(
       position + num_tokens > max_context_) {
     return false;
   }
+  qwen27::PhaseScope profile(qwen27::Phase::kInject);
 
   // Upload target features
   const std::size_t bytes = target_features.size() * sizeof(float);
@@ -890,6 +898,7 @@ bool QwenDFlashGpuExecutor::InjectTargetContextChunk(
 
   injected_context_len_ =
       std::max(injected_context_len_, position + num_tokens);
+  profile.Enqueued();
   (void)hipStreamSynchronize(stream_);
   return true;
 }
@@ -944,6 +953,9 @@ std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
     return {};
   }
   const std::uint32_t block_count = draft_count + 1U;
+  if (qwen27::ProfileEnabled())
+    qwen27::ProfileState::Get().CycleStart();
+  qwen27::PhaseScope profile(qwen27::Phase::kDraft);
 
   // Slot zero stays the selector's predecessor until its first step. Proposal
   // slots start as masks and are overwritten only after the embedding lookup.
@@ -1063,6 +1075,8 @@ std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
     LaunchBatchedResidualAdd(d_block_hidden_, d_conv_hidden_, d_block_hidden_,
                              block_count, hidden_size, stream_);
     emit("output", d_block_hidden_, hidden_size);
+    if (qwen27::FlushInterval() != 0)
+      (void)hipStreamQuery(stream_);
   }
 
   LaunchBatchedRMSNorm(
@@ -1105,6 +1119,8 @@ std::vector<tokenization::TokenId> QwenDFlashGpuExecutor::ForwardBlock(
           : nullptr,
       sequences, vocab_size, df_cfg.selector_rank, df_cfg.selector_top_k,
       stream_);
+  // The pageable downloads below block until the GPU is done.
+  profile.Enqueued();
 
   const auto token_copy =
       hipMemcpyAsync(tokens.data(), d_out_token_ + 1U,

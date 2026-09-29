@@ -8,6 +8,7 @@
 
 #include "src/core/hip/detail/dispatch_telemetry.hpp"
 #include "src/core/hip/hip_utils.hpp"
+#include "src/models/qwen/hip/cycle_profile.hpp"
 
 namespace gufo::hip {
 namespace {
@@ -199,6 +200,7 @@ void QwenGpuExecutor::RestoreCompactSnapshot(
 }
 
 void QwenGpuExecutor::SaveState(std::uint32_t valid_context) {
+  qwen27::PhaseScope profile(qwen27::Phase::kState);
   CheckReset();
   replaying_ssm_state_ = false;
   arena_.SaveState(valid_context);
@@ -208,6 +210,7 @@ void QwenGpuExecutor::SaveState(std::uint32_t valid_context) {
 }
 
 void QwenGpuExecutor::RestoreState() {
+  qwen27::PhaseScope profile(qwen27::Phase::kState);
   CheckReset();
   if (arena_.IsSsmReplayCaptureActive())
     arena_.DisableSsmReplayCapture();
@@ -222,6 +225,7 @@ void QwenGpuExecutor::FinishVerification() {
 
 void QwenGpuExecutor::ReplaySsmState(std::uint32_t position,
                                      std::uint32_t count) {
+  qwen27::PhaseScope profile(qwen27::Phase::kState);
   const auto& config = weights_.config;
   auto scratch = arena_.GetScratchView();
   for (std::uint32_t layer_idx = 0; layer_idx < config.num_layers;
@@ -359,6 +363,7 @@ QwenSampledVerificationResult QwenGpuExecutor::VerifySampledToken(
         "Qwen sampled verification proposal is malformed");
   }
 
+  qwen27::PhaseScope profile(qwen27::Phase::kVerifyRow);
   auto parameters = PrepareGpuSamplingParameters(sampler);
   const double acceptance_uniform = sampler.Uniform();
   const std::uint64_t residual_rng_checkpoint = sampler.rng_state();
@@ -377,6 +382,7 @@ QwenSampledVerificationResult QwenGpuExecutor::VerifySampledToken(
 
   QwenSampledVerificationResult result;
   std::uint32_t accepted = 0;
+  profile.Enqueued();
   HIP_CHECK(hipMemcpyAsync(&result.token, d_out_token, sizeof(result.token),
                            hipMemcpyDeviceToHost, arena_.stream));
   HIP_CHECK(hipMemcpyAsync(&accepted, sampling_workspace_.speculative_accepted,
