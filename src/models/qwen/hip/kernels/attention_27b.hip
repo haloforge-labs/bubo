@@ -118,11 +118,16 @@ __launch_bounds__(Rows * 96) __global__
     return __shfl(score, 0, Lanes) * scale;
   };
   const auto update = [&](float score, const __half* value) {
-    const float new_max = fmaxf(running_max, score);
-    const float previous_scale = expf(running_max - new_max);
-    const float value_scale = expf(score - new_max);
+    // One of expf(running_max - new_max) and expf(score - new_max) is
+    // expf(0) = 1; the other is expf(-|running_max - score|), bit for bit
+    // (negating a difference is exact, including running_max = -inf).
+    const float difference = running_max - score;
+    const float ratio = expf(-fabsf(difference));
+    const bool new_maximum = difference < 0.0F;
+    const float previous_scale = new_maximum ? ratio : 1.0F;
+    const float value_scale = new_maximum ? 1.0F : ratio;
     running_sum = (running_sum * previous_scale) + value_scale;
-    running_max = new_max;
+    running_max = new_maximum ? score : running_max;
 #pragma unroll
     for (std::uint32_t vector = 0; vector < vectors_per_lane; ++vector) {
       const float4 value_data = LoadHalf4(
