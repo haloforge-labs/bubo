@@ -42,7 +42,9 @@ enum class Phase : std::uint8_t {
   return level;
 }
 
-[[nodiscard]] inline bool ProfileEnabled() { return ProfileLevel() > 0; }
+[[nodiscard]] inline bool ProfileEnabled() {
+  return ProfileLevel() > 0;
+}
 
 enum class GpuPart : std::uint8_t {
   kAttnProj,
@@ -79,8 +81,8 @@ public:
   void Mark(hipStream_t stream, GpuPart part) { Record(stream, part); }
 
   // After the stream has synchronized.
-  void Collect(std::array<double, static_cast<std::size_t>(GpuPart::kCount)>&
-                   totals) {
+  void Collect(
+      std::array<double, static_cast<std::size_t>(GpuPart::kCount)>& totals) {
     for (std::size_t i = 1; i < count_; ++i) {
       float ms = 0.0F;
       if (hipEventElapsedTime(&ms, events_[i - 1], events_[i]) == hipSuccess)
@@ -110,8 +112,7 @@ private:
 [[nodiscard]] inline std::uint32_t FlushInterval() {
   static const std::uint32_t interval = [] {
     const char* value = std::getenv("GUFO_QWEN27_FLUSH");
-    return value != nullptr ? static_cast<std::uint32_t>(std::atoi(value))
-                            : 0U;
+    return value != nullptr ? static_cast<std::uint32_t>(std::atoi(value)) : 0U;
   }();
   return interval;
 }
@@ -177,8 +178,8 @@ struct ProfileState {
   }
 
   void Print(Clock::time_point now) {
-    static constexpr const char* kNames[] = {"draft", "inject", "verify",
-                                             "row", "state"};
+    static constexpr const char* kNames[] = {"draft", "inject", "verify", "row",
+                                             "state"};
     const double n = static_cast<double>(cycles);
     double phase_sum = 0;
     std::fprintf(stderr, "qwen27 profile: %llu cycles, %.1f ms/cycle |",
@@ -198,7 +199,7 @@ struct ProfileState {
       // The draft has no SSM; its slots hold the dynamic conv projections and
       // the grouped dynamic convolutions.
       static constexpr const char* kDraftParts[] = {
-          "attn_proj", "attn_core", "conv_proj", "conv", "ffn_gate_up",
+          "attn_proj", "attn_core", "conv_proj", "conv",    "ffn_gate_up",
           "ffn_down",  "other",     "head",      "selector"};
       const auto print = [&](const char* label, const auto& parts,
                              const char* const* names) {
@@ -228,8 +229,7 @@ struct ProfileState {
 // synchronize); without it the whole call counts as enqueue.
 class PhaseScope {
 public:
-  explicit PhaseScope(Phase phase)
-      : phase_(phase), enabled_(ProfileEnabled()) {
+  explicit PhaseScope(Phase phase) : phase_(phase), enabled_(ProfileEnabled()) {
     if (enabled_)
       start_ = ProfileState::Clock::now();
   }
@@ -247,8 +247,7 @@ public:
     const auto end = ProfileState::Clock::now();
     const auto enqueued =
         enqueued_ == ProfileState::Clock::time_point{} ? end : enqueued_;
-    auto& totals =
-        ProfileState::Get().phases[static_cast<std::size_t>(phase_)];
+    auto& totals = ProfileState::Get().phases[static_cast<std::size_t>(phase_)];
     totals.total_ms +=
         std::chrono::duration<double, std::milli>(end - start_).count();
     totals.enqueue_ms +=

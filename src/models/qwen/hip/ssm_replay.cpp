@@ -75,8 +75,8 @@ void QwenGpuArena::SaveState(std::uint32_t valid_context) {
   } else {
     CopyRecurrentState(
         d_ssm_conv_state, d_saved_ssm_conv_state_,
-        config_.SsmQkvSize() * config_.ssm_conv_kernel * sizeof(float),
-        config_, true, stream);
+        config_.SsmQkvSize() * config_.ssm_conv_kernel * sizeof(float), config_,
+        true, stream);
     CopyRecurrentState(
         d_ssm_deltanet_state, d_saved_ssm_deltanet_state_,
         config_.ssm_time_step_rank * config_.ssm_state_size *

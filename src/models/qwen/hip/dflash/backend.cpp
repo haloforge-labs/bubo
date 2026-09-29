@@ -540,8 +540,8 @@ speculative::DraftProposal QwenDFlashGpuDraftBackend::ProposeImpl(
   proposal_active_ = !proposal.tokens.empty();
   const std::uint32_t lookup_room = std::min(
       {max_tokens, context_budget, lookup_limit_ != 0 ? lookup_limit_ : 0U});
-  if (use_lookup && qwen27::LookupAppends() && proposal.tokens.size() == count &&
-      count < lookup_room) {
+  if (use_lookup && qwen27::LookupAppends() &&
+      proposal.tokens.size() == count && count < lookup_room) {
     // Append mode: when the context plus DFlash2's drafts continues an
     // earlier passage, copy what followed it after the drafts.
     std::vector<tokenization::TokenId> context(prompt_tokens.begin(),
@@ -550,10 +550,9 @@ speculative::DraftProposal QwenDFlashGpuDraftBackend::ProposeImpl(
                    proposal.tokens.end());
     const auto match = lookup_.Find(context);
     const std::size_t extra =
-        match.length == 0
-            ? 0
-            : std::min<std::size_t>(lookup_room - count,
-                                    context.size() - match.start);
+        match.length == 0 ? 0
+                          : std::min<std::size_t>(lookup_room - count,
+                                                  context.size() - match.start);
     const std::size_t width = proposal.candidates_per_token;
     for (std::size_t i = 0; i < extra; ++i) {
       const auto token = context[match.start + i];
@@ -563,9 +562,8 @@ speculative::DraftProposal QwenDFlashGpuDraftBackend::ProposeImpl(
         // DFlash2 row width.
         proposal.candidate_ids.push_back(token);
         proposal.candidate_probabilities.push_back(1.0F);
-        for (tokenization::TokenId id = 0; proposal.candidate_ids.size() %
-                                               width != 0;
-             ++id) {
+        for (tokenization::TokenId id = 0;
+             proposal.candidate_ids.size() % width != 0; ++id) {
           if (id == token)
             continue;
           proposal.candidate_ids.push_back(id);
@@ -607,16 +605,15 @@ void QwenDFlashGpuDraftBackend::AcceptFeedback(
   const std::size_t drafted = proposed_tokens_.size() - lookup_tokens_;
   if (drafted != 0)
     controller_.Observe(std::min(accepted.size(), drafted), drafted);
-  qwen27::LookupStats::Get().Record(lookup_tokens_,
-                                    accepted.size() > drafted
-                                        ? accepted.size() - drafted
-                                        : 0);
+  qwen27::LookupStats::Get().Record(
+      lookup_tokens_,
+      accepted.size() > drafted ? accepted.size() - drafted : 0);
   lookup_tokens_ = 0;
   if (std::FILE* log = qwen27::DraftLog();
       log != nullptr &&
       proposed_probabilities_.size() == proposed_tokens_.size()) {
-    std::fprintf(log, "%u %zu %zu", proposed_position_,
-                 proposed_tokens_.size(), accepted.size());
+    std::fprintf(log, "%u %zu %zu", proposed_position_, proposed_tokens_.size(),
+                 accepted.size());
     for (std::size_t i = 0; i < proposed_tokens_.size(); ++i)
       std::fprintf(log, " %u:%.4f", proposed_tokens_[i],
                    proposed_probabilities_[i]);

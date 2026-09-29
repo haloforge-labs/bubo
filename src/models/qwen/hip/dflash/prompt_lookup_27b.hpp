@@ -121,7 +121,8 @@ public:
   /// Best match for the whole of `tokens` (what Extend() saw), or a
   /// zero-length match. The newest key has no continuation yet, so it only
   /// matches earlier occurrences.
-  [[nodiscard]] Match Find(std::span<const tokenization::TokenId> tokens) const {
+  [[nodiscard]] Match Find(
+      std::span<const tokenization::TokenId> tokens) const {
     const std::size_t context = tokens.size();
     if (context < kKeyTokens + 1)
       return {};

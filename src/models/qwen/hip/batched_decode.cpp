@@ -44,8 +44,7 @@ void CopyDeviceToDevice2D(void* dst, std::size_t dst_pitch, const void* src,
                           std::size_t src_pitch, std::size_t row_bytes,
                           std::size_t rows, hipStream_t stream) {
 #ifdef _WIN32
-  LaunchDeviceCopy2D27(dst, dst_pitch, src, src_pitch, row_bytes, rows,
-                       stream);
+  LaunchDeviceCopy2D27(dst, dst_pitch, src, src_pitch, row_bytes, rows, stream);
 #else
   HIP_CHECK(hipMemcpy2DAsync(dst, dst_pitch, src, src_pitch, row_bytes, rows,
                              hipMemcpyDeviceToDevice, stream));
@@ -56,8 +55,8 @@ void LaunchProjection(const models::QwenTensorRef& weight, const float* input,
                       float* output, std::size_t batch_size,
                       std::size_t output_size, std::size_t input_size,
                       hipStream_t stream) {
-  if (TryLaunchVerifyGemm27(weight.type, weight.data, input, output,
-                            batch_size, output_size, input_size, stream))
+  if (TryLaunchVerifyGemm27(weight.type, weight.data, input, output, batch_size,
+                            output_size, input_size, stream))
     return;
   if (SupportsExactSharedProjection(weight.type)) {
     LaunchBatchedQuantGEMMFp32(weight.type, weight.data, input, output,
@@ -819,11 +818,10 @@ QwenGpuExecutor::ForwardVerificationBatch(
       if (const auto tap = arena_.GetTargetLayerCaptureIndex(layer_index);
           tap.has_value()) {
         float* const destination = feature_buffer + (*tap * hidden_size);
-        CopyDeviceToDevice2D(destination, feature_width * sizeof(float),
-                             scratch.decode.hidden.data(),
-                             hidden_size * sizeof(float),
-                             hidden_size * sizeof(float), batch_size,
-                             arena_.stream);
+        CopyDeviceToDevice2D(
+            destination, feature_width * sizeof(float),
+            scratch.decode.hidden.data(), hidden_size * sizeof(float),
+            hidden_size * sizeof(float), batch_size, arena_.stream);
       }
     }
     qwen27::MaybeFlush(arena_.stream, layer_index);
