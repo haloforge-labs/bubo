@@ -54,6 +54,8 @@ bool LaunchQ5K(const void* w, const float* x, float* y, std::size_t batch,
       return false;
     case 5:
       if (ssm_gate) return Launch<T, 5, 4, 4, 1>(w, x, y, m, k, stream);
+      if (ffn_down || out_6144)
+        return Launch<T, 5, 16, 4, 2>(w, x, y, m, k, stream);
       return false;
     case 6:
       if (ssm_gate) return Launch<T, 6, 4, 4, 1, 1>(w, x, y, m, k, stream);
@@ -104,6 +106,9 @@ bool LaunchQ6K(const void* w, const float* x, float* y, std::size_t batch,
       if (attn_v) return Launch<T, 4, 4, 4, 1, 1>(w, x, y, m, k, stream);
       if (head) return Launch<T, 4, 16, 4, 2>(w, x, y, m, k, stream);
       return false;
+    case 5:
+      if (attn_v) return Launch<T, 5, 8, 4, 2>(w, x, y, m, k, stream);
+      return false;
     default:
       return false;
   }
@@ -135,6 +140,14 @@ bool LaunchQ4K(const void* w, const float* x, float* y, std::size_t batch,
       if (attn_output) return Launch<T, 4, 8, 4, 1>(w, x, y, m, k, stream);
       if (conv) return Launch<T, 4, 4, 4, 1, 1>(w, x, y, m, k, stream);
       if (fc) return Launch<T, 4, 16, 4, 1>(w, x, y, m, k, stream);
+      return false;
+    case 5:
+      if (Is(m, k, 17408, 5120))  // FFN gate and up
+        return Launch<T, 5, 8, 4, 1>(w, x, y, m, k, stream);
+      if (attn_q) return Launch<T, 5, 4, 4, 1, 1>(w, x, y, m, k, stream);
+      if (attn_output) return Launch<T, 5, 16, 4, 2>(w, x, y, m, k, stream);
+      if (conv) return Launch<T, 5, 4, 4, 1, 1>(w, x, y, m, k, stream);
+      if (fc) return Launch<T, 5, 16, 4, 2>(w, x, y, m, k, stream);
       return false;
     default:
       return false;

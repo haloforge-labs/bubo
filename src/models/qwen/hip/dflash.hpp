@@ -343,6 +343,10 @@ private:
   speculative::DFlashLengthController controller_;
   std::vector<float> pending_target_features_;
   std::vector<tokenization::TokenId> proposed_tokens_;
+  // Diagnostics only (GUFO_QWEN27_DRAFTLOG): the pending proposal's draft
+  // probabilities and position.
+  std::vector<float> proposed_probabilities_;
+  std::uint32_t proposed_position_{0};
   bool primed_{false};
   bool proposal_active_{false};
 };

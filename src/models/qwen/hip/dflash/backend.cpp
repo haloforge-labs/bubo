@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "src/core/sampling.hpp"
+#include "src/models/qwen/hip/cycle_profile.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
 
 namespace gufo::hip {
@@ -503,6 +504,22 @@ speculative::DraftProposal QwenDFlashGpuDraftBackend::ProposeImpl(
 
   proposal.tokens = proposed_tokens_;
   proposal_active_ = !proposal.tokens.empty();
+  if (qwen27::DraftLog() != nullptr) {
+    // The probability the draft gave each proposed token (0 when greedy).
+    proposed_position_ = current_pos;
+    proposed_probabilities_.assign(proposal.tokens.size(), 0.0F);
+    const std::size_t width = proposal.candidates_per_token;
+    for (std::size_t row = 0; width != 0 && row < proposal.tokens.size();
+         ++row) {
+      for (std::size_t c = 0; c < width; ++c) {
+        if (proposal.candidate_ids[row * width + c] == proposal.tokens[row]) {
+          proposed_probabilities_[row] =
+              proposal.candidate_probabilities[row * width + c];
+          break;
+        }
+      }
+    }
+  }
   return proposal;
 }
 
@@ -515,6 +532,17 @@ void QwenDFlashGpuDraftBackend::AcceptFeedback(
   }
 
   controller_.Observe(accepted.size(), proposed_tokens_.size());
+  if (std::FILE* log = qwen27::DraftLog();
+      log != nullptr &&
+      proposed_probabilities_.size() == proposed_tokens_.size()) {
+    std::fprintf(log, "%u %zu %zu", proposed_position_,
+                 proposed_tokens_.size(), accepted.size());
+    for (std::size_t i = 0; i < proposed_tokens_.size(); ++i)
+      std::fprintf(log, " %u:%.4f", proposed_tokens_[i],
+                   proposed_probabilities_[i]);
+    std::fputc('\n', log);
+    std::fflush(log);
+  }
   proposal_active_ = false;
   proposed_tokens_.clear();
 }

@@ -11,6 +11,8 @@
 //   GUFO_QWEN27_FLUSH=N    submit queued launches (hipStreamQuery) every N
 //                          target layers in verification and after every
 //                          draft layer; timing only, results are unchanged
+//   GUFO_QWEN27_DRAFTLOG=F append one line per DFlash2 cycle to file F:
+//                          position, drafted, accepted, token:probability...
 
 #include <hip/hip_runtime.h>
 
@@ -106,6 +108,21 @@ private:
                             : 0U;
   }();
   return interval;
+}
+
+[[nodiscard]] inline std::FILE* DraftLog() {
+  static std::FILE* const file = []() -> std::FILE* {
+    const char* path = std::getenv("GUFO_QWEN27_DRAFTLOG");
+    if (path == nullptr || path[0] == '\0')
+      return nullptr;
+    std::FILE* opened = std::fopen(path, "a");
+    if (opened != nullptr)
+      std::fprintf(opened,
+                   "# qwen27 draft log: position drafted accepted "
+                   "token:draft_probability...\n");
+    return opened;
+  }();
+  return file;
 }
 
 inline void MaybeFlush(hipStream_t stream, std::uint32_t layer) {
