@@ -962,3 +962,6 @@ endif()
 if (BUILD_TESTING)
   include(cmake/Checks.cmake)
 endif()
+
+# Qwen3.6-35B-A3B exploration runtime (gufo-a3b, excluded from ALL).
+add_subdirectory(src/models/qwen36_a3b)
