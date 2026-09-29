@@ -45,6 +45,8 @@ bool LaunchQ5K(const void* w, const float* x, float* y, std::size_t batch,
   const bool ssm_gate = Is(m, k, 6144, 5120);
   const bool attn_q = Is(m, k, 12288, 5120);
   const bool out_6144 = Is(m, k, 5120, 6144);  // ssm_out, attn_output
+  const bool any =
+      ffn_up || ffn_down || ssm_qkv || ssm_gate || attn_q || out_6144;
   switch (batch) {
     case 3:
       if (ffn_down) return Launch<T, 3, 16, 4, 1, 1>(w, x, y, m, k, stream);
@@ -66,20 +68,16 @@ bool LaunchQ5K(const void* w, const float* x, float* y, std::size_t batch,
       if (ffn_down || out_6144)
         return Launch<T, 5, 16, 4, 2>(w, x, y, m, k, stream);
       return false;
+    // 6-8 rows (kb27_sweep5, 2026-09-27): 16-lane groups, 22-38% faster
+    // than the 32-lane shapes on every projection.
     case 6:
-      if (ssm_gate) return Launch<T, 6, 4, 4, 1, 1>(w, x, y, m, k, stream);
-      if (ffn_up) return Launch<T, 6, 8, 4, 1>(w, x, y, m, k, stream);
-      if (ssm_qkv) return Launch<T, 6, 4, 4, 1>(w, x, y, m, k, stream);
+      if (any) return Launch<T, 6, 4, 4, 1, 6, 8, 16>(w, x, y, m, k, stream);
       return false;
     case 7:
-      if (ssm_gate) return Launch<T, 7, 4, 4, 1>(w, x, y, m, k, stream);
-      if (ffn_up || ffn_down || ssm_qkv || attn_q || out_6144)
-        return Launch<T, 7, 16, 4, 2>(w, x, y, m, k, stream);
+      if (any) return Launch<T, 7, 4, 4, 1, 7, 8, 16>(w, x, y, m, k, stream);
       return false;
     case 8:
-      if (ssm_gate) return Launch<T, 8, 4, 4, 1>(w, x, y, m, k, stream);
-      if (ffn_up || ffn_down || ssm_qkv || attn_q || out_6144)
-        return Launch<T, 8, 16, 4, 2>(w, x, y, m, k, stream);
+      if (any) return Launch<T, 8, 4, 4, 1, 8, 8, 16>(w, x, y, m, k, stream);
       return false;
     default:
       return false;
@@ -96,7 +94,14 @@ bool LaunchIQ4XS(const void* w, const float* x, float* y, std::size_t batch,
   if (batch == 3) return Launch<T, 3, 4, 4, 2, 3, 1>(w, x, y, m, k, stream);
   if (batch == 4)
     return Launch<T, 4, 8, 4, 1, 4, 8, 16>(w, x, y, m, k, stream);
-  if (batch == 6) return Launch<T, 6, 8, 4, 2>(w, x, y, m, k, stream);
+  if (batch == 5)
+    return Launch<T, 5, 4, 4, 1, 5, 4, 16>(w, x, y, m, k, stream);
+  if (batch == 6)
+    return Launch<T, 6, 4, 4, 1, 6, 4, 16>(w, x, y, m, k, stream);
+  if (batch == 7)
+    return Launch<T, 7, 4, 4, 1, 7, 4, 16>(w, x, y, m, k, stream);
+  if (batch == 8)
+    return Launch<T, 8, 4, 4, 1, 8, 4, 16>(w, x, y, m, k, stream);
   return false;
 }
 
