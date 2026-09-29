@@ -53,6 +53,7 @@ enum class GpuPart : std::uint8_t {
   kFfnDown,
   kOther,
   kHead,
+  kSelector,
   kCount
 };
 
@@ -61,6 +62,11 @@ enum class GpuPart : std::uint8_t {
 class GpuTimeline {
 public:
   static GpuTimeline& Get() {
+    static GpuTimeline timeline;
+    return timeline;
+  }
+  // The DFlash2 draft block, on the draft's own stream.
+  static GpuTimeline& Draft() {
     static GpuTimeline timeline;
     return timeline;
   }
@@ -140,6 +146,7 @@ struct ProfileState {
   };
   std::array<Totals, static_cast<std::size_t>(Phase::kCount)> phases{};
   std::array<double, static_cast<std::size_t>(GpuPart::kCount)> gpu{};
+  std::array<double, static_cast<std::size_t>(GpuPart::kCount)> draft_gpu{};
   std::uint64_t cycles{0};
   Clock::time_point window_start{};
   Clock::time_point last_cycle{};
@@ -186,17 +193,29 @@ struct ProfileState {
     std::fprintf(stderr, " | other %.1f ms\n", (cycle_ms - phase_sum) / n);
     if (GpuTimeline::Enabled()) {
       static constexpr const char* kParts[] = {
-          "attn_proj", "attn_core", "ssm_proj", "ssm_core",
-          "ffn_gate_up", "ffn_down", "other", "head"};
-      double sum = 0;
-      std::fprintf(stderr, "qwen27 verify gpu ms/cycle:");
-      for (std::size_t i = 0; i < gpu.size(); ++i) {
-        sum += gpu[i];
-        std::fprintf(stderr, " %s %.1f", kParts[i], gpu[i] / n);
-      }
-      std::fprintf(stderr, " | total %.1f\n", sum / n);
+          "attn_proj", "attn_core", "ssm_proj", "ssm_core", "ffn_gate_up",
+          "ffn_down",  "other",     "head",     "selector"};
+      // The draft has no SSM; its slots hold the dynamic conv projections and
+      // the grouped dynamic convolutions.
+      static constexpr const char* kDraftParts[] = {
+          "attn_proj", "attn_core", "conv_proj", "conv", "ffn_gate_up",
+          "ffn_down",  "other",     "head",      "selector"};
+      const auto print = [&](const char* label, const auto& parts,
+                             const char* const* names) {
+        double sum = 0;
+        std::fprintf(stderr, "qwen27 %s gpu ms/cycle:", label);
+        for (std::size_t i = 0; i < parts.size(); ++i) {
+          sum += parts[i];
+          if (parts[i] != 0)
+            std::fprintf(stderr, " %s %.1f", names[i], parts[i] / n);
+        }
+        std::fprintf(stderr, " | total %.1f\n", sum / n);
+      };
+      print("verify", gpu, kParts);
+      print("draft", draft_gpu, kDraftParts);
     }
     gpu = {};
+    draft_gpu = {};
     phases = {};
     cycles = 0;
     cycle_ms = 0;
