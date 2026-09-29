@@ -265,10 +265,14 @@ private:
 
 // GUFO_QWEN27_PROFILE>=1: wall time of one prompt-side step (prefill, draft
 // context injection, snapshot), printed when it ends. Waits for the device.
+// Steps under min_tokens (decode-cycle work) are not timed.
 class ScopedPromptStep {
 public:
-  ScopedPromptStep(const char* name, std::size_t tokens)
-      : name_(name), tokens_(tokens), enabled_(ProfileEnabled()) {
+  ScopedPromptStep(const char* name, std::size_t tokens,
+                   std::size_t min_tokens = 0)
+      : name_(name),
+        tokens_(tokens),
+        enabled_(ProfileEnabled() && tokens >= min_tokens) {
     if (enabled_) {
       (void)hipDeviceSynchronize();
       start_ = ProfileState::Clock::now();

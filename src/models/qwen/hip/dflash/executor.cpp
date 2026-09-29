@@ -796,7 +796,7 @@ bool QwenDFlashGpuExecutor::InjectTargetContext(
       target_features.size() != static_cast<std::size_t>(num_tokens) * width) {
     return false;
   }
-  const qwen27::ScopedPromptStep step("draft_inject", num_tokens);
+  const qwen27::ScopedPromptStep step("draft_inject", num_tokens, 9);
   // Only the final attention window survives this injection. Skip complete
   // scratch chunks that it overwrites, keeping the original batch boundaries
   // and absolute RoPE positions for every surviving row.

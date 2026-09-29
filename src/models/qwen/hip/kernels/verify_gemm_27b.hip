@@ -123,8 +123,19 @@ bool LaunchQ6K(const void* w, const float* x, float* y, std::size_t batch,
       if (attn_v) return Launch<T, 4, 4, 4, 1, 1>(w, x, y, m, k, stream);
       if (head) return Launch<T, 4, 16, 4, 2>(w, x, y, m, k, stream);
       return false;
+    // The head at 5-8 rows (kb27_sweep6): 15-31% faster, 16-lane groups.
     case 5:
       if (attn_v) return Launch<T, 5, 8, 4, 2>(w, x, y, m, k, stream);
+      if (head) return Launch<T, 5, 4, 4, 1, 5, 4, 16>(w, x, y, m, k, stream);
+      return false;
+    case 6:
+      if (head) return Launch<T, 6, 16, 4, 1, 6, 4, 16>(w, x, y, m, k, stream);
+      return false;
+    case 7:
+      if (head) return Launch<T, 7, 16, 4, 1, 7, 4, 16>(w, x, y, m, k, stream);
+      return false;
+    case 8:
+      if (head) return Launch<T, 8, 16, 4, 1, 8, 8, 16>(w, x, y, m, k, stream);
       return false;
     default:
       return false;
