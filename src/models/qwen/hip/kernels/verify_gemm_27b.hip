@@ -111,22 +111,31 @@ bool LaunchQ6K(const void* w, const float* x, float* y, std::size_t batch,
   constexpr auto T = GgmlType::kQ6_K;
   const bool head = Is(m, k, 248320, 5120);
   const bool attn_v = Is(m, k, 1024, 5120);
+  const bool ffn_down = Is(m, k, 5120, 17408);  // DFlash2 draft layers
   switch (batch) {
     case 2:
       if (attn_v) return Launch<T, 2, 4, 3, 2>(w, x, y, m, k, stream);
+      if (ffn_down) return Launch<T, 2, 4, 2, 1, 2, 1>(w, x, y, m, k, stream);
       return false;
     case 3:
       if (attn_v) return Launch<T, 3, 4, 4, 1, 1>(w, x, y, m, k, stream);
       if (head) return Launch<T, 3, 16, 4, 1>(w, x, y, m, k, stream);
+      if (ffn_down)
+        return Launch<T, 3, 4, 4, 1, 3, 4, 16>(w, x, y, m, k, stream);
       return false;
     case 4:
       if (attn_v) return Launch<T, 4, 4, 4, 1, 1>(w, x, y, m, k, stream);
-      if (head) return Launch<T, 4, 16, 4, 2>(w, x, y, m, k, stream);
+      // kb27_sweep7: the head -9%, the draft down projection -44%.
+      if (head) return Launch<T, 4, 8, 3, 1, 4, 4, 16>(w, x, y, m, k, stream);
+      if (ffn_down)
+        return Launch<T, 4, 8, 2, 1, 4, 4, 16>(w, x, y, m, k, stream);
       return false;
     // The head at 5-8 rows (kb27_sweep6): 15-31% faster, 16-lane groups.
     case 5:
       if (attn_v) return Launch<T, 5, 8, 4, 2>(w, x, y, m, k, stream);
       if (head) return Launch<T, 5, 4, 4, 1, 5, 4, 16>(w, x, y, m, k, stream);
+      if (ffn_down)
+        return Launch<T, 5, 4, 4, 1, 5, 4, 16>(w, x, y, m, k, stream);
       return false;
     case 6:
       if (head) return Launch<T, 6, 16, 4, 1, 6, 4, 16>(w, x, y, m, k, stream);
@@ -147,35 +156,55 @@ bool LaunchQ4K(const void* w, const float* x, float* y, std::size_t batch,
                std::size_t m, std::size_t k, hipStream_t stream) {
   constexpr auto T = GgmlType::kQ4_K;
   const bool ffn_down = Is(m, k, 5120, 17408);
+  const bool ffn_gate_up = Is(m, k, 17408, 5120);
   const bool attn_q = Is(m, k, 4096, 5120);
+  const bool attn_kv = Is(m, k, 1024, 5120);
   const bool attn_output = Is(m, k, 5120, 4096);
   const bool conv = Is(m, k, 1280, 5120);
   const bool fc = Is(m, k, 5120, 25600);
+  // Draft shapes at 2-5 rows from kernel-bench/kb27_sweep7 (2026-09-27).
   switch (batch) {
     case 2:
       if (attn_q) return Launch<T, 2, 4, 4, 2>(w, x, y, m, k, stream);
+      if (attn_kv) return Launch<T, 2, 8, 3, 1, 2, 8>(w, x, y, m, k, stream);
       if (conv) return Launch<T, 2, 8, 3, 1>(w, x, y, m, k, stream);
       return false;
     case 3:
-      if (attn_q) return Launch<T, 3, 8, 4, 2>(w, x, y, m, k, stream);
-      if (attn_output) return Launch<T, 3, 8, 4, 2>(w, x, y, m, k, stream);
-      if (conv) return Launch<T, 3, 8, 4, 1>(w, x, y, m, k, stream);
-      if (fc) return Launch<T, 3, 16, 4, 2>(w, x, y, m, k, stream);
+      if (ffn_down)
+        return Launch<T, 3, 8, 4, 1, 3, 4, 16>(w, x, y, m, k, stream);
+      if (ffn_gate_up)
+        return Launch<T, 3, 8, 4, 1, 3, 8, 16>(w, x, y, m, k, stream);
+      if (attn_q)
+        return Launch<T, 3, 4, 4, 1, 1, 4, 16>(w, x, y, m, k, stream);
+      if (attn_kv) return Launch<T, 3, 8, 4, 2, 3, 1>(w, x, y, m, k, stream);
+      if (attn_output)
+        return Launch<T, 3, 8, 3, 1, 3, 4, 16>(w, x, y, m, k, stream);
+      if (conv) return Launch<T, 3, 4, 4, 1, 3, 8>(w, x, y, m, k, stream);
+      if (fc) return Launch<T, 3, 8, 4, 1, 1, 4, 16>(w, x, y, m, k, stream);
       return false;
     case 4:
-      if (ffn_down) return Launch<T, 4, 8, 4, 1>(w, x, y, m, k, stream);
-      if (attn_q) return Launch<T, 4, 4, 4, 1>(w, x, y, m, k, stream);
-      if (attn_output) return Launch<T, 4, 8, 4, 1>(w, x, y, m, k, stream);
+      if (ffn_down)
+        return Launch<T, 4, 8, 4, 1, 4, 4, 16>(w, x, y, m, k, stream);
+      if (attn_q)
+        return Launch<T, 4, 4, 4, 1, 4, 4, 16>(w, x, y, m, k, stream);
+      if (attn_kv) return Launch<T, 4, 8, 4, 2, 4, 1>(w, x, y, m, k, stream);
+      if (attn_output)
+        return Launch<T, 4, 4, 4, 1, 4, 8, 16>(w, x, y, m, k, stream);
       if (conv) return Launch<T, 4, 4, 4, 1, 1>(w, x, y, m, k, stream);
-      if (fc) return Launch<T, 4, 16, 4, 1>(w, x, y, m, k, stream);
+      if (fc) return Launch<T, 4, 4, 4, 1, 4, 4, 16>(w, x, y, m, k, stream);
       return false;
     case 5:
-      if (Is(m, k, 17408, 5120))  // FFN gate and up
-        return Launch<T, 5, 8, 4, 1>(w, x, y, m, k, stream);
-      if (attn_q) return Launch<T, 5, 4, 4, 1, 1>(w, x, y, m, k, stream);
-      if (attn_output) return Launch<T, 5, 16, 4, 2>(w, x, y, m, k, stream);
+      if (ffn_down)
+        return Launch<T, 5, 4, 4, 1, 5, 4, 16>(w, x, y, m, k, stream);
+      if (ffn_gate_up)
+        return Launch<T, 5, 8, 4, 1, 5, 4, 16>(w, x, y, m, k, stream);
+      if (attn_q)
+        return Launch<T, 5, 4, 4, 1, 1, 4, 16>(w, x, y, m, k, stream);
+      if (attn_kv) return Launch<T, 5, 8, 4, 1, 5, 8>(w, x, y, m, k, stream);
+      if (attn_output)
+        return Launch<T, 5, 8, 4, 1, 1, 4, 16>(w, x, y, m, k, stream);
       if (conv) return Launch<T, 5, 4, 4, 1, 1>(w, x, y, m, k, stream);
-      if (fc) return Launch<T, 5, 16, 4, 2>(w, x, y, m, k, stream);
+      if (fc) return Launch<T, 5, 4, 4, 1, 5, 4, 16>(w, x, y, m, k, stream);
       return false;
     default:
       return false;
