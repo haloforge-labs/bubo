@@ -32,9 +32,9 @@ __device__ __forceinline__ float RowShiftDown(float value) {
 // Split-K partials with the arithmetic of production's
 // QwenDecodeSplitKAttentionHalfPartialsKernel<true, 16>: 16 lanes per query
 // head, six heads per KV head. PerRow: grid (kv_heads, rows, splits), one row
-// per block. Otherwise: grid (kv_heads, splits), Rows rows per block sharing
-// every KV tile. Rows occupy whole waves (96 lanes), so token bounds are
-// wave-uniform.
+// per block. Otherwise: grid (kv_heads, splits, row groups), Rows rows per
+// block sharing every KV tile. Rows occupy whole waves (96 lanes), so token
+// bounds are wave-uniform.
 template<unsigned Rows, unsigned Pair, bool PerRow>
 __launch_bounds__(Rows * 96) __global__
     void VerifyAttentionPartials27(const float* __restrict__ q,
@@ -45,7 +45,8 @@ __launch_bounds__(Rows * 96) __global__
                                    std::uint32_t max_context,
                                    std::uint32_t num_heads,
                                    std::uint32_t num_kv_heads,
-                                   std::uint32_t split_count) {
+                                   std::uint32_t split_count,
+                                   std::uint32_t row_base) {
   constexpr unsigned Lanes = 16;
   constexpr std::uint32_t head_dim = kHeadDim;
   constexpr std::uint32_t vector_width = head_dim / 4;
@@ -54,7 +55,9 @@ __launch_bounds__(Rows * 96) __global__
   // One uint4 of K and one of V per thread per tile.
   constexpr unsigned kTile = kThreads / 32;
 
-  const unsigned row = PerRow ? blockIdx.y : threadIdx.x / 96;
+  const unsigned first_row =
+      row_base + (PerRow ? blockIdx.y : blockIdx.z * Rows);
+  const unsigned row = PerRow ? first_row : first_row + threadIdx.x / 96;
   const unsigned local = threadIdx.x % 96;
   const std::uint32_t kv_head = blockIdx.x;
   const std::uint32_t split = PerRow ? blockIdx.z : blockIdx.y;
@@ -80,8 +83,8 @@ __launch_bounds__(Rows * 96) __global__
   };
   std::size_t my_begin, my_end, union_begin, unused, union_end;
   range(row, my_begin, my_end);
-  range(PerRow ? row : 0, union_begin, unused);
-  range(PerRow ? row : Rows - 1, unused, union_end);
+  range(first_row, union_begin, unused);
+  range(PerRow ? row : first_row + Rows - 1, unused, union_end);
   const float scale = rsqrtf(static_cast<float>(head_dim));
 
   const auto* query = reinterpret_cast<const float4*>(
@@ -304,7 +307,7 @@ bool TryLaunchVerifyAttention27(const float* q, const float* gate,
   // kernel (LaunchCausalDecodeAttention + LaunchSplitKAttentionHalfPartials).
   const std::size_t row_scratch =
       detail::DecodeAttentionScratchElements(num_heads, head_dim);
-  if (batch_size < 2 || batch_size > 4 || k_cache_f16 == nullptr ||
+  if (batch_size < 2 || batch_size > 8 || k_cache_f16 == nullptr ||
       v_cache_f16 == nullptr || head_dim != kHeadDim || num_kv_heads == 0 ||
       num_heads != kGroup * num_kv_heads ||
       static_cast<std::size_t>(start_pos) + 1 < 512 ||
@@ -319,18 +322,22 @@ bool TryLaunchVerifyAttention27(const float* q, const float* gate,
   const auto* v = static_cast<const __half*>(v_cache_f16);
   const auto rows = static_cast<unsigned>(batch_size);
   // Measured on gfx1151 at 6K-48K context (kernel-bench/kb27_attn, alternating
-  // medians): per-row blocks are fastest at two and three rows, one shared
-  // four-row block at four.
-  if (rows == 4) {
+  // medians): per-row blocks are fastest at two, three, five and six rows,
+  // shared four-row blocks at four and eight, one four-row block plus three
+  // per-row blocks at seven. Every row keeps its own partitions, so the
+  // grouping never changes the result.
+  const unsigned groups = rows == 4 || rows == 7 ? 1 : rows == 8 ? 2 : 0;
+  if (groups != 0) {
     VerifyAttentionPartials27<4, 2, false>
-        <<<dim3(num_kv_heads, splits), 4 * 96, 0, stream>>>(
+        <<<dim3(num_kv_heads, splits, groups), 4 * 96, 0, stream>>>(
             q, k, v, scratch.data(), layer_idx, start_pos, max_context,
-            num_heads, num_kv_heads, splits);
-  } else {
+            num_heads, num_kv_heads, splits, 0);
+  }
+  if (rows > groups * 4) {
     VerifyAttentionPartials27<1, 1, true>
-        <<<dim3(num_kv_heads, rows, splits), 96, 0, stream>>>(
+        <<<dim3(num_kv_heads, rows - groups * 4, splits), 96, 0, stream>>>(
             q, k, v, scratch.data(), layer_idx, start_pos, max_context,
-            num_heads, num_kv_heads, splits);
+            num_heads, num_kv_heads, splits, groups * 4);
   }
   VerifyAttentionReduce27<<<dim3(num_heads, rows), 32, 0, stream>>>(
       gate, scratch.data(), out_context, num_heads, splits);
