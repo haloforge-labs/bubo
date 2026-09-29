@@ -26,10 +26,12 @@ __launch_bounds__(Resident ? 128 : 1024, 1) __global__
         std::uint32_t key_dimension, std::uint32_t value_dimension,
         SsmReplayCapture replay_capture, std::uint32_t rows,
         std::size_t conv_row_stride, std::size_t projection_row_stride,
-        std::size_t inner_row_stride, Sequences sequences = {}) {
+        std::size_t inner_row_stride, const StateT* __restrict__ src_state,
+        Sequences sequences = {}) {
   if constexpr (!std::is_same_v<Sequences, std::nullptr_t>) {
     const auto& sequence = sequences.sequences[blockIdx.y];
     deltanet_state = static_cast<StateT*>(sequence.recurrent);
+    src_state = static_cast<const StateT*>(sequence.recurrent_src);
     replay_capture = sequence.replay;
     rows = sequence.rows;
     const std::size_t offset = sequence.row_offset;
@@ -62,9 +64,13 @@ __launch_bounds__(Resident ? 128 : 1024, 1) __global__
   __shared__ float s_warp_q[8];
   __shared__ float s_val_warp[8];
 
-  StateT* s_matrix =
-      deltanet_state + ((static_cast<std::size_t>(layer_idx) * num_heads + h) *
-                        key_dim * val_dim);
+  const std::size_t matrix_offset =
+      (static_cast<std::size_t>(layer_idx) * num_heads + h) * key_dim * val_dim;
+  StateT* s_matrix = deltanet_state + matrix_offset;
+  // Out-of-place: start from `src_state` and write the result to
+  // `deltanet_state`. The arithmetic is unchanged.
+  const StateT* initial =
+      src_state != nullptr ? src_state + matrix_offset : s_matrix;
 
   // Keep each FP32 state row across the verification/replay block. Generic
   // shapes and BF16 storage retain their per-token storage transitions.
@@ -72,7 +78,16 @@ __launch_bounds__(Resident ? 128 : 1024, 1) __global__
   if constexpr (Resident) {
 #pragma unroll
     for (std::size_t vi = 0; vi < 32; ++vi)
-      resident[vi] = detail::LoadRecurrentState4(s_matrix + tid * 128, vi);
+      resident[vi] = detail::LoadRecurrentState4(initial + tid * 128, vi);
+  } else {
+    // Each thread owns one value row of this head; copy it first so the
+    // per-token loads and stores below operate on the destination.
+    if (src_state != nullptr && tid < val_dim) {
+      for (std::size_t vi = 0; vi < key_dim / 4; ++vi)
+        detail::StoreRecurrentState4(
+            s_matrix + tid * key_dim, vi,
+            detail::LoadRecurrentState4(initial + tid * key_dim, vi));
+    }
   }
 
   for (std::uint32_t row = 0; row < rows; ++row) {

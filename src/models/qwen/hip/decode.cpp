@@ -27,6 +27,8 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
     replaying_ssm_state_ = false;
     arena_.DisableSsmReplayCapture();
   }
+  // The decode step updates the recurrent state in place.
+  arena_.MaterializeSavedState();
 
   arena_.MarkSsmReplayPosition(pos);
   last_hidden_offset_ = 0;
@@ -54,6 +56,11 @@ tokenization::TokenId QwenGpuExecutor::ForwardToken(
     graph_key.workload_identity =
         ExtendQwenGraphWorkloadIdentity(graph_key.workload_identity, layer);
   }
+  // The lazy recurrent save swaps the live state buffers; a captured graph
+  // holds the addresses it was recorded with.
+  graph_key.workload_identity = ExtendQwenGraphWorkloadIdentity(
+      graph_key.workload_identity,
+      reinterpret_cast<std::uintptr_t>(arena_.d_ssm_deltanet_state));
   const QwenGraphRejection graph_rejections = ResolveQwenGraphRejections(
       compute_logits, use_split_k_decode,
       graph_executor_.IsEnabled() &&

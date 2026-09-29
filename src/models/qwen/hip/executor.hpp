@@ -347,6 +347,23 @@ public:
   [[nodiscard]] std::optional<std::size_t> GetTargetLayerCaptureIndex(
       std::uint32_t layer) const noexcept;
 
+  // Lazy recurrent-state save (Windows; see ssm_replay.cpp). After SaveState
+  // the saved state is the live state, until something updates it:
+  // verification and replay write their result to the spare buffer and swap
+  // the two (CommitOutOfPlaceState); any other in-place update first copies
+  // the live state into the spare (MaterializeSavedState).
+  [[nodiscard]] bool SavedStateAliasesLive() const noexcept {
+    return saved_aliases_live_;
+  }
+  [[nodiscard]] float* SpareConvState() const noexcept {
+    return d_saved_ssm_conv_state_;
+  }
+  [[nodiscard]] void* SpareDeltanetState() const noexcept {
+    return d_saved_ssm_deltanet_state_;
+  }
+  void CommitOutOfPlaceState() noexcept;
+  void MaterializeSavedState();
+
 private:
   void FreeAll() noexcept;
   void AllocateRecurrentSnapshot();
@@ -367,6 +384,7 @@ private:
   std::uint32_t replay_last_position_{0};
   std::size_t replay_captured_positions_{0};
   bool has_saved_state_{false};
+  bool saved_aliases_live_{false};
   bool replay_capture_active_{false};
 };
 

@@ -212,6 +212,8 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
       executor.replaying_ssm_state_ = false;
       executor.arena_.DisableSsmReplayCapture();
     }
+    // Decode updates each session's recurrent state in place.
+    executor.arena_.MaterializeSavedState();
     // Replay and capture-flag updates may still be queued on a session's
     // stream. The coordinator takes ownership only after they finish.
     if (&executor != coordinator) {
@@ -550,15 +552,29 @@ QwenGpuExecutor::ForwardVerificationBatch(
   std::array<std::uint32_t, kMaxRows> host_tokens{};
   std::array<std::uint32_t, kMaxRows> host_positions{};
   std::array<SsmSequenceState, kMaxDecodeBatch> ssm_sequences{};
+  // Lazy save: verification of an aliased session reads its live state and
+  // writes the spare buffer; the roles swap after the layer loop.
+  std::array<bool, kMaxDecodeBatch> out_of_place{};
   for (std::size_t index = 0; index < items.size(); ++index) {
     const auto& item = items[index];
     auto& state_arena = item.executor->arena_;
     auto replay = state_arena.GetSsmReplayCapture();
     replay.position = scratch.decode.prompt_tokens.data() + offsets[index];
-    ssm_sequences[index] = {state_arena.d_ssm_conv_state,
-                            state_arena.d_ssm_deltanet_state, replay,
-                            static_cast<std::uint32_t>(offsets[index]),
-                            static_cast<std::uint32_t>(item.tokens.size())};
+    out_of_place[index] = state_arena.SavedStateAliasesLive();
+    if (out_of_place[index]) {
+      ssm_sequences[index] = {state_arena.SpareConvState(),
+                              state_arena.SpareDeltanetState(),
+                              replay,
+                              static_cast<std::uint32_t>(offsets[index]),
+                              static_cast<std::uint32_t>(item.tokens.size()),
+                              state_arena.d_ssm_conv_state,
+                              state_arena.d_ssm_deltanet_state};
+    } else {
+      ssm_sequences[index] = {state_arena.d_ssm_conv_state,
+                              state_arena.d_ssm_deltanet_state, replay,
+                              static_cast<std::uint32_t>(offsets[index]),
+                              static_cast<std::uint32_t>(item.tokens.size())};
+    }
     for (std::size_t row = 0; row < item.tokens.size(); ++row) {
       const auto position = item.position + static_cast<std::uint32_t>(row);
       host_tokens[offsets[index] + row] = item.tokens[row];
@@ -796,6 +812,10 @@ QwenGpuExecutor::ForwardVerificationBatch(
       }
     }
     qwen27::MaybeFlush(arena_.stream, layer_index);
+  }
+  for (std::size_t index = 0; index < items.size(); ++index) {
+    if (out_of_place[index])
+      items[index].executor->arena_.CommitOutOfPlaceState();
   }
   // The pageable hidden-state download below blocks until the GPU is done.
   profile.Enqueued();

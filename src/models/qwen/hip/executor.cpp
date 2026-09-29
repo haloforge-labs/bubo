@@ -228,6 +228,14 @@ void QwenGpuExecutor::ReplaySsmState(std::uint32_t position,
   qwen27::PhaseScope profile(qwen27::Phase::kState);
   const auto& config = weights_.config;
   auto scratch = arena_.GetScratchView();
+  // Lazy save: the live state is the saved state. Replay into the spare
+  // (the first launch of each layer reads the live state) and swap, so the
+  // saved state stays intact for a later rollback.
+  const bool out_of_place = count != 0 && arena_.SavedStateAliasesLive();
+  float* const conv_state =
+      out_of_place ? arena_.SpareConvState() : arena_.d_ssm_conv_state;
+  void* const deltanet_state =
+      out_of_place ? arena_.SpareDeltanetState() : arena_.d_ssm_deltanet_state;
   for (std::uint32_t layer_idx = 0; layer_idx < config.num_layers;
        ++layer_idx) {
     const auto& layer = weights_.layers[layer_idx];
@@ -243,11 +251,12 @@ void QwenGpuExecutor::ReplaySsmState(std::uint32_t position,
           kSsmReplayCapacity - (start % kSsmReplayCapacity));
       const auto rows =
           std::min({count - offset, until_wrap, arena_.GetMaxBatch()});
+      const bool first = out_of_place && offset == 0;
       LaunchSSMConvRecurrenceRows(
           arena_.GetReplayQkv(layer_idx, start),
-          static_cast<const float*>(layer.ssm_conv1d.data),
-          arena_.d_ssm_conv_state, scratch.ssm.conv_out.data(),
-          arena_.d_ssm_deltanet_state, arena_.GetReplayAlpha(layer_idx, start),
+          static_cast<const float*>(layer.ssm_conv1d.data), conv_state,
+          scratch.ssm.conv_out.data(), deltanet_state,
+          arena_.GetReplayAlpha(layer_idx, start),
           arena_.GetReplayBeta(layer_idx, start),
           static_cast<const float*>(layer.ssm_a.data),
           static_cast<const float*>(layer.ssm_dt.data), nullptr, nullptr,
@@ -255,10 +264,14 @@ void QwenGpuExecutor::ReplaySsmState(std::uint32_t position,
           config.ssm_group_count, config.ssm_time_step_rank,
           config.ssm_state_size, config.SsmValueSize(), rows,
           config.ssm_time_step_rank, config.ssm_inner_size, arena_.stream, {},
-          arena_.GetRecurrentStateStorage());
+          arena_.GetRecurrentStateStorage(),
+          first ? arena_.d_ssm_conv_state : nullptr,
+          first ? arena_.d_ssm_deltanet_state : nullptr);
       offset += rows;
     }
   }
+  if (out_of_place)
+    arena_.CommitOutOfPlaceState();
 }
 
 std::span<const float> QwenGpuExecutor::CopyLastLogits() {

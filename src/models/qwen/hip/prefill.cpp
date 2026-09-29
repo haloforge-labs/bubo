@@ -47,6 +47,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptBatch(
   }
   replaying_ssm_state_ = false;
   arena_.DisableSsmReplayCapture();
+  arena_.MaterializeSavedState();  // prefill updates the state in place
   if (capture_prompt_hidden_) {
     h_prompt_hidden_.clear();
     const std::size_t captured_layers =

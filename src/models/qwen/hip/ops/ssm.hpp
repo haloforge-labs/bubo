@@ -29,6 +29,10 @@ struct SsmSequenceState {
   SsmReplayCapture replay;
   std::uint32_t row_offset{0};
   std::uint32_t rows{0};
+  // Out-of-place update: when set, the rows start from these states and the
+  // result is written to `conv` / `recurrent`; the sources are not modified.
+  const float* conv_src{nullptr};
+  const void* recurrent_src{nullptr};
 };
 
 /// Captures the raw recurrent inputs for every row in a verification batch so
@@ -66,7 +70,9 @@ void LaunchSSMConvRecurrenceRows(
     std::uint32_t rows, std::size_t projection_row_stride,
     std::size_t inner_row_stride, hipStream_t stream = nullptr,
     SsmReplayCapture replay_capture = {},
-    QwenRecurrentStateStorage state_storage = QwenRecurrentStateStorage::kFp32);
+    QwenRecurrentStateStorage state_storage = QwenRecurrentStateStorage::kFp32,
+    const float* conv_src_state = nullptr,
+    const void* deltanet_src_state = nullptr);
 
 /// Runs independent request states in one pair of launches. Row offsets index
 /// the shared projection buffers; each sequence retains its own causal order

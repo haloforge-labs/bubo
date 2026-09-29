@@ -85,12 +85,16 @@ __global__ void SSMConvKernel(const float* __restrict__ qkv_in,
                               std::uint32_t layer_idx,
                               SsmReplayCapture replay_capture,
                               std::uint32_t rows, std::size_t row_stride,
+                              const float* __restrict__ conv_src,
                               Sequences sequences = {}) {
   if constexpr (!std::is_same_v<Sequences, std::nullptr_t>) {
     const auto& sequence = sequences.sequences[blockIdx.y];
     qkv_in += sequence.row_offset * qkv_dim;
     conv_out += sequence.row_offset * qkv_dim;
     conv_state = sequence.conv + layer_idx * qkv_dim * 4;
+    conv_src = sequence.conv_src != nullptr
+                   ? sequence.conv_src + layer_idx * qkv_dim * 4
+                   : nullptr;
     replay_capture = sequence.replay;
     rows = sequence.rows;
   }
@@ -99,6 +103,14 @@ __global__ void SSMConvKernel(const float* __restrict__ qkv_in,
     return;
 
   const std::size_t c_off = c * 4;
+  // Out-of-place: this thread owns channel c's four slots; start them from
+  // the source state, then update the destination exactly as in place.
+  if (conv_src != nullptr) {
+    conv_state[c_off + 0] = conv_src[c_off + 0];
+    conv_state[c_off + 1] = conv_src[c_off + 1];
+    conv_state[c_off + 2] = conv_src[c_off + 2];
+    conv_state[c_off + 3] = conv_src[c_off + 3];
+  }
   const bool capture =
       replay_capture.qkv != nullptr && replay_capture.position != nullptr &&
       replay_capture.enabled != nullptr && replay_capture.enabled[0] != 0U;
@@ -152,18 +164,21 @@ void LaunchSSMConvRecurrenceRows(
     std::uint32_t num_heads, std::uint32_t key_dim, std::uint32_t val_dim,
     std::uint32_t rows, std::size_t projection_row_stride,
     std::size_t inner_row_stride, hipStream_t stream,
-    SsmReplayCapture replay_capture, QwenRecurrentStateStorage state_storage) {
+    SsmReplayCapture replay_capture, QwenRecurrentStateStorage state_storage,
+    const float* conv_src_state, const void* deltanet_src_state) {
   if (rows == 0) {
     return;
   }
   const std::size_t block_size = 256;
   const std::size_t grid_size = (qkv_size + block_size - 1) / block_size;
-  float* conv_layer_state =
-      conv_state + (static_cast<std::size_t>(layer_idx) * qkv_size * 4);
+  const std::size_t conv_layer_offset =
+      static_cast<std::size_t>(layer_idx) * qkv_size * 4;
+  float* conv_layer_state = conv_state + conv_layer_offset;
 
   SSMConvKernel<><<<grid_size, block_size, 0, stream>>>(
       qkv_in, conv_weights, conv_layer_state, conv_out, qkv_size, layer_idx,
-      replay_capture, rows, qkv_size);
+      replay_capture, rows, qkv_size,
+      conv_src_state != nullptr ? conv_src_state + conv_layer_offset : nullptr);
 
   const auto launch = [&]<typename StateT, bool Resident, bool WriteOutput>() {
     constexpr unsigned threads = Resident ? 128 : 256;
@@ -172,7 +187,8 @@ void LaunchSSMConvRecurrenceRows(
             conv_out, static_cast<StateT*>(deltanet_state), alpha_buf, beta_buf,
             ssm_a, ssm_dt, ssm_norm, gate, out_buf, layer_idx, num_key_heads,
             num_heads, key_dim, val_dim, replay_capture, rows, qkv_size,
-            projection_row_stride, inner_row_stride);
+            projection_row_stride, inner_row_stride,
+            static_cast<const StateT*>(deltanet_src_state));
   };
   const auto launch_output = [&]<typename StateT, bool Resident>() {
     if (out_buf != nullptr)
@@ -230,7 +246,7 @@ void LaunchSSMConvRecurrenceBatch(
         out_buf ? out_buf + offset * inner_row_stride : nullptr, layer_idx,
         qkv_size, num_key_heads, num_heads, key_dim, val_dim, sequence.rows,
         projection_row_stride, inner_row_stride, stream, sequence.replay,
-        state_storage);
+        state_storage, sequence.conv_src, sequence.recurrent_src);
     return;
   }
   SsmSequenceBatch batch{};
@@ -239,14 +255,14 @@ void LaunchSSMConvRecurrenceBatch(
   SSMConvKernel<SsmSequenceBatch>
       <<<dim3((qkv_size + 255) / 256, count), 256, 0, stream>>>(
           qkv_in, conv_weights, nullptr, conv_out, qkv_size, layer_idx, {}, 0,
-          qkv_size, batch);
+          qkv_size, nullptr, batch);
   const auto launch = [&]<typename StateT, bool Resident, bool WriteOutput>() {
     DeltaNetRecurrenceKernel<StateT, Resident, WriteOutput, SsmSequenceBatch>
         <<<dim3(num_heads, count), Resident ? 128 : 256, 0, stream>>>(
             conv_out, nullptr, alpha_buf, beta_buf, ssm_a, ssm_dt, ssm_norm,
             gate, out_buf, layer_idx, num_key_heads, num_heads, key_dim,
             val_dim, {}, 0, qkv_size, projection_row_stride, inner_row_stride,
-            batch);
+            nullptr, batch);
   };
   const auto launch_output = [&]<typename StateT, bool Resident>() {
     if (out_buf)
