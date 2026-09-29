@@ -1,7 +1,9 @@
 #include "src/models/qwen/hip/kernels/copy_27b.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
+#include <stdexcept>
 
 namespace gufo::hip {
 namespace {
@@ -49,7 +51,54 @@ bool Aligned16(const void* p) {
   return (reinterpret_cast<std::uintptr_t>(p) & 15U) == 0;
 }
 
+constexpr std::size_t kMaxPublishWords = 4;
+
+struct PublishSources {
+  const std::uint32_t* words[kMaxPublishWords];
+};
+
+__global__ void PublishWordsKernel(PublishSources sources, std::uint32_t count,
+                                   std::uint32_t* host_mapped,
+                                   std::uint32_t sequence) {
+  for (std::uint32_t i = 0; i < count; ++i)
+    host_mapped[i] = *sources.words[i];
+  __threadfence_system();
+  host_mapped[count] = sequence;
+  __threadfence_system();
+}
+
 }  // namespace
+
+void LaunchPublishWords27(const std::uint32_t* const* sources,
+                          std::size_t count, std::uint32_t* host_mapped,
+                          std::uint32_t sequence, hipStream_t stream) {
+  PublishSources packed{};
+  for (std::size_t i = 0; i < count && i < kMaxPublishWords; ++i)
+    packed.words[i] = sources[i];
+  PublishWordsKernel<<<1, 1, 0, stream>>>(
+      packed, static_cast<std::uint32_t>(std::min(count, kMaxPublishWords)),
+      host_mapped, sequence);
+}
+
+void WaitPublished27(volatile std::uint32_t* host_words, std::size_t slot,
+                     std::uint32_t sequence, hipStream_t stream) {
+  // HIP on Windows holds launches until a flush; hipStreamQuery submits them.
+  (void)hipStreamQuery(stream);
+  const auto start = std::chrono::steady_clock::now();
+  std::uint32_t spins = 0;
+  while (host_words[slot] != sequence) {
+#if !defined(__HIP_DEVICE_COMPILE__)
+    __builtin_ia32_pause();
+#endif
+    if (++spins % 4096 == 0 &&
+        std::chrono::steady_clock::now() - start > std::chrono::seconds(1)) {
+      if (hipStreamSynchronize(stream) != hipSuccess ||
+          host_words[slot] != sequence)
+        throw std::runtime_error("Qwen published result did not arrive");
+      return;
+    }
+  }
+}
 
 void LaunchDeviceCopy27(void* dst, const void* src, std::size_t bytes,
                         hipStream_t stream) {

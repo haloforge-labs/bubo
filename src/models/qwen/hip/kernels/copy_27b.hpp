@@ -4,6 +4,7 @@
 #include <hip/hip_runtime.h>
 
 #include <cstddef>
+#include <cstdint>
 
 namespace gufo::hip {
 
@@ -18,6 +19,19 @@ void LaunchDeviceCopy27(void* dst, const void* src, std::size_t bytes,
 void LaunchDeviceCopy2D27(void* dst, std::size_t dst_pitch, const void* src,
                           std::size_t src_pitch, std::size_t row_bytes,
                           std::size_t rows, hipStream_t stream);
+
+/// Publishes `count` device words into host-mapped coherent memory followed by
+/// `sequence` in slot `count` (system-scope fence in between). The host polls
+/// the sequence word instead of calling hipStreamSynchronize, which on
+/// Windows returns ~0.5 ms after a short launch completes.
+void LaunchPublishWords27(const std::uint32_t* const* sources,
+                          std::size_t count, std::uint32_t* host_mapped,
+                          std::uint32_t sequence, hipStream_t stream);
+
+/// Flushes queued launches, then spins until host_words[slot] == sequence.
+/// Falls back to hipStreamSynchronize after ~1 s so a lost write cannot hang.
+void WaitPublished27(volatile std::uint32_t* host_words, std::size_t slot,
+                     std::uint32_t sequence, hipStream_t stream);
 
 }  // namespace gufo::hip
 

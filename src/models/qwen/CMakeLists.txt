@@ -60,6 +60,7 @@ if (ENGINE_ENABLE_HIP)
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_batched.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/verify_gemm_27b.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/copy_27b.hip
+    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/sample_27b.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_decode.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_decode_graph.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_tile.hip

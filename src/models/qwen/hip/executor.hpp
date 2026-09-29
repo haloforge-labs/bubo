@@ -606,6 +606,17 @@ private:
   std::size_t last_hidden_offset_{0};
   float* d_target_layer_features_{nullptr};
   GpuSamplingWorkspace sampling_workspace_;
+  // Windows: coherent host-mapped words for a sampled-verification row's
+  // token, acceptance flag and a sequence number the host polls instead of
+  // synchronizing the stream (copy_27b.hpp, WaitPublished27).
+  struct PinnedHostFree {
+    void operator()(std::uint32_t* pointer) const noexcept {
+      (void)hipHostFree(pointer);
+    }
+  };
+  std::unique_ptr<std::uint32_t, PinnedHostFree> h_row_result_;
+  std::uint32_t* d_row_result_{nullptr};
+  std::uint32_t row_sequence_{0};
   std::optional<tokenization::TokenId> next_token_;
   bool capture_prompt_hidden_{false};
   bool replaying_ssm_state_{false};

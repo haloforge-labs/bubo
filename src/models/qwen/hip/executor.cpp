@@ -9,6 +9,8 @@
 #include "src/core/hip/detail/dispatch_telemetry.hpp"
 #include "src/core/hip/hip_utils.hpp"
 #include "src/models/qwen/hip/cycle_profile.hpp"
+#include "src/models/qwen/hip/kernels/copy_27b.hpp"
+#include "src/models/qwen/hip/kernels/sample_27b.hpp"
 
 namespace gufo::hip {
 namespace {
@@ -294,10 +296,10 @@ tokenization::TokenId QwenGpuExecutor::SampleLastLogits(
 
   auto scratch = arena_.GetScratchView();
   auto* const d_out_token = scratch.decode.sampled_token.data();
-  LaunchGPUSampling(scratch.decode.logits.data(), d_out_token,
-                    weights_.config.vocab_size, parameters,
-                    sampler.penalties().data(), sampler.penalties().size(),
-                    &sampling_workspace_, arena_.stream);
+  LaunchGPUSampling27(scratch.decode.logits.data(), d_out_token,
+                      weights_.config.vocab_size, parameters,
+                      sampler.penalties().data(), sampler.penalties().size(),
+                      &sampling_workspace_, arena_.stream);
 
   tokenization::TokenId token = 0;
   HIP_CHECK(hipMemcpyAsync(&token, d_out_token, sizeof(token),
@@ -347,10 +349,10 @@ tokenization::TokenId QwenGpuExecutor::SampleVerificationLogits(
   }
   auto scratch = arena_.GetScratchView();
   auto* const d_out_token = scratch.decode.sampled_token.data();
-  LaunchGPUSampling(d_verification_logits_ + (row * weights_.config.vocab_size),
-                    d_out_token, weights_.config.vocab_size, parameters,
-                    sampler.penalties().data(), sampler.penalties().size(),
-                    &sampling_workspace_, arena_.stream);
+  LaunchGPUSampling27(
+      d_verification_logits_ + (row * weights_.config.vocab_size), d_out_token,
+      weights_.config.vocab_size, parameters, sampler.penalties().data(),
+      sampler.penalties().size(), &sampling_workspace_, arena_.stream);
 
   tokenization::TokenId token = 0;
   HIP_CHECK(hipMemcpyAsync(&token, d_out_token, sizeof(token),
@@ -384,7 +386,7 @@ QwenSampledVerificationResult QwenGpuExecutor::VerifySampledToken(
 
   auto scratch = arena_.GetScratchView();
   auto* const d_out_token = scratch.decode.sampled_token.data();
-  LaunchGPUSpeculativeSampling(
+  LaunchGPUSpeculativeSampling27(
       d_verification_logits_ + (row * weights_.config.vocab_size), d_out_token,
       sampling_workspace_.speculative_accepted, weights_.config.vocab_size,
       parameters, draft_token, static_cast<float>(draft_token_probability),
@@ -396,12 +398,33 @@ QwenSampledVerificationResult QwenGpuExecutor::VerifySampledToken(
   QwenSampledVerificationResult result;
   std::uint32_t accepted = 0;
   profile.Enqueued();
+#ifdef _WIN32
+  if (h_row_result_ == nullptr) {
+    std::uint32_t* pinned = nullptr;
+    HIP_CHECK(hipHostMalloc(reinterpret_cast<void**>(&pinned),
+                            4 * sizeof(std::uint32_t),
+                            hipHostMallocCoherent | hipHostMallocMapped));
+    h_row_result_.reset(pinned);
+    pinned[0] = pinned[1] = pinned[2] = pinned[3] = 0;
+    HIP_CHECK(hipHostGetDevicePointer(reinterpret_cast<void**>(&d_row_result_),
+                                      pinned, 0));
+  }
+  const std::uint32_t sequence = ++row_sequence_;
+  const std::uint32_t* const sources[] = {
+      d_out_token, sampling_workspace_.speculative_accepted};
+  LaunchPublishWords27(sources, 2, d_row_result_, sequence, arena_.stream);
+  volatile std::uint32_t* const published = h_row_result_.get();
+  WaitPublished27(published, 2, sequence, arena_.stream);
+  result.token = published[0];
+  accepted = published[1];
+#else
   HIP_CHECK(hipMemcpyAsync(&result.token, d_out_token, sizeof(result.token),
                            hipMemcpyDeviceToHost, arena_.stream));
   HIP_CHECK(hipMemcpyAsync(&accepted, sampling_workspace_.speculative_accepted,
                            sizeof(accepted), hipMemcpyDeviceToHost,
                            arena_.stream));
   HIP_CHECK(hipStreamSynchronize(arena_.stream));
+#endif
   if (result.token >= weights_.config.vocab_size || accepted > 1)
     throw std::runtime_error(
         "target logit distribution contains no finite values");
