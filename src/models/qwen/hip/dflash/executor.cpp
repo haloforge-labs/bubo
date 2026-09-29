@@ -17,6 +17,7 @@
 #include "src/models/qwen/dflash_weights.hpp"
 #include "src/models/qwen/hip/cycle_profile.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
+#include "src/models/qwen/hip/kernels/copy_27b.hpp"
 #include "src/models/qwen/hip/kernels/dflash_kernels.hpp"
 #include "src/models/qwen/hip/kernels/verify_gemm_27b.hpp"
 #include "src/models/qwen/hip/mtp/detail/allocation.hpp"
@@ -886,12 +887,20 @@ bool QwenDFlashGpuExecutor::InjectTargetContextChunk(
       const auto count =
           std::min(num_tokens - offset, history_capacity_ - slot);
       const std::size_t cache_bytes = count * kv_dim * sizeof(float);
+#ifdef _WIN32
+      // Copy kernels avoid a copy-engine hand-off per layer on Windows.
+      LaunchDeviceCopy27(d_injected_k_[i] + slot * kv_dim,
+                         d_k_block_ + offset * kv_dim, cache_bytes, stream_);
+      LaunchDeviceCopy27(d_injected_v_[i] + slot * kv_dim,
+                         d_v_block_ + offset * kv_dim, cache_bytes, stream_);
+#else
       HIP_CHECK(hipMemcpyAsync(d_injected_k_[i] + slot * kv_dim,
                                d_k_block_ + offset * kv_dim, cache_bytes,
                                hipMemcpyDeviceToDevice, stream_));
       HIP_CHECK(hipMemcpyAsync(d_injected_v_[i] + slot * kv_dim,
                                d_v_block_ + offset * kv_dim, cache_bytes,
                                hipMemcpyDeviceToDevice, stream_));
+#endif
       offset += count;
     }
   }

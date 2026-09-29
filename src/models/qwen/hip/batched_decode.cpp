@@ -12,6 +12,7 @@
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/detail/decode_step.hpp"
 #include "src/models/qwen/hip/executor.hpp"
+#include "src/models/qwen/hip/kernels/copy_27b.hpp"
 #include "src/models/qwen/hip/kernels/verify_gemm_27b.hpp"
 #include "src/models/qwen/hip/ops.hpp"
 
@@ -25,6 +26,29 @@ constexpr std::size_t kMaxDecodeBatch = 8;
   // These formats preserve scalar FP32 arithmetic while sharing weight loads.
   return type == core::GgmlType::kQ8_0 || type == core::GgmlType::kQ8_K ||
          detail::IsNativeWmmaQuant(type);
+}
+
+// Device-to-device copies: kernels on Windows, where hipMemcpyAsync hands
+// each copy to the copy engine (see copy_27b.hpp).
+void CopyDeviceToDevice(void* dst, const void* src, std::size_t bytes,
+                        hipStream_t stream) {
+#ifdef _WIN32
+  LaunchDeviceCopy27(dst, src, bytes, stream);
+#else
+  HIP_CHECK(hipMemcpyAsync(dst, src, bytes, hipMemcpyDeviceToDevice, stream));
+#endif
+}
+
+void CopyDeviceToDevice2D(void* dst, std::size_t dst_pitch, const void* src,
+                          std::size_t src_pitch, std::size_t row_bytes,
+                          std::size_t rows, hipStream_t stream) {
+#ifdef _WIN32
+  LaunchDeviceCopy2D27(dst, dst_pitch, src, src_pitch, row_bytes, rows,
+                       stream);
+#else
+  HIP_CHECK(hipMemcpy2DAsync(dst, dst_pitch, src, src_pitch, row_bytes, rows,
+                             hipMemcpyDeviceToDevice, stream));
+#endif
 }
 
 void LaunchProjection(const models::QwenTensorRef& weight, const float* input,
@@ -372,11 +396,10 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
       auto& state_arena = items[row].executor->arena_;
       if (const auto tap = state_arena.GetTargetLayerCaptureIndex(layer_index);
           tap.has_value()) {
-        HIP_CHECK(hipMemcpyAsync(
+        CopyDeviceToDevice(
             state_arena.d_target_layer_features + (*tap * hidden_size),
             scratch.decode.hidden.data() + (row * hidden_size),
-            hidden_size * sizeof(float), hipMemcpyDeviceToDevice,
-            arena.stream));
+            hidden_size * sizeof(float), arena.stream);
       }
     }
   }
@@ -400,15 +423,13 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
   for (std::size_t row = 0; row < batch_size; ++row) {
     auto& state_arena = items[row].executor->arena_;
     if (&state_arena != &arena || row != 0) {
-      HIP_CHECK(hipMemcpyAsync(
-          state_arena.d_hidden,
-          scratch.decode.hidden.data() + (row * hidden_size),
-          hidden_size * sizeof(float), hipMemcpyDeviceToDevice, arena.stream));
+      CopyDeviceToDevice(state_arena.d_hidden,
+                         scratch.decode.hidden.data() + (row * hidden_size),
+                         hidden_size * sizeof(float), arena.stream);
     }
-    HIP_CHECK(hipMemcpyAsync(
-        state_arena.d_logits,
-        coordinator->d_verification_logits_ + (row * vocab_size),
-        vocab_size * sizeof(float), hipMemcpyDeviceToDevice, arena.stream));
+    CopyDeviceToDevice(state_arena.d_logits,
+                       coordinator->d_verification_logits_ + (row * vocab_size),
+                       vocab_size * sizeof(float), arena.stream);
   }
   HIP_CHECK(hipStreamSynchronize(arena.stream));
 
@@ -767,11 +788,11 @@ QwenGpuExecutor::ForwardVerificationBatch(
       if (const auto tap = arena_.GetTargetLayerCaptureIndex(layer_index);
           tap.has_value()) {
         float* const destination = feature_buffer + (*tap * hidden_size);
-        HIP_CHECK(hipMemcpy2DAsync(destination, feature_width * sizeof(float),
-                                   scratch.decode.hidden.data(),
-                                   hidden_size * sizeof(float),
-                                   hidden_size * sizeof(float), batch_size,
-                                   hipMemcpyDeviceToDevice, arena_.stream));
+        CopyDeviceToDevice2D(destination, feature_width * sizeof(float),
+                             scratch.decode.hidden.data(),
+                             hidden_size * sizeof(float),
+                             hidden_size * sizeof(float), batch_size,
+                             arena_.stream);
       }
     }
     qwen27::MaybeFlush(arena_.stream, layer_index);
@@ -789,11 +810,10 @@ QwenGpuExecutor::ForwardVerificationBatch(
                          feature_buffer + offset * feature_width,
                          item.tokens.size() * feature_width * sizeof(float),
                          hipMemcpyDeviceToHost, arena_.stream));
-      HIP_CHECK(hipMemcpyAsync(
+      CopyDeviceToDevice(
           executor.arena_.d_target_layer_features,
           feature_buffer + (offset + item.tokens.size() - 1) * feature_width,
-          feature_width * sizeof(float), hipMemcpyDeviceToDevice,
-          arena_.stream));
+          feature_width * sizeof(float), arena_.stream);
     } else if (capture_prompt_hidden_) {
       HIP_CHECK(
           hipMemcpyAsync(executor.h_verification_hidden_.data(),
@@ -804,11 +824,10 @@ QwenGpuExecutor::ForwardVerificationBatch(
     if (&executor == &coordinator) {
       executor.last_hidden_offset_ = (item.tokens.size() - 1) * hidden_size;
     } else {
-      HIP_CHECK(hipMemcpyAsync(
-          executor.arena_.d_hidden,
-          scratch.decode.hidden.data() +
-              (offset + item.tokens.size() - 1) * hidden_size,
-          hidden_size * sizeof(float), hipMemcpyDeviceToDevice, arena_.stream));
+      CopyDeviceToDevice(executor.arena_.d_hidden,
+                         scratch.decode.hidden.data() +
+                             (offset + item.tokens.size() - 1) * hidden_size,
+                         hidden_size * sizeof(float), arena_.stream);
       executor.last_hidden_offset_ = 0;
     }
   }
@@ -833,9 +852,8 @@ QwenGpuExecutor::ForwardVerificationBatch(
     const std::size_t count = item.tokens.size() * vocab_size;
     const auto* logits = logits_buffer + offsets[index] * vocab_size;
     if (logits != executor.d_verification_logits_) {
-      HIP_CHECK(hipMemcpyAsync(executor.d_verification_logits_, logits,
-                               count * sizeof(float), hipMemcpyDeviceToDevice,
-                               arena_.stream));
+      CopyDeviceToDevice(executor.d_verification_logits_, logits,
+                         count * sizeof(float), arena_.stream);
     }
     if (item.capture_logits) {
       executor.h_verification_logits_.resize(count);

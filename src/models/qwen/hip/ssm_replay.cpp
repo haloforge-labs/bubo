@@ -6,6 +6,7 @@
 
 #include "src/core/hip/hip_utils.hpp"
 #include "src/models/qwen/hip/executor.hpp"
+#include "src/models/qwen/hip/kernels/copy_27b.hpp"
 #include "src/models/qwen/hip/ops/ssm.hpp"
 
 namespace gufo::hip {
@@ -16,9 +17,16 @@ void CopyRecurrentState(void* live, void* saved, std::size_t layer_bytes,
                         const core::ModelConfig& config, bool save,
                         hipStream_t stream) {
   const auto bytes = config.SsmLayerCount() * layer_bytes;
-  if (bytes != 0)
-    HIP_CHECK(hipMemcpyAsync(save ? saved : live, save ? live : saved, bytes,
-                             hipMemcpyDeviceToDevice, stream));
+  if (bytes == 0)
+    return;
+#ifdef _WIN32
+  // ~160 MB per speculative cycle: a copy kernel runs at shader bandwidth,
+  // the Windows copy engine does not.
+  LaunchDeviceCopy27(save ? saved : live, save ? live : saved, bytes, stream);
+#else
+  HIP_CHECK(hipMemcpyAsync(save ? saved : live, save ? live : saved, bytes,
+                           hipMemcpyDeviceToDevice, stream));
+#endif
 }
 
 }  // namespace
