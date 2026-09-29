@@ -23,8 +23,7 @@ void TokenProb(const float* logits, const std::uint32_t* tok, float* prob,
 /// capacity.
 void RingStore(const float* k, const float* v, float* ring_k, float* ring_v,
                const std::uint32_t* pos, std::uint32_t rows,
-               std::uint32_t width, std::uint32_t capacity,
-               hipStream_t stream);
+               std::uint32_t width, std::uint32_t capacity, hipStream_t stream);
 
 }  // namespace gufo::models::qwen36_a3b
 

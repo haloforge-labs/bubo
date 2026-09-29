@@ -36,39 +36,50 @@ constexpr std::uint32_t kF16MaxCols = 4096;
 constexpr std::uint32_t kBucket = 16;
 
 void Fail(std::string* error, std::string message) {
-  if (error != nullptr && error->empty()) *error = std::move(message);
+  if (error != nullptr && error->empty())
+    *error = std::move(message);
 }
 
 bool Ok(hipError_t err, const char* what, std::string* error) {
-  if (err == hipSuccess) return true;
+  if (err == hipSuccess)
+    return true;
   Fail(error, std::string(what) + ": " + hipGetErrorString(err));
   return false;
 }
 
 bool Blas(hipblasStatus_t status, const char* what, std::string* error) {
-  if (status == HIPBLAS_STATUS_SUCCESS) return true;
+  if (status == HIPBLAS_STATUS_SUCCESS)
+    return true;
   Fail(error, std::string(what) + ": hipBLAS status " +
                   std::to_string(static_cast<int>(status)));
   return false;
 }
 
-fn::WeightType Small(GgmlType t) { return static_cast<fn::WeightType>(t); }
+fn::WeightType Small(GgmlType t) {
+  return static_cast<fn::WeightType>(t);
+}
 
 WeightKind Kind(const Tensor& t) {
   switch (t.type) {
-    case GgmlType::kQ8_0: return WeightKind::kQ8;
-    case GgmlType::kBF16: return WeightKind::kBf16;
-    default: return WeightKind::kF32;
+    case GgmlType::kQ8_0:
+      return WeightKind::kQ8;
+    case GgmlType::kBF16:
+      return WeightKind::kBf16;
+    default:
+      return WeightKind::kF32;
   }
 }
 
-hipblasHandle_t Handle(void* p) { return static_cast<hipblasHandle_t>(p); }
+hipblasHandle_t Handle(void* p) {
+  return static_cast<hipblasHandle_t>(p);
+}
 
 }  // namespace
 
 void Engine::WideMark(int phase) {
   static const bool enabled = std::getenv("A3B_WIDE_PROFILE") != nullptr;
-  if (!enabled) return;
+  if (!enabled)
+    return;
   // Synced host timestamps: event times are not trustworthy on Windows HIP
   // (the stream runs in submission batches). Adds a sync per phase.
   Wide& s = wide_;
@@ -81,7 +92,8 @@ void Engine::WideMark(int phase) {
 
 void Engine::WideReport(std::size_t tokens) {
   Wide& s = wide_;
-  if (s.marks.empty()) return;
+  if (s.marks.empty())
+    return;
   (void)hipStreamSynchronize(stream_);
   double ms[kWPhases]{};
   double total = 0;
@@ -93,18 +105,22 @@ void Engine::WideReport(std::size_t tokens) {
   s.marks.clear();
   s.stamps.clear();
   static constexpr const char* kNames[kWPhases] = {
-      "gdn proj", "gdn core", "gdn out", "attn proj", "attn core",
-      "attn out", "router", "shared exp", "route host", "exp gate/up",
-      "exp down", "moe epilogue", "norm/head", "mtp block", "bf16 experts", "topk+counts"};
-  std::fprintf(stderr, "a3b wide prefill profile, %zu tokens, %.1f ms "
-               "(%.0f t/s):\n", tokens, total, tokens * 1000.0 / total);
+      "gdn proj",   "gdn core",    "gdn out",      "attn proj",
+      "attn core",  "attn out",    "router",       "shared exp",
+      "route host", "exp gate/up", "exp down",     "moe epilogue",
+      "norm/head",  "mtp block",   "bf16 experts", "topk+counts"};
+  std::fprintf(stderr,
+               "a3b wide prefill profile, %zu tokens, %.1f ms "
+               "(%.0f t/s):\n",
+               tokens, total, tokens * 1000.0 / total);
   for (int p = 0; p < kWPhases; ++p)
     std::fprintf(stderr, "  %-13s %8.1f ms %5.1f%%\n", kNames[p], ms[p],
                  100.0 * ms[p] / total);
 }
 
 bool Engine::AllocateWide(std::string* error) {
-  if (wide_.rows != 0) return true;
+  if (wide_.rows != 0)
+    return true;
   const std::size_t N = options_.prefill_chunk;
   const std::size_t H = c_.hidden;
   const std::size_t E = c_.experts;
@@ -115,8 +131,8 @@ bool Engine::AllocateWide(std::string* error) {
   const std::size_t vd = c_.SsmValueDim();
   const std::size_t qd = c_.QDim();
   const std::size_t kv = c_.KvDim();
-  const std::size_t padded = static_cast<std::size_t>(c_.kv_heads) *
-                             kWmmaGroup * c_.head_dim;
+  const std::size_t padded =
+      static_cast<std::size_t>(c_.kv_heads) * kWmmaGroup * c_.head_dim;
   const std::size_t max_k = std::max({H, vd, qd, ff, sf, 2 * H});
   const std::size_t slots = N * U;
   const std::size_t compact = fn::RoutedCompactRows(slots, E);
@@ -192,7 +208,8 @@ bool Engine::AllocateWide(std::string* error) {
   w.tiles_bf = i32(bf_tiles);
   w.tokens = i32(N);
   w.counts = static_cast<std::uint32_t*>(alloc(E * sizeof(std::uint32_t)));
-  if (!ok) return false;
+  if (!ok)
+    return false;
   if (!Ok(hipHostMalloc(reinterpret_cast<void**>(&w.counts_host),
                         E * sizeof(std::uint32_t)),
           "pinned counts", error) ||
@@ -209,7 +226,8 @@ bool Engine::AllocateWide(std::string* error) {
           "counts event", error))
     return false;
   hipblasHandle_t h = nullptr;
-  if (!Blas(hipblasCreate(&h), "hipblasCreate", error)) return false;
+  if (!Blas(hipblasCreate(&h), "hipblasCreate", error))
+    return false;
   w.blas = h;
   if (!Blas(hipblasSetStream(h, stream_), "hipblasSetStream", error))
     return false;
@@ -219,13 +237,20 @@ bool Engine::AllocateWide(std::string* error) {
 
 void Engine::FreeWide() {
   Wide& w = wide_;
-  if (w.blas != nullptr) (void)hipblasDestroy(Handle(w.blas));
-  if (w.counts_ready != nullptr) (void)hipEventDestroy(w.counts_ready);
-  for (hipEvent_t e : w.events) (void)hipEventDestroy(e);
-  if (w.counts_host != nullptr) (void)hipHostFree(w.counts_host);
-  if (w.tiles_host != nullptr) (void)hipHostFree(w.tiles_host);
-  if (w.tiles_bf_host != nullptr) (void)hipHostFree(w.tiles_bf_host);
-  if (w.tokens_host != nullptr) (void)hipHostFree(w.tokens_host);
+  if (w.blas != nullptr)
+    (void)hipblasDestroy(Handle(w.blas));
+  if (w.counts_ready != nullptr)
+    (void)hipEventDestroy(w.counts_ready);
+  for (hipEvent_t e : w.events)
+    (void)hipEventDestroy(e);
+  if (w.counts_host != nullptr)
+    (void)hipHostFree(w.counts_host);
+  if (w.tiles_host != nullptr)
+    (void)hipHostFree(w.tiles_host);
+  if (w.tiles_bf_host != nullptr)
+    (void)hipHostFree(w.tiles_bf_host);
+  if (w.tokens_host != nullptr)
+    (void)hipHostFree(w.tokens_host);
   w = Wide{};
 }
 
@@ -238,14 +263,13 @@ bool Engine::BlasBf16(const void* w, const void* x, const void* x_lo,
   const float one = 1.0F;
   const float zero = 0.0F;
   for (int part = 0; part < (x_lo != nullptr ? 2 : 1); ++part) {
-    if (!Blas(hipblasGemmEx(Handle(wide_.blas), HIPBLAS_OP_T, HIPBLAS_OP_N,
-                            static_cast<int>(m), static_cast<int>(n),
-                            static_cast<int>(k), &one, w, HIP_R_16BF,
-                            static_cast<int>(k), part == 0 ? x : x_lo,
-                            HIP_R_16BF, static_cast<int>(k),
-                            part == 0 ? &zero : &one, out, HIP_R_32F,
-                            static_cast<int>(m), HIPBLAS_COMPUTE_32F,
-                            HIPBLAS_GEMM_DEFAULT),
+    if (!Blas(hipblasGemmEx(
+                  Handle(wide_.blas), HIPBLAS_OP_T, HIPBLAS_OP_N,
+                  static_cast<int>(m), static_cast<int>(n), static_cast<int>(k),
+                  &one, w, HIP_R_16BF, static_cast<int>(k),
+                  part == 0 ? x : x_lo, HIP_R_16BF, static_cast<int>(k),
+                  part == 0 ? &zero : &one, out, HIP_R_32F, static_cast<int>(m),
+                  HIPBLAS_COMPUTE_32F, HIPBLAS_GEMM_DEFAULT),
               "BF16 GEMM", error))
       return false;
   }
@@ -282,7 +306,8 @@ bool Engine::WideDense(const Tensor& w, const float* x, float* out,
         fn::NarrowActivations(x, s.half, false, count, stream_);
         s.staged_kinds |= 1u;
       }
-      if (fn::DenseF16Gemm(w.data, s.half, out, n, m, k, stream_)) return true;
+      if (fn::DenseF16Gemm(w.data, s.half, out, n, m, k, stream_))
+        return true;
     }
     if (!(s.staged_kinds & 2u)) {
       fn::QuantizeQ8Tiled(x, s.q8t, n, k, stream_);
@@ -305,12 +330,12 @@ bool Engine::WideDense(const Tensor& w, const float* x, float* out,
     }
     const float one = 1.0F;
     const float zero = 0.0F;
-    return Blas(hipblasSgemm(Handle(s.blas), HIPBLAS_OP_T, HIPBLAS_OP_N,
-                             static_cast<int>(m), static_cast<int>(n),
-                             static_cast<int>(k), &one, w.f32(),
-                             static_cast<int>(k), x, static_cast<int>(k),
-                             &zero, out, static_cast<int>(m)),
-                "F32 GEMM", error);
+    return Blas(
+        hipblasSgemm(Handle(s.blas), HIPBLAS_OP_T, HIPBLAS_OP_N,
+                     static_cast<int>(m), static_cast<int>(n),
+                     static_cast<int>(k), &one, w.f32(), static_cast<int>(k), x,
+                     static_cast<int>(k), &zero, out, static_cast<int>(m)),
+        "F32 GEMM", error);
   }
   if (!(s.staged_kinds & 4u)) {
     SplitBf16(x, static_cast<__hip_bfloat16*>(s.bf),
@@ -347,14 +372,14 @@ bool Engine::WideGdn(const Layer& l, std::uint32_t idx, std::uint32_t n,
   if (!options_.fn_gate)
     MulInPlace(s.gdn, s.z, static_cast<std::size_t>(n) * vd, stream_);
   WideMark(kWGdnOut);
-  if (!WideDense(l.ssm_out, s.gdn, s.blk, n, error)) return false;
+  if (!WideDense(l.ssm_out, s.gdn, s.blk, n, error))
+    return false;
   AddInPlace(s.res, s.blk, static_cast<std::size_t>(n) * H, stream_);
   return true;
 }
 
 bool Engine::WideAttention(const Layer& l, __half* k_cache, __half* v_cache,
-                           __half* vt_cache,
-                           float* res, std::uint32_t n,
+                           __half* vt_cache, float* res, std::uint32_t n,
                            std::uint32_t start_pos, std::string* error) {
   const std::uint32_t H = c_.hidden;
   const std::uint32_t qd = c_.QDim();
@@ -396,7 +421,8 @@ bool Engine::WideAttention(const Layer& l, __half* k_cache, __half* v_cache,
     }
     if (!check) {
       WideMark(kWAttnOut);
-      if (!WideDense(l.attn_out, s.gdn, s.blk, n, error)) return false;
+      if (!WideDense(l.attn_out, s.gdn, s.blk, n, error))
+        return false;
       AddInPlace(res, s.blk, static_cast<std::size_t>(n) * H, stream_);
       return true;
     }
@@ -426,13 +452,16 @@ bool Engine::WideAttention(const Layer& l, __half* k_cache, __half* v_cache,
       scale = std::max(scale, static_cast<double>(std::fabs(ref[i])));
       worst = std::max(worst, static_cast<double>(std::fabs(mine[i] - ref[i])));
     }
-    std::fprintf(stderr, "prefill attn check pos %u n %u: max |diff| %.3g, "
-                 "max |ref| %.3g\n", start_pos, n, worst, scale);
+    std::fprintf(stderr,
+                 "prefill attn check pos %u n %u: max |diff| %.3g, "
+                 "max |ref| %.3g\n",
+                 start_pos, n, worst, scale);
   } else {
     UnpadHeads(s.o24, s.gdn, n, c_.kv_heads, group, kWmmaGroup, d, stream_);
   }
   WideMark(kWAttnOut);
-  if (!WideDense(l.attn_out, s.gdn, s.blk, n, error)) return false;
+  if (!WideDense(l.attn_out, s.gdn, s.blk, n, error))
+    return false;
   AddInPlace(res, s.blk, static_cast<std::size_t>(n) * H, stream_);
   return true;
 }
@@ -453,7 +482,8 @@ bool Engine::WideMoe(const Layer& l, float* res, std::uint32_t n,
   router.rows = E + 1;
   router.cols = H;
   WideMark(kWRouter);
-  if (!WideDense(router, s.xn, s.router, n, error)) return false;
+  if (!WideDense(router, s.xn, s.router, n, error))
+    return false;
   WideMark(kWTopK);
   fn::RouterTopK(s.router, E + 1, s.ids, s.weights, n, E, U, stream_);
   fn::ExpertCounts(s.ids, s.counts, n, E, U, stream_);
@@ -469,7 +499,8 @@ bool Engine::WideMoe(const Layer& l, float* res, std::uint32_t n,
       !WideDense(l.sh_up, s.xn, s.shu, n, error))
     return false;
   fn::Swiglu(s.shg, s.shu, static_cast<std::size_t>(n) * sf, stream_);
-  if (!WideDense(l.sh_down, s.shg, s.sh_out, n, error)) return false;
+  if (!WideDense(l.sh_down, s.shg, s.sh_out, n, error))
+    return false;
 
   WideMark(kWRouteHost);
   if (!Ok(hipEventSynchronize(s.counts_ready), "expert counts", error))
@@ -497,7 +528,8 @@ bool Engine::WideMoe(const Layer& l, float* res, std::uint32_t n,
     std::uint32_t n64 = 0;
     for (std::uint32_t e = 0; e < E; ++e)
       for (std::uint32_t j = 0; j * 64 < bound[e + 1] - bound[e]; ++j)
-        s.tiles_host[n_tiles + n64++] = static_cast<std::int32_t>(e | (j << 16));
+        s.tiles_host[n_tiles + n64++] =
+            static_cast<std::int32_t>(e | (j << 16));
     if (n64 * 4 <= n_tiles * 3) {
       down_tiles = n64;
       down_offset = n_tiles;
@@ -514,8 +546,8 @@ bool Engine::WideMoe(const Layer& l, float* res, std::uint32_t n,
                     s.rows_slot, n, U, E, stream_);
 
   WideMark(kWGateUp);
-  const bool q8_gate_up = l.gate_exps.type == GgmlType::kQ8_0 &&
-                          l.up_exps.type == GgmlType::kQ8_0;
+  const bool q8_gate_up =
+      l.gate_exps.type == GgmlType::kQ8_0 && l.up_exps.type == GgmlType::kQ8_0;
   const bool q8_down = l.down_exps.type == GgmlType::kQ8_0;
   auto* xc = static_cast<__hip_bfloat16*>(s.xc);
   auto* ac = static_cast<__hip_bfloat16*>(s.ac);
@@ -524,18 +556,16 @@ bool Engine::WideMoe(const Layer& l, float* res, std::uint32_t n,
   // BF16 experts over the compacted rows [bound[e], bound[e] + count): the
   // grouped WMMA GEMM (tiles of kGroupedTileRows rows, built once per layer),
   // or with A3B_WIDE_BF16_BLAS one hipBLAS GEMM per expert (reference).
-  static const bool blas_experts =
-      std::getenv("A3B_WIDE_BF16_BLAS") != nullptr;
+  static const bool blas_experts = std::getenv("A3B_WIDE_BF16_BLAS") != nullptr;
   std::uint32_t bf_tiles = 0;
   if ((!q8_gate_up || !q8_down) && !blas_experts) {
     for (std::uint32_t e = 0; e < E; ++e)
       for (std::uint32_t j = 0; j * kGroupedTileRows < s.counts_host[e]; ++j)
         s.tiles_bf_host[bf_tiles++] = static_cast<std::int32_t>(e | (j << 16));
-    if (bf_tiles > 0 &&
-        !Ok(hipMemcpyAsync(s.tiles_bf, s.tiles_bf_host,
-                           bf_tiles * sizeof(std::int32_t),
-                           hipMemcpyHostToDevice, stream_),
-            "BF16 tile upload", error))
+    if (bf_tiles > 0 && !Ok(hipMemcpyAsync(s.tiles_bf, s.tiles_bf_host,
+                                           bf_tiles * sizeof(std::int32_t),
+                                           hipMemcpyHostToDevice, stream_),
+                            "BF16 tile upload", error))
       return false;
   }
   const auto bf16_experts = [&](const Tensor& w, const void* x,
@@ -549,7 +579,8 @@ bool Engine::WideMoe(const Layer& l, float* res, std::uint32_t n,
     const std::size_t per = static_cast<std::size_t>(m) * k * 2;
     for (std::uint32_t e = 0; e < E; ++e) {
       const std::uint32_t count = s.counts_host[e];
-      if (count == 0) continue;
+      if (count == 0)
+        continue;
       if (!BlasBf16(static_cast<const std::uint8_t*>(w.data) + e * per,
                     static_cast<const std::uint8_t*>(x) +
                         static_cast<std::size_t>(bound[e]) * k * 2,
@@ -564,7 +595,8 @@ bool Engine::WideMoe(const Layer& l, float* res, std::uint32_t n,
 
   if (q8_gate_up) {
     if (!(s.staged == s.xn && (s.staged_kinds & 1u))) {
-      if (s.staged != s.xn) s.staged_kinds = 0;
+      if (s.staged != s.xn)
+        s.staged_kinds = 0;
       s.staged = s.xn;
       fn::NarrowActivations(s.xn, s.half, false,
                             static_cast<std::size_t>(n) * H, stream_);
@@ -572,13 +604,13 @@ bool Engine::WideMoe(const Layer& l, float* res, std::uint32_t n,
     }
     if (n_tiles > 0 &&
         (!fn::RoutedF16Gemm(l.gate_exps.data, fn::WeightType::kQ8_0, s.half,
-                            s.tiles, n_tiles, tile_rows, s.bounds,
-                            s.rows_token, s.rows_slot, nullptr, s.gate_e,
-                            nullptr, ff, H, stream_) ||
+                            s.tiles, n_tiles, tile_rows, s.bounds, s.rows_token,
+                            s.rows_slot, nullptr, s.gate_e, nullptr, ff, H,
+                            stream_) ||
          !fn::RoutedF16Gemm(l.up_exps.data, fn::WeightType::kQ8_0, s.half,
-                            s.tiles, n_tiles, tile_rows, s.bounds,
-                            s.rows_token, s.rows_slot, s.gate_e, nullptr,
-                            s.up_half, ff, H, stream_))) {
+                            s.tiles, n_tiles, tile_rows, s.bounds, s.rows_token,
+                            s.rows_slot, s.gate_e, nullptr, s.up_half, ff, H,
+                            stream_))) {
       Fail(error, "routed F16 gate/up GEMM failed");
       return false;
     }
@@ -586,8 +618,7 @@ bool Engine::WideMoe(const Layer& l, float* res, std::uint32_t n,
     // BF16 gate/up: gather the token rows in bucket order, one GEMM per
     // expert, SwiGLU straight into the down projection's BF16 rows.
     WideMark(kWBf16Exp);
-    GatherRowsBf16(s.xn, false, s.rows_token, compact, H, xc, xc_lo,
-                   stream_);
+    GatherRowsBf16(s.xn, false, s.rows_token, compact, H, xc, xc_lo, stream_);
     if (!bf16_experts(l.gate_exps, xc, xc_lo, H, s.gc, ff) ||
         !bf16_experts(l.up_exps, xc, xc_lo, H, s.uc, ff))
       return false;
@@ -597,10 +628,10 @@ bool Engine::WideMoe(const Layer& l, float* res, std::uint32_t n,
   WideMark(kWDown);
   if (q8_down && q8_gate_up) {
     if (down_tiles > 0 &&
-        !fn::RoutedF16Gemm(l.down_exps.data, fn::WeightType::kQ8_0,
-                           s.up_half, s.tiles + down_offset, down_tiles,
-                           down_rows, s.bounds, s.rows_slot, s.rows_slot,
-                           nullptr, nullptr, s.down_half, H, ff, stream_)) {
+        !fn::RoutedF16Gemm(l.down_exps.data, fn::WeightType::kQ8_0, s.up_half,
+                           s.tiles + down_offset, down_tiles, down_rows,
+                           s.bounds, s.rows_slot, s.rows_slot, nullptr, nullptr,
+                           s.down_half, H, ff, stream_)) {
       Fail(error, "routed F16 down GEMM failed");
       return false;
     }
@@ -611,7 +642,8 @@ bool Engine::WideMoe(const Layer& l, float* res, std::uint32_t n,
     if (q8_gate_up)
       GatherRowsBf16(s.up_half, true, s.rows_slot, compact, ff, ac, ac_lo,
                      stream_);
-    if (!bf16_experts(l.down_exps, ac, ac_lo, ff, s.dc, H)) return false;
+    if (!bf16_experts(l.down_exps, ac, ac_lo, ff, s.dc, H))
+      return false;
     ScatterRowsHalf(s.dc, s.rows_slot, compact, H, s.down_half, stream_);
   } else {
     Fail(error, "BF16 gate/up with Q8_0 down experts is not handled");
@@ -644,7 +676,8 @@ bool Engine::WideTrunk(std::uint32_t n, std::string* error) {
       s.pos_list = static_cast<std::uint32_t*>(p);
     }
     std::vector<std::uint32_t> list(groups);
-    for (std::uint32_t g = 0; g < groups; ++g) list[g] = pos_ + g * kMaxRows;
+    for (std::uint32_t g = 0; g < groups; ++g)
+      list[g] = pos_ + g * kMaxRows;
     if (!Ok(hipMemcpy(s.pos_list, list.data(), groups * 4,
                       hipMemcpyHostToDevice),
             "pos list upload", error))
@@ -654,13 +687,12 @@ bool Engine::WideTrunk(std::uint32_t n, std::string* error) {
     for (std::uint32_t t0 = 0; t0 < n; t0 += kMaxRows) {
       const std::uint32_t r = std::min<std::uint32_t>(kMaxRows, n - t0);
       float* rows = s.res + static_cast<std::size_t>(t0) * H;
-      AddNormQuant(rows, nullptr, gamma.f32(), xn_, aq_, r, H, c_.eps,
-                   stream_);
+      AddNormQuant(rows, nullptr, gamma.f32(), xn_, aq_, r, H, c_.eps, stream_);
       part(rows, r, s.pos_list + t0 / kMaxRows);
     }
   };
-  fn::EmbedTokens(token_embd_.data, Small(token_embd_.type), s.tokens, s.res,
-                  n, H, 1, stream_);
+  fn::EmbedTokens(token_embd_.data, Small(token_embd_.type), s.tokens, s.res, n,
+                  H, 1, stream_);
   for (std::uint32_t i = 0; i < c_.layers; ++i) {
     const Layer& l = layers_[i];
     if (l.linear && (debug & 4u)) {
@@ -674,32 +706,31 @@ bool Engine::WideTrunk(std::uint32_t n, std::string* error) {
     } else if (!l.linear && (debug & 2u)) {
       grouped(l.attn_norm, [&](float* rows, std::uint32_t r,
                                const std::uint32_t* pos) {
-        FusedAttention(l, k_cache_[i], v_cache_[i], vt_cache_[i], pos, rows,
-                       r);
+        FusedAttention(l, k_cache_[i], v_cache_[i], vt_cache_[i], pos, rows, r);
       });
     } else {
       WideMark(kWOther);
-      fn::RmsNormRows(s.res, l.attn_norm.f32(), s.xn, n, H, 1, c_.eps,
-                      stream_);
+      fn::RmsNormRows(s.res, l.attn_norm.f32(), s.xn, n, H, 1, c_.eps, stream_);
       Unstage();
-      const bool ok = l.linear ? WideGdn(l, i, n, error)
-                               : WideAttention(l, k_cache_[i], v_cache_[i],
-                                               vt_cache_[i],
-                                               s.res, n, pos_, error);
-      if (!ok) return false;
+      const bool ok = l.linear
+                          ? WideGdn(l, i, n, error)
+                          : WideAttention(l, k_cache_[i], v_cache_[i],
+                                          vt_cache_[i], s.res, n, pos_, error);
+      if (!ok)
+        return false;
     }
     if (debug & 1u) {
       grouped(l.post_norm, [&](float* rows, std::uint32_t r,
-                               const std::uint32_t*) {
-        FusedMoe(l, rows, r);
-      });
+                               const std::uint32_t*) { FusedMoe(l, rows, r); });
       continue;
     }
     WideMark(kWOther);
     fn::RmsNormRows(s.res, l.post_norm.f32(), s.xn, n, H, 1, c_.eps, stream_);
     Unstage();
-    if (!WideMoe(l, s.res, n, error)) return false;
-    if (df_) DFlashTap(i, s.res, n, true);
+    if (!WideMoe(l, s.res, n, error))
+      return false;
+    if (df_)
+      DFlashTap(i, s.res, n, true);
   }
   return true;
 }
@@ -708,7 +739,8 @@ bool Engine::WideLogits(std::span<const std::int32_t> tokens, float* logits,
                         std::string* error) {
   const std::uint32_t H = c_.hidden;
   const auto n = static_cast<std::uint32_t>(tokens.size());
-  if (!AllocateWide(error)) return false;
+  if (!AllocateWide(error))
+    return false;
   Wide& s = wide_;
   if (n == 0 || n > s.rows || pos_ + n > options_.max_context) {
     Fail(error, "wide logits chunk does not fit");
@@ -717,12 +749,14 @@ bool Engine::WideLogits(std::span<const std::int32_t> tokens, float* logits,
   const std::size_t bytes = static_cast<std::size_t>(n) * c_.vocab * 4;
   if (s.logits_rows < n) {
     void* p = nullptr;
-    if (!Ok(hipMalloc(&p, bytes), "wide logits alloc", error)) return false;
+    if (!Ok(hipMalloc(&p, bytes), "wide logits alloc", error))
+      return false;
     owned_.push_back(p);
     s.logits = static_cast<float*>(p);
     s.logits_rows = n;
   }
-  if (!Sync(error)) return false;
+  if (!Sync(error))
+    return false;
   std::copy_n(tokens.data(), n, s.tokens_host);
   *pos_host_ = pos_;
   if (!Ok(hipMemcpyAsync(s.tokens, s.tokens_host, n * sizeof(std::int32_t),
@@ -735,7 +769,8 @@ bool Engine::WideLogits(std::span<const std::int32_t> tokens, float* logits,
     return false;
   fn::RmsNormRows(s.res, output_norm_.f32(), s.h, n, H, 1, c_.eps, stream_);
   Unstage();
-  if (!WideDense(output_, s.h, s.logits, n, error)) return false;
+  if (!WideDense(output_, s.h, s.logits, n, error))
+    return false;
   pos_ += n;
   return Ok(hipMemcpyAsync(logits, s.logits, bytes, hipMemcpyDeviceToHost,
                            stream_),
@@ -747,11 +782,13 @@ bool Engine::SpecPrefillWide(std::span<const std::int32_t> tokens,
                              Candidates* last, std::string* error) {
   const std::uint32_t H = c_.hidden;
   const bool mtp = HasMtp() && mtp_k_ != nullptr;
-  if (tokens.empty() || pos_ + tokens.size() + kMaxRows > options_.max_context) {
+  if (tokens.empty() ||
+      pos_ + tokens.size() + kMaxRows > options_.max_context) {
     Fail(error, "prompt does not fit the context");
     return false;
   }
-  if (!AllocateWide(error)) return false;
+  if (!AllocateWide(error))
+    return false;
   Wide& s = wide_;
   const auto end = static_cast<std::uint32_t>(pos_ + tokens.size());
   for (std::size_t off = 0; off < tokens.size(); off += s.rows) {
@@ -759,7 +796,8 @@ bool Engine::SpecPrefillWide(std::span<const std::int32_t> tokens,
         std::min<std::size_t>(s.rows, tokens.size() - off));
     const bool final = off + n == tokens.size();
     // The pinned staging is read when the queued copies run.
-    if (!Sync(error)) return false;
+    if (!Sync(error))
+      return false;
     std::copy_n(tokens.data() + off, n, s.tokens_host);
     *pos_host_ = pos_;
     if (!Ok(hipMemcpyAsync(s.tokens, s.tokens_host, n * sizeof(std::int32_t),
@@ -769,15 +807,17 @@ bool Engine::SpecPrefillWide(std::span<const std::int32_t> tokens,
                            hipMemcpyHostToDevice, stream_),
             "position upload", error))
       return false;
-    if (!WideTrunk(n, error)) return false;
-    if (df_ && !DFlashInject(n, pos_, end, true, nullptr, error)) return false;
+    if (!WideTrunk(n, error))
+      return false;
+    if (df_ && !DFlashInject(n, pos_, end, true, nullptr, error))
+      return false;
     WideMark(kWOther);
     if (final) {
       // The last row's logits through the decode head (same arithmetic as
       // the 8-row path's final chunk).
       AddNormQuant(s.res + static_cast<std::size_t>(n - 1) * H, nullptr,
                    output_norm_.f32(), xn_, aq_, 1, H, c_.eps, stream_);
-      const GemvSeg head{output_.data, nullptr, logits_, output_.rows,
+      const GemvSeg head{output_.data,  nullptr,          logits_, output_.rows,
                          Kind(output_), GemvMode::kStore, c_.vocab};
       MultiGemv(&head, 1, aq_, xn_, 1, H, stream_);
       TopCandidates(1);
@@ -787,32 +827,30 @@ bool Engine::SpecPrefillWide(std::span<const std::int32_t> tokens,
       // MTP rows pair token i with the trunk's normed hidden i - 1: the
       // pending row from the previous chunk (zeros at position 0), then
       // this chunk's rows but the last, which becomes the new pending row.
-      fn::RmsNormRows(s.res, output_norm_.f32(), s.h, n, H, 1, c_.eps,
-                      stream_);
+      fn::RmsNormRows(s.res, output_norm_.f32(), s.h, n, H, 1, c_.eps, stream_);
       fn::CopyDevice(mtp_pending_, s.mh, H, stream_);
       if (n > 1)
         fn::CopyDevice(s.h, s.mh + H, static_cast<std::size_t>(n - 1) * H,
                        stream_);
-      fn::CopyDevice(s.h + static_cast<std::size_t>(n - 1) * H, mtp_pending_,
-                     H, stream_);
+      fn::CopyDevice(s.h + static_cast<std::size_t>(n - 1) * H, mtp_pending_, H,
+                     stream_);
       fn::EmbedTokens(token_embd_.data, Small(token_embd_.type), s.tokens,
                       s.emb, n, H, 1, stream_);
-      fn::RmsNormRows(s.emb, mtp_.enorm.f32(), s.emb, n, H, 1, c_.eps,
-                      stream_);
+      fn::RmsNormRows(s.emb, mtp_.enorm.f32(), s.emb, n, H, 1, c_.eps, stream_);
       fn::RmsNormRows(s.mh, mtp_.hnorm.f32(), s.mh, n, H, 1, c_.eps, stream_);
       Concat2(s.emb, s.mh, s.cat, n, H, stream_);
       Unstage();
       const Layer& b = mtp_.block;
-      if (!WideDense(mtp_.eh_proj, s.cat, s.res, n, error)) return false;
-      fn::RmsNormRows(s.res, b.attn_norm.f32(), s.xn, n, H, 1, c_.eps,
-                      stream_);
+      if (!WideDense(mtp_.eh_proj, s.cat, s.res, n, error))
+        return false;
+      fn::RmsNormRows(s.res, b.attn_norm.f32(), s.xn, n, H, 1, c_.eps, stream_);
       Unstage();
       if (!WideAttention(b, mtp_k_, mtp_v_, mtp_vt_, s.res, n, pos_, error))
         return false;
-      fn::RmsNormRows(s.res, b.post_norm.f32(), s.xn, n, H, 1, c_.eps,
-                      stream_);
+      fn::RmsNormRows(s.res, b.post_norm.f32(), s.xn, n, H, 1, c_.eps, stream_);
       Unstage();
-      if (!WideMoe(b, s.res, n, error)) return false;
+      if (!WideMoe(b, s.res, n, error))
+        return false;
     }
     WideMark(kWOther);
     pos_ += n;

@@ -35,9 +35,9 @@ struct DFlash {
   ~DFlash();
 
   // Topology (from the draft GGUF).
-  std::uint32_t hidden{0}, heads{0}, kv_heads{0}, head_dim{0}, rotary{0},
-      ff{0}, block_size{0}, mask_token{0}, conv_k{0}, conv_g{0},
-      sel_rank{0}, sel_topk{0}, window{0}, capacity{0};
+  std::uint32_t hidden{0}, heads{0}, kv_heads{0}, head_dim{0}, rotary{0}, ff{0},
+      block_size{0}, mask_token{0}, conv_k{0}, conv_g{0}, sel_rank{0},
+      sel_topk{0}, window{0}, capacity{0};
   float theta{0}, eps{0};
   std::vector<std::uint32_t> taps;  // trunk layer outputs, zero-based
   std::vector<int> tap_slot;        // by trunk layer: feature slot or -1
@@ -62,7 +62,7 @@ struct DFlash {
       *sel{}, *logits{}, *conf{}, *ones{}, *partial_scores{};
   std::uint32_t *partial_ids{}, *tok{}, *pos{}, *pos_list{};
   Q8_1Block* aq{};
-  std::uint32_t* host{};  // pinned: [0, 16) tokens, [16] position
+  std::uint32_t* host{};      // pinned: [0, 16) tokens, [16] position
   std::uint32_t* pos_host{};  // pinned injection group positions
   std::uint32_t max_groups{0};
 

@@ -42,7 +42,8 @@ public:
   /// Indexes tokens appended since the last call. `committed` must extend
   /// what was indexed before (Clear() after anything else).
   void Extend(std::span<const std::int32_t> committed) {
-    if (committed.size() < prev_.size()) Clear();
+    if (committed.size() < prev_.size())
+      Clear();
     for (std::size_t end = prev_.size(); end < committed.size(); ++end) {
       // prev_[end] chains occurrences of the key ending just before `end`.
       std::uint32_t previous = kNone;
@@ -64,7 +65,8 @@ public:
   [[nodiscard]] Match Find(std::span<const std::int32_t> committed,
                            std::span<const std::int32_t> tail) const {
     const std::size_t context = committed.size() + tail.size();
-    if (context < kKeyTokens) return {};
+    if (context < kKeyTokens)
+      return {};
     const auto at = [&](std::size_t i) {
       return i < committed.size() ? committed[i] : tail[i - committed.size()];
     };
@@ -72,7 +74,8 @@ public:
     for (std::size_t i = 0; i < kKeyTokens; ++i)
       key_tokens[i] = at(context - kKeyTokens + i);
     const auto found = head_.find(Key(key_tokens));
-    if (found == head_.end()) return {};
+    if (found == head_.end())
+      return {};
     Match best{};
     std::uint32_t end = found->second;
     for (std::size_t n = 0; n < kMaxCandidates && end != kNone; ++n) {
@@ -82,7 +85,8 @@ public:
       while (length < kMaxMatch && end > length && context > length &&
              committed[end - length - 1] == at(context - length - 1))
         ++length;
-      if (end < committed.size() && length > best.length) best = {end, length};
+      if (end < committed.size() && length > best.length)
+        best = {end, length};
       end = prev_[end];
     }
     return best.length >= min_match_ ? best : Match{};

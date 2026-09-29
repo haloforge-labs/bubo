@@ -6,8 +6,8 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
-#include <cstdlib>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <span>
 #include <string>
@@ -41,11 +41,13 @@ double NowMs() {
 }
 
 void Fail(std::string* error, std::string message) {
-  if (error != nullptr && error->empty()) *error = std::move(message);
+  if (error != nullptr && error->empty())
+    *error = std::move(message);
 }
 
 bool Ok(hipError_t err, const char* what, std::string* error) {
-  if (err == hipSuccess) return true;
+  if (err == hipSuccess)
+    return true;
   Fail(error, std::string(what) + ": " + hipGetErrorString(err));
   return false;
 }
@@ -75,18 +77,20 @@ bool ReadFloats(const core::GgufTensorInfo& t, std::vector<float>* out,
       return true;
     case GgmlType::kF16: {
       const auto* s = static_cast<const std::uint16_t*>(t.data);
-      for (std::size_t i = 0; i < n; ++i) (*out)[i] = HalfToFloat(s[i]);
+      for (std::size_t i = 0; i < n; ++i)
+        (*out)[i] = HalfToFloat(s[i]);
       return true;
     }
     case GgmlType::kBF16: {
       const auto* s = static_cast<const std::uint16_t*>(t.data);
       for (std::size_t i = 0; i < n; ++i)
-        (*out)[i] = std::bit_cast<float>(static_cast<std::uint32_t>(s[i]) << 16);
+        (*out)[i] =
+            std::bit_cast<float>(static_cast<std::uint32_t>(s[i]) << 16);
       return true;
     }
     default:
-      Fail(error, "DFlash tensor " + std::string(t.name) +
-                      " has an unsupported type");
+      Fail(error,
+           "DFlash tensor " + std::string(t.name) + " has an unsupported type");
       return false;
   }
 }
@@ -100,7 +104,8 @@ std::vector<std::uint8_t> QuantizeQ8(const std::vector<float>& x,
   for (std::size_t b = 0; b < blocks; ++b) {
     const float* v = x.data() + b * 32;
     float amax = 0;
-    for (int i = 0; i < 32; ++i) amax = std::max(amax, std::fabs(v[i]));
+    for (int i = 0; i < 32; ++i)
+      amax = std::max(amax, std::fabs(v[i]));
     const float d = amax / 127.0f;
     const float id = d != 0 ? 1.0f / d : 0.0f;
     std::uint8_t* o = out.data() + b * 34;
@@ -117,15 +122,18 @@ std::vector<std::uint8_t> QuantizeQ8(const std::vector<float>& x,
 
 DFlash::~DFlash() {
   for (void* p : owned)
-    if (p != nullptr) (void)hipFree(p);
-  if (host != nullptr) (void)hipHostFree(host);
-  if (pos_host != nullptr) (void)hipHostFree(pos_host);
+    if (p != nullptr)
+      (void)hipFree(p);
+  if (host != nullptr)
+    (void)hipHostFree(host);
+  if (pos_host != nullptr)
+    (void)hipHostFree(pos_host);
 }
 
-bool Engine::LoadDFlash(const std::filesystem::path& path,
-                        std::string* error) {
+bool Engine::LoadDFlash(const std::filesystem::path& path, std::string* error) {
   auto reader = core::GgufReader::OpenFile(path, error);
-  if (!reader) return false;
+  if (!reader)
+    return false;
   const auto arch = reader->GetMetadataString("general.architecture");
   if (!arch || *arch != "dflash") {
     Fail(error, "not a DFlash GGUF");
@@ -134,8 +142,10 @@ bool Engine::LoadDFlash(const std::filesystem::path& path,
   auto d = std::make_shared<DFlash>();
   const auto u32 = [&](const char* key, std::uint32_t* out) {
     const auto v = reader->GetMetadataUint32(std::string("dflash.") + key);
-    if (!v) Fail(error, std::string("DFlash GGUF lacks dflash.") + key);
-    else *out = *v;
+    if (!v)
+      Fail(error, std::string("DFlash GGUF lacks dflash.") + key);
+    else
+      *out = *v;
     return v.has_value();
   };
   std::uint32_t n_layers = 0;
@@ -180,9 +190,11 @@ bool Engine::LoadDFlash(const std::filesystem::path& path,
   // Target taps: layer-input indices N = trunk layer N - 1's output.
   if (const auto* m = reader->FindMetadata("dflash.target_layers")) {
     if (const auto* u = std::get_if<std::vector<std::uint64_t>>(&m->value))
-      for (const auto x : *u) d->taps.push_back(static_cast<std::uint32_t>(x));
+      for (const auto x : *u)
+        d->taps.push_back(static_cast<std::uint32_t>(x));
     if (const auto* s = std::get_if<std::vector<std::int64_t>>(&m->value))
-      for (const auto x : *s) d->taps.push_back(static_cast<std::uint32_t>(x));
+      for (const auto x : *s)
+        d->taps.push_back(static_cast<std::uint32_t>(x));
   }
   if (d->taps.empty()) {
     Fail(error, "DFlash GGUF lacks dflash.target_layers");
@@ -205,9 +217,8 @@ bool Engine::LoadDFlash(const std::filesystem::path& path,
             error))
       return nullptr;
     d->owned.push_back(p);
-    if (data != nullptr &&
-        !Ok(hipMemcpy(p, data, bytes, hipMemcpyHostToDevice), "dflash upload",
-            error))
+    if (data != nullptr && !Ok(hipMemcpy(p, data, bytes, hipMemcpyHostToDevice),
+                               "dflash upload", error))
       return nullptr;
     return p;
   };
@@ -229,32 +240,38 @@ bool Engine::LoadDFlash(const std::filesystem::path& path,
   const auto matrix = [&](const std::string& name, std::uint32_t rows,
                           std::uint32_t cols, Tensor* out) {
     const auto* t = find(name, static_cast<std::size_t>(rows) * cols);
-    if (t == nullptr || cols % 32 != 0) return false;
+    if (t == nullptr || cols % 32 != 0)
+      return false;
     const void* data = nullptr;
     if (t->type == GgmlType::kQ8_0) {
       data = device(t->data, static_cast<std::size_t>(rows) * cols / 32 * 34);
     } else {
-      if (!ReadFloats(*t, &tmp, error)) return false;
+      if (!ReadFloats(*t, &tmp, error))
+        return false;
       const auto q = QuantizeQ8(tmp, cols);
       data = device(q.data(), q.size());
     }
-    if (data == nullptr) return false;
+    if (data == nullptr)
+      return false;
     *out = Tensor{data, GgmlType::kQ8_0, cols, rows, 1};
     return true;
   };
   const auto vector = [&](const std::string& name, std::size_t elements,
                           const float** out) {
     const auto* t = find(name, elements);
-    if (t == nullptr || !ReadFloats(*t, &tmp, error)) return false;
+    if (t == nullptr || !ReadFloats(*t, &tmp, error))
+      return false;
     *out = static_cast<const float*>(device(tmp.data(), tmp.size() * 4));
     return *out != nullptr;
   };
   const auto bf16 = [&](const std::string& name, std::size_t elements,
                         const void** out) {
     const auto* t = find(name, elements);
-    if (t == nullptr || !ReadFloats(*t, &tmp, error)) return false;
+    if (t == nullptr || !ReadFloats(*t, &tmp, error))
+      return false;
     std::vector<std::uint16_t> b(tmp.size());
-    for (std::size_t i = 0; i < tmp.size(); ++i) b[i] = FloatToBf16(tmp[i]);
+    for (std::size_t i = 0; i < tmp.size(); ++i)
+      b[i] = FloatToBf16(tmp[i]);
     *out = device(b.data(), b.size() * 2);
     return *out != nullptr;
   };
@@ -296,7 +313,8 @@ bool Engine::LoadDFlash(const std::filesystem::path& path,
       return false;
     l.ring_k = static_cast<float*>(device(nullptr, ring));
     l.ring_v = static_cast<float*>(device(nullptr, ring));
-    if (l.ring_k == nullptr || l.ring_v == nullptr) return false;
+    if (l.ring_k == nullptr || l.ring_v == nullptr)
+      return false;
   }
 
   // Scratch.
@@ -329,8 +347,7 @@ bool Engine::LoadDFlash(const std::filesystem::path& path,
   d->pos = static_cast<std::uint32_t*>(device(nullptr, 4));
   d->max_groups =
       std::max<std::uint32_t>(options_.prefill_chunk, kMaxRows) / kMaxRows + 1;
-  d->pos_list =
-      static_cast<std::uint32_t*>(device(nullptr, d->max_groups * 4));
+  d->pos_list = static_cast<std::uint32_t*>(device(nullptr, d->max_groups * 4));
   d->aq = static_cast<Q8_1Block*>(
       device(nullptr, R * (max_k / 32) * sizeof(Q8_1Block)));
   {
@@ -348,21 +365,26 @@ bool Engine::LoadDFlash(const std::filesystem::path& path,
           "dflash pinned", error))
     return false;
   // Pruned head: the engine's draft vocab (also the MTP's), its codebooks.
-  if (!options_.draft_vocab.empty() && draft_head_ == nullptr &&
+  if (draft_head_ == nullptr && !options_.draft_vocab_ids.empty() &&
+      !BuildDraftHead(options_.draft_vocab_ids, error))
+    return false;
+  if (draft_head_ == nullptr && !options_.draft_vocab.empty() &&
       !LoadDraftVocab(error))
     return false;
   if (draft_head_ != nullptr) {
     const std::size_t row = static_cast<std::size_t>(d->sel_rank) * 2;
     d->pred_p = device(nullptr, (draft_vocab_ + 1) * row);
     d->succ_p = device(nullptr, draft_vocab_ * row);
-    if (d->pred_p == nullptr || d->succ_p == nullptr) return false;
+    if (d->pred_p == nullptr || d->succ_p == nullptr)
+      return false;
     fn::GatherRows(d->pred, d->pred_p, draft_map_, draft_vocab_, row, stream_);
     fn::GatherRows(d->succ, d->succ_p, draft_map_, draft_vocab_, row, stream_);
     if (!Ok(hipStreamSynchronize(stream_), "dflash codebook gather", error))
       return false;
   }
   std::size_t bytes = 0;
-  for (const auto& t : reader->GetTensors()) bytes += t.size_bytes;
+  for (const auto& t : reader->GetTensors())
+    bytes += t.size_bytes;
   std::fprintf(stderr,
                "a3b: DFlash draft %u layers, block %u, %zu taps, window %u, "
                "%.2f GiB file -> Q8_0\n",
@@ -374,9 +396,11 @@ bool Engine::LoadDFlash(const std::filesystem::path& path,
 
 void Engine::DFlashTap(std::uint32_t layer, const float* res, std::uint32_t n,
                        bool wide) {
-  if (!df_) return;
+  if (!df_)
+    return;
   const int slot = df_->tap_slot[layer];
-  if (slot < 0) return;
+  if (slot < 0)
+    return;
   const std::uint32_t H = c_.hidden;
   const std::uint32_t F = static_cast<std::uint32_t>(df_->taps.size()) * H;
   float* feat = wide ? df_->wide_feat : df_->feat;
@@ -390,7 +414,8 @@ bool Engine::DFlashInject(std::uint32_t n, std::uint32_t pos0,
   const bool timed = g_clock.on && !wide;
   double t0 = 0;
   if (timed) {
-    if (!Sync(error)) return false;
+    if (!Sync(error))
+      return false;
     t0 = NowMs();
   }
   const std::uint32_t H = d.hidden;
@@ -408,7 +433,8 @@ bool Engine::DFlashInject(std::uint32_t n, std::uint32_t pos0,
       Fail(error, "DFlash injection chunk too large");
       return false;
     }
-    if (!Sync(error)) return false;
+    if (!Sync(error))
+      return false;
     for (std::uint32_t g = 0; g < groups; ++g)
       d.pos_host[g] = pos0 + first + g * kMaxRows;
     if (!Ok(hipMemcpyAsync(d.pos_list, d.pos_host, groups * 4,
@@ -423,8 +449,8 @@ bool Engine::DFlashInject(std::uint32_t n, std::uint32_t pos0,
     const std::uint32_t* pos = pos_dev != nullptr ? pos_dev : d.pos_list + g;
     GateQuant(feat + static_cast<std::size_t>(t0) * F, d.ones, 0,
               GateMode::kMul, d.aq, nullptr, r, F, stream_);
-    const GemvSeg fc{d.fc.data, nullptr, d.o, H, WeightKind::kQ8,
-                     GemvMode::kStore, H};
+    const GemvSeg fc{d.fc.data,       nullptr,          d.o, H,
+                     WeightKind::kQ8, GemvMode::kStore, H};
     MultiGemv(&fc, 1, d.aq, nullptr, r, F, stream_);
     AddNormQuant(d.o, nullptr, d.enc_norm, d.xn, d.aq, r, H, d.eps, stream_);
     for (const DFlashLayer& l : d.layers) {
@@ -435,15 +461,14 @@ bool Engine::DFlashInject(std::uint32_t n, std::uint32_t pos0,
       MultiGemv(kv, 2, d.aq, d.xn, r, H, stream_);
       fn::RmsNormRows(d.k, l.k_norm, d.k, r * d.kv_heads, d.head_dim, 1, d.eps,
                       stream_);
-      fn::Rope(d.k, r, d.kv_heads, d.head_dim, d.rotary, pos, d.theta,
-               stream_);
-      RingStore(d.k, d.v, l.ring_k, l.ring_v, pos, r, kvd, d.capacity,
-                stream_);
+      fn::Rope(d.k, r, d.kv_heads, d.head_dim, d.rotary, pos, d.theta, stream_);
+      RingStore(d.k, d.v, l.ring_k, l.ring_v, pos, r, kvd, d.capacity, stream_);
     }
   }
   d.injected = pos0 + n;
   if (timed) {
-    if (!Sync(error)) return false;
+    if (!Sync(error))
+      return false;
     g_clock.inject_ms += NowMs() - t0;
     ++g_clock.injects;
   }
@@ -459,14 +484,16 @@ bool Engine::DFlashDraft(std::int32_t x, std::uint32_t count,
                          std::vector<float>* probs, std::string* error) {
   drafts->clear();
   if (g_clock.on) {
-    if (!Sync(error)) return false;
+    if (!Sync(error))
+      return false;
     const double t0 = NowMs();
     const bool ok = DFlashDraftPass(x, count, drafts, probs, error);
     g_clock.draft_ms += NowMs() - t0;
     if (++g_clock.drafts % 100 == 0)
-      std::fprintf(stderr, "\n[dflash] draft %.2f ms, inject %.2f ms (avg)\n",
-                   g_clock.draft_ms / g_clock.drafts,
-                   g_clock.inject_ms / std::max<std::uint64_t>(1, g_clock.injects));
+      std::fprintf(
+          stderr, "\n[dflash] draft %.2f ms, inject %.2f ms (avg)\n",
+          g_clock.draft_ms / g_clock.drafts,
+          g_clock.inject_ms / std::max<std::uint64_t>(1, g_clock.injects));
     return ok;
   }
   return DFlashDraftPass(x, count, drafts, probs, error);
@@ -475,15 +502,18 @@ bool Engine::DFlashDraft(std::int32_t x, std::uint32_t count,
 bool Engine::DFlashDraftPass(std::int32_t x, std::uint32_t count,
                              std::vector<std::int32_t>* drafts,
                              std::vector<float>* probs, std::string* error) {
-  if (probs != nullptr) probs->clear();
+  if (probs != nullptr)
+    probs->clear();
   if (!df_) {
     Fail(error, "no DFlash draft loaded");
     return false;
   }
   DFlash& d = *df_;
   count = std::min(count, DFlashMaxDrafts());
-  if (pos_ + count + 1 > options_.max_context) count = 0;
-  if (count == 0) return true;
+  if (pos_ + count + 1 > options_.max_context)
+    count = 0;
+  if (count == 0)
+    return true;
   if (d.injected != pos_) {
     Fail(error, "DFlash context is not at the current position");
     return false;
@@ -493,9 +523,11 @@ bool Engine::DFlashDraftPass(std::int32_t x, std::uint32_t count,
   const std::uint32_t qd = d.heads * d.head_dim;
   const std::uint32_t kvd = d.kv_heads * d.head_dim;
   // The pinned staging is read when the queued copies run.
-  if (!Sync(error)) return false;
+  if (!Sync(error))
+    return false;
   d.host[0] = static_cast<std::uint32_t>(x);
-  for (std::uint32_t i = 1; i < b; ++i) d.host[i] = d.mask_token;
+  for (std::uint32_t i = 1; i < b; ++i)
+    d.host[i] = d.mask_token;
   d.host[kPosWord] = pos_;
   // The selector's chain: stok[0] is the anchor, in the draft vocab's index
   // space when pruned (row V' of pred_p, filled with the anchor's row below).
@@ -505,9 +537,9 @@ bool Engine::DFlashDraftPass(std::int32_t x, std::uint32_t count,
   d.host[48] = draft_vocab_;
   if (!Ok(hipMemcpyAsync(d.tok, d.host, b * 4, hipMemcpyHostToDevice, stream_),
           "dflash tokens", error) ||
-      (pruned && !Ok(hipMemcpyAsync(stok, d.host + 48, 4,
-                                    hipMemcpyHostToDevice, stream_),
-                     "dflash tokens", error)) ||
+      (pruned &&
+       !Ok(hipMemcpyAsync(stok, d.host + 48, 4, hipMemcpyHostToDevice, stream_),
+           "dflash tokens", error)) ||
       !Ok(hipMemcpyAsync(d.pos, d.host + kPosWord, 4, hipMemcpyHostToDevice,
                          stream_),
           "dflash position", error))
@@ -516,18 +548,18 @@ bool Engine::DFlashDraftPass(std::int32_t x, std::uint32_t count,
     GateQuant(src, d.ones, 0, GateMode::kMul, d.aq, nullptr, b, k, stream_);
   };
   const auto gemv = [&](const Tensor& w, float* out, std::uint32_t k) {
-    const GemvSeg s{w.data, nullptr, out, w.rows, WeightKind::kQ8,
-                    GemvMode::kStore, w.rows};
+    const GemvSeg s{w.data,          nullptr,          out,   w.rows,
+                    WeightKind::kQ8, GemvMode::kStore, w.rows};
     MultiGemv(&s, 1, d.aq, nullptr, b, k, stream_);
   };
-  const auto conv = [&](const float* in, const float* base, std::uint32_t side) {
+  const auto conv = [&](const float* in, const float* base,
+                        std::uint32_t side) {
     dk::LaunchDFlashGroupedDynamicConv(in, d.dyn, base, d.conv, b, H, d.conv_k,
                                        d.conv_g, side, stream_);
   };
-  fn::EmbedTokens(token_embd_.data,
-                  static_cast<fn::WeightType>(token_embd_.type),
-                  reinterpret_cast<const std::int32_t*>(d.tok), d.h, b, H, 1,
-                  stream_);
+  fn::EmbedTokens(
+      token_embd_.data, static_cast<fn::WeightType>(token_embd_.type),
+      reinterpret_cast<const std::int32_t*>(d.tok), d.h, b, H, 1, stream_);
   const float* add = nullptr;
   const float scale = 1.0f / std::sqrt(static_cast<float>(d.head_dim));
   for (const DFlashLayer& l : d.layers) {
@@ -559,8 +591,8 @@ bool Engine::DFlashDraftPass(std::int32_t x, std::uint32_t count,
     gemv(l.ffn_conv_proj, d.dyn, H);
     conv(d.xn, l.ffn_conv_base, 0);
     quant(d.conv, H);
-    const GemvSeg gated{l.gate.data, l.up.data, d.f, d.ff, WeightKind::kQ8,
-                        GemvMode::kGated, d.ff};
+    const GemvSeg gated{l.gate.data,     l.up.data,        d.f, d.ff,
+                        WeightKind::kQ8, GemvMode::kGated, d.ff};
     MultiGemv(&gated, 1, d.aq, nullptr, b, H, stream_);
     quant(d.f, d.ff);
     gemv(l.down, d.o, d.ff);
@@ -571,34 +603,38 @@ bool Engine::DFlashDraftPass(std::int32_t x, std::uint32_t count,
   // Proposal rows 1..count: selector projection and the target's head.
   const Q8_1Block* aq1 = d.aq + H / 32;
   const float* xn1 = d.xn + H;
-  const GemvSeg sel{d.sel_hidden.data, nullptr, d.sel, d.sel_rank,
-                    WeightKind::kQ8, GemvMode::kStore, d.sel_rank};
+  const GemvSeg sel{d.sel_hidden.data, nullptr,          d.sel,     d.sel_rank,
+                    WeightKind::kQ8,   GemvMode::kStore, d.sel_rank};
   MultiGemv(&sel, 1, aq1, xn1, count, H, stream_);
   const WeightKind head_kind = output_.type == GgmlType::kQ8_0 ? WeightKind::kQ8
                                : output_.type == GgmlType::kBF16
                                    ? WeightKind::kBf16
                                    : WeightKind::kF32;
-  const GemvSeg head{pruned ? draft_head_ : output_.data, nullptr, d.logits,
-                     vocab, head_kind, GemvMode::kStore, vocab};
+  const GemvSeg head{pruned ? draft_head_ : output_.data,
+                     nullptr,
+                     d.logits,
+                     vocab,
+                     head_kind,
+                     GemvMode::kStore,
+                     vocab};
   MultiGemv(&head, 1, aq1, xn1, count, H, stream_);
   if (pruned) {
     const std::size_t words = d.sel_rank / 2;  // one BF16 row as floats
-    fn::CopyDevice(static_cast<const float*>(d.pred) +
-                       static_cast<std::size_t>(x) * words,
-                   static_cast<float*>(d.pred_p) + draft_vocab_ * words, words,
-                   stream_);
+    fn::CopyDevice(
+        static_cast<const float*>(d.pred) + static_cast<std::size_t>(x) * words,
+        static_cast<float*>(d.pred_p) + draft_vocab_ * words, words, stream_);
   }
   const std::array<dk::DFlashSelectorSequence, 1> seq{
       dk::DFlashSelectorSequence{count, 0.0f}};
-  dk::LaunchDFlashSelectorBatch(d.logits, d.sel, pruned ? d.pred_p : d.pred,
-                                pruned ? d.succ_p : d.succ, stok, d.conf,
-                                d.partial_scores, d.partial_ids, nullptr,
-                                nullptr, nullptr, seq, vocab, d.sel_rank,
-                                d.sel_topk, stream_);
+  dk::LaunchDFlashSelectorBatch(
+      d.logits, d.sel, pruned ? d.pred_p : d.pred, pruned ? d.succ_p : d.succ,
+      stok, d.conf, d.partial_scores, d.partial_ids, nullptr, nullptr, nullptr,
+      seq, vocab, d.sel_rank, d.sel_topk, stream_);
   TokenProb(d.logits, stok + 1, d.conf, count, vocab, stream_);
-  if (pruned) fn::RemapIds(stok + 1, count, draft_map_, stream_);
-  if (!Ok(hipMemcpyAsync(d.host + 1, stok + 1, count * 4,
-                         hipMemcpyDeviceToHost, stream_),
+  if (pruned)
+    fn::RemapIds(stok + 1, count, draft_map_, stream_);
+  if (!Ok(hipMemcpyAsync(d.host + 1, stok + 1, count * 4, hipMemcpyDeviceToHost,
+                         stream_),
           "dflash drafts", error) ||
       !Ok(hipMemcpyAsync(d.host + 32, d.conf, count * 4, hipMemcpyDeviceToHost,
                          stream_),
@@ -614,7 +650,8 @@ bool Engine::DFlashDraftPass(std::int32_t x, std::uint32_t count,
 }
 
 void Engine::DFlashReset() {
-  if (df_) df_->injected = 0;
+  if (df_)
+    df_->injected = 0;
 }
 
 // Prompt checkpoint: the ring holds the last `capacity` context positions,

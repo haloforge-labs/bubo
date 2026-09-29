@@ -4,7 +4,6 @@
 // rewritten by later tokens. The DFlash draft's context is a ring, which
 // later tokens do overwrite: it is copied with the checkpoint.
 #include "src/models/qwen36_a3b/engine.hpp"
-
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
 namespace gufo::models::qwen36_a3b {
@@ -20,19 +19,22 @@ bool Engine::SaveCheckpoint(std::string* error) {
   const std::size_t state = static_cast<std::size_t>(c_.ssm_v_heads) *
                             c_.ssm_head_dim * c_.ssm_head_dim;
   if (verify_rows_ != 0) {
-    if (error != nullptr) *error = "checkpoint inside a speculative step";
+    if (error != nullptr)
+      *error = "checkpoint inside a speculative step";
     return false;
   }
   if (ckpt_ssm_.empty()) {
     ckpt_ssm_.assign(c_.layers, nullptr);
     ckpt_conv_.assign(c_.layers, nullptr);
     for (std::uint32_t i = 0; i < c_.layers; ++i) {
-      if (!layers_[i].linear) continue;
+      if (!layers_[i].linear)
+        continue;
       void* a = nullptr;
       void* b = nullptr;
       if (hipMalloc(&a, state * sizeof(float)) != hipSuccess ||
           hipMalloc(&b, conv * sizeof(float)) != hipSuccess) {
-        if (error != nullptr) *error = "checkpoint alloc failed";
+        if (error != nullptr)
+          *error = "checkpoint alloc failed";
         return false;
       }
       owned_.push_back(a);
@@ -43,20 +45,23 @@ bool Engine::SaveCheckpoint(std::string* error) {
     void* p = nullptr;
     if (hipMalloc(&p, static_cast<std::size_t>(c_.hidden) * sizeof(float)) !=
         hipSuccess) {
-      if (error != nullptr) *error = "checkpoint alloc failed";
+      if (error != nullptr)
+        *error = "checkpoint alloc failed";
       return false;
     }
     owned_.push_back(p);
     ckpt_pending_ = static_cast<float*>(p);
   }
   for (std::uint32_t i = 0; i < c_.layers; ++i) {
-    if (!layers_[i].linear) continue;
+    if (!layers_[i].linear)
+      continue;
     fn::CopyDevice(ssm_state_[i], ckpt_ssm_[i], state, stream_);
     fn::CopyDevice(conv_state_[i], ckpt_conv_[i], conv, stream_);
   }
   if (mtp_pending_ != nullptr)
     fn::CopyDevice(mtp_pending_, ckpt_pending_, c_.hidden, stream_);
-  if (HasDFlash() && !DFlashSaveCheckpoint(error)) return false;
+  if (HasDFlash() && !DFlashSaveCheckpoint(error))
+    return false;
   ckpt_pos_ = pos_;
   ckpt_valid_ = true;
   return Sync(error);
@@ -68,17 +73,20 @@ bool Engine::RestoreCheckpoint(std::string* error) {
   const std::size_t state = static_cast<std::size_t>(c_.ssm_v_heads) *
                             c_.ssm_head_dim * c_.ssm_head_dim;
   if (!ckpt_valid_) {
-    if (error != nullptr) *error = "no prompt checkpoint";
+    if (error != nullptr)
+      *error = "no prompt checkpoint";
     return false;
   }
   for (std::uint32_t i = 0; i < c_.layers; ++i) {
-    if (!layers_[i].linear) continue;
+    if (!layers_[i].linear)
+      continue;
     fn::CopyDevice(ckpt_ssm_[i], ssm_state_[i], state, stream_);
     fn::CopyDevice(ckpt_conv_[i], conv_state_[i], conv, stream_);
   }
   if (mtp_pending_ != nullptr)
     fn::CopyDevice(ckpt_pending_, mtp_pending_, c_.hidden, stream_);
-  if (HasDFlash() && !DFlashRestoreCheckpoint(error)) return false;
+  if (HasDFlash() && !DFlashRestoreCheckpoint(error))
+    return false;
   pos_ = ckpt_pos_;
   verify_rows_ = 0;
   step_mtp_ = false;

@@ -77,10 +77,9 @@ void MultiGemv(const GemvSeg* segs, int count, const Q8_1Block* xq,
 /// Routed gate/up: act[(t*used + s)][m] = silu(G_e x_t) * (U_e x_t) with
 /// e = ids[t*used + s], over [experts][m][k] Q8_0 (xq input) or BF16 (xf).
 void ExpertsGated(const void* gate, const void* up, WeightKind type,
-                  const Q8_1Block* xq, const float* xf,
-                  const std::int32_t* ids, float* act, std::uint32_t rows,
-                  std::uint32_t used, std::uint32_t m, std::uint32_t k,
-                  hipStream_t stream);
+                  const Q8_1Block* xq, const float* xf, const std::int32_t* ids,
+                  float* act, std::uint32_t rows, std::uint32_t used,
+                  std::uint32_t m, std::uint32_t k, hipStream_t stream);
 
 /// Routed and shared down projections with the MoE epilogue and the residual
 /// add fused:
@@ -93,11 +92,10 @@ void ExpertsGated(const void* gate, const void* up, WeightKind type,
 void ExpertsDown(const void* down, WeightKind down_type, const void* sh_down,
                  WeightKind sh_type, const float* act, const float* sh_act,
                  Q8_1Block* act_q, const std::int32_t* ids,
-                 const float* weights,
-                 const float* router, std::uint32_t router_stride,
-                 std::uint32_t shared_gate, float* res, std::uint32_t rows,
-                 std::uint32_t used, std::uint32_t h, std::uint32_t f,
-                 hipStream_t stream);
+                 const float* weights, const float* router,
+                 std::uint32_t router_stride, std::uint32_t shared_gate,
+                 float* res, std::uint32_t rows, std::uint32_t used,
+                 std::uint32_t h, std::uint32_t f, hipStream_t stream);
 
 }  // namespace gufo::models::qwen36_a3b
 

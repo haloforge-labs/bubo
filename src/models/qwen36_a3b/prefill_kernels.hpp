@@ -16,8 +16,8 @@ namespace gufo::models::qwen36_a3b {
 /// for group <= j < padded (heads of `d` floats). Pads A3B's 8 query heads
 /// per KV head to the 12 of Flash-Next's WMMA attention geometry.
 void PadHeads(const float* src, float* dst, std::uint32_t n_tokens,
-              std::uint32_t kv_heads, std::uint32_t group,
-              std::uint32_t padded, std::uint32_t d, hipStream_t stream);
+              std::uint32_t kv_heads, std::uint32_t group, std::uint32_t padded,
+              std::uint32_t d, hipStream_t stream);
 /// The inverse selection: dst[t][g * group + j] = src[t][g * padded + j].
 void UnpadHeads(const float* src, float* dst, std::uint32_t n_tokens,
                 std::uint32_t kv_heads, std::uint32_t group,

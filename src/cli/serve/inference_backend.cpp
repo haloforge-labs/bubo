@@ -40,6 +40,9 @@
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 #endif
+#if defined(GUFO_WITH_A3B)
+#include "src/models/qwen36_a3b/text_runner.hpp"
+#endif
 
 namespace gufo::server {
 namespace {
@@ -2983,6 +2986,73 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                 prefill_policy, scheduler_policy, speculative_config,
                 std::move(resolved_disk_cache_config));
   }
+#if defined(GUFO_WITH_A3B)
+  if (models::qwen36_a3b::IsA3bArchitecture(
+          reader->GetMetadataString("general.architecture").value_or(""))) {
+    if (!vision_model_path.empty()) {
+      SetError(error, "Qwen3.6-35B-A3B has no image input (--mmproj)");
+      return false;
+    }
+    if (session_count != 1) {
+      SetError(error, "Qwen3.6-35B-A3B serves one session (--sessions 1)");
+      return false;
+    }
+    models::qwen36_a3b::ServeConfig a3b;
+    a3b.max_context = max_context;
+    a3b.max_draft_tokens = speculative_config.max_draft_tokens;
+    a3b.survival = speculative_config.mtp_survival;
+    a3b.latin_draft_vocab = speculative_config.mtp_latin_draft_vocabulary;
+    a3b.prompt_lookup = speculative_config.prompt_lookup;
+    switch (speculative_config.backend) {
+      case TextSpeculativeBackend::kDisabled:
+        break;
+      case TextSpeculativeBackend::kMtp:
+        if (!speculative_config.draft_model_path.empty()) {
+          SetError(error,
+                   "Qwen3.6-35B-A3B MTP is inside the model GGUF; drop "
+                   "--mtp-model");
+          return false;
+        }
+        a3b.drafting = models::qwen36_a3b::ServeConfig::Drafting::kMtp;
+        break;
+      case TextSpeculativeBackend::kDFlash:
+        a3b.drafting = models::qwen36_a3b::ServeConfig::Drafting::kDFlash;
+        a3b.dflash_model_path = speculative_config.draft_model_path;
+        break;
+      default:
+        SetError(error,
+                 "Qwen3.6-35B-A3B supports --speculative mtp or dflash2");
+        return false;
+    }
+    Logger::Info("loader", "event=load_phase phase=target_weights " +
+                               Logger::MemoryStatus());
+    auto runner =
+        models::qwen36_a3b::CreateTextRunner(model_path, a3b, &load_error);
+    if (runner == nullptr) {
+      SetError(error, "Failed to create Qwen3.6-35B-A3B model: " + load_error);
+      return false;
+    }
+    if (DiskCacheEnabled(resolved_disk_cache_config))
+      Logger::Warn("loader",
+                   "event=disk_cache state=off reason=unsupported_model "
+                   "model=qwen35moe");
+    try {
+      auto new_state = std::make_shared<Impl::State>();
+      new_state->model_id = runner->Descriptor().model_id;
+      new_state->max_context = runner->Descriptor().max_context;
+      auto runner_pool =
+          std::make_shared<TextRunnerPool>(std::move(runner), session_count);
+      new_state->scheduler = std::make_shared<TextGenerationScheduler>(
+          std::move(runner_pool), prefill_policy, scheduler_policy);
+      const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+      impl_->state = std::move(new_state);
+      return true;
+    } catch (const std::exception& exception) {
+      SetError(error, exception.what());
+      return false;
+    }
+  }
+#endif
   std::shared_ptr<models::qwen::vision::Encoder> vision;
   try {
     if (reader->GetMetadataUint64("qwen35.embedding_length") == 5120) {

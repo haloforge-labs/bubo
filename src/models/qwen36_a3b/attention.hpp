@@ -39,9 +39,9 @@ bool DecodeAttention(const float* q, const __half* k_cache,
                      std::uint32_t max_context, hipStream_t stream);
 /// Copies V rows [*pos, *pos + n) of v_cache ([pos][kv_head][256]) into the
 /// tiled transposed cache vt ([kv_head][max_context / 16][256][16]).
-void StoreVt(const __half* v_cache, __half* vt_cache,
-             const std::uint32_t* pos, std::uint32_t n, std::uint32_t kv_heads,
-             std::uint32_t max_context, hipStream_t stream);
+void StoreVt(const __half* v_cache, __half* vt_cache, const std::uint32_t* pos,
+             std::uint32_t n, std::uint32_t kv_heads, std::uint32_t max_context,
+             hipStream_t stream);
 /// Kernel choice for DecodeAttention: 0 = the ALU kernel, 1 = WMMA (default;
 /// needs vt_cache, else the ALU kernel), 2 = WMMA with P split hi + lo.
 /// -1 = the A3B_DECODE_ATTN environment variable.

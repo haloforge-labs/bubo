@@ -128,6 +128,8 @@ struct Options {
   /// Token IDs (one per line) the MTP draft head is restricted to. Drafts
   /// only: verification always uses the full head, so output stays exact.
   std::string draft_vocab;
+  /// The same restriction as a list of token IDs (used when non-empty).
+  std::vector<std::int32_t> draft_vocab_ids;
   /// SpecPrefill chunk (tokens) for the wide prefill (prefill.cpp: Flash-
   /// Next's WMMA GEMMs, routed expert GEMMs and causal attention); 0 runs
   /// the prompt through the decode kernels 8 rows at a time.
@@ -153,7 +155,7 @@ enum Phase : int {
 };
 
 class Engine {
- public:
+public:
   static constexpr std::uint32_t kMaxRows = 8;
 
   static std::unique_ptr<Engine> Load(const std::filesystem::path& path,
@@ -221,6 +223,22 @@ class Engine {
   /// only its new tokens with SpecPrefill.
   bool SaveCheckpoint(std::string* error);
   bool RestoreCheckpoint(std::string* error);
+  // --- Host state snapshots (state.cpp), for gufo serve's prompt cache. ---
+  /// Bytes of SaveState: the recurrent (GDN and conv) state, the MTP
+  /// catch-up rows and the DFlash context ring. The KV caches are not
+  /// included: rows below position() stay intact until later tokens rewrite
+  /// them, so a state restores only over the token history it was saved
+  /// with (the caller keeps track).
+  std::size_t StateBytes() const;
+  /// Saves the state between steps (not inside a speculative step).
+  bool SaveState(std::span<std::uint8_t> out, std::string* error);
+  /// Restores SaveState's bytes; position() returns to the saved one.
+  bool LoadState(std::span<const std::uint8_t> in, std::string* error);
+  /// Full logits of row `row` of the last SpecPrefill (row 0) or verify pass,
+  /// valid until the next trunk pass.
+  bool RowLogits(std::uint32_t row, float* out, std::string* error);
+  /// Writes a logits row into row 0 (a restored frontier for RowLogits).
+  bool SetRowLogits(const float* in, std::string* error);
   // --- DFlash-2 drafting (dflash.cpp). ---
   /// Loads a DFlash-2 draft GGUF for this target; from then on every prefill
   /// and commit feeds the draft's context (call before any request).
@@ -239,11 +257,13 @@ class Engine {
   void SetFnAttention(bool on) { options_.fn_attention = on; }
   /// Switches SpecPrefill between the wide path (chunk > 0) and 8-row chunks.
   void SetPrefillChunk(std::uint32_t chunk) {
-    if (wide_.rows == 0) options_.prefill_chunk = chunk;
-    else options_.prefill_chunk = chunk == 0 ? 0 : wide_.rows;
+    if (wide_.rows == 0)
+      options_.prefill_chunk = chunk;
+    else
+      options_.prefill_chunk = chunk == 0 ? 0 : wide_.rows;
   }
 
- private:
+private:
   Engine() = default;
   bool Bind(std::string* error);
   bool Upload(std::string* error);
@@ -277,10 +297,11 @@ class Engine {
   /// The MTP block over `n` rows at positions pos..: tokens and seed hiddens
   /// in device memory. With `draft_out`, the last row's argmax goes there and
   /// its normed hidden to mtp_hn_ (the next chained seed).
-  void MtpPass(const std::int32_t* tokens, const float* hidden,
-               std::uint32_t n, const std::uint32_t* pos,
-               std::int32_t* draft_out, bool candidates);
+  void MtpPass(const std::int32_t* tokens, const float* hidden, std::uint32_t n,
+               const std::uint32_t* pos, std::int32_t* draft_out,
+               bool candidates);
   bool LoadDraftVocab(std::string* error);
+  bool BuildDraftHead(std::vector<std::int32_t> ids, std::string* error);
   /// Copies trunk layer `layer`'s output rows into their feature slot (no-op
   /// unless the layer is a DFlash tap); `wide` selects the prefill buffer.
   void DFlashTap(std::uint32_t layer, const float* res, std::uint32_t n,
@@ -313,24 +334,41 @@ class Engine {
   /// reused while wide_.staged == x (Unstage() after rewriting x).
   bool WideDense(const Tensor& w, const float* x, float* out, std::uint32_t n,
                  std::string* error);
-  void Unstage() { wide_.staged = nullptr; wide_.staged_kinds = 0; }
+  void Unstage() {
+    wide_.staged = nullptr;
+    wide_.staged_kinds = 0;
+  }
   bool WideGdn(const Layer& l, std::uint32_t idx, std::uint32_t n,
                std::string* error);
   bool WideAttention(const Layer& l, __half* k_cache, __half* v_cache,
                      __half* vt_cache, float* res, std::uint32_t n,
-                     std::uint32_t start_pos,
-                     std::string* error);
-  bool WideMoe(const Layer& l, float* res, std::uint32_t n,
-               std::string* error);
+                     std::uint32_t start_pos, std::string* error);
+  bool WideMoe(const Layer& l, float* res, std::uint32_t n, std::string* error);
   /// out = x W^T for BF16 weights; with x_lo the activations are the BF16
   /// split x + x_lo (a second, accumulating GEMM).
   bool BlasBf16(const void* w, const void* x, const void* x_lo, float* out,
                 std::uint32_t m, std::uint32_t n, std::uint32_t k,
                 std::string* error);
   // A3B_WIDE_PROFILE: per-phase event times of each SpecPrefill.
-  enum WidePhase { kWGdnProj, kWGdnCore, kWGdnOut, kWAttnProj, kWAttnCore,
-                   kWAttnOut, kWRouter, kWShared, kWRouteHost, kWGateUp,
-                   kWDown, kWEpilogue, kWOther, kWMtp, kWBf16Exp, kWTopK, kWPhases };
+  enum WidePhase {
+    kWGdnProj,
+    kWGdnCore,
+    kWGdnOut,
+    kWAttnProj,
+    kWAttnCore,
+    kWAttnOut,
+    kWRouter,
+    kWShared,
+    kWRouteHost,
+    kWGateUp,
+    kWDown,
+    kWEpilogue,
+    kWOther,
+    kWMtp,
+    kWBf16Exp,
+    kWTopK,
+    kWPhases
+  };
   void WideMark(int phase);
   void WideReport(std::size_t tokens);
   struct Wide {
@@ -430,14 +468,20 @@ class Engine {
   // ([0..7] verify tokens, then the rows' Candidates).
   std::uint32_t *stage_host_{}, *stage_dev_{};
   std::uint8_t* down_host_{};
-  enum SpecSlot { kSpecCatchUp, kSpecChain, kSpecVerify, kSpecCandidates,
-                  kSpecCommit, kSpecSlots };
+  enum SpecSlot {
+    kSpecCatchUp,
+    kSpecChain,
+    kSpecVerify,
+    kSpecCandidates,
+    kSpecCommit,
+    kSpecSlots
+  };
   void SpecTick(int slot);
   double spec_ms_[kSpecSlots]{};
   std::uint64_t spec_steps_{0};
   std::chrono::steady_clock::time_point spec_mark_{};
-  std::uint32_t mtp_rows_{0};    // rows of the next MTP catch-up pass
-  bool step_mtp_{false};         // the pending step ran the MTP block
+  std::uint32_t mtp_rows_{0};     // rows of the next MTP catch-up pass
+  bool step_mtp_{false};          // the pending step ran the MTP block
   std::uint32_t draft_depth_{0};  // drafts proposed in the pending step
   // Staging layout (words): [0] x, [1] trunk position, [2] catch-up
   // position, [3] chain position, [kStageChainToken], [kStageVerify..] the

@@ -2,9 +2,9 @@
 // Qwen ChatML turn, prefills it and streams a sampled reply with timings.
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <cmath>
 #include <cstring>
 #include <ctime>
 #include <random>
@@ -17,7 +17,6 @@
 #include "src/models/qwen36_a3b/attention.hpp"
 #include "src/models/qwen36_a3b/engine.hpp"
 #include "src/models/qwen36_a3b/prompt_lookup.hpp"
-#include "src/models/qwen36_a3b/serve.hpp"
 
 namespace {
 
@@ -26,32 +25,45 @@ double Ms(Clock::time_point a, Clock::time_point b) {
   return std::chrono::duration<double, std::milli>(b - a).count();
 }
 
-constexpr const char* kDefaultModel =
-    "C:/Users/Mate/.cache/huggingface/hub/models--unsloth--Qwen3.6-35B-A3B-MTP-GGUF/"
-    "snapshots/5bc3e238d916f48a861bac2f8a1990a0e9b7e98d/"
-    "Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf";
+/// Environment defaults: GUFO_A3B_MODEL (--model) and GUFO_A3B_DATA, the
+/// directory of the bench inputs (bench-corpus.txt and the lookup bench's
+/// source files; default: the current directory).
+std::string EnvOr(const char* name, const char* otherwise) {
+  const char* value = std::getenv(name);
+  return value != nullptr && *value != '\0' ? value : otherwise;
+}
+
+std::string DataFile(const std::string& name) {
+  return EnvOr("GUFO_A3B_DATA", ".") + "/" + name;
+}
 
 void Usage() {
   std::fprintf(stderr,
                "usage: gufo-a3b [--model PATH] [--prompt TEXT] [-n TOKENS]\n"
                "                [--temp T] [--top-k K] [--top-p P] [--seed S]\n"
                "                [--no-think] [--raw] [--ctx N] [--chunk 1-8]\n"
-               "                [--ppl FILE] [--ppl-ctx N] [--fn-gate] [--no-graph] [--legacy] [--profile]\n"
-               "                [--mtp DRAFTS] (speculative path; 0 = its plain decode)\n"
-               "                [--bench probe|depth] [--seeds N] [--depths A,B,..] [--corpus FILE]\n"
-               "                [--draft-vocab FILE] [--survival F] [--draft-sample] [--gpu-chain]\n"
-               "                [--prefill-chunk N] (0 = 8-row decode kernels) [--fn-attention]\n"
-               "                [--lookup MIN_MATCH] [--lookup-after-mtp] [--bench lookup] [--coupled]\n"
+               "                [--ppl FILE] [--ppl-ctx N] [--fn-gate] "
+               "[--no-graph] [--legacy] [--profile]\n"
+               "                [--mtp DRAFTS] (speculative path; 0 = its "
+               "plain decode)\n"
+               "                [--bench probe|depth] [--seeds N] [--depths "
+               "A,B,..] [--corpus FILE]\n"
+               "                [--draft-vocab FILE] [--survival F] "
+               "[--draft-sample] [--gpu-chain]\n"
+               "                [--prefill-chunk N] (0 = 8-row decode kernels) "
+               "[--fn-attention]\n"
+               "                [--lookup MIN_MATCH] [--lookup-after-mtp] "
+               "[--bench lookup] [--coupled]\n"
                "                [--dflash DRAFT.gguf] [--dflash-n DRAFTS]\n"
-               "                [--serve] [--host H] [--port P] [--model-id ID] [--api-key K]\n"
-               "                [--max-tokens N] (OpenAI-compatible server)\n");
+               "(serving: gufo serve --model A3B.gguf; see "
+               "docs/models/qwen3.6-35b-a3b)\n");
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
   using namespace gufo;
-  std::string model = kDefaultModel;
+  std::string model = EnvOr("GUFO_A3B_MODEL", "");
   std::string prompt = "Write a short story about a lighthouse keeper.";
   int n_predict = 256;
   sampling::SamplingConfig sc;
@@ -96,10 +108,6 @@ int main(int argc, char** argv) {
   // per step (default its maximum, the verify width - 1).
   std::string dflash;
   int dflash_n = 7;
-  // --serve: OpenAI-compatible server (serve.cpp).
-  bool serve = false;
-  bool lookup_set = false;
-  models::qwen36_a3b::ServeOptions serve_options;
   // --bench lookup: a comma-separated subset of its tasks.
   std::string only;
   // --bench real: the follow-up (prompt checkpoint) turn from this depth up.
@@ -109,7 +117,7 @@ int main(int argc, char** argv) {
   std::string bench;
   int seeds = 1;
   std::string depths = "1000,8000,16000,32000";
-  std::string corpus_file = "C:/custom_llama/bench-corpus.txt";
+  std::string corpus_file = DataFile("bench-corpus.txt");
   bool ctx_set = false;
   bool depths_set = false;
   bool n_set = false;
@@ -123,57 +131,99 @@ int main(int argc, char** argv) {
       }
       return argv[++i];
     };
-    if (a == "--model") model = next();
-    else if (a == "--prompt") prompt = next();
-    else if (a == "-n") n_predict = std::atoi(next()), n_set = true;
-    else if (a == "--temp") sc.temperature = static_cast<float>(std::atof(next()));
-    else if (a == "--top-k") sc.top_k = std::atoi(next());
-    else if (a == "--top-p") sc.top_p = static_cast<float>(std::atof(next()));
-    else if (a == "--seed") sc.seed = std::atoll(next());
-    else if (a == "--ctx") options.max_context = static_cast<std::uint32_t>(std::atoi(next())), ctx_set = true;
-    else if (a == "--chunk") chunk = std::clamp<std::size_t>(std::atoi(next()), 1, models::qwen36_a3b::Engine::kMaxRows);
-    else if (a == "--ppl") ppl_file = next();
-    else if (a == "--fn-gate") options.fn_gate = true;
-    else if (a == "--fn-router") options.fn_router = true;
-    else if (a == "--fn-attention") options.fn_attention = true;
-    else if (a == "--ppl-wide") ppl_wide = true;
-    else if (a == "--ppl-deep") ppl_deep = static_cast<std::size_t>(std::atoll(next()));
-    else if (a == "--ppl-deep-noise") ppl_noise = true;
-    else if (a == "--ppl-ref") ppl_ref = next();
-    else if (a == "--ppl-score") ppl_score = static_cast<std::size_t>(std::atoll(next()));
-    else if (a == "--prefill-chunk") options.prefill_chunk = static_cast<std::uint32_t>(std::max(0, std::atoi(next())));
-    else if (a == "--no-graph") options.graphs = false;
-    else if (a == "--legacy") options.fused = false;
-    else if (a == "--mtp") mtp = std::atoi(next());
-    else if (a == "--spec-profile") options.spec_profile = true;
-    else if (a == "--draft-vocab") options.draft_vocab = next();
-    else if (a == "--survival") survival = std::atof(next());
-    else if (a == "--draft-sample") draft_sample = true;
-    else if (a == "--gpu-chain") gpu_chain = true;
-    else if (a == "--coupled") coupled = true;
-    else if (a == "--only") only = std::string(",") + next() + ",";
-    else if (a == "--followup-min") followup_min = std::atoi(next());
-    else if (a == "--lookup") lookup = std::max(0, std::atoi(next())), lookup_set = true;
-    else if (a == "--serve") serve = true;
-    else if (a == "--host") serve_options.host = next();
-    else if (a == "--port") serve_options.port = std::atoi(next());
-    else if (a == "--model-id") serve_options.model_id = next();
-    else if (a == "--api-key") serve_options.api_key = next();
-    else if (a == "--max-tokens") serve_options.max_tokens = static_cast<std::size_t>(std::atoll(next()));
-    else if (a == "--lookup-after-mtp") lookup_after_mtp = true;
-    else if (a == "--dflash") dflash = next();
-    else if (a == "--dflash-n") dflash_n = std::max(0, std::atoi(next()));
-    else if (a == "--bench") bench = next();
-    else if (a == "--seeds") seeds = std::max(1, std::atoi(next()));
-    else if (a == "--depths") depths = next(), depths_set = true;
-    else if (a == "--corpus") corpus_file = next();
-    else if (a == "--fused-parts") options.fused_parts = static_cast<std::uint32_t>(std::atoi(next()));
-    else if (a == "--profile") options.profile = true;
-    else if (a == "--profile-sync") options.profile = options.profile_sync = true;
-    else if (a == "--ppl-ctx") ppl_ctx = std::atoi(next());
-    else if (a == "--ablate") ablate = std::atoi(next());
-    else if (a == "--no-think") think = false;
-    else if (a == "--raw") raw = true;
+    if (a == "--model")
+      model = next();
+    else if (a == "--prompt")
+      prompt = next();
+    else if (a == "-n")
+      n_predict = std::atoi(next()), n_set = true;
+    else if (a == "--temp")
+      sc.temperature = static_cast<float>(std::atof(next()));
+    else if (a == "--top-k")
+      sc.top_k = std::atoi(next());
+    else if (a == "--top-p")
+      sc.top_p = static_cast<float>(std::atof(next()));
+    else if (a == "--seed")
+      sc.seed = std::atoll(next());
+    else if (a == "--ctx")
+      options.max_context = static_cast<std::uint32_t>(std::atoi(next())),
+      ctx_set = true;
+    else if (a == "--chunk")
+      chunk = std::clamp<std::size_t>(std::atoi(next()), 1,
+                                      models::qwen36_a3b::Engine::kMaxRows);
+    else if (a == "--ppl")
+      ppl_file = next();
+    else if (a == "--fn-gate")
+      options.fn_gate = true;
+    else if (a == "--fn-router")
+      options.fn_router = true;
+    else if (a == "--fn-attention")
+      options.fn_attention = true;
+    else if (a == "--ppl-wide")
+      ppl_wide = true;
+    else if (a == "--ppl-deep")
+      ppl_deep = static_cast<std::size_t>(std::atoll(next()));
+    else if (a == "--ppl-deep-noise")
+      ppl_noise = true;
+    else if (a == "--ppl-ref")
+      ppl_ref = next();
+    else if (a == "--ppl-score")
+      ppl_score = static_cast<std::size_t>(std::atoll(next()));
+    else if (a == "--prefill-chunk")
+      options.prefill_chunk =
+          static_cast<std::uint32_t>(std::max(0, std::atoi(next())));
+    else if (a == "--no-graph")
+      options.graphs = false;
+    else if (a == "--legacy")
+      options.fused = false;
+    else if (a == "--mtp")
+      mtp = std::atoi(next());
+    else if (a == "--spec-profile")
+      options.spec_profile = true;
+    else if (a == "--draft-vocab")
+      options.draft_vocab = next();
+    else if (a == "--survival")
+      survival = std::atof(next());
+    else if (a == "--draft-sample")
+      draft_sample = true;
+    else if (a == "--gpu-chain")
+      gpu_chain = true;
+    else if (a == "--coupled")
+      coupled = true;
+    else if (a == "--only")
+      only = std::string(",") + next() + ",";
+    else if (a == "--followup-min")
+      followup_min = std::atoi(next());
+    else if (a == "--lookup")
+      lookup = std::max(0, std::atoi(next()));
+    else if (a == "--lookup-after-mtp")
+      lookup_after_mtp = true;
+    else if (a == "--dflash")
+      dflash = next();
+    else if (a == "--dflash-n")
+      dflash_n = std::max(0, std::atoi(next()));
+    else if (a == "--bench")
+      bench = next();
+    else if (a == "--seeds")
+      seeds = std::max(1, std::atoi(next()));
+    else if (a == "--depths")
+      depths = next(), depths_set = true;
+    else if (a == "--corpus")
+      corpus_file = next();
+    else if (a == "--fused-parts")
+      options.fused_parts = static_cast<std::uint32_t>(std::atoi(next()));
+    else if (a == "--profile")
+      options.profile = true;
+    else if (a == "--profile-sync")
+      options.profile = options.profile_sync = true;
+    else if (a == "--ppl-ctx")
+      ppl_ctx = std::atoi(next());
+    else if (a == "--ablate")
+      ablate = std::atoi(next());
+    else if (a == "--no-think")
+      think = false;
+    else if (a == "--raw")
+      raw = true;
     else {
       Usage();
       return 2;
@@ -186,26 +236,21 @@ int main(int argc, char** argv) {
     Usage();
     return 2;
   }
-  if (bench == "attn") return models::qwen36_a3b::RunDecodeAttentionBench();
-  if (!bench.empty() && mtp < 0) mtp = 0;
-  if (serve) {
-    // The best measured policy unless overridden: MTP 6 with survival 0.6,
-    // the ASCII draft head, prompt lookup after each kept MTP draft.
-    if (!ctx_set) options.max_context = 131072;
-    if (mtp < 0) mtp = 6;
-    if (survival <= 0) survival = dflash.empty() ? 0.6 : 0.2;
-    if (!lookup_set) lookup = 12;
-    const char* kVocab = "C:/custom_llama/draft-vocab-ascii.txt";
-    if (options.draft_vocab.empty())
-      if (std::FILE* f = std::fopen(kVocab, "rb")) {
-        std::fclose(f);
-        options.draft_vocab = kVocab;
-      }
+  if (bench == "attn")
+    return models::qwen36_a3b::RunDecodeAttentionBench();
+  if (!bench.empty() && mtp < 0)
+    mtp = 0;
+  if (model.empty()) {
+    std::fprintf(stderr,
+                 "gufo-a3b: --model PATH (or GUFO_A3B_MODEL) is required\n");
+    return 2;
   }
   if (bench == "real") {
     // bench-real.ps1's defaults.
-    if (!depths_set) depths = "0,4096,16384,32768,65536,131072";
-    if (!n_set) n_predict = 2048;
+    if (!depths_set)
+      depths = "0,4096,16384,32768,65536,131072";
+    if (!n_set)
+      n_predict = 2048;
   }
   if (ppl_deep > 0 && !ctx_set)
     options.max_context = static_cast<std::uint32_t>(
@@ -215,7 +260,8 @@ int main(int argc, char** argv) {
     int deepest = 0;
     for (std::size_t at = 0; at < depths.size();) {
       const std::size_t comma = depths.find(',', at);
-      deepest = std::max(deepest, std::atoi(depths.substr(at, comma - at).c_str()));
+      deepest =
+          std::max(deepest, std::atoi(depths.substr(at, comma - at).c_str()));
       at = comma == std::string::npos ? depths.size() : comma + 1;
     }
     // The corpus runs denser than the nominal 3.3 characters per token.
@@ -234,34 +280,17 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "DFlash load failed: %s\n", error.c_str());
       return 1;
     }
-    if (mtp < 0) mtp = 0;  // the speculative path
+    if (mtp < 0)
+      mtp = 0;  // the speculative path
   }
-  auto tok = tokenization::QwenTokenizer::CreateFromGguf(engine->gguf(), &error);
+  auto tok =
+      tokenization::QwenTokenizer::CreateFromGguf(engine->gguf(), &error);
   if (!tok) {
     std::fprintf(stderr, "tokenizer failed: %s\n", error.c_str());
     return 1;
   }
   const auto t1 = Clock::now();
   std::fprintf(stderr, "a3b: loaded in %.1f s\n", Ms(t0, t1) / 1000.0);
-  if (serve) {
-    serve_options.mtp = mtp;
-    serve_options.survival = survival;
-    serve_options.lookup = lookup;
-    serve_options.dflash_n = dflash.empty() ? 0 : dflash_n;
-    serve_options.sampling = sc;
-    serve_options.sampling.seed = -1;
-    std::fprintf(stderr,
-                 "a3b: serve policy: %s, survival %.2f, lookup %d, draft vocab "
-                 "%s; sampling temp %.2f top-k %d top-p %.2f (request fields "
-                 "override)\n",
-                 dflash.empty() ? ("mtp " + std::to_string(mtp)).c_str()
-                                : "dflash",
-                 survival, lookup,
-                 options.draft_vocab.empty() ? "off" : "on", sc.temperature,
-                 sc.top_k, sc.top_p);
-    return models::qwen36_a3b::RunServe(*engine, *tok, serve_options);
-  }
-
   if (!ppl_file.empty()) {
     // Teacher-forced perplexity over a raw text file (no BOS, no template).
     std::FILE* f = std::fopen(ppl_file.c_str(), "rb");
@@ -278,7 +307,8 @@ int main(int argc, char** argv) {
     topt.parse_special_tokens = false;
     const auto ctoks = tok->Encode(corpus, topt);
     std::vector<std::int32_t> t(ctoks.begin(), ctoks.end());
-    if (t.size() + 1 > options.max_context) t.resize(options.max_context - 1);
+    if (t.size() + 1 > options.max_context)
+      t.resize(options.max_context - 1);
     const std::uint32_t V = engine->config().vocab;
     std::vector<float> rows(static_cast<std::size_t>(chunk) * V);
     double nll = 0;
@@ -287,9 +317,11 @@ int main(int argc, char** argv) {
       float mx = row[0];
       std::uint32_t arg = 0;
       for (std::uint32_t v = 1; v < V; ++v)
-        if (row[v] > mx) mx = row[v], arg = v;
+        if (row[v] > mx)
+          mx = row[v], arg = v;
       double sum = 0;
-      for (std::uint32_t v = 0; v < V; ++v) sum += std::exp(double(row[v]) - mx);
+      for (std::uint32_t v = 0; v < V; ++v)
+        sum += std::exp(double(row[v]) - mx);
       nll += std::log(sum) + mx - row[target];
       top1 += arg == static_cast<std::uint32_t>(target);
       ++scored;
@@ -312,18 +344,21 @@ int main(int argc, char** argv) {
         const auto a0 = Clock::now();
         const bool noise = wide && ppl_noise;
         engine->SetFnAttention(noise);
-        if (noise) wide = false;
+        if (noise)
+          wide = false;
         if (wide) {
           engine->SetPrefillChunk(2048);
           models::qwen36_a3b::Candidates unused{};
-          if (!engine->SpecPrefill({t.data(), D}, &unused, &error)) return false;
+          if (!engine->SpecPrefill({t.data(), D}, &unused, &error))
+            return false;
         } else {
           for (std::size_t off = 0; off < D; off += 8) {
             const std::size_t n = std::min<std::size_t>(8, D - off);
             if (!engine->Forward({t.data() + off, n}, nullptr, &error))
               return false;
           }
-          if (!engine->Sync(&error)) return false;
+          if (!engine->Sync(&error))
+            return false;
         }
         const double pre = Ms(a0, Clock::now()) / 1000.0;
         for (std::size_t off = 0; off < S; off += 8) {
@@ -332,9 +367,12 @@ int main(int argc, char** argv) {
                                true))
             return false;
         }
-        std::fprintf(stderr, "a3b: %s prefill of %zu tokens %.1f s (%.0f t/s)\n",
-                     noise ? "8-row (FN attention)" : wide ? "wide" : "8-row", D,
-                     pre, D / pre);
+        std::fprintf(stderr,
+                     "a3b: %s prefill of %zu tokens %.1f s (%.0f t/s)\n",
+                     noise  ? "8-row (FN attention)"
+                     : wide ? "wide"
+                            : "8-row",
+                     D, pre, D / pre);
         return true;
       };
       bool have_ref = false;
@@ -381,10 +419,13 @@ int main(int argc, char** argv) {
           float mx = x[0];
           *arg = 0;
           for (std::uint32_t v = 1; v < V; ++v)
-            if (x[v] > mx) mx = x[v], *arg = v;
+            if (x[v] > mx)
+              mx = x[v], *arg = v;
           double sum = 0;
-          for (std::uint32_t v = 0; v < V; ++v) sum += p[v] = std::exp(double(x[v]) - mx);
-          for (std::uint32_t v = 0; v < V; ++v) p[v] /= sum;
+          for (std::uint32_t v = 0; v < V; ++v)
+            sum += p[v] = std::exp(double(x[v]) - mx);
+          for (std::uint32_t v = 0; v < V; ++v)
+            p[v] /= sum;
         };
         std::uint32_t arg_ref = 0, arg_cur = 0;
         softmax(a, pr, &arg_ref);
@@ -394,7 +435,8 @@ int main(int argc, char** argv) {
         nll_cur -= std::log(std::max(pc[target], 1e-300));
         double k = 0;
         for (std::uint32_t v = 0; v < V; ++v)
-          if (pr[v] > 0) k += pr[v] * (std::log(pr[v]) - std::log(std::max(pc[v], 1e-300)));
+          if (pr[v] > 0)
+            k += pr[v] * (std::log(pr[v]) - std::log(std::max(pc[v], 1e-300)));
         kl += k;
         kl_max = std::max(kl_max, k);
         top_ref += arg_ref == static_cast<std::uint32_t>(target);
@@ -402,15 +444,17 @@ int main(int argc, char** argv) {
         agree += arg_ref == arg_cur;
         ++n;
       }
-      std::printf("deep ppl @ %zu tokens, next %zu scored:\n"
-                  "  8-row prefill (reference): PPL %.4f, top-1 %.2f%%\n"
-                  "  %-26s PPL %.4f, top-1 %.2f%%  (%+.2f%%)\n"
-                  "  KL(ref || wide) mean %.5f, max %.4f nats; argmax agreement %.2f%%\n",
-                  D, S, std::exp(nll_ref / n), 100.0 * top_ref / n,
-                  ppl_noise ? "8-row, FN attention:" : "wide prefill:",
-                  std::exp(nll_cur / n), 100.0 * top_cur / n,
-                  100.0 * (std::exp(nll_cur / n) / std::exp(nll_ref / n) - 1.0),
-                  kl / n, kl_max, 100.0 * agree / n);
+      std::printf(
+          "deep ppl @ %zu tokens, next %zu scored:\n"
+          "  8-row prefill (reference): PPL %.4f, top-1 %.2f%%\n"
+          "  %-26s PPL %.4f, top-1 %.2f%%  (%+.2f%%)\n"
+          "  KL(ref || wide) mean %.5f, max %.4f nats; argmax agreement "
+          "%.2f%%\n",
+          D, S, std::exp(nll_ref / n), 100.0 * top_ref / n,
+          ppl_noise ? "8-row, FN attention:" : "wide prefill:",
+          std::exp(nll_cur / n), 100.0 * top_cur / n,
+          100.0 * (std::exp(nll_cur / n) / std::exp(nll_ref / n) - 1.0), kl / n,
+          kl_max, 100.0 * agree / n);
       return 0;
     }
     if (ppl_ctx > 0) {
@@ -419,7 +463,8 @@ int main(int argc, char** argv) {
       const std::size_t N = ppl_ctx;
       const std::size_t first = N / 2;
       const std::size_t n_chunk = t.size() / N;
-      if (ppl_wide) rows.resize(N * V);
+      if (ppl_wide)
+        rows.resize(N * V);
       for (std::size_t c = 0; c < n_chunk; ++c) {
         engine->Reset();
         const std::size_t start = c * N;
@@ -476,7 +521,8 @@ int main(int argc, char** argv) {
 
   std::string text = prompt;
   if (!raw) {
-    text = "<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n";
+    text =
+        "<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n";
     text += think ? "<think>\n" : "<think>\n\n</think>\n\n";
   }
   const auto ids = tok->Encode(text);
@@ -502,8 +548,7 @@ int main(int argc, char** argv) {
                                  : static_cast<int>(Candidates::kCount);
       double sum = 0.0;
       for (int i = 0; i < k; ++i) {
-        const double w =
-            std::exp((c.logits[i] - c.logits[0]) / sc.temperature);
+        const double w = std::exp((c.logits[i] - c.logits[0]) / sc.temperature);
         d.push_back({c.ids[i], w});
         sum += w;
       }
@@ -518,21 +563,27 @@ int main(int argc, char** argv) {
       }
       d.resize(keep);
       double total = 0.0;
-      for (const auto& e : d) total += e.second;
-      for (auto& e : d) e.second /= total;
+      for (const auto& e : d)
+        total += e.second;
+      for (auto& e : d)
+        e.second /= total;
       return d;
     };
     const auto sample = [&](const Dist& d, std::int32_t exclude) {
       double total = 0.0;
       for (const auto& e : d)
-        if (e.first != exclude) total += e.second;
+        if (e.first != exclude)
+          total += e.second;
       double u = uniform(rng) * total;
       for (const auto& e : d) {
-        if (e.first == exclude) continue;
-        if ((u -= e.second) <= 0.0) return e.first;
+        if (e.first == exclude)
+          continue;
+        if ((u -= e.second) <= 0.0)
+          return e.first;
       }
       for (auto it = d.rbegin(); it != d.rend(); ++it)
-        if (it->first != exclude) return it->first;
+        if (it->first != exclude)
+          return it->first;
       return d.front().first;
     };
     // --coupled: Gumbel-max sampling with noise fixed per (seed, reply
@@ -545,15 +596,16 @@ int main(int argc, char** argv) {
       std::int32_t best = d.front().first;
       double best_key = -1e300;
       for (const auto& e : d) {
-        std::uint64_t z = coupled_seed ^ (pos * 0x9E3779B97F4A7C15ULL) ^
-                          (static_cast<std::uint64_t>(e.first) *
-                           0xD1B54A32D192ED03ULL);
+        std::uint64_t z =
+            coupled_seed ^ (pos * 0x9E3779B97F4A7C15ULL) ^
+            (static_cast<std::uint64_t>(e.first) * 0xD1B54A32D192ED03ULL);
         z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
         z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
         z ^= z >> 31;
         const double u = (static_cast<double>(z >> 11) + 0.5) * 0x1.0p-53;
         const double key = std::log(e.second) - std::log(-std::log(u));
-        if (key > best_key) best_key = key, best = e.first;
+        if (key > best_key)
+          best_key = key, best = e.first;
       }
       return best;
     };
@@ -570,8 +622,8 @@ int main(int argc, char** argv) {
       std::size_t looked{0}, lookup_accepted{0};  // prompt lookup drafts
       std::uint64_t hash{1469598103934665603ULL};
       std::vector<std::int32_t> out;  // the reply's tokens
-      std::size_t cached{0};  // prompt tokens served by the checkpoint
-      bool stopped{false};    // ended on a stop token (else the budget)
+      std::size_t cached{0};          // prompt tokens served by the checkpoint
+      bool stopped{false};            // ended on a stop token (else the budget)
       bool ok{false};
     };
     // Prompt checkpoint for --bench real: kSave prefills the prompt without
@@ -580,8 +632,9 @@ int main(int argc, char** argv) {
     enum CacheMode { kNoCache, kSave, kResume };
     std::vector<std::int32_t> ckpt_tokens;
     const auto suffix_ids = [&] {
-      const auto e = tok->Encode(std::string("<|im_start|>assistant\n") +
-                                 (think ? "<think>\n" : "<think>\n\n</think>\n\n"));
+      const auto e =
+          tok->Encode(std::string("<|im_start|>assistant\n") +
+                      (think ? "<think>\n" : "<think>\n\n</think>\n\n"));
       return std::vector<std::int32_t>(e.begin(), e.end());
     }();
     // One request from a clean state: prefill, then draft/verify steps.
@@ -591,12 +644,14 @@ int main(int argc, char** argv) {
       Result r;
       // Diagnostic: A3B_NO_RESUME prefills follow-ups in full (A/B).
       static const bool no_resume = std::getenv("A3B_NO_RESUME") != nullptr;
-      if (cache == kResume && no_resume) cache = kNoCache;
+      if (cache == kResume && no_resume)
+        cache = kNoCache;
       if (cache == kResume && !ckpt_tokens.empty() &&
           ids.size() > ckpt_tokens.size() &&
           std::equal(ckpt_tokens.begin(), ckpt_tokens.end(), ids.begin())) {
         if (!engine->RestoreCheckpoint(&error)) {
-          std::fprintf(stderr, "checkpoint restore failed: %s\n", error.c_str());
+          std::fprintf(stderr, "checkpoint restore failed: %s\n",
+                       error.c_str());
           return r;
         }
         r.cached = ckpt_tokens.size();
@@ -614,7 +669,8 @@ int main(int argc, char** argv) {
         ++r.generated;
         hist.push_back(t);
         r.out.push_back(t);
-        if (!echo) return;
+        if (!echo)
+          return;
         const std::string piece = tok->DecodeTokenCopy(t);
         std::fwrite(piece.data(), 1, piece.size(), stdout);
         std::fflush(stdout);
@@ -625,8 +681,9 @@ int main(int argc, char** argv) {
       // the suffix.
       std::size_t split = r.cached;
       if (cache == kSave && ids.size() > suffix_ids.size() &&
-          std::equal(suffix_ids.begin(), suffix_ids.end(),
-                     ids.end() - static_cast<std::ptrdiff_t>(suffix_ids.size()))) {
+          std::equal(
+              suffix_ids.begin(), suffix_ids.end(),
+              ids.end() - static_cast<std::ptrdiff_t>(suffix_ids.size()))) {
         split = ids.size() - suffix_ids.size();
         Candidates unused{};
         if (!engine->SpecPrefill({ids.data(), split}, &unused, &error) ||
@@ -664,30 +721,34 @@ int main(int argc, char** argv) {
         // Prompt lookup fills the rest of the step (up to the verify width)
         // with what followed the best match; drafts from `copied` on are
         // copies (point-mass proposals).
-        const auto wide = static_cast<std::uint32_t>(std::min<int>(
-            models::qwen36_a3b::Engine::kMaxRows - 1,
-            std::max(0, budget - r.generated)));
+        const auto wide = static_cast<std::uint32_t>(
+            std::min<int>(models::qwen36_a3b::Engine::kMaxRows - 1,
+                          std::max(0, budget - r.generated)));
         std::size_t copied = SIZE_MAX;
         const auto fill = [&] {
-          if (lookup == 0 || drafts.size() >= wide) return false;
+          if (lookup == 0 || drafts.size() >= wide)
+            return false;
           const auto m = index.Find(hist, drafts);
-          if (m.length == 0) return false;
-          const std::size_t count =
-              std::min<std::size_t>(wide - drafts.size(), hist.size() - m.start);
+          if (m.length == 0)
+            return false;
+          const std::size_t count = std::min<std::size_t>(
+              wide - drafts.size(), hist.size() - m.start);
           copied = drafts.size();
           for (std::size_t i = 0; i < count; ++i)
             drafts.push_back(hist[m.start + i]);
           return count != 0;
         };
         drafts.clear();
-        if (lookup > 0) index.Extend(hist);
+        if (lookup > 0)
+          index.Extend(hist);
         if (engine->HasDFlash() && dflash_n > 0) {
           // DFlash block drafts (top-1 proposals), then prompt lookup copies
           // when the block left room.
           std::vector<float> dprob;
           if (!engine->DFlashDraft(
-                  x, std::min<std::uint32_t>(static_cast<std::uint32_t>(dflash_n),
-                                             wide),
+                  x,
+                  std::min<std::uint32_t>(static_cast<std::uint32_t>(dflash_n),
+                                          wide),
                   &drafts, &dprob, &error)) {
             std::fprintf(stderr, "\ndflash draft failed: %s\n", error.c_str());
             return r;
@@ -705,7 +766,8 @@ int main(int argc, char** argv) {
               }
             }
           }
-          if (lookup > 0) (void)fill();
+          if (lookup > 0)
+            (void)fill();
           if (!engine->Verify(x, drafts, &rows, &error)) {
             std::fprintf(stderr, "\nverify failed: %s\n", error.c_str());
             return r;
@@ -737,10 +799,12 @@ int main(int argc, char** argv) {
             Dist qd = dist(q);
             const std::int32_t d = draft_sample ? sample(qd, -1) : q.ids[0];
             alive *= qd.front().second;
-            if (!drafts.empty() && alive < survival) break;
+            if (!drafts.empty() && alive < survival)
+              break;
             drafts.push_back(d);
             props.push_back(std::move(qd));
-            if (fill() || drafts.size() >= cap) break;
+            if (fill() || drafts.size() >= cap)
+              break;
             if (!engine->DraftNext(d, &q, &error)) {
               std::fprintf(stderr, "\ndraft failed: %s\n", error.c_str());
               return r;
@@ -753,10 +817,12 @@ int main(int argc, char** argv) {
         }
         ++r.cycles;
         r.drafted += drafts.size();
-        if (copied < drafts.size()) r.looked += drafts.size() - copied;
+        if (copied < drafts.size())
+          r.looked += drafts.size() - copied;
         const auto prob = [](const Dist& d, std::int32_t t) {
           for (const auto& e : d)
-            if (e.first == t) return e.second;
+            if (e.first == t)
+              return e.second;
           return 0.0;
         };
         std::uint32_t keep = 0;
@@ -769,12 +835,13 @@ int main(int argc, char** argv) {
           const double pd = prob(d, drafts[j]);
           const double u = uniform(rng);
           const std::int32_t pick = coupled ? gumbel(d, r.generated) : -1;
-          const bool ok = coupled    ? pick == drafts[j]
-                          : sampled  ? u * prob(props[j], drafts[j]) < pd
-                                     : u < pd;
+          const bool ok = coupled   ? pick == drafts[j]
+                          : sampled ? u * prob(props[j], drafts[j]) < pd
+                                    : u < pd;
           if (ok) {
             ++r.accepted;
-            if (j >= copied) ++r.lookup_accepted;
+            if (j >= copied)
+              ++r.lookup_accepted;
             if (is_stop(drafts[j]) || r.generated >= budget) {
               keep = j + 1;
               stop = true;
@@ -788,7 +855,8 @@ int main(int argc, char** argv) {
             Dist residual;
             for (const auto& e : d) {
               const double w = e.second - prob(props[j], e.first);
-              if (w > 0) residual.push_back({e.first, w});
+              if (w > 0)
+                residual.push_back({e.first, w});
             }
             next = residual.empty() ? sample(d, -1) : sample(residual, -1);
           } else {
@@ -814,19 +882,20 @@ int main(int argc, char** argv) {
       return r;
     };
     const auto render = [&](const std::string& user) {
-      std::string t = "<|im_start|>user\n" + user +
-                       "<|im_end|>\n<|im_start|>assistant\n";
+      std::string t =
+          "<|im_start|>user\n" + user + "<|im_end|>\n<|im_start|>assistant\n";
       t += think ? "<think>\n" : "<think>\n\n</think>\n\n";
       const auto e = tok->Encode(t);
       return std::vector<std::int32_t>(e.begin(), e.end());
     };
     const auto line = [&](const char* label, const Result& r) {
-      std::printf("%-10s %5d tok  %6.2f t/s  accept %5.1f%%  %.2f tok/cycle  "
-                  "%6.1f ms/cycle",
-                  label, r.generated, r.generated * 1000.0 / r.decode_ms,
-                  r.drafted ? 100.0 * r.accepted / r.drafted : 0.0,
-                  r.cycles ? static_cast<double>(r.generated) / r.cycles : 0.0,
-                  r.cycles ? r.decode_ms / r.cycles : 0.0);
+      std::printf(
+          "%-10s %5d tok  %6.2f t/s  accept %5.1f%%  %.2f tok/cycle  "
+          "%6.1f ms/cycle",
+          label, r.generated, r.generated * 1000.0 / r.decode_ms,
+          r.drafted ? 100.0 * r.accepted / r.drafted : 0.0,
+          r.cycles ? static_cast<double>(r.generated) / r.cycles : 0.0,
+          r.cycles ? r.decode_ms / r.cycles : 0.0);
       if (lookup > 0)
         std::printf("  lookup %zu/%zu", r.lookup_accepted, r.looked);
       std::printf("  text %012llx\n",
@@ -844,32 +913,35 @@ int main(int argc, char** argv) {
       sum.hash = 0;
     };
     if (!bench.empty()) {
-    std::printf("a3b bench: mtp %d (%s%s, survival %.2f%s), lookup %d%s%s, "
-                "temp %.2f top-p %.2f top-k %d, thinking %s, max %d tokens\n",
-                mtp, gpu_chain ? "gpu chain" : "host drafts",
-                draft_sample ? ", sampled drafts" : ", top-1 drafts", survival,
-                options.draft_vocab.empty() ? "" : ", draft vocab", lookup,
-                lookup > 0 && lookup_after_mtp ? " after mtp" : "",
-                coupled ? ", coupled sampler" : "",
-                sc.temperature, sc.top_p, sc.top_k, think ? "on" : "off",
-                n_predict);
-    if (engine->HasDFlash())
-      std::printf("dflash: up to %d drafts per step\n",
-                  std::min<int>(dflash_n,
-                                static_cast<int>(engine->DFlashMaxDrafts())));
-    // Warm-up (untimed): first-use graph captures are not billed to a run.
-    (void)run(render("Say hi."), 16, sc.seed, false);
+      std::printf(
+          "a3b bench: mtp %d (%s%s, survival %.2f%s), lookup %d%s%s, "
+          "temp %.2f top-p %.2f top-k %d, thinking %s, max %d tokens\n",
+          mtp, gpu_chain ? "gpu chain" : "host drafts",
+          draft_sample ? ", sampled drafts" : ", top-1 drafts", survival,
+          options.draft_vocab.empty() ? "" : ", draft vocab", lookup,
+          lookup > 0 && lookup_after_mtp ? " after mtp" : "",
+          coupled ? ", coupled sampler" : "", sc.temperature, sc.top_p,
+          sc.top_k, think ? "on" : "off", n_predict);
+      if (engine->HasDFlash())
+        std::printf("dflash: up to %d drafts per step\n",
+                    std::min<int>(dflash_n,
+                                  static_cast<int>(engine->DFlashMaxDrafts())));
+      // Warm-up (untimed): first-use graph captures are not billed to a run.
+      (void)run(render("Say hi."), 16, sc.seed, false);
     }
     if (bench == "probe") {
       // probe-27b.py's three tasks, seeds seed..seed+seeds-1.
       const std::pair<const char*, const char*> tasks[] = {
-          {"story", "Write a short story about a lighthouse keeper who finds "
-                    "a message in a bottle."},
-          {"code", "Write a Python module implementing an LRU cache with TTL "
-                   "expiry, with type hints and docstrings."},
-          {"train", "A train leaves at 9:40 and travels 237 km at 83 km/h, "
-                    "then waits 12 minutes, then travels 118 km at 94 km/h. "
-                    "When does it arrive? Work it out step by step."}};
+          {"story",
+           "Write a short story about a lighthouse keeper who finds "
+           "a message in a bottle."},
+          {"code",
+           "Write a Python module implementing an LRU cache with TTL "
+           "expiry, with type hints and docstrings."},
+          {"train",
+           "A train leaves at 9:40 and travels 237 km at 83 km/h, "
+           "then waits 12 minutes, then travels 118 km at 94 km/h. "
+           "When does it arrive? Work it out step by step."}};
       Result all;
       all.decode_ms = 0;
       for (const auto& [name, user] : tasks) {
@@ -877,9 +949,10 @@ int main(int argc, char** argv) {
         const auto ids = render(user);
         for (int s = 0; s < seeds; ++s) {
           const Result r = run(ids, n_predict, sc.seed + s, false);
-          if (!r.ok) return 1;
-          const std::string label = std::string(name) + " s" +
-                                    std::to_string(sc.seed + s);
+          if (!r.ok)
+            return 1;
+          const std::string label =
+              std::string(name) + " s" + std::to_string(sc.seed + s);
           line(label.c_str(), r);
           add(sum, r);
         }
@@ -921,14 +994,18 @@ int main(int argc, char** argv) {
       constexpr std::size_t kCharsPerToken = 4;
       // A byte slice moved off UTF-8 continuation bytes at both ends.
       const auto slice = [&](std::size_t at, std::size_t len) {
-        while (at < text.size() && (text[at] & 0xC0) == 0x80) ++at;
+        while (at < text.size() && (text[at] & 0xC0) == 0x80)
+          ++at;
         std::size_t end = std::min(text.size(), at + len);
-        while (end < text.size() && (text[end] & 0xC0) == 0x80) ++end;
+        while (end < text.size() && (text[end] & 0xC0) == 0x80)
+          ++end;
         return text.substr(at, end - at);
       };
       const auto user_content = [&](int depth, int task, int index) {
-        if (depth == 0) return std::string(standalone[task]);
-        const std::size_t chars = static_cast<std::size_t>(depth) * kCharsPerToken;
+        if (depth == 0)
+          return std::string(standalone[task]);
+        const std::size_t chars =
+            static_cast<std::size_t>(depth) * kCharsPerToken;
         const std::size_t span = std::max<std::size_t>(
             1, text.size() > chars ? text.size() - chars : 1);
         const std::size_t offset =
@@ -944,27 +1021,34 @@ int main(int argc, char** argv) {
           std::string("<|im_start|>assistant\n") +
           (think ? "<think>\n" : "<think>\n\n</think>\n\n");
       std::string mode = coupled ? "coupled" : "sampled";
-      if (mtp > 0) mode += "-mtp" + std::to_string(mtp);
-      if (!options.draft_vocab.empty()) mode += "-draftvocab";
-      if (survival > 0) mode += "-survival";
-      if (lookup > 0) mode += "-lookup";
+      if (mtp > 0)
+        mode += "-mtp" + std::to_string(mtp);
+      if (!options.draft_vocab.empty())
+        mode += "-draftvocab";
+      if (survival > 0)
+        mode += "-survival";
+      if (lookup > 0)
+        mode += "-lookup";
       char stamp[32];
       const std::time_t now = std::time(nullptr);
-      std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", std::localtime(&now));
-      const std::string stem =
-          "C:/custom_llama/bench-real-a3b-" + mode + "-" + stamp;
+      std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S",
+                    std::localtime(&now));
+      const std::string stem = DataFile("bench-real-a3b-") + mode + "-" + stamp;
       std::FILE* replies = std::fopen((stem + ".replies.txt").c_str(), "wb");
       std::FILE* csv = std::fopen((stem + ".csv").c_str(), "wb");
       if (csv != nullptr)
-        std::fprintf(csv, "engine,mode,depth,task,prompt_n,cache_n,pp_tps,"
-                          "prefill_s,predicted_n,finish,tg_tps,"
-                          "draft_accept_pct,wall_s\n");
-      std::printf("\n| %7s | %-8s | %10s | %7s | %8s | %9s | %7s | %-6s | %7s | "
-                  "%8s | %7s |\n",
-                  "depth", "task", "prompt tok", "cached", "pp t/s", "prefill s",
-                  "gen tok", "finish", "tg t/s", "accept %", "wall s");
-      std::printf("| ------: | :------- | ---------: | ------: | -------: | "
-                  "--------: | ------: | :----- | ------: | -------: | ------: |\n");
+        std::fprintf(csv,
+                     "engine,mode,depth,task,prompt_n,cache_n,pp_tps,"
+                     "prefill_s,predicted_n,finish,tg_tps,"
+                     "draft_accept_pct,wall_s\n");
+      std::printf(
+          "\n| %7s | %-8s | %10s | %7s | %8s | %9s | %7s | %-6s | %7s | "
+          "%8s | %7s |\n",
+          "depth", "task", "prompt tok", "cached", "pp t/s", "prefill s",
+          "gen tok", "finish", "tg t/s", "accept %", "wall s");
+      std::printf(
+          "| ------: | :------- | ---------: | ------: | -------: | "
+          "--------: | ------: | :----- | ------: | -------: | ------: |\n");
       std::fflush(stdout);
       struct Row {
         int depth;
@@ -976,15 +1060,18 @@ int main(int argc, char** argv) {
                                const std::vector<std::int32_t>& ids,
                                CacheMode cache, std::string* answer) {
         Result r = run(ids, n_predict, sc.seed, false, cache);
-        if (!r.ok) return false;
+        if (!r.ok)
+          return false;
         std::string reply;
-        for (const auto id : r.out) reply += tok->DecodeTokenCopy(id);
+        for (const auto id : r.out)
+          reply += tok->DecodeTokenCopy(id);
         const std::size_t close = reply.find("</think>");
         std::string content =
             close == std::string::npos ? "" : reply.substr(close + 8);
         while (!content.empty() && (content[0] == '\n' || content[0] == ' '))
           content.erase(0, 1);
-        if (answer != nullptr) *answer = content;
+        if (answer != nullptr)
+          *answer = content;
         const char* finish = r.stopped ? "stop" : "length";
         if (replies != nullptr) {
           std::fprintf(replies,
@@ -1001,16 +1088,17 @@ int main(int argc, char** argv) {
         const double tg = r.generated * 1000.0 / r.decode_ms;
         const double acc = r.drafted ? 100.0 * r.accepted / r.drafted : 0.0;
         const double wall = (r.prefill_ms + r.decode_ms) / 1000.0;
-        std::printf("| %7d | %-8s | %10zu | %7zu | %8.1f | %9.2f | %7d | %-6s | "
-                    "%7.2f | %8.1f | %7.1f |\n",
-                    depth, task, r.prompt_n, r.cached, pp, r.prefill_ms / 1000.0,
-                    r.generated, finish, tg, acc, wall);
+        std::printf(
+            "| %7d | %-8s | %10zu | %7zu | %8.1f | %9.2f | %7d | %-6s | "
+            "%7.2f | %8.1f | %7.1f |\n",
+            depth, task, r.prompt_n, r.cached, pp, r.prefill_ms / 1000.0,
+            r.generated, finish, tg, acc, wall);
         std::fflush(stdout);
         if (csv != nullptr) {
-          std::fprintf(csv, "a3b,%s,%d,%s,%zu,%zu,%.1f,%.2f,%d,%s,%.2f,%.1f,%.1f\n",
-                       mode.c_str(), depth, task, r.prompt_n, r.cached, pp,
-                       r.prefill_ms / 1000.0, r.generated, finish, tg, acc,
-                       wall);
+          std::fprintf(
+              csv, "a3b,%s,%d,%s,%zu,%zu,%.1f,%.2f,%d,%s,%.2f,%.1f,%.1f\n",
+              mode.c_str(), depth, task, r.prompt_n, r.cached, pp,
+              r.prefill_ms / 1000.0, r.generated, finish, tg, acc, wall);
           std::fflush(csv);
         }
         table.push_back({depth, task, std::move(r)});
@@ -1037,30 +1125,39 @@ int main(int argc, char** argv) {
           return 1;
         if (follow &&
             !request(depth, "followup",
-                     encode(card_turn + "<|im_start|>assistant\n" + card_answer +
-                            "<|im_end|>\n<|im_start|>user\n" + followup +
-                            "<|im_end|>\n" + gen_suffix),
+                     encode(card_turn + "<|im_start|>assistant\n" +
+                            card_answer + "<|im_end|>\n<|im_start|>user\n" +
+                            followup + "<|im_end|>\n" + gen_suffix),
                      kResume, nullptr))
           return 1;
       }
-      if (replies != nullptr) std::fclose(replies);
-      if (csv != nullptr) std::fclose(csv);
-      std::printf("\na3b, Qwen3.6-35B-A3B UD-Q8_K_XL + MTP, %s\n", mode.c_str());
-      std::printf("| %-8s | %20s | %9s | %-16s |\n", "task", "test", "t/s", "note");
-      std::printf("| :------- | -------------------: | --------: | :--------------- |\n");
+      if (replies != nullptr)
+        std::fclose(replies);
+      if (csv != nullptr)
+        std::fclose(csv);
+      std::printf("\na3b, Qwen3.6-35B-A3B UD-Q8_K_XL + MTP, %s\n",
+                  mode.c_str());
+      std::printf("| %-8s | %20s | %9s | %-16s |\n", "task", "test", "t/s",
+                  "note");
+      std::printf(
+          "| :------- | -------------------: | --------: | :--------------- "
+          "|\n");
       for (const auto& row : table) {
         const Result& r = row.r;
         char test[64], note[64];
         std::snprintf(test, sizeof(test), "pp%zu @ d%d", r.prompt_n, row.depth);
-        if (r.cached > 0) std::snprintf(note, sizeof(note), "%zu cached", r.cached);
-        else note[0] = '\0';
+        if (r.cached > 0)
+          std::snprintf(note, sizeof(note), "%zu cached", r.cached);
+        else
+          note[0] = '\0';
         std::printf("| %-8s | %20s | %9.2f | %-16s |\n", row.task.c_str(), test,
                     r.prompt_n * 1000.0 / r.prefill_ms, note);
         std::snprintf(test, sizeof(test), "tg%d @ d%d", r.generated, row.depth);
         if (r.drafted > 0)
           std::snprintf(note, sizeof(note), "accept %.1f%%",
                         100.0 * r.accepted / r.drafted);
-        else note[0] = '\0';
+        else
+          note[0] = '\0';
         std::printf("| %-8s | %20s | %9.2f | %-16s |\n", row.task.c_str(), test,
                     r.generated * 1000.0 / r.decode_ms, note);
       }
@@ -1084,7 +1181,8 @@ int main(int argc, char** argv) {
       for (std::size_t got; (got = std::fread(buf, 1, sizeof(buf), f)) > 0;)
         corpus.append(buf, got);
       std::fclose(f);
-      const std::uint32_t wide = options.prefill_chunk > 0 ? options.prefill_chunk : 2048;
+      const std::uint32_t wide =
+          options.prefill_chunk > 0 ? options.prefill_chunk : 2048;
       for (std::size_t at = 0; at < depths.size();) {
         const std::size_t comma = depths.find(',', at);
         const int depth = std::atoi(depths.substr(at, comma - at).c_str());
@@ -1110,15 +1208,17 @@ int main(int argc, char** argv) {
           for (std::uint32_t j = 0; j < Candidates::kCount; ++j)
             if (got[0].ids[i] == got[1].ids[j]) {
               ++shared;
-              worst = std::max(worst, static_cast<double>(std::fabs(
-                                          got[0].logits[i] - got[1].logits[j])));
+              worst = std::max(
+                  worst, static_cast<double>(
+                             std::fabs(got[0].logits[i] - got[1].logits[j])));
             }
-        std::printf("prefill %6zu tok: 8-row %7.1f t/s, wide %7.1f t/s (x%.1f) "
-                    "| top1 %s, top-64 shared %d, max |dlogit| %.3f (top %.2f)\n",
-                    ids.size(), ids.size() * 1000.0 / ms[0],
-                    ids.size() * 1000.0 / ms[1], ms[0] / ms[1],
-                    got[0].ids[0] == got[1].ids[0] ? "same" : "DIFF", shared,
-                    worst, got[0].logits[0]);
+        std::printf(
+            "prefill %6zu tok: 8-row %7.1f t/s, wide %7.1f t/s (x%.1f) "
+            "| top1 %s, top-64 shared %d, max |dlogit| %.3f (top %.2f)\n",
+            ids.size(), ids.size() * 1000.0 / ms[0],
+            ids.size() * 1000.0 / ms[1], ms[0] / ms[1],
+            got[0].ids[0] == got[1].ids[0] ? "same" : "DIFF", shared, worst,
+            got[0].logits[0]);
         std::fflush(stdout);
       }
       return 0;
@@ -1133,12 +1233,14 @@ int main(int argc, char** argv) {
         row_depths.clear();
         for (std::size_t at = 0; at < depths.size();) {
           const std::size_t comma = depths.find(',', at);
-          row_depths.push_back(std::atoi(depths.substr(at, comma - at).c_str()));
+          row_depths.push_back(
+              std::atoi(depths.substr(at, comma - at).c_str()));
           at = comma == std::string::npos ? depths.size() : comma + 1;
         }
       }
       for (const int depth : row_depths) {
-        if (depth + 256 > static_cast<int>(options.max_context)) break;
+        if (depth + 256 > static_cast<int>(options.max_context))
+          break;
         engine->Reset();
         std::vector<std::int32_t> p(prompt_ids);
         while (static_cast<int>(p.size()) < depth)
@@ -1158,11 +1260,13 @@ int main(int argc, char** argv) {
                    engine->SpecCommit(1, &error);
           };
           for (int i = 0; i < 3; ++i)
-            if (!step()) return 1;
+            if (!step())
+              return 1;
           const int reps = 20;
           const auto a0 = Clock::now();
           for (int i = 0; i < reps; ++i)
-            if (!step()) return 1;
+            if (!step())
+              return 1;
           std::printf("  %u:%5.1f", n, Ms(a0, Clock::now()) / reps);
         }
         std::printf("  ms\n");
@@ -1174,9 +1278,9 @@ int main(int argc, char** argv) {
       // conversation (file edits, tests of a given module, a YAML edit, a
       // tool plan, a log diagnosis, a follow-up edit of the model's own
       // answer) plus free prose.
-      const auto slurp = [](const char* path, std::size_t limit) {
+      const auto slurp = [](const std::string& path, std::size_t limit) {
         std::string text;
-        if (std::FILE* f = std::fopen(path, "rb")) {
+        if (std::FILE* f = std::fopen(path.c_str(), "rb")) {
           char buf[65536];
           for (std::size_t got; (got = std::fread(buf, 1, sizeof(buf), f)) > 0;)
             text.append(buf, got);
@@ -1184,70 +1288,85 @@ int main(int argc, char** argv) {
         }
         return text.substr(0, std::min(limit, text.size()));
       };
-      const std::string probe =
-          slurp("C:/custom_llama/decode-probe.py", SIZE_MAX);
+      const std::string probe = slurp(DataFile("decode-probe.py"), SIZE_MAX);
       const std::string vocab_py =
-          slurp("C:/custom_llama/make-draft-vocab.py", SIZE_MAX);
+          slurp(DataFile("make-draft-vocab.py"), SIZE_MAX);
       const std::string ci = slurp(
-          "C:/custom_llama/gufo_experimental/.github/workflows/ci.yml",
-          SIZE_MAX);
-      std::string log = slurp(
-          "C:/custom_llama/bench-real-gufo-sampled-20260925-151423.server.log",
-          SIZE_MAX);
+          DataFile("gufo_experimental/.github/workflows/ci.yml"), SIZE_MAX);
+      std::string log =
+          slurp(DataFile("bench-real-gufo-sampled-20260925-151423.server.log"),
+                SIZE_MAX);
       {
         // Its first 45 lines.
         std::size_t at = 0;
         int lines = 0;
         while (lines < 45 && (at = log.find('\n', at)) != std::string::npos)
           ++at, ++lines;
-        if (lines == 45) log.resize(at - 1);
+        if (lines == 45)
+          log.resize(at - 1);
       }
       if (probe.empty() || vocab_py.empty() || ci.empty() || log.empty()) {
         std::fprintf(stderr, "lookup bench: missing an input file\n");
         return 1;
       }
       const std::string tools =
-          "[\n  {\"name\": \"read_file\", \"parameters\": {\"path\": \"string\"}},\n"
+          "[\n  {\"name\": \"read_file\", \"parameters\": {\"path\": "
+          "\"string\"}},\n"
           "  {\"name\": \"search\", \"parameters\": {\"pattern\": \"string\", "
           "\"glob\": \"string\"}},\n"
           "  {\"name\": \"edit_file\", \"parameters\": {\"path\": \"string\", "
           "\"old\": \"string\", \"new\": \"string\"}},\n"
           "  {\"name\": \"run\", \"parameters\": {\"command\": \"string\", "
           "\"timeout_s\": \"integer\"}}\n]";
-      const std::vector<std::pair<const char*, std::vector<std::string>>> tasks = {
-          {"py-edit",
-           {"Here is decode-probe.py:\n\n```python\n" + probe +
-                "\n```\n\nAdd a --tasks-file option that loads the task list "
-                "from a JSON file (a list of strings) instead of the built-in "
-                "TASKS, keeping everything else unchanged. Return the complete "
-                "updated file.",
-            "Now also add a --dry-run flag that prints the request bodies "
-            "instead of sending them. Return the complete file again."}},
-          {"tests",
-           {"Here is make-draft-vocab.py:\n\n```python\n" + vocab_py +
-            "\n```\n\nWrite pytest unit tests for byte_decoder() and for the "
-            "token filtering rule in main() (refactor the rule into a function "
-            "if needed and show that change too)."}},
-          {"yaml-edit",
-           {"Here is our CI workflow:\n\n```yaml\n" + ci +
-            "\n```\n\nAdd a Windows job that mirrors the existing job but runs "
-            "on windows-latest, caches the build directory, and only runs on "
-            "pushes to main. Return the full updated YAML."}},
-          {"tool-plan",
-           {"You are a coding agent with these tools:\n" + tools +
-            "\n\nTask: in the repository, the function StablePromptPrefix in "
-            "src/cli/serve/inference_backend.cpp mishandles an empty message "
-            "list. Plan the tool calls you would make to find, fix and test "
-            "this. Answer with a JSON array of tool calls only, with realistic "
-            "arguments."}},
-          {"log-diag",
-           {"Here is the start of a server log:\n\n```\n" + log +
-            "\n```\n\nExplain what happened during this load, quote the lines "
-            "that show each phase, and list anything that looks abnormal."}},
-          {"prose",
-           {"Explain how speculative decoding with rejection sampling keeps "
-            "the output distribution of the target model exact, for an "
-            "engineer who knows probability but not LLMs."}}};
+      const std::vector<std::pair<const char*, std::vector<std::string>>>
+          tasks = {
+              {"py-edit",
+               {"Here is decode-probe.py:\n\n```python\n" + probe +
+                    "\n```\n\nAdd a --tasks-file option that loads the task "
+                    "list "
+                    "from a JSON file (a list of strings) instead of the "
+                    "built-in "
+                    "TASKS, keeping everything else unchanged. Return the "
+                    "complete "
+                    "updated file.",
+                "Now also add a --dry-run flag that prints the request bodies "
+                "instead of sending them. Return the complete file again."}},
+              {"tests",
+               {"Here is make-draft-vocab.py:\n\n```python\n" + vocab_py +
+                "\n```\n\nWrite pytest unit tests for byte_decoder() and for "
+                "the "
+                "token filtering rule in main() (refactor the rule into a "
+                "function "
+                "if needed and show that change too)."}},
+              {"yaml-edit",
+               {"Here is our CI workflow:\n\n```yaml\n" + ci +
+                "\n```\n\nAdd a Windows job that mirrors the existing job but "
+                "runs "
+                "on windows-latest, caches the build directory, and only runs "
+                "on "
+                "pushes to main. Return the full updated YAML."}},
+              {"tool-plan",
+               {"You are a coding agent with these tools:\n" + tools +
+                "\n\nTask: in the repository, the function StablePromptPrefix "
+                "in "
+                "src/cli/serve/inference_backend.cpp mishandles an empty "
+                "message "
+                "list. Plan the tool calls you would make to find, fix and "
+                "test "
+                "this. Answer with a JSON array of tool calls only, with "
+                "realistic "
+                "arguments."}},
+              {"log-diag",
+               {"Here is the start of a server log:\n\n```\n" + log +
+                "\n```\n\nExplain what happened during this load, quote the "
+                "lines "
+                "that show each phase, and list anything that looks "
+                "abnormal."}},
+              {"prose",
+               {"Explain how speculative decoding with rejection sampling "
+                "keeps "
+                "the output distribution of the target model exact, for an "
+                "engineer who knows probability but not LLMs."}}};
       Result all;
       for (int s = 0; s < seeds; ++s) {
         for (const auto& [name, turns] : tasks) {
@@ -1262,20 +1381,23 @@ int main(int argc, char** argv) {
             std::string text = chat;
             text += think ? "<think>\n" : "<think>\n\n</think>\n\n";
             const auto e = tok->Encode(text);
-            const Result r =
-                run(std::vector<std::int32_t>(e.begin(), e.end()), n_predict,
-                    sc.seed + s, false);
-            if (!r.ok) return 1;
+            const Result r = run(std::vector<std::int32_t>(e.begin(), e.end()),
+                                 n_predict, sc.seed + s, false);
+            if (!r.ok)
+              return 1;
             std::string reply;
-            for (const auto id : r.out) reply += tok->DecodeTokenCopy(id);
+            for (const auto id : r.out)
+              reply += tok->DecodeTokenCopy(id);
             const std::size_t close = reply.find("</think>");
             std::string content =
                 close == std::string::npos ? "" : reply.substr(close + 8);
-            while (!content.empty() && (content[0] == '\n' || content[0] == ' '))
+            while (!content.empty() &&
+                   (content[0] == '\n' || content[0] == ' '))
               content.erase(0, 1);
             chat += content + "<|im_end|>\n";
             std::string label = std::string(name);
-            if (turns.size() > 1) label += "#" + std::to_string(t + 1);
+            if (turns.size() > 1)
+              label += "#" + std::to_string(t + 1);
             label += " s" + std::to_string(sc.seed + s);
             std::printf("%5zu prompt  ", r.prompt_n);
             line(label.c_str(), r);
@@ -1308,17 +1430,17 @@ int main(int argc, char** argv) {
         at = comma == std::string::npos ? depths.size() : comma + 1;
         const std::string user =
             "[run 0]\n" +
-            corpus.substr(0, std::min<std::size_t>(
-                                 corpus.size(),
-                                 static_cast<std::size_t>(depth * 3.3))) +
+            corpus.substr(
+                0, std::min<std::size_t>(
+                       corpus.size(), static_cast<std::size_t>(depth * 3.3))) +
             question;
         const auto ids = render(user);
         for (int s = 0; s < seeds; ++s) {
           const Result r = run(ids, n_predict, sc.seed + s, false);
-          if (!r.ok) return 1;
+          if (!r.ok)
+            return 1;
           std::printf("depth %6zu tok s%llu  prefill %6.1f s %7.1f t/s  |  ",
-                      r.prompt_n,
-                      static_cast<unsigned long long>(sc.seed + s),
+                      r.prompt_n, static_cast<unsigned long long>(sc.seed + s),
                       r.prefill_ms / 1000.0,
                       r.prompt_n * 1000.0 / r.prefill_ms);
           line("decode", r);
@@ -1327,7 +1449,8 @@ int main(int argc, char** argv) {
       return 0;
     }
     const Result r = run(prompt_ids, n_predict, sc.seed, true);
-    if (!r.ok) return 1;
+    if (!r.ok)
+      return 1;
     engine->PrintSpecProfile();
     std::fprintf(stderr,
                  "\n\na3b: %d tokens in %.0f ms = %.2f t/s; %zu steps "
@@ -1336,18 +1459,16 @@ int main(int argc, char** argv) {
                  r.generated, r.decode_ms, r.generated * 1000.0 / r.decode_ms,
                  r.cycles,
                  r.cycles ? static_cast<double>(r.generated) / r.cycles : 0.0,
-                 r.cycles ? r.decode_ms / r.cycles : 0.0, r.drafted,
-                 r.accepted, r.drafted ? 100.0 * r.accepted / r.drafted : 0.0);
+                 r.cycles ? r.decode_ms / r.cycles : 0.0, r.drafted, r.accepted,
+                 r.drafted ? 100.0 * r.accepted / r.drafted : 0.0);
     return 0;
   }
 
   const std::uint32_t vocab = engine->config().vocab;
   std::vector<float> logits(vocab);
   const auto p0 = Clock::now();
-  for (std::size_t off = 0; off < prompt_ids.size();
-       off += chunk) {
-    const std::size_t n = std::min<std::size_t>(
-        chunk, prompt_ids.size() - off);
+  for (std::size_t off = 0; off < prompt_ids.size(); off += chunk) {
+    const std::size_t n = std::min<std::size_t>(chunk, prompt_ids.size() - off);
     const bool last = off + n == prompt_ids.size();
     if (!engine->Forward({prompt_ids.data() + off, n},
                          last ? logits.data() : nullptr, &error)) {
@@ -1364,9 +1485,9 @@ int main(int argc, char** argv) {
     // Graph-replayed decode with one phase removed at a time; the delta to
     // the full step is what that phase costs in the real schedule.
     static constexpr const char* kNames[] = {
-        "embed", "norm+add", "gdn proj", "gdn core", "gdn out", "attn proj",
-        "attn core", "attn out", "router", "shared exp", "exp gate/up",
-        "exp down", "moe epilogue", "head"};
+        "embed",       "norm+add",  "gdn proj",     "gdn core", "gdn out",
+        "attn proj",   "attn core", "attn out",     "router",   "shared exp",
+        "exp gate/up", "exp down",  "moe epilogue", "head"};
     const auto run = [&](std::uint32_t mask) {
       engine->SetSkip(mask);
       const std::int32_t t = 13;
@@ -1382,8 +1503,10 @@ int main(int argc, char** argv) {
     constexpr int kP = models::qwen36_a3b::kPhCount;
     constexpr std::uint32_t kAll = (1u << kP) - 2;  // embed always runs
     std::vector<std::uint32_t> masks{0};
-    for (int p = 1; p < kP; ++p) masks.push_back(1u << p);
-    for (int p = 1; p < kP; ++p) masks.push_back(kAll & ~(1u << p));
+    for (int p = 1; p < kP; ++p)
+      masks.push_back(1u << p);
+    for (int p = 1; p < kP; ++p)
+      masks.push_back(kAll & ~(1u << p));
     masks.push_back(kAll);
     constexpr int kRounds = 3;
     std::vector<std::vector<double>> ms(masks.size());
@@ -1407,8 +1530,7 @@ int main(int argc, char** argv) {
       const double alone = med(kP - 1 + p) - none;
       sum_without += without;
       sum_alone += alone;
-      std::fprintf(stderr, "  %-13s %9.3f %9.3f\n", kNames[p], without,
-                   alone);
+      std::fprintf(stderr, "  %-13s %9.3f %9.3f\n", kNames[p], without, alone);
     }
     std::fprintf(stderr, "  %-13s %9.3f %9.3f\n", "sum", sum_without,
                  sum_alone);
@@ -1427,7 +1549,8 @@ int main(int argc, char** argv) {
     const auto next = sampler.Sample(logits);
     sampler.Accept(next);
     sample_ms += Ms(s0, Clock::now());
-    if (next == eos || (im_end && next == *im_end)) break;
+    if (next == eos || (im_end && next == *im_end))
+      break;
     const std::string piece = tok->DecodeTokenCopy(next);
     std::fwrite(piece.data(), 1, piece.size(), stdout);
     std::fflush(stdout);
