@@ -13,13 +13,19 @@ using core::GgmlType;
 // shares. Measured on real UD-Q4_K_XL and DFlash2 Q4_K_M weights against the
 // production dispatcher, alternating rounds, median of nine
 // (kernel-bench/kb27_sweep, kb27_sweep2); only gains of 5% or more are kept.
+// Lanes = 16 runs two sixteen-lane groups per wave; each keeps both original
+// lane partials and combines them in the same butterfly, so it is exact too.
+// MinWaves is only the occupancy hint of the launch bounds. The 16-lane and
+// MinWaves shapes at 3-4 rows come from kernel-bench/kb27_sweep4 and
+// kb27_confirm4 (eleven alternating rounds against this dispatch).
 template<GgmlType T, std::size_t Batch, std::uint32_t Waves, std::size_t Rows,
-         std::size_t Tiles, std::size_t TokensPerStep = Batch>
+         std::size_t Tiles, std::size_t TokensPerStep = Batch,
+         std::uint32_t MinWaves = 4, std::uint32_t Lanes = 32>
 bool Launch(const void* w, const float* x, float* y, std::size_t m,
             std::size_t k, hipStream_t stream) {
-  constexpr std::size_t kRowsPerBlock = Waves * Rows;
-  SmallBatchKQuantExactFp32GEMMKernel<Waves, Batch, Rows, T, Tiles, 4, 1, true,
-                                      TokensPerStep>
+  constexpr std::size_t kRowsPerBlock = Waves * (32 / Lanes) * Rows;
+  SmallBatchKQuantExactFp32GEMMKernel<Waves, Batch, Rows, T, Tiles, MinWaves,
+                                      1, true, TokensPerStep, 32, Lanes>
       <<<static_cast<unsigned>((m + kRowsPerBlock - 1) / kRowsPerBlock),
          Waves * 32, 0, stream>>>(w, x, y, m, k);
   return true;
@@ -45,12 +51,15 @@ bool LaunchQ5K(const void* w, const float* x, float* y, std::size_t batch,
       if (ssm_qkv) return Launch<T, 3, 16, 4, 1>(w, x, y, m, k, stream);
       if (ssm_gate) return Launch<T, 3, 8, 4, 1, 1>(w, x, y, m, k, stream);
       if (attn_q) return Launch<T, 3, 4, 4, 1, 1>(w, x, y, m, k, stream);
+      if (out_6144)
+        return Launch<T, 3, 4, 4, 1, 1, 4, 16>(w, x, y, m, k, stream);
       return false;
     case 4:
       if (ffn_up) return Launch<T, 4, 16, 4, 1, 1>(w, x, y, m, k, stream);
-      if (ssm_qkv) return Launch<T, 4, 16, 4, 1>(w, x, y, m, k, stream);
-      if (ssm_gate) return Launch<T, 4, 8, 4, 2>(w, x, y, m, k, stream);
-      if (attn_q) return Launch<T, 4, 8, 4, 1>(w, x, y, m, k, stream);
+      if (ffn_down || ssm_qkv || ssm_gate || attn_q)
+        return Launch<T, 4, 8, 4, 1, 4, 4, 16>(w, x, y, m, k, stream);
+      if (out_6144)
+        return Launch<T, 4, 4, 4, 1, 1, 4, 16>(w, x, y, m, k, stream);
       return false;
     case 5:
       if (ssm_gate) return Launch<T, 5, 4, 4, 1>(w, x, y, m, k, stream);
@@ -84,6 +93,9 @@ bool LaunchIQ4XS(const void* w, const float* x, float* y, std::size_t batch,
   if (!Is(m, k, 17408, 5120))
     return false;
   if (batch == 2) return Launch<T, 2, 4, 3, 2>(w, x, y, m, k, stream);
+  if (batch == 3) return Launch<T, 3, 4, 4, 2, 3, 1>(w, x, y, m, k, stream);
+  if (batch == 4)
+    return Launch<T, 4, 8, 4, 1, 4, 8, 16>(w, x, y, m, k, stream);
   if (batch == 6) return Launch<T, 6, 8, 4, 2>(w, x, y, m, k, stream);
   return false;
 }

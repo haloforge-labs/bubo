@@ -12,6 +12,7 @@
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/detail/decode_step.hpp"
 #include "src/models/qwen/hip/executor.hpp"
+#include "src/models/qwen/hip/kernels/attention_27b.hpp"
 #include "src/models/qwen/hip/kernels/copy_27b.hpp"
 #include "src/models/qwen/hip/kernels/verify_gemm_27b.hpp"
 #include "src/models/qwen/hip/ops.hpp"
@@ -698,11 +699,9 @@ QwenGpuExecutor::ForwardVerificationBatch(
                 reinterpret_cast<float*>(scratch.decode.weight_bf16.data()),
                 sequence_size * attention_scratch.size()};
           }
-          LaunchCausalDecodeAttention(
+          const bool fast_attention = TryLaunchVerifyAttention27(
               (scratch.attention.q.data() + offset * attention_size),
               (scratch.ssm.gate.data() + offset * attention_size),
-              state_arena.d_kv_cache,
-              OffsetIfPresent(state_arena.d_kv_cache, total_k),
               state_arena.d_attention_kv_f16,
               OffsetIfPresent(
                   static_cast<std::uint16_t*>(state_arena.d_attention_kv_f16),
@@ -712,6 +711,22 @@ QwenGpuExecutor::ForwardVerificationBatch(
               state_arena.GetMaxContext(), config.num_attention_heads,
               config.num_key_value_heads, config.head_dim, arena_.stream,
               attention_scratch);
+          if (!fast_attention) {
+            LaunchCausalDecodeAttention(
+                (scratch.attention.q.data() + offset * attention_size),
+                (scratch.ssm.gate.data() + offset * attention_size),
+                state_arena.d_kv_cache,
+                OffsetIfPresent(state_arena.d_kv_cache, total_k),
+                state_arena.d_attention_kv_f16,
+                OffsetIfPresent(
+                    static_cast<std::uint16_t*>(state_arena.d_attention_kv_f16),
+                    total_k),
+                (scratch.ssm.out.data() + offset * attention_size),
+                attention_layer, start_pos, sequence_size,
+                state_arena.GetMaxContext(), config.num_attention_heads,
+                config.num_key_value_heads, config.head_dim, arena_.stream,
+                attention_scratch);
+          }
         } else {
           for (std::size_t row = 0; row < sequence_size; ++row) {
             float* const query =
