@@ -19,7 +19,7 @@ The port is validated on TheRock 10.0.0. Other releases usually build, but a
 newer clang can round fused kernels differently (see [Test status](#test-status)).
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools\windows\check.ps1   # what is missing, and how to fix it
+powershell -ExecutionPolicy Bypass -File tools\windows\check.ps1   # what is missing, what fits, how to fix it
 powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1   # release -> build\release\gufo.exe
 powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1 -Preset gpu-test   # + tests and tools
 ```
@@ -28,6 +28,35 @@ powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1 -Preset gpu-tes
 vcpkg toolchain, builds, and copies the ROCm and vcpkg runtime DLLs plus the
 hipBLASLt/rocBLAS kernel libraries next to `gufo.exe`, so `build\release` runs
 as it is.
+
+`check.ps1` covers the whole setup, not only the build: the toolchain; the
+build (runtime files, whether HIP sees the GPU, whether it is older than the
+source); the dedicated GPU memory; every model it finds, with a memory
+estimate and any missing draft or vision file (with the download command);
+and runtime traps such as a busy port, a server that is already running, or
+`GUFO_*` switches left in the shell.
+
+## Starting a server
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\windows\start.ps1          # pick a model; Enter = recommended
+powershell -ExecutionPolicy Bypass -File tools\windows\start.ps1 -Last    # the previous choice again
+powershell -ExecutionPolicy Bypass -File tools\windows\start.ps1 -List    # what is here, and what fits
+```
+
+`start.ps1` looks through the Hugging Face cache, a `models` folder in or
+beside the checkout, LM Studio's folders and any `-ModelDir` (remembered). It
+reads each GGUF header to tell targets, MTP and DFlash2 drafts and vision
+sidecars apart, lists what `gufo serve llm` runs (Qwen3.8-Flash-Next,
+Qwen3.8-27B, Qwen3.6-35B-A3B and its fine-tunes) at the context that fits the
+dedicated GPU memory, pairs each with its draft and `mmproj`, and offers the
+speed modes those files allow, fastest measured first. Enter starts the plan
+it shows; `c` changes context, sessions, thinking, draft file, port, local
+network access (with an API key), a log file and extra options. It prints the
+full `gufo` command, runs it in the same window, offers to ignore `GUFO_*` /
+`A3B_*` switches left in the shell, and restores every variable it touched.
+Choices are kept in `%LOCALAPPDATA%\gufo\start.json` (never the API key);
+`-DryRun` prints the command only.
 
 ## Running Qwen3.8-Flash-Next
 
@@ -39,9 +68,10 @@ hf download unsloth/Qwen3.8-Flash-Next-GGUF --include "UD-Q4_K_XL/*" "MTP/mtp-Qw
 powershell -ExecutionPolicy Bypass -File tools\windows\run-flash-next.ps1
 ```
 
-`run-flash-next.ps1` finds the files in the Hugging Face cache and serves an
+`start.ps1` does the same interactively; `run-flash-next.ps1` is the
+scriptable form. It finds the files in the Hugging Face cache and serves an
 OpenAI-compatible API on `http://127.0.0.1:8080/v1` (thinking on, adaptive MTP,
-the model's own sampler). `-Think off`, `-Draft mtp3|off`, `-Context N` and
+the model's own sampler, images through the BF16 `mmproj`). `-Think off`, `-Draft mtp3|off`, `-Context N` and
 `-Mode bench` (pp2048/tg128 at depths 0..128K) are the common variations. The
 server is ready when the log shows `event=load_completed`.
 
@@ -52,7 +82,8 @@ lists any set in the calling shell.
 
 ## Other text models
 
-`gufo serve llm --model PATH` also serves Qwen3.8-27B (with a DFlash2 draft,
+`start.ps1` offers these as well. `gufo serve llm --model PATH` also serves
+Qwen3.8-27B (with a DFlash2 draft,
 see [its guide](models/qwen3.8-27b/README.md)) and Qwen3.6-35B-A3B
 (`qwen35moe` GGUFs, see [its guide](models/qwen3.6-35b-a3b/README.md)). Both
 carry Windows-specific decode work: VRAM-resident 27B weights and verify

@@ -1,4 +1,5 @@
-# Qwen3.8-Flash-Next on the Windows build of Gufo.
+# Qwen3.8-Flash-Next on the Windows build of Gufo. start.ps1 (same folder)
+# is the interactive launcher for every model; this script is the scriptable one.
 #
 #   powershell -ExecutionPolicy Bypass -File tools\windows\run-flash-next.ps1                # serve: UD-Q4_K_XL, thinking, adaptive MTP
 #   powershell -ExecutionPolicy Bypass -File tools\windows\run-flash-next.ps1 -Think off     # instruct mode (thinking off)
@@ -54,6 +55,10 @@ if (-not $MtpModel) {
   if (-not $MtpModel) { $MtpModel = Join-Path $Snapshot $mtpFile }
 }
 if ($Draft -ne "off" -and -not (Test-Path $MtpModel)) { throw "MTP model not found: $MtpModel (or use -Draft off)" }
+# gufo finds the vision sidecar only beside the model or one folder up, i.e.
+# in the same snapshot; one downloaded at another revision needs --mmproj.
+$vision = @(@($Snapshot) + $snapshots | ForEach-Object { Join-Path $_ "mmproj-BF16.gguf" } |
+  Where-Object { Test-Path $_ }) | Select-Object -First 1
 
 # Never greedy by default. Thinking uses the sampler embedded in the GGUF
 # (general.sampling.*: temp 1.0, top-p 0.95, top-k 20); instruct uses Qwen's
@@ -78,10 +83,13 @@ if ($Draft -ne "off" -and $Mode -eq "serve") {
 }
 
 if ($Mode -eq "serve") {
+  # 32 MiB requests: base64 images next to a long conversation.
   $arguments = @("serve", "--host", "127.0.0.1", "--port", "$Port", "--sessions", "1",
+    "--max-request-bytes", "33554432",
     "llm", "--model", $model, "--served-model-name", "flash-next",
-    "--context", "$Context",
+    "--context", "$Context", "--max-output-bytes", "8388608",
     "--think", $Think) + $sampling + $speculative
+  if ($vision) { $arguments += @("--mmproj", $vision) }
 } else {
   # Same shape as upstream's single-user table: pp2048/tg128 per depth.
   # (bench has no thinking switch; -Think only picks the sampler here.)

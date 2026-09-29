@@ -123,8 +123,8 @@ profilers, tuning executables and Python reference runners are not installed
 with the production package. No `build.sh` wrapper is needed.
 
 Windows 11 x64 builds natively against AMD's TheRock ROCm; see
-[Windows](docs/WINDOWS.md) for the toolchain, a prerequisite check and the
-build script.
+[Windows](docs/WINDOWS.md) for the toolchain, a setup check, the build script
+and an interactive launcher (`tools\windows\start.ps1`).
 
 ### With Nix
 
