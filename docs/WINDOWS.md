@@ -50,6 +50,14 @@ files downloaded at different revisions are found. `GUFO_*` environment
 variables (`GUFO_PLATFORM_TUNING`, diagnostics) reach the server; the script
 lists any set in the calling shell.
 
+## Other text models
+
+`gufo serve llm --model PATH` also serves Qwen3.8-27B (with a DFlash2 draft,
+see [its guide](models/qwen3.8-27b/README.md)) and Qwen3.6-35B-A3B
+(`qwen35moe` GGUFs, see [its guide](models/qwen3.6-35b-a3b/README.md)). Both
+carry Windows-specific decode work: VRAM-resident 27B weights and verify
+kernels tuned for the Windows compiler, and A3B's own runtime.
+
 ## How the port works
 
 - `compat/win32/include` shadows the POSIX headers Gufo uses (`unistd.h`,
