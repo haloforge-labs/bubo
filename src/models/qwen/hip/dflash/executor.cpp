@@ -622,6 +622,7 @@ std::size_t QwenDFlashGpuExecutor::SnapshotPayloadBytes() const noexcept {
 
 std::unique_ptr<QwenDFlashGpuSnapshot> QwenDFlashGpuExecutor::SaveSnapshot()
     const {
+  const qwen27::ScopedPromptStep step("draft_snapshot", injected_context_len_);
   const std::size_t kv_width =
       static_cast<std::size_t>(model_->GetConfig().num_key_value_heads) *
       model_->GetConfig().head_dim;
@@ -795,6 +796,7 @@ bool QwenDFlashGpuExecutor::InjectTargetContext(
       target_features.size() != static_cast<std::size_t>(num_tokens) * width) {
     return false;
   }
+  const qwen27::ScopedPromptStep step("draft_inject", num_tokens);
   // Only the final attention window survives this injection. Skip complete
   // scratch chunks that it overwrites, keeping the original batch boundaries
   // and absolute RoPE positions for every surviving row.

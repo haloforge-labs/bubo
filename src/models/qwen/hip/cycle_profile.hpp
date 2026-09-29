@@ -263,6 +263,37 @@ private:
   ProfileState::Clock::time_point enqueued_{};
 };
 
+// GUFO_QWEN27_PROFILE>=1: wall time of one prompt-side step (prefill, draft
+// context injection, snapshot), printed when it ends. Waits for the device.
+class ScopedPromptStep {
+public:
+  ScopedPromptStep(const char* name, std::size_t tokens)
+      : name_(name), tokens_(tokens), enabled_(ProfileEnabled()) {
+    if (enabled_) {
+      (void)hipDeviceSynchronize();
+      start_ = ProfileState::Clock::now();
+    }
+  }
+  ScopedPromptStep(const ScopedPromptStep&) = delete;
+  ScopedPromptStep& operator=(const ScopedPromptStep&) = delete;
+  ~ScopedPromptStep() {
+    if (!enabled_)
+      return;
+    (void)hipDeviceSynchronize();
+    const double ms = std::chrono::duration<double, std::milli>(
+                          ProfileState::Clock::now() - start_)
+                          .count();
+    std::fprintf(stderr, "qwen27 prompt: %s tokens=%zu %.1f ms\n", name_,
+                 tokens_, ms);
+  }
+
+private:
+  const char* name_;
+  std::size_t tokens_;
+  bool enabled_;
+  ProfileState::Clock::time_point start_{};
+};
+
 }  // namespace gufo::hip::qwen27
 
 #endif  // GUFO_MODELS_QWEN_HIP_CYCLE_PROFILE_HPP_

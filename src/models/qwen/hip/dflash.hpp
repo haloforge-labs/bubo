@@ -14,6 +14,7 @@
 #include "src/core/speculative/draft_backend.hpp"
 #include "src/models/qwen/dflash_policy.hpp"
 #include "src/models/qwen/dflash_weights.hpp"
+#include "src/models/qwen/hip/dflash/prompt_lookup_27b.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/tokenizer.hpp"
 
@@ -347,6 +348,11 @@ private:
   // probabilities and position.
   std::vector<float> proposed_probabilities_;
   std::uint32_t proposed_position_{0};
+  // Opt-in prompt lookup (GUFO_QWEN27_LOOKUP): proposals of up to
+  // lookup_limit_ tokens copied from the context replace a DFlash2 block.
+  qwen27::PromptLookup lookup_;
+  std::uint32_t lookup_limit_{0};
+  std::uint32_t lookup_tokens_{0};  // trailing lookup tokens of the proposal
   bool primed_{false};
   bool proposal_active_{false};
 };

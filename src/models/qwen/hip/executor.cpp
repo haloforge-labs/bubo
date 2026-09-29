@@ -278,6 +278,7 @@ void QwenGpuExecutor::ReplaySsmState(std::uint32_t position,
 
 std::span<const float> QwenGpuExecutor::CopyLastLogits() {
   CheckReset();
+  const qwen27::ScopedPromptStep step("copy_last_logits", 1);
   auto scratch = arena_.GetScratchView();
   HIP_CHECK(hipMemcpyAsync(h_logits_.data(), scratch.decode.logits.data(),
                            h_logits_.size() * sizeof(float),
