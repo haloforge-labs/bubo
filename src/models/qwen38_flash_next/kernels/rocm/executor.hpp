@@ -148,7 +148,7 @@ public:
   };
 
   ~Executor();
-  [[nodiscard]] hipStream_t stream() const noexcept { return stream_; }
+  [[nodiscard]] hipStream_t stream() const noexcept { return primary_stream_; }
   Executor(const Executor&) = delete;
   Executor& operator=(const Executor&) = delete;
 
@@ -426,7 +426,21 @@ private:
   const DeviceModel* model_{nullptr};
   NgramTable* ngram_{nullptr};
   Options options_;
-  hipStream_t stream_{nullptr};
+  /// The stream launches go to. On Windows a submission waits for the
+  /// retirement of the previous submission on its own stream (~0.45 us per
+  /// node: ~0.8 ms after a verify body), while another stream starts at
+  /// once. So decode-sized work alternates between two streams: every
+  /// completed flag wait (the host has seen all earlier launches finish)
+  /// hands the next launch to the other stream, and the two never overlap.
+  /// Prefill, batched decoding and snapshots use the primary stream (the
+  /// BLAS handles are bound to it).
+  mutable hipStream_t stream_{nullptr};
+  hipStream_t primary_stream_{nullptr};
+  hipStream_t alt_stream_{nullptr};
+  /// stream_ holds launches no wait has covered yet (a deferred rollback).
+  mutable bool unwaited_{false};
+  /// Back to the primary stream, after draining the current one if needed.
+  [[nodiscard]] bool UsePrimaryStream(std::string* error_msg) const;
   hipEvent_t counts_ready_{nullptr};
   hipblasHandle_t blas_{nullptr};
   std::unique_ptr<BlasLt> blaslt_;

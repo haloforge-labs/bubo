@@ -342,8 +342,11 @@ Executor::~Executor() {
   if (counts_ready_ != nullptr) {
     (void)hipEventDestroy(counts_ready_);
   }
-  if (stream_ != nullptr) {
-    (void)hipStreamDestroy(stream_);
+  if (alt_stream_ != nullptr) {
+    (void)hipStreamDestroy(alt_stream_);
+  }
+  if (primary_stream_ != nullptr) {
+    (void)hipStreamDestroy(primary_stream_);
   }
 }
 
@@ -364,9 +367,12 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
     AssignError(error_msg, "quantized GEMM tier initialization failed");
     return nullptr;
   }
-  if (!Check(hipStreamCreate(&e->stream_), "hipStreamCreate", error_msg)) {
+  if (!Check(hipStreamCreate(&e->primary_stream_), "hipStreamCreate",
+             error_msg) ||
+      !Check(hipStreamCreate(&e->alt_stream_), "hipStreamCreate", error_msg)) {
     return nullptr;
   }
+  e->stream_ = e->primary_stream_;
   if (!Check(hipEventCreateWithFlags(&e->counts_ready_, hipEventDisableTiming),
              "expert counts event", error_msg)) {
     return nullptr;
@@ -1436,6 +1442,12 @@ bool Executor::WaitFlag(std::uint32_t want, const char* what,
     std::this_thread::yield();
   }
   ++waits_completed_;
+  unwaited_ = false;
+  // Everything launched so far has finished: the next launch goes to the
+  // other stream, whose last submission retired long ago (see stream_).
+  if (alt_stream_ != nullptr) {
+    stream_ = stream_ == primary_stream_ ? alt_stream_ : primary_stream_;
+  }
   return true;
 }
 
@@ -2040,6 +2052,11 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
                        std::uint32_t n_logits, float* logits, ForwardMode mode,
                        std::string* error_msg, bool verify_candidates) const {
   verify_candidates_ready_ = 0;
+  // Only decode-sized passes may run on the alternate stream.
+  if ((mode == ForwardMode::kPrefill || tokens.size() > kVecBatch) &&
+      !UsePrimaryStream(error_msg)) {
+    return false;
+  }
   const bool speculative = mode == ForwardMode::kVerify;
   PrefillPhase phase(mode == ForwardMode::kPrefill);
   selected_logits_ = nullptr;
@@ -2324,6 +2341,21 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
   return true;
 }
 
+bool Executor::UsePrimaryStream(std::string* error_msg) const {
+  if (stream_ == primary_stream_) {
+    return true;
+  }
+  if (unwaited_) {
+    if (!Check(hipStreamSynchronize(stream_), "alternate stream", error_msg)) {
+      return false;
+    }
+    unwaited_ = false;
+    ++waits_completed_;  // covers a deferred frontier copy
+  }
+  stream_ = primary_stream_;
+  return true;
+}
+
 bool Executor::FinishFrontier(float* logits, std::string* error_msg) const {
   if (waits_completed_ == frontier_ticket_ && !Wait("frontier", error_msg)) {
     return false;
@@ -2406,6 +2438,7 @@ bool Executor::Rollback(Session& session, std::uint32_t keep,
     // Not flushed: the next draft joins this submission (a submission that
     // starts on its own waits for the previous one's retirement).
     frontier_ticket_ = waits_completed_;
+    unwaited_ = true;
     return true;
   }
   if (!Wait("rollback", error_msg)) {
@@ -2607,6 +2640,9 @@ std::uint64_t Executor::SnapshotBytes(const Session& session,
 bool Executor::SaveSnapshot(const Session& session, std::uint32_t hidden_rows,
                             std::span<std::uint8_t> payload,
                             std::string* error_msg) const {
+  if (!UsePrimaryStream(error_msg)) {
+    return false;
+  }
   if (session.owner_ != this) {
     AssignError(error_msg, "session belongs to another executor");
     return false;
@@ -2655,6 +2691,9 @@ bool Executor::RestoreSnapshot(Session& session,
                                std::span<const std::uint8_t> payload,
                                SnapshotInfo* info, std::string* error_msg,
                                std::uint32_t next_drafts) const {
+  if (!UsePrimaryStream(error_msg)) {
+    return false;
+  }
   if (session.owner_ != this) {
     AssignError(error_msg, "session belongs to another executor");
     return false;
