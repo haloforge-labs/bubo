@@ -21,6 +21,7 @@
 #include "src/core/hip/snapshot_transfer.hpp"
 #include "src/core/platform/tuning.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
+#include "src/models/qwen38_flash_next/kernels/rocm/trace.hpp"
 
 namespace gufo::models::qwen38_flash_next::rocm {
 namespace {
@@ -494,6 +495,13 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
             "pinned logits buffer", error_msg)) {
       return nullptr;
     }
+    void* frontier = nullptr;
+    if (!Check(hipHostMalloc(&frontier, c.vocab_size * sizeof(float),
+                             ResultHostFlags()),
+               "pinned frontier buffer", error_msg)) {
+      return nullptr;
+    }
+    e->frontier_host_ = static_cast<float*>(frontier);
     if (Tune().flag_waits) {
       void* done = nullptr;
       if (!Check(hipHostMalloc(&done, 64, hipHostMallocCoherent),
@@ -1408,6 +1416,16 @@ bool Executor::Wait(const char* what, std::string* error_msg) const {
   if (!Check(hipGetLastError(), what, error_msg)) {
     return false;
   }
+  return WaitFlag(want, what, error_msg);
+}
+
+bool Executor::WaitBumped(const char* what, std::string* error_msg) const {
+  // The flag counts bumps and absolute signals alike (see Wait).
+  return WaitFlag(++done_counter_, what, error_msg);
+}
+
+bool Executor::WaitFlag(std::uint32_t want, const char* what,
+                        std::string* error_msg) const {
   (void)hipStreamQuery(stream_);  // submit: launches are batched until a flush
   const auto start = std::chrono::steady_clock::now();
   const volatile std::uint32_t* flag = done_flag_;
@@ -1417,6 +1435,7 @@ bool Executor::Wait(const char* what, std::string* error_msg) const {
     }
     std::this_thread::yield();
   }
+  ++waits_completed_;
   return true;
 }
 
@@ -1954,9 +1973,18 @@ bool Executor::MtpHead(const DeviceMixer& head, const float* res, bool token,
 
 bool Executor::Run(Session& session, std::uint64_t key, bool graph,
                    const std::function<bool()>& body, std::string* error_msg,
-                   bool synchronize) const {
+                   bool synchronize, bool bump) const {
   // A batch shape runs eagerly once before it is captured: the first pass
   // grows the GEMM tier's arena, which capture forbids.
+  const auto run_body = [&] {
+    if (!body()) {
+      return false;
+    }
+    if (bump) {
+      BumpDone(done_flag_, stream_);
+    }
+    return true;
+  };
   if (graph && session.warmed_.contains(key)) {
     hipGraphExec_t exec = nullptr;
     if (const auto it = session.graphs_.find(key);
@@ -1971,7 +1999,7 @@ bool Executor::Run(Session& session, std::uint64_t key, bool graph,
               "graph capture", error_msg)) {
         return false;
       }
-      const bool ok = body();
+      const bool ok = run_body();
       if (!Check(hipStreamEndCapture(stream_, &captured), "graph capture end",
                  error_msg) ||
           !ok) {
@@ -1979,6 +2007,12 @@ bool Executor::Run(Session& session, std::uint64_t key, bool graph,
           (void)hipGraphDestroy(captured);
         }
         return false;
+      }
+      if (Tl().Enabled()) {
+        std::size_t nodes = 0;
+        (void)hipGraphGetNodes(captured, nullptr, &nodes);
+        std::fprintf(stderr, "qwen38_flash_next: graph %016llx: %zu nodes\n",
+                     static_cast<unsigned long long>(key), nodes);
       }
       const bool instantiated =
           Check(hipGraphInstantiate(&exec, captured, nullptr, nullptr, 0),
@@ -1993,7 +2027,7 @@ bool Executor::Run(Session& session, std::uint64_t key, bool graph,
       return false;
     }
   } else {
-    if (!body()) {
+    if (!run_body()) {
       return false;
     }
     session.warmed_.insert(key);
@@ -2053,15 +2087,22 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   control_host_->mtp_position = session.mtp_.position;
   control_host_->mtp_blocks = session.mtp_.blocks;
   control_host_->hidden_row = -1;
-  if (c.ple_layer >= 0) {
-    if (ngram_ == nullptr) {
-      AssignError(error_msg, "n-gram table is not open");
-      return false;
-    }
-    if (!PleFetch(session, tokens, speculative, error_msg)) {
-      return false;
-    }
+  if (c.ple_layer >= 0 && ngram_ == nullptr) {
+    AssignError(error_msg, "n-gram table is not open");
+    return false;
   }
+  const auto ple_fetch = [&] {
+    return c.ple_layer < 0 || PleFetch(session, tokens, speculative, error_msg);
+  };
+  // Submits queued launches (HIP on Windows batches them until a flush);
+  // illegal while a graph is being captured.
+  const auto flush = [&] {
+    hipStreamCaptureStatus capture = hipStreamCaptureStatusNone;
+    if (hipStreamIsCapturing(stream_, &capture) == hipSuccess &&
+        capture == hipStreamCaptureStatusNone) {
+      (void)hipStreamQuery(stream_);
+    }
+  };
   // Sparse selection only changes the result once a query can see more
   // than the token budget; every layer of this model shares one ratio.
   const bool sparse = c.compress_ratio > 0 && start_pos + n > c.indexer_top_k;
@@ -2093,6 +2134,10 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   // Both pieces use the same stream and arithmetic as the unsplit graph.
   const std::uint32_t first_layer =
       graph && c.ple_layer > 0 ? static_cast<std::uint32_t>(c.ple_layer) : 0;
+  const bool traced = Tl().Enabled() && graph;
+  if (traced) {
+    Tl().Gpu(stream_, Timeline::kVerifyBegin, n);
+  }
   if (first_layer > 0) {
     const auto prefix = [&] {
       return ForwardBody(session, n, 0, false, speculative, sparse, start_pos,
@@ -2102,6 +2147,15 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
     if (!Run(session, key | kPrefixKey, graph, prefix, error_msg, false)) {
       return false;
     }
+    // The prefix reads no n-gram rows: start it before hashing them, so the
+    // host's row hashing and read submission overlap its GPU time.
+    flush();
+  }
+  if (!ple_fetch()) {
+    return false;
+  }
+  if (traced) {
+    Tl().Gpu(stream_, Timeline::kPrefixEnd, n);
   }
   const auto body = [&] {
     return ForwardBody(session, n, n_logits, logits != nullptr, speculative,
@@ -2115,13 +2169,25 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
     return false;
   }
   // With Tuning::flag_waits a decode-sized pass waits on a completion flag
-  // instead of synchronizing the stream (see Wait).
+  // instead of synchronizing the stream (see Wait); the graph raises it as
+  // its last node.
   const bool flag_wait = graph && done_flag_ != nullptr;
+  if (traced) {
+    Tl().Gpu(stream_, Timeline::kBodyBegin, n);
+  }
   candidates_in_body_ = candidates;
-  const bool ran = Run(session, key, graph, body, error_msg, !flag_wait);
+  const bool ran =
+      Run(session, key, graph, body, error_msg, !flag_wait, flag_wait);
   candidates_in_body_ = false;
-  if (!ran || (flag_wait && !Wait("forward", error_msg))) {
+  if (ran && traced) {
+    Tl().Gpu(stream_, Timeline::kVerifyEnd, n);
+  }
+  if (!ran || (flag_wait && !WaitBumped("forward", error_msg))) {
     return false;
+  }
+  if (traced) {
+    Tl().Host(Timeline::kSynced);
+    Tl().MaybeReport(stream_);
   }
   // The pass has completed: its candidate lists are on the host.
   verify_candidates_ready_ = candidates ? n_logits : 0;
@@ -2258,8 +2324,17 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
   return true;
 }
 
+bool Executor::FinishFrontier(float* logits, std::string* error_msg) const {
+  if (waits_completed_ == frontier_ticket_ && !Wait("frontier", error_msg)) {
+    return false;
+  }
+  std::copy_n(frontier_host_, config().vocab_size, logits);
+  return true;
+}
+
 bool Executor::Rollback(Session& session, std::uint32_t keep,
-                        std::string* error_msg, float* logits) const {
+                        std::string* error_msg, float* logits,
+                        bool defer_frontier) const {
   const Config& c = config();
   const std::uint32_t n = session.spec_tokens_;
   if (n == 0 || keep == 0 || keep > n) {
@@ -2267,15 +2342,20 @@ bool Executor::Rollback(Session& session, std::uint32_t keep,
     return false;
   }
   session.spec_tokens_ = 0;
+  Tl().Gpu(stream_, Timeline::kRollBegin, keep);
+  if (defer_frontier && logits == nullptr) {
+    defer_frontier = false;
+  }
   if (logits != nullptr &&
       !CopyPinned(VerificationLogits() +
                       static_cast<std::size_t>(keep - 1) * c.vocab_size,
-                  logits_host_, c.vocab_size * sizeof(float),
-                  hipMemcpyDeviceToHost, stream_, "frontier download",
-                  error_msg)) {
+                  defer_frontier ? frontier_host_ : logits_host_,
+                  c.vocab_size * sizeof(float), hipMemcpyDeviceToHost, stream_,
+                  "frontier download", error_msg)) {
     return false;
   }
   if (keep == n && logits == nullptr) {
+    Tl().Gpu(stream_, Timeline::kRollEnd, keep);
     return true;
   }
   if (keep < n) {
@@ -2321,9 +2401,17 @@ bool Executor::Rollback(Session& session, std::uint32_t keep,
             ? 0
             : std::min(session.blocks_, session.position_ / c.compress_ratio);
   }
+  Tl().Gpu(stream_, Timeline::kRollEnd, keep);
+  if (defer_frontier) {
+    // Not flushed: the next draft joins this submission (a submission that
+    // starts on its own waits for the previous one's retirement).
+    frontier_ticket_ = waits_completed_;
+    return true;
+  }
   if (!Wait("rollback", error_msg)) {
     return false;
   }
+  Tl().Host(Timeline::kSynced);
   if (logits != nullptr) {
     std::copy_n(logits_host_, c.vocab_size, logits);
   }
@@ -2824,9 +2912,21 @@ bool Executor::MtpForward(Session& session,
   // With Tuning::flag_waits a draft step waits on a completion flag instead
   // of synchronizing the stream (see Wait).
   const bool flag_wait = graph && done_flag_ != nullptr;
-  if (!Run(session, key, graph, body, error_msg, !flag_wait) ||
-      (flag_wait && !Wait("MTP forward", error_msg))) {
+  const bool traced = Tl().Enabled() && graph;
+  if (traced) {
+    Tl().Gpu(stream_, Timeline::kMtpBegin, n);
+  }
+  if (!Run(session, key, graph, body, error_msg, !flag_wait, flag_wait)) {
     return false;
+  }
+  if (traced) {
+    Tl().Gpu(stream_, Timeline::kMtpEnd, n);
+  }
+  if (flag_wait && !WaitBumped("MTP forward", error_msg)) {
+    return false;
+  }
+  if (traced) {
+    Tl().Host(Timeline::kSynced);
   }
   if (output.token != nullptr) {
     *output.token = *mtp_token_host_;

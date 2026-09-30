@@ -48,6 +48,13 @@ void CopyMapped(const void* src, void* dst, std::size_t bytes,
 /// fences once the stream reaches this point: a completion signal the host
 /// can spin on instead of hipStreamSynchronize.
 void SignalDone(std::uint32_t* flag, std::uint32_t value, hipStream_t stream);
+/// Increments the completion flag; captured as a graph's last node, it
+/// signals the graph's end without a separate launch after it.
+void BumpDone(std::uint32_t* flag, hipStream_t stream);
+/// Holds the stream until the host writes `want` into coherent `flag`.
+void WaitHost(std::uint32_t* flag, std::uint32_t want, hipStream_t stream);
+/// Diagnostics: writes the GPU wall clock to `slot` when the stream gets here.
+void GpuStamp(std::uint64_t* slot, hipStream_t stream);
 /// Copies rows `ids[0..rows)` of `src` (row_bytes each, a multiple of 4)
 /// into consecutive rows of `dst`.
 void GatherRows(const void* src, void* dst, const std::int32_t* ids,

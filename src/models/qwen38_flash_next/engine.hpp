@@ -201,7 +201,8 @@ public:
       std::span<const AdvanceRequest> requests,
       std::string* error_msg = nullptr);
   [[nodiscard]] std::span<const float> Logits() const noexcept {
-    return valid_ ? std::span<const float>(logits_) : std::span<const float>{};
+    return valid_ && EnsureFrontier() ? std::span<const float>(logits_)
+                                      : std::span<const float>{};
   }
   [[nodiscard]] std::uint32_t Position() const noexcept;
   [[nodiscard]] std::uint32_t ContextSize() const noexcept;
@@ -283,7 +284,11 @@ private:
   std::shared_ptr<Model> model_;
   std::unique_ptr<rocm::Session> session_;
   std::vector<std::int32_t> tokens_;
-  std::vector<float> logits_;
+  mutable std::vector<float> logits_;
+  /// A sampled cycle's rollback left the frontier row in flight (see
+  /// FinishDecode): logits_ is stale until EnsureFrontier fetches it.
+  mutable bool frontier_pending_{false};
+  bool EnsureFrontier(std::string* error_msg = nullptr) const;
   /// GPU-selected top candidates of logits_, valid only from a sampled MTP
   /// cycle's FinishDecode until the next PrepareDecode consumes them.
   MtpCandidateLogits anchor_candidates_{};

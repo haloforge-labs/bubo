@@ -325,7 +325,16 @@ std::uint32_t Session::ContextSize() const noexcept {
   return session_->max_context();
 }
 
+bool Session::EnsureFrontier(std::string* error_msg) const {
+  if (!frontier_pending_) {
+    return true;
+  }
+  frontier_pending_ = false;
+  return model_->executor_->FinishFrontier(logits_.data(), error_msg);
+}
+
 void Session::Reset() {
+  (void)EnsureFrontier();
   valid_ = false;
   session_->Reset();
   tokens_.clear();
@@ -383,6 +392,9 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
     AssignError(error_msg, "snapshot needs a synced, non-empty context");
     return nullptr;
   }
+  if (!EnsureFrontier(error_msg)) {
+    return nullptr;
+  }
   const auto token_count = static_cast<std::uint32_t>(tokens_.size());
   const auto identity = ImageIdentity(token_count);
   const std::uint32_t hidden_rows = KeptHiddenRows();
@@ -430,6 +442,9 @@ bool Session::RestoreSnapshot(const SessionSnapshot& snapshot,
 
 bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
                               std::string* error_msg) {
+  if (!EnsureFrontier(error_msg)) {
+    return false;
+  }
   SessionSnapshotHeader header{};
   if (payload.size() < sizeof(header)) {
     AssignError(error_msg, "session snapshot is truncated");
@@ -604,6 +619,9 @@ bool Session::DraftCatchUpBatch(std::span<const AdvanceRequest> requests,
 
 bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
                    bool prefill) {
+  if (!EnsureFrontier(error_msg)) {
+    return false;
+  }
   rocm::Executor& exec = *model_->executor_;
   for (std::size_t off = 0; off < tokens.size(); off += exec.max_batch()) {
     const std::size_t n =
@@ -683,6 +701,9 @@ bool Session::TeacherForce(std::span<const std::int32_t> tokens,
                            bool prefill) {
   if (!valid_ || tokens_.empty()) {
     AssignError(error_msg, "teacher forcing needs a synced session");
+    return false;
+  }
+  if (!EnsureFrontier(error_msg)) {
     return false;
   }
   const std::size_t n = tokens.size();
@@ -881,12 +902,17 @@ bool Session::PrepareDecode(const DecodeRequest& request,
   std::optional<sampling::TokenId> fast_anchor;
   if (anchor_candidates_valid_) {
     anchor_candidates_valid_ = false;
-    if (CandidatesMatch(anchor_candidates_, logits_)) {
+    // A frontier row still in flight is the very row the verify graph
+    // selected these candidates from (FinishDecode).
+    if (frontier_pending_ || CandidatesMatch(anchor_candidates_, logits_)) {
       fast_anchor = sampler.SampleFromTop(
           std::span(anchor_candidates_.logits).first(anchor_candidates_.size),
           std::span(anchor_candidates_.ids).first(anchor_candidates_.size),
           logits_.size());
     }
+  }
+  if (!fast_anchor && !EnsureFrontier(error_msg)) {
+    return false;
   }
   const auto anchor = static_cast<std::int32_t>(
       fast_anchor ? *fast_anchor : sampler.Sample(logits_));
@@ -1079,11 +1105,20 @@ bool Session::FinishDecode(const DecodeRequest& request,
     }
     ++keep;
   }
-  if (!exec.Rollback(*session_, keep, error_msg,
-                     gpu_verification || pending.rows_on_device ? logits_.data()
-                                                                : nullptr)) {
+  // Sampled cycles with candidate lists sample the next anchor from those
+  // lists, so the frontier row stays in flight (EnsureFrontier fetches it
+  // when anything else needs it) and the rollback is not waited for: the
+  // next draft queues behind it.
+  const bool defer_frontier =
+      !gpu_verification && pending.rows_on_device && have_candidates;
+  frontier_pending_ = false;
+  if (!exec.Rollback(
+          *session_, keep, error_msg,
+          gpu_verification || pending.rows_on_device ? logits_.data() : nullptr,
+          defer_frontier)) {
     return false;
   }
+  frontier_pending_ = defer_frontier;
   if (!gpu_verification) {
     // Rows kept on the GPU: Rollback already wrote the frontier to logits_.
     if (!pending.rows_on_device) {
@@ -1152,6 +1187,9 @@ bool Session::DecodeStep(std::size_t max_tokens,
                   : pending.gpu_verification || pending.rows_on_device
                       ? nullptr
                       : verify_logits_.data();
+  if (!pending.speculative) {
+    frontier_pending_ = false;  // the forward rewrites the whole row
+  }
   if (!model_->executor_->Forward(
           *session_, pending.chain, pending.chain.size(), logits,
           pending.speculative ? rocm::Executor::ForwardMode::kVerify
@@ -1292,6 +1330,11 @@ bool Session::DecodeBatchImpl(std::span<const DecodeRequest> requests,
         r.max_tokens, *r.sampler, r.result, &r.outcome->error, r.stop_at_eos);
     return r.outcome->completed;
   }
+  for (const auto& r : requests) {
+    if (!r.session->EnsureFrontier(error_msg)) {
+      return false;
+    }
+  }
   auto& exec = *requests.front().session->model_->executor_;
   std::optional<std::uint32_t> batch_drafts;
   std::uint32_t batch_context = 0;
@@ -1428,6 +1471,11 @@ bool Session::EvaluateBatchImpl(std::span<const AdvanceRequest> requests,
     const auto& r = requests.front();
     r.outcome->completed = r.session->Evaluate(r.token, &r.outcome->error);
     return r.outcome->completed;
+  }
+  for (const auto& r : requests) {
+    if (!r.session->EnsureFrontier(error_msg)) {
+      return false;
+    }
   }
   auto& exec = *requests.front().session->model_->executor_;
   if (!DraftCatchUpBatch(requests, error_msg))

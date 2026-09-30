@@ -201,9 +201,14 @@ public:
   /// Keeps the first `keep` (1..n) tokens of the last speculative batch and
   /// discards the rest. If `logits` is supplied, copies the kept frontier
   /// into it using the same synchronization as rollback.
+  /// `defer_frontier`: the frontier row goes to a private pinned buffer and
+  /// nothing is waited for; FinishFrontier later delivers it.
   [[nodiscard]] bool Rollback(Session& session, std::uint32_t keep,
-                              std::string* error_msg,
-                              float* logits = nullptr) const;
+                              std::string* error_msg, float* logits = nullptr,
+                              bool defer_frontier = false) const;
+  /// Completes a deferred frontier download (Rollback) into `logits`.
+  [[nodiscard]] bool FinishFrontier(float* logits,
+                                    std::string* error_msg) const;
 
   /// Runs the draft block over `tokens` (at most max_batch) at the session's
   /// MTP position. The hidden input of token i is the trunk residual of row
@@ -412,9 +417,11 @@ private:
   /// Runs `body` eagerly, or as the session's captured graph for `key`
   /// when `graph` is set. A prefix may leave its work queued so the host
   /// can wait for disk reads while the GPU computes it.
+  /// `bump`: the body ends with BumpDone (inside a captured graph), and the
+  /// caller waits with WaitBumped instead of Wait.
   bool Run(Session& session, std::uint64_t key, bool graph,
            const std::function<bool()>& body, std::string* error_msg,
-           bool synchronize = true) const;
+           bool synchronize = true, bool bump = false) const;
 
   const DeviceModel* model_{nullptr};
   NgramTable* ngram_{nullptr};
@@ -553,6 +560,11 @@ private:
   mutable std::uint32_t routed_tile_rows_{48};  ///< token rows per tile
   mutable int routed_tile_cols_{0};
   float* logits_host_{nullptr};
+  float* frontier_host_{nullptr};  ///< deferred rollback frontier row
+  /// Successful flag waits so far, and the count when the frontier copy was
+  /// queued: any later wait means the copy has landed.
+  mutable std::uint64_t waits_completed_{0};
+  mutable std::uint64_t frontier_ticket_{0};
   /// Options::draft_vocab: the draft head scores only these output rows (a copy
   /// of the selected rows of the output head); draft_ids_ maps a subset row
   /// back to its token id. Empty = the full vocabulary.
@@ -570,6 +582,10 @@ private:
   /// on Windows. Falls back to hipStreamSynchronize after 1 s (and so still
   /// reports a failed launch).
   [[nodiscard]] bool Wait(const char* what, std::string* error_msg) const;
+  /// Waits for work that ended with BumpDone (see Run).
+  [[nodiscard]] bool WaitBumped(const char* what, std::string* error_msg) const;
+  [[nodiscard]] bool WaitFlag(std::uint32_t want, const char* what,
+                              std::string* error_msg) const;
   /// While capturing or running a verify body: append the candidate
   /// selection of every logit row (Forward's verify_candidates).
   mutable bool candidates_in_body_{false};

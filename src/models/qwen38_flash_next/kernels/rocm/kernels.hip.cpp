@@ -5540,6 +5540,42 @@ void SignalDone(std::uint32_t* flag, std::uint32_t value, hipStream_t stream) {
 }
 
 namespace {
+__global__ void BumpDoneKernel(volatile std::uint32_t* flag) {
+  __threadfence_system();
+  *flag = *flag + 1;
+  __threadfence_system();
+}
+}  // namespace
+
+void BumpDone(std::uint32_t* flag, hipStream_t stream) {
+  hipLaunchKernelGGL(BumpDoneKernel, dim3(1), dim3(1), 0, stream, flag);
+}
+
+namespace {
+__global__ void WaitHostKernel(volatile std::uint32_t* flag,
+                               std::uint32_t want) {
+  while (*flag != want) {
+    __builtin_amdgcn_s_sleep(2);
+  }
+  __threadfence_system();
+}
+}  // namespace
+
+void WaitHost(std::uint32_t* flag, std::uint32_t want, hipStream_t stream) {
+  hipLaunchKernelGGL(WaitHostKernel, dim3(1), dim3(1), 0, stream, flag, want);
+}
+
+namespace {
+__global__ void GpuStampKernel(std::uint64_t* slot) {
+  *slot = wall_clock64();
+}
+}  // namespace
+
+void GpuStamp(std::uint64_t* slot, hipStream_t stream) {
+  hipLaunchKernelGGL(GpuStampKernel, dim3(1), dim3(1), 0, stream, slot);
+}
+
+namespace {
 __global__ void GatherRowsKernel(const std::uint32_t* __restrict__ src,
                                  std::uint32_t* __restrict__ dst,
                                  const std::int32_t* __restrict__ ids,
