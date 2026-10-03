@@ -345,7 +345,8 @@ struct Encoder::Impl {
     expect("clip.vision.attention.head_count", kHeads);
     expect("clip.vision.spatial_merge_size", 2);
     expect("clip.vision.image_size", 768);
-    if ((width != 5120 && width != 2560) ||
+    // 5120 Qwen3.8-27B, 2560 Flash-Next, 2048 Qwen3.6-35B-A3B.
+    if ((width != 5120 && width != 2560 && width != 2048) ||
         reader->GetMetadataString("general.architecture") != "clip" ||
         reader->GetMetadataString("general.type") != "mmproj" ||
         reader->GetMetadataBool("clip.has_vision_encoder") != true ||

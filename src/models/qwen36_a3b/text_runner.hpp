@@ -30,6 +30,9 @@ struct ServeConfig {
   bool latin_draft_vocab{false};
   /// --prompt-lookup: drafts copied from the context (12-token matches).
   bool prompt_lookup{false};
+  /// --mmproj: the Qwen3.6 vision sidecar (BF16, projection 2048). Empty
+  /// looks for mmproj-BF16.gguf beside the model, as the Qwen loader does.
+  std::string vision_model_path;
 };
 
 /// True for the GGUF architecture this runtime serves.

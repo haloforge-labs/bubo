@@ -400,10 +400,10 @@ bool Engine::WideAttention(const Layer& l, __half* k_cache, __half* v_cache,
                   stream_);
   fn::RmsNormRows(s.k, l.attn_k_norm.f32(), s.k, n * c_.kv_heads, d, 1, c_.eps,
                   stream_);
-  fn::Rope(s.q, n, c_.heads, d, c_.rotary_dim, pos_dev_, c_.rope_theta,
-           stream_);
+  fn::Rope(s.q, n, c_.heads, d, c_.rotary_dim, pos_dev_, c_.rope_theta, stream_,
+           rope_);
   fn::Rope(s.k, n, c_.kv_heads, d, c_.rotary_dim, pos_dev_, c_.rope_theta,
-           stream_);
+           stream_, rope_);
   fn::StoreKv(s.k, k_cache, n, kv, pos_dev_, stream_);
   fn::StoreKv(s.v, v_cache, n, kv, pos_dev_, stream_);
   StoreVt(v_cache, vt_cache, pos_dev_, n, c_.kv_heads, options_.max_context,
@@ -693,6 +693,7 @@ bool Engine::WideTrunk(std::uint32_t n, std::string* error) {
   };
   fn::EmbedTokens(token_embd_.data, Small(token_embd_.type), s.tokens, s.res, n,
                   H, 1, stream_);
+  InjectImages(s.res, pos_, n);
   for (std::uint32_t i = 0; i < c_.layers; ++i) {
     const Layer& l = layers_[i];
     if (l.linear && (debug & 4u)) {

@@ -19,6 +19,11 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/models/qwen36_a3b/decode_kernels.hpp"
 
+namespace gufo::models::qwen::vision {
+class DeviceInput;
+struct DeviceRope;
+}  // namespace gufo::models::qwen::vision
+
 /// Qwen3.6-35B-A3B (qwen35moe) exploration runtime: hybrid Gated DeltaNet /
 /// gated attention trunk with a 256-expert top-8 MoE and a gated shared
 /// expert. Built from Flash-Next's kernel launchers, never modifying them.
@@ -182,6 +187,13 @@ public:
   void PrintProfile() const;
   /// Changes the ablation mask and drops the captured decode graph.
   void SetSkip(std::uint32_t mask);
+  hipStream_t stream() const { return stream_; }
+  /// Image input of the current request (null = none): its embeddings
+  /// replace the image-pad rows' token embeddings in every prefill, and its
+  /// mRoPE layout rotates the trunk's and the MTP block's attention. Call
+  /// again after reconfiguring `input`; graphs are rebuilt when the device
+  /// layout moves.
+  void SetVision(qwen::vision::DeviceInput* input);
 
   // --- Speculative decoding with the file's MTP block (fused path only). ---
   bool HasMtp() const { return c_.nextn > 0; }
@@ -287,7 +299,14 @@ private:
   /// target_h_ (the MTP seed); `snapshots` records GDN rollback rows.
   void BodyFused(std::uint32_t n, std::uint32_t rows,
                  const std::int32_t* tokens, const std::uint32_t* pos,
-                 bool capture, bool snapshots);
+                 bool capture, bool snapshots,
+                 std::uint32_t inject_pos = kNoInject);
+  /// BodyFused without image embeddings (decode and verify passes).
+  static constexpr std::uint32_t kNoInject = 0xFFFFFFFFu;
+  /// Image embeddings over prefill rows [pos, pos + n) of `res` (eager).
+  void InjectImages(float* res, std::uint32_t pos, std::uint32_t n);
+  /// Drops every captured graph (decode and speculative).
+  void DropGraphs();
   void FusedGdn(const Layer& l, std::uint32_t idx, std::uint32_t n,
                 bool snapshots);
   void FusedAttention(const Layer& l, __half* k_cache, __half* v_cache,
@@ -426,6 +445,8 @@ private:
   std::vector<Layer> layers_;
   MtpLayer mtp_;
   hipStream_t stream_{nullptr};
+  qwen::vision::DeviceInput* vision_{nullptr};
+  const qwen::vision::DeviceRope* rope_{nullptr};
 
   // Per-layer state (indexed by layer; unused slots stay null).
   std::vector<float*> conv_state_, ssm_state_;

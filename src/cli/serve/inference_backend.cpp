@@ -2989,10 +2989,6 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
 #if defined(GUFO_WITH_A3B)
   if (models::qwen36_a3b::IsA3bArchitecture(
           reader->GetMetadataString("general.architecture").value_or(""))) {
-    if (!vision_model_path.empty()) {
-      SetError(error, "Qwen3.6-35B-A3B has no image input (--mmproj)");
-      return false;
-    }
     if (session_count != 1) {
       SetError(error, "Qwen3.6-35B-A3B serves one session (--sessions 1)");
       return false;
@@ -3003,6 +2999,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
     a3b.survival = speculative_config.mtp_survival;
     a3b.latin_draft_vocab = speculative_config.mtp_latin_draft_vocabulary;
     a3b.prompt_lookup = speculative_config.prompt_lookup;
+    a3b.vision_model_path = vision_model_path;
     switch (speculative_config.backend) {
       case TextSpeculativeBackend::kDisabled:
         break;

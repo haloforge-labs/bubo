@@ -21,6 +21,8 @@
 
 #include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen/tokenizer.hpp"
+#include "src/models/qwen/vision/device_input.hpp"
+#include "src/models/qwen/vision/encoder.hpp"
 #include "src/models/qwen/vision/prompt.hpp"
 #include "src/models/qwen36_a3b/engine.hpp"
 #include "src/models/qwen36_a3b/prompt_lookup.hpp"
@@ -92,9 +94,34 @@ std::vector<std::int32_t> LatinTextVocabulary(
   return ids;
 }
 
+/// A request's images: gufo serve carries this with the tokens, and the
+/// runner binds it in SetPromptContext.
+struct ImageContext final : server::TextPromptContext {
+  std::shared_ptr<const qwen::vision::Prompt> prompt;
+};
+
+/// An image whose pad rows a KV lineage holds: its grid and the identity of
+/// the prompt through it (pixels, placement, encoder). Image-pad tokens are
+/// all the same ID, so rows are reusable only when these match too.
+struct KvImage {
+  qwen::vision::ImageGrid grid;
+  std::array<std::uint8_t, 32> identity{};
+  bool operator==(const KvImage&) const = default;
+};
+
+std::vector<KvImage> ImagesBelow(std::span<const KvImage> images,
+                                 std::size_t tokens) {
+  std::vector<KvImage> below;
+  for (const auto& image : images)
+    if (image.grid.offset < tokens)
+      below.push_back(image);
+  return below;
+}
+
 struct Model {
   std::unique_ptr<Engine> engine;
   std::unique_ptr<tokenization::QwenTokenizer> tokenizer;
+  std::shared_ptr<qwen::vision::Encoder> encoder;  // null: text only
   std::optional<tokenization::TokenId> im_end;
   ServeConfig config;
   std::uint32_t limit{0};  // usable context (verify headroom kept free)
@@ -108,6 +135,7 @@ public:
   void Invalidate() noexcept override {
     model->engine->Reset();
     kv.clear();
+    kv_images.clear();
     has_frontier = false;
     lookup.Clear();
   }
@@ -121,6 +149,13 @@ public:
   void Wrote(std::uint32_t pos, std::span<const std::int32_t> tokens) {
     kv.resize(pos);
     kv.insert(kv.end(), tokens.begin(), tokens.end());
+    std::erase_if(kv_images,
+                  [&](const KvImage& i) { return i.grid.offset >= pos; });
+    if (prompt != nullptr) {
+      for (const auto& image : prompt->images)
+        if (image.grid.offset >= pos && image.grid.offset < pos + tokens.size())
+          kv_images.push_back({image.grid, image.prefix_identity});
+    }
   }
 
   std::shared_ptr<Model> model;
@@ -131,6 +166,11 @@ public:
   std::uint32_t frontier_row{0};
   bool has_frontier{false};
   PromptLookup lookup{kLookupMinMatch};
+  /// The bound request's images (null: none) and their device input.
+  std::shared_ptr<const qwen::vision::Prompt> prompt;
+  qwen::vision::DeviceInput vision;
+  /// The images among the rows of `kv`, in order.
+  std::vector<KvImage> kv_images;
 };
 
 class StateSnapshot final : public server::TextRunnerSnapshot {
@@ -142,6 +182,7 @@ public:
   const Model* owner{nullptr};
   std::vector<std::uint8_t> state;
   std::vector<std::int32_t> tokens;
+  std::vector<KvImage> images;  // among `tokens`
   Candidates frontier{};
   std::vector<float> logits;  // the frontier row
 };
@@ -218,12 +259,40 @@ public:
 
   [[nodiscard]] std::optional<server::TextPreparedPrompt> PreparePrompt(
       const server::ChatRequest& request) const override {
-    for (const auto& message : request.messages)
-      if (!message.images.empty())
-        throw std::invalid_argument("Qwen3.6-35B-A3B has no image input");
-    auto prompt = Prepare(request);
-    return server::TextPreparedPrompt{
-        std::move(prompt.tokens), {}, prompt.stable_prefix_tokens};
+    auto prompt = std::make_shared<qwen::vision::Prompt>(Prepare(request));
+    const auto cache_prefix = prompt->stable_prefix_tokens;
+    if (prompt->images.empty())
+      return server::TextPreparedPrompt{
+          std::move(prompt->tokens), {}, cache_prefix};
+    // The image rows' identities key gufo serve's prompt cache, as for the
+    // Qwen3.8 models (inference_backend.cpp PrepareQwenPrompt).
+    auto context = std::make_shared<ImageContext>();
+    context->cache_identity = prompt->cache_identity;
+    for (const auto& image : prompt->images) {
+      const auto identity = prompt->IdentityForPrefix(image.grid.offset);
+      context->cache_prefixes.push_back(
+          {image.grid.offset, {identity.begin(), identity.end()}});
+    }
+    context->prompt = prompt;
+    return server::TextPreparedPrompt{prompt->tokens, std::move(context),
+                                      cache_prefix};
+  }
+
+  void SetPromptContext(
+      server::TextRunnerState& state,
+      std::shared_ptr<const server::TextPromptContext> context) const override {
+    auto& s = Require(state);
+    std::shared_ptr<const qwen::vision::Prompt> prompt;
+    if (context != nullptr) {
+      const auto* image = dynamic_cast<const ImageContext*>(context.get());
+      if (image == nullptr)
+        throw std::invalid_argument("invalid A3B prompt context");
+      prompt = image->prompt;
+      prompt->rope.Validate(m_->limit);
+    }
+    s.prompt = prompt;
+    s.vision.Configure(std::move(prompt), m_->encoder, s.engine().stream());
+    s.engine().SetVision(&s.vision);
   }
 
   [[nodiscard]] server::TextGenerationBackend::InitialOutputState
@@ -269,7 +338,15 @@ public:
                                     prompt.begin() + offset + n);
     std::string error;
     const auto pos = s.position();
-    if (!s.engine().SpecPrefill(chunk, &s.frontier, &error)) {
+    bool ok = false;
+    try {
+      ok = s.engine().SpecPrefill(chunk, &s.frontier, &error);
+    } catch (...) {
+      // Image encoding failed or was cancelled part-way through the chunk.
+      s.Invalidate();
+      throw;
+    }
+    if (!ok) {
       s.Invalidate();
       Check(false, "prefill", error);
     }
@@ -345,6 +422,7 @@ public:
     snapshot->state.resize(s.engine().StateBytes());
     const auto history = s.history();
     snapshot->tokens.assign(history.begin(), history.end());
+    snapshot->images = ImagesBelow(s.kv_images, history.size());
     snapshot->frontier = s.frontier;
     snapshot->logits.resize(s.engine().config().vocab);
     std::string error;
@@ -368,7 +446,8 @@ public:
     // them only over the same tokens. Otherwise rebuild it by prefill.
     const bool rows_valid =
         s.kv.size() >= snap->tokens.size() &&
-        std::equal(snap->tokens.begin(), snap->tokens.end(), s.kv.begin());
+        std::equal(snap->tokens.begin(), snap->tokens.end(), s.kv.begin()) &&
+        ImagesBelow(s.kv_images, snap->tokens.size()) == snap->images;
     if (rows_valid) {
       if (!s.engine().LoadState(snap->state, &error) ||
           !s.engine().SetRowLogits(snap->logits.data(), &error)) {
@@ -377,13 +456,31 @@ public:
       }
       s.frontier = snap->frontier;
     } else {
+      // The rebuild embeds the bound request's images, which must be the
+      // snapshot's (gufo serve matches their identities before restoring).
+      std::vector<KvImage> bound;
+      if (s.prompt != nullptr)
+        for (const auto& image : s.prompt->images)
+          bound.push_back({image.grid, image.prefix_identity});
+      if (ImagesBelow(bound, snap->tokens.size()) != snap->images)
+        throw std::invalid_argument(
+            "A3B snapshot images do not match the request");
       s.engine().Reset();
       s.kv.clear();
-      if (!s.engine().SpecPrefill(snap->tokens, &s.frontier, &error)) {
+      s.kv_images.clear();
+      bool ok = false;
+      try {
+        ok = s.engine().SpecPrefill(snap->tokens, &s.frontier, &error);
+      } catch (...) {
+        s.Invalidate();
+        throw;
+      }
+      if (!ok) {
         s.Invalidate();
         Check(false, "snapshot rebuild", error);
       }
       s.kv = snap->tokens;
+      s.kv_images = snap->images;
     }
     s.frontier_row = 0;
     s.has_frontier = true;
@@ -407,12 +504,20 @@ private:
   }
 
   qwen::vision::Prompt Prepare(const server::ChatRequest& request) const {
+    const bool images = std::ranges::any_of(
+        request.messages, [](const auto& m) { return !m.images.empty(); });
+    if (images && m_->encoder == nullptr)
+      throw std::invalid_argument(
+          "image input requires the Qwen3.6 vision sidecar (--mmproj "
+          "mmproj-BF16.gguf)");
     return qwen::vision::Prepare(
         *m_->tokenizer, request.messages,
         request.tool_choice == server::ChatRequest::ToolChoice::kNone
             ? std::span<const tokenization::ChatTool>{}
             : std::span<const tokenization::ChatTool>{request.tools},
-        ChatOptions(request), {}, m_->limit);
+        ChatOptions(request),
+        images ? std::string_view(m_->encoder->identity()) : std::string_view{},
+        m_->limit);
   }
 
   /// Steps without MTP drafts still feed the MTP block when it drafts.
@@ -644,6 +749,14 @@ std::shared_ptr<server::TextModelRunner> CreateTextRunner(
   if (model->tokenizer == nullptr)
     return nullptr;
   model->im_end = model->tokenizer->FindSpecialToken("<|im_end|>");
+  try {
+    model->encoder = qwen::vision::Encoder::Open(
+        model_path, config.vision_model_path, model->engine->config().hidden);
+  } catch (const std::exception& e) {
+    if (error != nullptr)
+      *error = std::string("vision sidecar: ") + e.what();
+    return nullptr;
+  }
   model->limit = context;
   model->model_id = model->engine->gguf()
                         .GetMetadataString("general.name")

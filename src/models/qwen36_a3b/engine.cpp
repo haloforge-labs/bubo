@@ -17,6 +17,7 @@
 #include <thread>
 
 #include "qfn_mmq.h"
+#include "src/models/qwen/vision/device_input.hpp"
 #include "src/models/qwen36_a3b/attention.hpp"
 #include "src/models/qwen36_a3b/kernels.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
@@ -855,9 +856,9 @@ void Engine::Attention(const Layer& l, std::uint32_t idx, std::uint32_t n) {
     fn::RmsNormRows(k_, l.attn_k_norm.f32(), k_, n * c_.kv_heads, c_.head_dim,
                     1, c_.eps, stream_);
     fn::Rope(q_, n, c_.heads, c_.head_dim, c_.rotary_dim, pos_dev_,
-             c_.rope_theta, stream_);
+             c_.rope_theta, stream_, rope_);
     fn::Rope(k_, n, c_.kv_heads, c_.head_dim, c_.rotary_dim, pos_dev_,
-             c_.rope_theta, stream_);
+             c_.rope_theta, stream_, rope_);
     fn::StoreKv(k_, k_cache_[idx], n, kv, pos_dev_, stream_);
     fn::StoreKv(v_, v_cache_[idx], n, kv, pos_dev_, stream_);
     fn::Attention(q_, k_cache_[idx], v_cache_[idx], nullptr, 0, ctx_, partials_,
@@ -948,6 +949,34 @@ void Engine::SetSkip(std::uint32_t mask) {
   decode_exec_ = nullptr;
   decode_warm_ = false;
   options_.skip = mask;
+}
+
+void Engine::DropGraphs() {
+  (void)hipStreamSynchronize(stream_);
+  if (decode_exec_ != nullptr)
+    (void)hipGraphExecDestroy(decode_exec_);
+  decode_exec_ = nullptr;
+  decode_warm_ = false;
+  for (auto& [key, exec] : spec_graphs_)
+    (void)hipGraphExecDestroy(exec);
+  spec_graphs_.clear();
+  spec_warm_.clear();
+}
+
+void Engine::SetVision(qwen::vision::DeviceInput* input) {
+  vision_ = input;
+  // The descriptor's address is baked into captured graphs; its contents
+  // (positions, delta) follow each request without a recapture.
+  const auto* rope = input != nullptr ? input->rope() : nullptr;
+  if (rope != rope_) {
+    DropGraphs();
+    rope_ = rope;
+  }
+}
+
+void Engine::InjectImages(float* res, std::uint32_t pos, std::uint32_t n) {
+  if (vision_ != nullptr)
+    vision_->Inject(res, pos, n, c_.hidden, 1, stream_);
 }
 
 void Engine::Mark(Phase phase) {
@@ -1089,7 +1118,7 @@ void Engine::FusedAttention(const Layer& l, __half* k_cache, __half* v_cache,
     (void)fn::PrepareAttention(
         packed_, stride, l.attn_q_norm.f32(), l.attn_k_norm.f32(), q_, gate_,
         k_cache, v_cache, n, c_.heads, c_.kv_heads, c_.head_dim, c_.rotary_dim,
-        pos, c_.rope_theta, c_.eps, stream_);
+        pos, c_.rope_theta, c_.eps, stream_, rope_);
     StoreVt(v_cache, vt_cache, pos, n, c_.kv_heads, options_.max_context,
             stream_);
     if (options_.fn_attention ||
@@ -1167,11 +1196,13 @@ void Engine::FusedMoe(const Layer& l, float* res, std::uint32_t n) {
 
 void Engine::BodyFused(std::uint32_t n, std::uint32_t rows,
                        const std::int32_t* tokens, const std::uint32_t* pos,
-                       bool capture, bool snapshots) {
+                       bool capture, bool snapshots, std::uint32_t inject_pos) {
   const std::uint32_t H = c_.hidden;
   Mark(kPhEmbed);
   fn::EmbedTokens(token_embd_.data, Small(token_embd_.type), tokens, res_, n, H,
                   1, stream_);
+  if (inject_pos != kNoInject)
+    InjectImages(res_, inject_pos, n);
   const std::uint32_t parts = options_.fused_parts;
   for (std::uint32_t i = 0; i < c_.layers; ++i) {
     const Layer& l = layers_[i];
@@ -1380,7 +1411,7 @@ bool Engine::SpecPrefill(std::span<const std::int32_t> tokens, Candidates* last,
                            hipMemcpyHostToDevice, stream_),
             "position upload", error))
       return false;
-    BodyFused(n, final ? 1 : 0, tokens_dev_, pos_dev_, mtp, false);
+    BodyFused(n, final ? 1 : 0, tokens_dev_, pos_dev_, mtp, false, pos_);
     if (df_ && !DFlashInject(n, pos_, end, false, pos_dev_, error))
       return false;
     if (mtp) {
