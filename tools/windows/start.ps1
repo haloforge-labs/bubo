@@ -262,6 +262,7 @@ function Get-TargetPlanBase($Target) {
     }
     "a3b" {
       $drafts = @(Get-GufoCompanions $Target $all "dflash" | ForEach-Object { $_.Record })
+      $vision = @(Get-GufoCompanions $Target $all "mmproj" | ForEach-Object { $_.Record }) | Select-Object -First 1
       $extras = @("--mtp-policy", "survival", "--mtp-draft-vocab", "latin")
       if ($Target.HasMtp) {
         $modes += @{ Label = "MTP 6 + survival + Latin draft vocab + prompt lookup (fastest measured)"; Draft = $false; Env = @{}

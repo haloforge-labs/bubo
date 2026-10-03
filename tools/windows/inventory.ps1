@@ -234,7 +234,7 @@ function Get-GufoFamilyInfo([string]$Family) {
       Overhead = 3.0 } }
     "a3b" { @{
       Title = "Qwen3.6-35B-A3B"; ServedName = "a3b"; DefaultContext = 131072
-      Download = 'hf download unsloth/Qwen3.6-35B-A3B-MTP-GGUF Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf'
+      Download = 'hf download unsloth/Qwen3.6-35B-A3B-MTP-GGUF Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf; hf download unsloth/Qwen3.6-35B-A3B-GGUF mmproj-BF16.gguf'
       DraftDownload = 'hf download unsloth/Qwen3.6-35B-A3B-MTP-GGUF Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf'
       Overhead = 3.0 } }
   }

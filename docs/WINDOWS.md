@@ -5,6 +5,14 @@ distribution for gfx1151 (Ryzen AI Max+ 395 / Radeon 8060S). No WSL. Linux
 builds are unaffected: the port lives in `compat/win32`, Windows-only files and
 `_WIN32` branches.
 
+## Prebuilt
+
+Each [release](https://github.com/pixmaate/gufo/releases) carries
+`gufo-windows-<date>.zip`: `gufo.exe` with the ROCm, vcpkg and Visual C++
+runtimes in `bin\`, and `start.cmd`. It needs only a Strix Halo (gfx1151)
+machine, a current AMD driver and the models; its `README.txt` lists the
+downloads. `tools\windows\package.ps1` makes the zip from a release build.
+
 ## Prerequisites
 
 | Piece | Default location | Notes |
@@ -37,6 +45,18 @@ and runtime traps such as a busy port, a server that is already running, or
 `GUFO_*` switches left in the shell.
 
 ## Starting a server
+
+`start.cmd` (repository root, or the prebuilt folder) is the quick launcher:
+it lists the servable models it finds with their drafts and vision sidecars,
+a number key picks one, number keys toggle its features (speculative
+decoding, prompt lookup, survival stopping, the Latin draft vocabulary,
+images, thinking, context, network access) and Enter starts the server.
+Everything exact and measured faster is on by default; the Latin draft
+vocabulary is the one opt-in (about 5% faster for English, identical output).
+`start.cmd -Last` repeats the previous choice, `-DryRun` prints the command.
+Choices are kept in `%LOCALAPPDATA%\gufo\launcher.json`.
+
+The full launcher asks question by question instead:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\windows\start.ps1          # pick a model; Enter = recommended
