@@ -11,6 +11,7 @@ vcpkg libraries
   ICU (icu*.dll) - Unicode License V3
   libpng (libpng16) - PNG Reference Library License
   libjpeg-turbo (jpeg62) - IJG / BSD-3-Clause
+  WebP (libwebp*.dll, libsharpyuv.dll) - BSD-3-Clause (licenses/libwebp.txt)
   zlib, and any other vcpkg runtime DLL present - their own permissive licenses
 Microsoft Visual C++ runtime (msvcp140*.dll, vcruntime140*.dll) and the LLVM
 OpenMP runtime (libomp140.x86_64.dll)

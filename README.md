@@ -7,7 +7,13 @@
 Gufo is a vertical local inference engine specifically built and optimized for the AMD Strix Halo hardware:
 Ryzen AI MAX+ 395 systems with Radeon 8060S (`gfx1151`), up to 128 GiB of unified memory.
 
-**Contrinutions are welcome!**
+**Contributions are welcome!**
+
+See the [changelog](CHANGELOG.md) and [GitHub Releases](https://github.com/gufo-org/gufo/releases)
+for user-facing changes and release history.
+
+> [!TIP]
+> This tree combines upstream v0.6.0 with the **[Windows port](https://github.com/pixmaate/gufo)**. **[Gufo RDMA for Dual Strix Halo](https://github.com/neuhaus/gufo)** is a separate variant.
 
 ## Models and benchmarks
 
@@ -155,7 +161,7 @@ not production build or runtime requirements.
 | --- | --- |
 | ROCm HIP compiler/runtime, hipBLAS, hipBLASLt, rocBLAS | GPU execution and matrix multiplication |
 | hipCUB, rocPRIM, rocWMMA headers | Compiled GPU kernels |
-| ICU, libcurl, OpenSSL, libpng, libjpeg | Tokenization, HTTPS, hashing and images |
+| ICU, libcurl, OpenSSL, libpng, libjpeg, libwebp | Tokenization, HTTPS, hashing and images |
 | FFmpeg and ffprobe | Video/audio output; invoked as separate executables |
 
 Install ROCm using [AMD's Linux instructions](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/).
@@ -166,7 +172,7 @@ For example, on Debian/Ubuntu the ordinary system libraries are:
 
 ```sh
 sudo apt install build-essential cmake ninja-build pkg-config \
-  libicu-dev libcurl4-openssl-dev libssl-dev libpng-dev libjpeg-dev ffmpeg
+  libicu-dev libcurl4-openssl-dev libssl-dev libpng-dev libjpeg-dev libwebp-dev ffmpeg
 
 # ROCm libraries from the table, named as AMD's repository ships them.
 sudo apt install hipblas-dev hipblaslt-dev rocblas-dev \

@@ -29,8 +29,9 @@ build\release\gufo.exe serve llm --model Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf `
 | `--mtp-draft-vocab latin` | The draft head covers Latin-text tokens only (Flash-Next's rule); drafts only. |
 | `--prompt-lookup` | Drafts copied from the context after a 12-token match. |
 
-One session (`--sessions 1`); no images; the disk cache is off for this
-model. The prompt cache keeps the recurrent state (~130 MB per snapshot) and
+One session (`--sessions 1`); image input uses the Qwen3.6 BF16 vision sidecar
+(`--mmproj`, or mmproj-BF16.gguf beside the model); the disk cache is off for
+this model. The prompt cache keeps the recurrent state (~130 MB per snapshot) and
 reuses the KV rows in place.
 
 ## Exactness

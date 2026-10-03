@@ -17,6 +17,7 @@
 #include <span>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <type_traits>
 #include <utility>
 
@@ -31,6 +32,8 @@
 #include "src/models/qwen/generator.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
+#include "src/core/hip/device_probe.hpp"
+#include "src/core/hip/hip_utils.hpp"
 #include "src/core/platform/device_memory.hpp"
 #include "src/core/speculative/speculative_verifier.hpp"
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
@@ -56,6 +59,82 @@ void SetError(std::string* error, std::string message) {
 }
 
 #if defined(ENGINE_ENABLE_HIP)
+
+std::optional<ChatRequest> ConstrainChatRequest(
+    const ChatRequest& request, const TextModelRunner& runner,
+    sampling::SamplingConfig* sampling) {
+  if (!request.response_format &&
+      (request.tools.empty() ||
+       request.tool_choice == ChatRequest::ToolChoice::kNone))
+    return std::nullopt;
+  auto constrained = request;
+  auto instruction = request.response_format ? request.response_format->prompt()
+                                             : std::string();
+  auto grammar = request.response_format;
+  if (!request.tools.empty() &&
+      request.tool_choice != ChatRequest::ToolChoice::kNone) {
+    std::vector<sampling::JsonConstraint::Tool> tools;
+    std::vector<std::pair<json::Value, bool>> schemas;
+    const bool required =
+        request.tool_choice == ChatRequest::ToolChoice::kRequired;
+    auto format = runner.ToolFormat();
+    for (const auto& tool : request.tools) {
+      const auto definition = tool.definition_json.empty()
+                                  ? json::Value()
+                                  : json::parse(tool.definition_json);
+      const auto* function = definition.find("function");
+      const auto* strict = function ? function->find("strict") : nullptr;
+      const bool enforce = strict && strict->as_bool();
+      auto schema = json::parse(tool.parameters_json);
+      auto native = sampling::JsonConstraint::ToolParameters(schema, enforce,
+                                                             format, required);
+      tools.emplace_back(tool.name, std::move(native));
+      schemas.emplace_back(std::move(schema), enforce);
+    }
+    if (std::ranges::any_of(
+            tools, [](const auto& tool) { return tool.second == nullptr; })) {
+      format = sampling::JsonConstraint::ToolFormat::kJson;
+      // Compile the fallback only when native parameter tags cannot represent
+      // these values. Normal native requests reuse the cached grammar directly.
+      for (std::size_t i = 0; i < tools.size(); ++i)
+        tools[i].second = sampling::JsonConstraint::ToolParameters(
+            schemas[i].first, schemas[i].second, format);
+    }
+    grammar = sampling::JsonConstraint::WithTools(
+        grammar, std::move(tools), required,
+        !request.response_format && request.parallel_tool_calls, format);
+    if (format == sampling::JsonConstraint::ToolFormat::kJson)
+      instruction +=
+          "\nIf a tool is needed, respond using the JSON tool-call form "
+          "<tool_call>{\"name\":\"function_name\",\"arguments\":{...}}</"
+          "tool_call>. "
+          "Tool arguments must follow the chosen function's schema.";
+    if (request.response_format)
+      instruction += " The JSON response schema applies to the final answer.";
+  }
+  if (!request.response_format_description.empty())
+    instruction.insert(0, request.response_format_description + "\n\n");
+  if (instruction.empty()) {
+    // Native constraints follow the model's existing template. In particular
+    // they do not change prompt tokens or invalidate continuation checkpoints.
+  } else if (!constrained.messages.empty() &&
+             (constrained.messages.front().role ==
+                  tokenization::ChatRole::kSystem ||
+              constrained.messages.front().role ==
+                  tokenization::ChatRole::kDeveloper)) {
+    constrained.messages.front().content += "\n\n" + instruction;
+  } else {
+    constrained.messages.insert(
+        constrained.messages.begin(),
+        tokenization::ChatMessage{tokenization::ChatRole::kSystem,
+                                  instruction});
+  }
+  if (runner.InitialOutputState(request) ==
+      TextGenerationBackend::InitialOutputState::kReasoning)
+    grammar = sampling::JsonConstraint::WithReasoning(grammar);
+  sampling->constraint = runner.BindConstraint(grammar);
+  return constrained;
+}
 
 struct QwenImageContext final : TextPromptContext {
   std::shared_ptr<const models::qwen::vision::Prompt> prompt;
@@ -257,6 +336,9 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
            << tokenization::QwenChatTemplate::OfficialTemplateSha256() << '\n'
            << "state_abi=" << state_abi << '\n'
            << "payload_layout=qwen-gfx1151-live-prefix-v3\n"
+           // Older learned boundaries could keep logits from an earlier
+           // prefix. Their payload has no readiness tag to distinguish them.
+           << "checkpoint_frontier=complete-prefix-v1\n"
            << "numerics=qwen-bf16-fp32-prefill-v1\n"
            << "rmsnorm=fused-square-sum-v1\n"
            << "prefill_attention=visible-causal-tail-v1\n"
@@ -508,7 +590,8 @@ public:
     if (!frontier_.has_value()) {
       throw std::logic_error("Qwen state has no next-token frontier");
     }
-    if (sampler.config().can_use_unmodified_argmax()) {
+    if (sampler.config().can_use_unmodified_argmax() ||
+        (verifier_ == nullptr && sampler.CanSelectArgmax(*frontier_))) {
       return *frontier_;
     }
     if (frontier_logits_.empty()) {
@@ -543,6 +626,10 @@ public:
     rollback_position_ = position_;
     rollback_tokens_.assign(1, *frontier_);
     rollback_logits_ = std::move(frontier_logits_);
+    // Verification keeps its own EOS handling: the tokenizer stop set already
+    // covers EOS, so a sentinel id here would change nothing. An ignore-EOS
+    // request instead publishes the stop token in AppendSpeculativeSelection
+    // and continues, at the cost of a window clipped on every EOS crossing.
     return {*verifier_,
             sequence_,
             static_cast<std::uint32_t>(position_),
@@ -708,7 +795,7 @@ private:
   bool AppendSpeculativeSelection(TextRunnerToken token,
                                   sampling::SamplerState& sampler,
                                   TextDecodeStep& result) {
-    if (model_->GetTokenizer().IsStopToken(token)) {
+    if (stop_at_eos() && model_->GetTokenizer().IsStopToken(token)) {
       result.stop = true;
       return false;
     }
@@ -790,8 +877,26 @@ const QwenTextRunnerState& RequireQwenState(const TextRunnerState& state) {
   return *qwen;
 }
 
-class QwenTextRunner final : public TextModelRunner {
+// Owns a four-byte device buffer and a private stream from load, so probing
+// a lost context needs no allocation. HIP context loss is sticky: after a GPU
+// reset even this memset fails with a hard error. Only such an error marks the
+// device lost; a memset still pending at the deadline may be queued behind
+// long kernels on the shared hardware queues, so it counts as usable.
+class HipTextModelRunner : public TextModelRunner {
 public:
+  [[nodiscard]] bool DeviceUsable() const override {
+    return device_probe_.DeviceUsable();
+  }
+
+private:
+  hip::DeviceUsabilityProbe device_probe_;
+};
+
+class QwenTextRunner final : public HipTextModelRunner {
+public:
+  sampling::JsonConstraint::ToolFormat ToolFormat() const override {
+    return sampling::JsonConstraint::ToolFormat::kQwen;
+  }
   QwenTextRunner(
       std::shared_ptr<const hip::QwenGpuModel> model, std::uint32_t max_context,
       std::shared_ptr<const hip::QwenDFlashGpuModel> dflash_model = nullptr,
@@ -858,12 +963,18 @@ public:
         hipSuccess) {
       capacity = free_bytes;
     }
+    // Snapshot buffers are device allocations, but on a unified-memory APU
+    // they are carved from the same RAM as every host allocation, and HIP's
+    // free figure does not see host pressure. Cap them by the host budget too.
+    std::size_t snapshot_capacity = HostSnapshotBudgetBytes();
+    if (capacity.has_value())
+      snapshot_capacity = std::min(snapshot_capacity, *capacity);
     return {
         .resident_weights_bytes = resident_weights,
         .state_capacity_bytes = capacity,
         .per_request_state_bytes = usage.request_state_bytes,
         .temporary_scratch_bytes = usage.temporary_scratch_bytes,
-        .retained_snapshot_capacity_bytes = capacity,
+        .retained_snapshot_capacity_bytes = snapshot_capacity,
         .requires_device_runtime_lock = true,
     };
   }
@@ -884,6 +995,16 @@ public:
       });
     }
     return plans;
+  }
+
+  [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary>
+  BuildConstraintVocabulary() const override {
+    return std::make_shared<const sampling::ConstraintVocabulary>(
+        model_->GetTokenizer().GetVocabSize(), [this](std::uint32_t id) {
+          const auto& tokenizer = model_->GetTokenizer();
+          return sampling::ConstraintVocabulary::Piece{
+              tokenizer.DecodeTokenCopy(id), tokenizer.IsStopToken(id)};
+        });
   }
 
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
@@ -1004,7 +1125,7 @@ public:
       TextRunnerState& state, sampling::SamplerState& sampler) const override {
     auto& qwen = RequireQwenState(state);
     const TextRunnerToken token = qwen.SelectFrontier(sampler);
-    if (model_->GetTokenizer().IsStopToken(token)) {
+    if (qwen.stop_at_eos() && model_->GetTokenizer().IsStopToken(token)) {
       return {
           .stop = true,
           .token = 0,
@@ -1526,8 +1647,11 @@ const DeepSeekTextRunnerState& RequireDeepSeekState(
   return *deepseek;
 }
 
-class DeepSeekTextRunner final : public TextModelRunner {
+class DeepSeekTextRunner final : public HipTextModelRunner {
 public:
+  sampling::JsonConstraint::ToolFormat ToolFormat() const override {
+    return sampling::JsonConstraint::ToolFormat::kDeepSeek;
+  }
   DeepSeekTextRunner(std::shared_ptr<models::deepseek_v4_flash::Model> model,
                      std::uint32_t max_context, bool use_dspark,
                      std::uint32_t max_draft_tokens,
@@ -1608,6 +1732,16 @@ public:
     return plans;
   }
 
+  [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary>
+  BuildConstraintVocabulary() const override {
+    return std::make_shared<const sampling::ConstraintVocabulary>(
+        model_->VocabSize(), [this](std::uint32_t id) {
+          return sampling::ConstraintVocabulary::Piece{
+              model_->DecodeToken(static_cast<int>(id)),
+              model_->IsStopToken(static_cast<int>(id))};
+        });
+  }
+
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
       std::string_view text) const override {
     return DeepSeekRunnerTokens(model_->Tokenize(text));
@@ -1660,20 +1794,15 @@ public:
         });
       }
     }
-    auto tokens = DeepSeekRunnerTokens(model_->EncodeChat(
-        messages, tools,
-        models::deepseek_v4_flash::ChatTemplateOptions{
-            .enable_thinking = request.reasoning.enabled.value_or(false),
-            .reasoning_effort =
-                request.reasoning.effort.value_or(ReasoningEffort::kLow),
-            .preserve_thinking =
-                request.reasoning.preserve_thinking.value_or(false),
-            .tools_present =
-                !request.tools.empty() &&
-                request.tool_choice != ChatRequest::ToolChoice::kNone,
-            .require_tool_call =
-                request.tool_choice == ChatRequest::ToolChoice::kRequired,
-        }));
+    auto options = models::deepseek_v4_flash::ResolveDeepSeekChatOptions(
+        request.reasoning);
+    options.tools_present =
+        !request.tools.empty() &&
+        request.tool_choice != ChatRequest::ToolChoice::kNone;
+    options.require_tool_call =
+        request.tool_choice == ChatRequest::ToolChoice::kRequired;
+    auto tokens =
+        DeepSeekRunnerTokens(model_->EncodeChat(messages, tools, options));
     if (tokens.empty()) {
       return std::nullopt;
     }
@@ -1682,7 +1811,9 @@ public:
 
   [[nodiscard]] TextGenerationBackend::InitialOutputState InitialOutputState(
       const ChatRequest& request) const override {
-    return request.reasoning.enabled.value_or(false)
+    return models::deepseek_v4_flash::ResolveDeepSeekChatOptions(
+               request.reasoning)
+                   .enable_thinking
                ? TextGenerationBackend::InitialOutputState::kReasoning
                : TextGenerationBackend::InitialOutputState::kContent;
   }
@@ -1782,7 +1913,7 @@ public:
       }
       token = static_cast<int>(sampler.Sample(logits));
     }
-    if (model_->IsStopToken(token)) {
+    if (deepseek.stop_at_eos() && model_->IsStopToken(token)) {
       return {
           .stop = true,
           .token = 0,
@@ -1819,7 +1950,8 @@ public:
       throw std::runtime_error("DeepSeek token preview failed: " + error);
     const auto token = sampler.Sample(logits);
     return TextDecodeSelection{
-        .stop = model_->IsStopToken(static_cast<int>(token)),
+        .stop = deepseek.stop_at_eos() &&
+                model_->IsStopToken(static_cast<int>(token)),
         .token = token,
         .piece = model_->DecodeToken(static_cast<int>(token)),
     };
@@ -1848,7 +1980,7 @@ public:
     std::string error;
     if (!deepseek.session().DsparkStep(
             max_tokens, max_draft_tokens_, &emitted, &error,
-            bridge ? bridge->hook() : nullptr, true)) {
+            bridge ? bridge->hook() : nullptr, deepseek.stop_at_eos())) {
       throw std::runtime_error("DeepSeek DSpark decode failed: " + error);
     }
     if (emitted.empty()) {
@@ -1862,7 +1994,7 @@ public:
     deepseek.set_position(deepseek.session().Position());
     step.selections.reserve(emitted.size());
     for (const int token : emitted) {
-      if (model_->IsStopToken(token)) {
+      if (deepseek.stop_at_eos() && model_->IsStopToken(token)) {
         step.stop = true;
         break;
       }
@@ -1931,15 +2063,21 @@ public:
           .max_draft_tokens = max_draft_tokens_,
           .emitted = &emitted[index],
           .sampler = bridges[index] ? bridges[index]->hook() : nullptr,
-          .stop_at_eos = true,
+          .stop_at_eos = states[index]->stop_at_eos(),
       };
     }
 
     std::string error;
+    bool interrupted = false;
     if (!model_->DsparkStepBatch(
             std::span<const models::deepseek_v4_flash::SessionDsparkBatchItem>(
                 items.data(), decodes.size()),
-            &error)) {
+            &error, &interrupted)) {
+      // Cancellation is rejected before sampling or device-state mutation.
+      // Isolate the cancelled row rather than failing every client in its
+      // batch. Ordinary cycles retain the shared physical batch.
+      if (interrupted)
+        return TextModelRunner::DecodeBatch(decodes);
       throw std::runtime_error("DeepSeek DSpark batch decode failed: " + error);
     }
 
@@ -1959,7 +2097,7 @@ public:
       states[index]->set_position(states[index]->session().Position());
       step.selections.reserve(emitted[index].size());
       for (const int token : emitted[index]) {
-        if (model_->IsStopToken(token)) {
+        if (states[index]->stop_at_eos() && model_->IsStopToken(token)) {
           step.stop = true;
           break;
         }
@@ -2003,10 +2141,15 @@ public:
     }
 
     std::string error;
+    bool interrupted = false;
     if (!model_->EvaluateBatch(
             std::span<const models::deepseek_v4_flash::SessionBatchItem>(
                 items.data(), item_count),
-            &error)) {
+            &error, &interrupted)) {
+      if (interrupted) {
+        TextModelRunner::AdvanceBatch(advances);
+        return;
+      }
       throw std::runtime_error("DeepSeek batch decode failed: " + error);
     }
     for (std::size_t index = 0; index < item_count; ++index) {
@@ -2272,8 +2415,11 @@ const QwenFlashNextTextRunnerState& RequireQwenFlashNextState(
   return *qfn;
 }
 
-class QwenFlashNextTextRunner final : public TextModelRunner {
+class QwenFlashNextTextRunner final : public HipTextModelRunner {
 public:
+  sampling::JsonConstraint::ToolFormat ToolFormat() const override {
+    return sampling::JsonConstraint::ToolFormat::kQwen;
+  }
   QwenFlashNextTextRunner(std::shared_ptr<QwenFlashNextModel> model,
                           std::uint32_t max_context, bool use_mtp,
                           std::uint32_t max_draft_tokens,
@@ -2349,6 +2495,16 @@ public:
           {.kind = TextExecutionPlanKind::kBatched, .physical_width = width});
     }
     return plans;
+  }
+
+  [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary>
+  BuildConstraintVocabulary() const override {
+    return std::make_shared<const sampling::ConstraintVocabulary>(
+        model_->tokenizer().GetVocabSize(), [this](std::uint32_t id) {
+          const auto& tokenizer = model_->tokenizer();
+          return sampling::ConstraintVocabulary::Piece{
+              tokenizer.DecodeTokenCopy(id), tokenizer.IsStopToken(id)};
+        });
   }
 
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
@@ -2447,7 +2603,7 @@ public:
           "Qwen3.8-Flash-Next token selection has no logits");
     }
     const auto token = static_cast<std::int32_t>(sampler.Sample(logits));
-    if (model_->IsStopToken(token)) {
+    if (qfn.stop_at_eos() && model_->IsStopToken(token)) {
       return {.stop = true, .token = 0, .piece = {}};
     }
     return {
@@ -2496,7 +2652,8 @@ public:
     std::string error;
     const auto budget =
         std::min<std::size_t>(max_tokens, std::uint64_t{max_draft_tokens_} + 1);
-    if (!qfn.session().DecodeStep(budget, working_sampler, &decoded, &error)) {
+    if (!qfn.session().DecodeStep(budget, working_sampler, &decoded, &error,
+                                  qfn.stop_at_eos())) {
       throw std::runtime_error("Qwen3.8-Flash-Next MTP decode failed: " +
                                error);
     }
@@ -2572,15 +2729,15 @@ public:
     before.reserve(count);
     requests.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
-      auto& session =
-          RequireQwenFlashNextState(decodes[i].state.get()).session();
+      auto& state = RequireQwenFlashNextState(decodes[i].state.get());
+      auto& session = state.session();
       auto& sampler = samplers.emplace_back(decodes[i].sampler.get());
       before.push_back(session.Statistics());
       requests.push_back(
           {&session,
            std::min<std::size_t>(decodes[i].max_tokens,
                                  std::uint64_t{max_draft_tokens_} + 1),
-           &sampler, &results[i], true, &outcomes[i]});
+           &sampler, &results[i], state.stop_at_eos(), &outcomes[i]});
     }
     std::string error;
     (void)QwenFlashNextSession::DecodeBatch(requests, &error);
@@ -2736,6 +2893,7 @@ struct InferenceBackend::Impl {
     std::string model_id;
     SamplingDefaults sampling_defaults;
     std::uint32_t max_context{0};
+    bool supports_images{false};
     ReasoningOptions reasoning_defaults;
   };
 
@@ -2751,8 +2909,9 @@ struct InferenceBackend::Impl {
         reasoning_end_ = state_->scheduler->runner().Tokenize("</think>");
     }
 
-    Result Wait(const TokenCallback& on_token) override {
-      auto result = request_.Wait(on_token);
+    Result Wait(const TokenCallback& on_token,
+                const ProgressCallback& on_progress) override {
+      auto result = request_.Wait(on_token, on_progress);
       if (!reasoning_end_.empty()) {
         const auto end =
             std::search(result.tokens.begin(), result.tokens.end(),
@@ -2812,7 +2971,7 @@ struct InferenceBackend::Impl {
         });
     ScheduledGenerationRequest generation(std::move(current),
                                           std::move(request), initial);
-    return generation.Wait(on_token);
+    return generation.Wait(on_token, {});
   }
 
   mutable std::mutex state_mutex;
@@ -2831,7 +2990,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                             TextSchedulerPolicy scheduler_policy,
                             const TextSpeculativeConfig& speculative_config,
                             const TextDiskCacheConfig& disk_cache_config,
-                            const std::string& vision_model_path) {
+                            const std::string& vision_model_path,
+                            TextRunnerRamCacheOptions ram_cache_config) {
 #if defined(ENGINE_ENABLE_HIP)
   TextDiskCacheConfig resolved_disk_cache_config = disk_cache_config;
   std::string load_error;
@@ -2908,7 +3068,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
     }
     return load(std::move(model), error, max_context, session_count,
                 prefill_policy, scheduler_policy, speculative_config,
-                std::move(resolved_disk_cache_config));
+                std::move(resolved_disk_cache_config), ram_cache_config);
   }
   if (reader->GetMetadataString("general.architecture") == "qwen4exp") {
     if (speculative_config.backend != TextSpeculativeBackend::kDisabled &&
@@ -2984,7 +3144,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
     }
     return load(std::move(model), error, max_context, session_count,
                 prefill_policy, scheduler_policy, speculative_config,
-                std::move(resolved_disk_cache_config));
+                std::move(resolved_disk_cache_config), ram_cache_config);
   }
 #if defined(GUFO_WITH_A3B)
   if (models::qwen36_a3b::IsA3bArchitecture(
@@ -3023,8 +3183,9 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
     }
     Logger::Info("loader", "event=load_phase phase=target_weights " +
                                Logger::MemoryStatus());
-    auto runner =
-        models::qwen36_a3b::CreateTextRunner(model_path, a3b, &load_error);
+    bool supports_images = false;
+    auto runner = models::qwen36_a3b::CreateTextRunner(
+        model_path, a3b, &load_error, &supports_images);
     if (runner == nullptr) {
       SetError(error, "Failed to create Qwen3.6-35B-A3B model: " + load_error);
       return false;
@@ -3037,8 +3198,9 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       auto new_state = std::make_shared<Impl::State>();
       new_state->model_id = runner->Descriptor().model_id;
       new_state->max_context = runner->Descriptor().max_context;
-      auto runner_pool =
-          std::make_shared<TextRunnerPool>(std::move(runner), session_count);
+      new_state->supports_images = supports_images;
+      auto runner_pool = std::make_shared<TextRunnerPool>(
+          std::move(runner), session_count, std::nullopt, ram_cache_config);
       new_state->scheduler = std::make_shared<TextGenerationScheduler>(
           std::move(runner_pool), prefill_policy, scheduler_policy);
       const std::lock_guard<std::mutex> lock(impl_->state_mutex);
@@ -3080,7 +3242,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
   }
   return load(std::move(model), error, max_context, session_count,
               prefill_policy, scheduler_policy, speculative_config,
-              std::move(resolved_disk_cache_config));
+              std::move(resolved_disk_cache_config), ram_cache_config);
 #else
   (void)model_path;
   (void)max_context;
@@ -3090,6 +3252,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
   (void)speculative_config;
   (void)disk_cache_config;
   (void)vision_model_path;
+  (void)ram_cache_config;
   SetError(error, "HTTP inference requires the HIP backend");
   return false;
 #endif
@@ -3102,7 +3265,8 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
                             TextPrefillPolicy prefill_policy,
                             TextSchedulerPolicy scheduler_policy,
                             TextSpeculativeConfig speculative_config,
-                            TextDiskCacheConfig disk_cache_config) {
+                            TextDiskCacheConfig disk_cache_config,
+                            TextRunnerRamCacheOptions ram_cache_config) {
   if (model == nullptr) {
     SetError(error, "Qwen GPU model must not be null");
     return false;
@@ -3202,6 +3366,10 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
     }
 
     auto new_state = std::make_shared<Impl::State>();
+    new_state->sampling_defaults.model =
+        sampling::TextPreset(model->GetConfig());
+    new_state->sampling_defaults.supplied = {};
+    new_state->supports_images = model->VisionEncoder() != nullptr;
     auto runner = std::make_shared<QwenTextRunner>(
         std::move(model), max_context, std::move(dflash_model),
         speculative_options, disk_cache_config.model_artifact_fingerprint,
@@ -3219,7 +3387,8 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
     Logger::Info("loader",
                  "event=load_phase phase=sessions " + Logger::MemoryStatus());
     auto runner_pool = std::make_shared<TextRunnerPool>(
-        std::move(runner), session_count, std::move(runner_disk_cache));
+        std::move(runner), session_count, std::move(runner_disk_cache),
+        ram_cache_config);
     new_state->scheduler = std::make_shared<TextGenerationScheduler>(
         std::move(runner_pool), prefill_policy, scheduler_policy);
     {
@@ -3238,7 +3407,8 @@ bool InferenceBackend::load(
     std::uint32_t max_context, std::size_t session_count,
     TextPrefillPolicy prefill_policy, TextSchedulerPolicy scheduler_policy,
     TextSpeculativeConfig speculative_config,
-    TextDiskCacheConfig disk_cache_config) {
+    TextDiskCacheConfig disk_cache_config,
+    TextRunnerRamCacheOptions ram_cache_config) {
   if (model == nullptr) {
     SetError(error, "DeepSeek model must not be null");
     return false;
@@ -3285,6 +3455,9 @@ bool InferenceBackend::load(
 
   try {
     auto new_state = std::make_shared<Impl::State>();
+    new_state->sampling_defaults.model =
+        sampling::TextModelPreset::kDeepSeekV4Flash;
+    new_state->sampling_defaults.supplied = {};
     auto runner = std::make_shared<DeepSeekTextRunner>(
         std::move(model), max_context, use_dspark,
         speculative_config.max_draft_tokens,
@@ -3301,7 +3474,8 @@ bool InferenceBackend::load(
       };
     }
     auto runner_pool = std::make_shared<TextRunnerPool>(
-        std::move(runner), session_count, std::move(runner_disk_cache));
+        std::move(runner), session_count, std::move(runner_disk_cache),
+        ram_cache_config);
     new_state->scheduler = std::make_shared<TextGenerationScheduler>(
         std::move(runner_pool), prefill_policy, scheduler_policy);
     {
@@ -3320,7 +3494,8 @@ bool InferenceBackend::load(
     std::uint32_t max_context, std::size_t session_count,
     TextPrefillPolicy prefill_policy, TextSchedulerPolicy scheduler_policy,
     TextSpeculativeConfig speculative_config,
-    TextDiskCacheConfig disk_cache_config) {
+    TextDiskCacheConfig disk_cache_config,
+    TextRunnerRamCacheOptions ram_cache_config) {
   if (model == nullptr) {
     SetError(error, "Qwen3.8-Flash-Next model must not be null");
     return false;
@@ -3365,6 +3540,9 @@ bool InferenceBackend::load(
   }
   try {
     auto new_state = std::make_shared<Impl::State>();
+    new_state->sampling_defaults.model = sampling::TextModelPreset::kQwen38;
+    new_state->sampling_defaults.supplied = {};
+    new_state->supports_images = model->VisionEncoder() != nullptr;
     auto runner = std::make_shared<QwenFlashNextTextRunner>(
         std::move(model), max_context,
         speculative_config.backend == TextSpeculativeBackend::kMtp,
@@ -3382,7 +3560,8 @@ bool InferenceBackend::load(
       };
     }
     auto runner_pool = std::make_shared<TextRunnerPool>(
-        std::move(runner), session_count, std::move(runner_disk_cache));
+        std::move(runner), session_count, std::move(runner_disk_cache),
+        ram_cache_config);
     new_state->scheduler = std::make_shared<TextGenerationScheduler>(
         std::move(runner_pool), prefill_policy, scheduler_policy);
     {
@@ -3409,6 +3588,24 @@ std::string InferenceBackend::model_id() const {
 bool InferenceBackend::ready() const {
 #if defined(ENGINE_ENABLE_HIP)
   return impl_->Snapshot() != nullptr;
+#else
+  return false;
+#endif
+}
+
+bool InferenceBackend::device_lost() const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  return state != nullptr && state->scheduler->device_lost();
+#else
+  return false;
+#endif
+}
+
+bool InferenceBackend::supports_images() const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  return state != nullptr && state->supports_images;
 #else
   return false;
 #endif
@@ -3472,7 +3669,8 @@ void InferenceBackend::set_model_id(const std::string& model_id) {
 }
 
 void InferenceBackend::set_sampling_defaults(
-    std::size_t max_tokens, const sampling::SamplingConfig& sampling_config) {
+    std::size_t max_tokens, const sampling::SamplingConfig& sampling_config,
+    sampling::SamplingOverrides supplied) {
 #if defined(ENGINE_ENABLE_HIP)
   sampling_config.Validate();
   const std::lock_guard<std::mutex> lock(impl_->state_mutex);
@@ -3480,14 +3678,14 @@ void InferenceBackend::set_sampling_defaults(
     return;
   }
   auto updated = std::make_shared<Impl::State>(*impl_->state);
-  updated->sampling_defaults = {
-      .max_tokens = max_tokens,
-      .sampling = sampling_config,
-  };
+  updated->sampling_defaults.max_tokens = max_tokens;
+  updated->sampling_defaults.sampling = sampling_config;
+  updated->sampling_defaults.supplied = supplied;
   impl_->state = std::move(updated);
 #else
   (void)max_tokens;
   (void)sampling_config;
+  (void)supplied;
 #endif
 }
 
@@ -3545,16 +3743,20 @@ InferenceBackend::Result InferenceBackend::chat(
   if (state == nullptr) {
     return {};
   }
-  auto prompt = state->scheduler->runner().PreparePrompt(request);
+  auto effective_sampling = sampling_config;
+  auto constrained = ConstrainChatRequest(request, state->scheduler->runner(),
+                                          &effective_sampling);
+  const auto& effective_request = constrained ? *constrained : request;
+  auto prompt = state->scheduler->runner().PreparePrompt(effective_request);
   if (!prompt.has_value() || prompt->tokens.empty()) {
     return {};
   }
   return impl_->GenerateScheduled(
       state, std::move(prompt->tokens), request_start, max_tokens,
-      sampling_config, is_cancelled, on_token, request.client_id,
+      effective_sampling, is_cancelled, on_token, request.client_id,
       std::move(prompt->context), request.cache_prompt,
       prompt->cache_prefix_tokens, request.stop_sequences,
-      state->scheduler->runner().InitialOutputState(request));
+      state->scheduler->runner().InitialOutputState(effective_request));
 #else
   (void)request;
   (void)max_tokens;
@@ -3562,6 +3764,45 @@ InferenceBackend::Result InferenceBackend::chat(
   (void)is_cancelled;
   (void)on_token;
   return {};
+#endif
+}
+
+std::shared_ptr<InferenceBackend::GenerationRequest>
+InferenceBackend::start_complete(
+    std::string_view prompt, std::size_t max_tokens,
+    const sampling::SamplingConfig& sampling_config,
+    const CancellationCheck& is_cancelled, bool stream_output, bool ignore_eos,
+    std::string_view client_id, const std::vector<std::string>& stop_sequences,
+    bool return_progress) {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto request_start = Clock::now();
+  const auto state = impl_->Snapshot();
+  if (state == nullptr) {
+    return TextGenerationBackend::start_complete(
+        prompt, max_tokens, sampling_config, is_cancelled, stream_output,
+        ignore_eos, client_id, stop_sequences, return_progress);
+  }
+  auto prompt_tokens = state->scheduler->runner().Tokenize(prompt);
+  auto scheduled_request = state->scheduler->Submit(
+      std::move(prompt_tokens), max_tokens, sampling_config, is_cancelled,
+      stream_output,
+      TextRequestMetadata{
+          .client_id = client_id.empty() ? "anonymous" : std::string(client_id),
+          .deadline = std::nullopt,
+          .request_start = request_start,
+          .prompt_context = {},
+          .cache_prompt = true,
+          .cache_prefix_tokens = 0,
+          .stop_at_eos = !ignore_eos,
+          .stop_sequences = stop_sequences,
+          .return_progress = return_progress,
+      });
+  return std::make_shared<Impl::ScheduledGenerationRequest>(
+      state, std::move(scheduled_request));
+#else
+  return TextGenerationBackend::start_complete(
+      prompt, max_tokens, sampling_config, is_cancelled, stream_output,
+      ignore_eos, client_id, stop_sequences, return_progress);
 #endif
 }
 
@@ -3578,7 +3819,11 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
         request, max_tokens, sampling_config, is_cancelled, stream_output);
   }
 
-  auto prompt = state->scheduler->runner().PreparePrompt(request);
+  auto effective_sampling = sampling_config;
+  auto constrained = ConstrainChatRequest(request, state->scheduler->runner(),
+                                          &effective_sampling);
+  const auto& effective_request = constrained ? *constrained : request;
+  auto prompt = state->scheduler->runner().PreparePrompt(effective_request);
   if (!prompt.has_value() || prompt->tokens.empty()) {
     return TextGenerationBackend::start_chat(
         request, max_tokens, sampling_config, is_cancelled, stream_output);
@@ -3587,7 +3832,7 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
   const std::string client_id =
       request.client_id.empty() ? "anonymous" : request.client_id;
   auto scheduled_request = state->scheduler->Submit(
-      std::move(prompt->tokens), max_tokens, sampling_config, is_cancelled,
+      std::move(prompt->tokens), max_tokens, effective_sampling, is_cancelled,
       stream_output,
       TextRequestMetadata{
           .client_id = client_id,
@@ -3597,10 +3842,11 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
           .cache_prompt = request.cache_prompt,
           .cache_prefix_tokens = prompt->cache_prefix_tokens,
           .stop_sequences = request.stop_sequences,
+          .return_progress = request.return_progress,
       });
   return std::make_shared<Impl::ScheduledGenerationRequest>(
       state, std::move(scheduled_request),
-      state->scheduler->runner().InitialOutputState(request));
+      state->scheduler->runner().InitialOutputState(effective_request));
 #else
   return TextGenerationBackend::start_chat(request, max_tokens, sampling_config,
                                            is_cancelled, stream_output);

@@ -5,7 +5,7 @@
 #   - TheRock 10.0.0 for Windows gfx1151, extracted to C:\TheRock\build:
 #     https://stable.repo.amd.com/rocm/core/tarball/therock-dist-windows-gfx1151-10.0.0.tar.gz
 #     (SHA-256 1293927b06b3b8d4bd7e0265823fb998bc9e0d83c68f33dcfa5d32663b30ce38)
-#   - vcpkg at C:\vcpkg with: icu curl openssl libpng libjpeg-turbo (x64-windows)
+#   - vcpkg at C:\vcpkg with: icu curl openssl libpng libjpeg-turbo libwebp pkgconf (x64-windows)
 #   - Visual Studio Build Tools (MSVC STL + Windows SDK; the compiler is TheRock clang)
 #   - CMake 3.21+, and ninja on PATH or at C:\tools\ninja\ninja.exe
 #
@@ -56,6 +56,7 @@ cmd /c "`"$vcvars`" >nul && set" | ForEach-Object {
 
 $env:HIP_PATH = $Rocm.Replace('\', '/')
 $env:HIP_DEVICE_LIB_PATH = "$Rocm/lib/llvm/amdgcn/bitcode".Replace('\', '/')
+$env:PKG_CONFIG_PATH = "$Vcpkg/installed/x64-windows/lib/pkgconfig"
 $env:PATH = "$Rocm\bin;$Rocm\lib\llvm\bin;$(Split-Path $Ninja);$env:PATH"
 $clang = "$Rocm\lib\llvm\bin\clang.exe".Replace('\', '/')
 $clangxx = "$Rocm\lib\llvm\bin\clang++.exe".Replace('\', '/')
@@ -74,6 +75,7 @@ if (-not (Test-Path "$build\CMakeCache.txt")) {
     "-DVCPKG_TARGET_TRIPLET=x64-windows" `
     "-DCMAKE_PREFIX_PATH=$($Rocm.Replace('\', '/'))" `
     "-DCMAKE_LINKER_TYPE=LLD" `
+    "-DPKG_CONFIG_EXECUTABLE=$($Vcpkg.Replace('\', '/'))/installed/x64-windows/tools/pkgconf/pkgconf.exe" `
     @CMakeArgs
   if ($LASTEXITCODE -ne 0) { throw "configure failed" }
 }

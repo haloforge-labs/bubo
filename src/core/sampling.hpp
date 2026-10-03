@@ -3,10 +3,13 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <utility>
 #include <vector>
+
+#include "src/core/json_constraint.hpp"
 
 namespace gufo::sampling {
 
@@ -27,6 +30,7 @@ struct SamplingConfig {
   std::size_t repeat_last_n{64};
   float frequency_penalty{0.0F};
   float presence_penalty{0.0F};
+  std::shared_ptr<const TokenConstraint> constraint;
 
   void Validate() const;
 
@@ -90,6 +94,17 @@ public:
   SamplerState& operator=(SamplerState&&) noexcept = default;
 
   [[nodiscard]] const SamplingConfig& config() const noexcept;
+  /// Draft q may remain unconstrained; target p always uses this request's
+  /// grammar.
+  [[nodiscard]] SamplerState WithoutConstraint() const;
+  /// A finite argmax can bypass downloading logits if it satisfies the grammar.
+  /// Set penalties_applied only for a winner computed with this state's exact
+  /// penalty arithmetic and history; raw model argmaxes leave it false.
+  [[nodiscard]] bool CanSelectArgmax(TokenId token,
+                                     bool penalties_applied = false) const;
+  /// A lazy tool grammar can admit the entire vocabulary before a call.
+  /// Retain ordinary CPU/GPU sampling while its mask makes no restriction.
+  [[nodiscard]] bool NeedsConstraintMask() const;
   [[nodiscard]] std::span<const TokenId> history() const noexcept;
   [[nodiscard]] std::span<const TokenPenalty> penalties() const noexcept {
     return penalty_counts_;
@@ -148,10 +163,14 @@ public:
   [[nodiscard]] double Uniform();
 
 private:
+  [[nodiscard]] std::vector<float> ConstrainedLogits(
+      std::span<const float> logits, std::span<const TokenId> ids = {}) const;
   void TrimHistory();
   void RebuildPenaltyCounts();
   [[nodiscard]] double AdjustedLogit(TokenId token, float logit) const noexcept;
   [[nodiscard]] TokenId SampleGreedy(std::span<const float> logits) const;
+  [[nodiscard]] TokenId SampleConstrainedGreedy(
+      std::span<const float> logits) const;
   [[nodiscard]] SamplingDistribution LinearDistribution(
       std::span<const float> logits) const;
   void PrepareSelected(std::span<const float> logits);
@@ -160,6 +179,9 @@ private:
   void FinishSelected(double full_softmax_sum, bool has_full_softmax_sum);
 
   SamplingConfig config_;
+  JsonConstraint::State constraint_state_;
+  mutable std::shared_ptr<const std::vector<std::uint8_t>> constraint_mask_;
+  mutable bool constraint_restricts_{false};
   std::vector<TokenId> history_;
   std::vector<TokenPenalty> penalty_counts_;
   std::vector<Probability> candidate_scratch_;

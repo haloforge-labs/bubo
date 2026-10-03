@@ -3,6 +3,7 @@
 #include <span>
 #include <string_view>
 
+#include "src/cli/banner.hpp"
 #include "src/cli/bench/bench.hpp"
 #include "src/cli/diagnose/diagnose.h"
 #include "src/cli/eval/eval.hpp"
@@ -11,16 +12,21 @@
 #include "src/cli/transcribe/transcribe.hpp"
 #include "src/cli/video/video.hpp"
 
-#ifndef GUFO_VERSION
-#define GUFO_VERSION "development"
+#ifndef GUFO_RELEASE_VERSION
+#define GUFO_RELEASE_VERSION "development"
+#endif
+#ifndef GUFO_REVISION
+#define GUFO_REVISION "unknown"
 #endif
 
-constexpr std::string_view kGufoVersion = GUFO_VERSION;
+constexpr std::string_view kGufoReleaseVersion = GUFO_RELEASE_VERSION;
+constexpr std::string_view kGufoRevision = GUFO_REVISION;
 
 namespace {
 
 void print_version() {
-  std::cout << "gufo version " << kGufoVersion << "\n";
+  std::cout << "gufo version " << kGufoReleaseVersion << " (" << kGufoRevision
+            << ")\n";
 }
 
 void print_help(std::string_view program_name) {
@@ -114,6 +120,8 @@ int run(std::span<const char* const> args) {
     print_help(program_name);
     return 2;
   }
+
+  gufo::cli::PrintStartupBanner(kGufoReleaseVersion, options);
 
   if (first_arg == "probe") {
     return gufo::cli::RunProbe(options.subspan(1));

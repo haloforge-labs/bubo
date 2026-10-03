@@ -24,6 +24,9 @@ extern "C" {
 #ifndef SIGCHLD
 #define SIGCHLD 17
 #endif
+#ifndef SIGBUS
+#define SIGBUS 7
+#endif
 
 typedef unsigned long sigset_t;
 struct sigaction {

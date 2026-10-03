@@ -41,8 +41,8 @@ inline int roctxRangePop() {
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/ops.hpp"
 
-#ifndef GUFO_VERSION
-#define GUFO_VERSION "development"
+#ifndef GUFO_REVISION
+#define GUFO_REVISION "unknown"
 #endif
 
 namespace {
@@ -1050,7 +1050,7 @@ int Run(std::span<const char* const> args) {
 
   gufo::bench::KernelBenchReport report;
   report.fingerprint_id = fingerprint.fingerprint_id;
-  report.engine_revision = GUFO_VERSION;
+  report.engine_revision = GUFO_REVISION;
   report.device_name = properties.name;
   report.gpu_architecture = properties.gcnArchName;
   report.compute_units = properties.multiProcessorCount;

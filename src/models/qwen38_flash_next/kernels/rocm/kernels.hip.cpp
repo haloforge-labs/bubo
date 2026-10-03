@@ -2138,8 +2138,8 @@ __global__ void SelectMarkKernel(std::uint32_t* mask, const float* scores,
 /// positions: lane j scores key j of the tile, then lane d accumulates
 /// value column d with online softmax rescaling. In the sparse window the
 /// tiles are gathered from the query's selected blocks (compacted through
-/// LDS in windows of 1024 blocks), so the sweep costs the budget rather than
-/// the context.
+/// LDS in windows of 1024 blocks, tiles cut across windows), so the key
+/// work costs the budget rather than the context.
 /// grid.z splits the key tiles round-robin across `gridDim.z` blocks; with
 /// more than one split each block writes (max, sum, unnormalized acc) to
 /// `partials[(t * heads + h) * splits + z]` and AttentionMergeKernel
@@ -2159,7 +2159,12 @@ __global__ void AttentionKernel(const float* q, const __half* k_cache,
   __shared__ float p[kTile];
   __shared__ float shared[32];
   __shared__ std::uint32_t keys[kTile];
-  __shared__ std::uint32_t list[kWindow];
+  // Room for one carried partial tile at the model's ratio of 4 (under a
+  // tile's worth of blocks). A whole tile of keys would push the kernel past
+  // 16 KiB of LDS and cost a resident block per CU on multi-row calls; below
+  // ratio 4 a partial tile too big to carry is attended in its window.
+  constexpr std::uint32_t kCarry = kTile / 4;
+  __shared__ std::uint32_t list[kWindow + kCarry];
   __shared__ std::uint32_t wave_total[8];
   const std::uint32_t h = blockIdx.x;
   const std::uint32_t t = blockIdx.y;
@@ -2264,9 +2269,19 @@ __global__ void AttentionKernel(const float* q, const __half* k_cache,
     const std::uint32_t n_complete = tail_start / ratio;
     const std::uint32_t lane = i & 31u;
     const std::uint32_t wave = i >> 5u;
+    // Tiles are cut from the running compacted list, not per window: the
+    // budget's ~512 selected blocks make the same eight full tiles at any
+    // depth, dealt round-robin over the splits. Cut per window, a deep
+    // context scattered them into dozens of mostly empty tiles, and every
+    // window holding fewer than one tile's blocks landed on split 0 alone,
+    // so decode attention grew with the context instead of the budget.
+    const std::uint32_t per_tile = kTile / ratio;
+    std::uint32_t carry = 0;    // compacted blocks not yet cut into a tile
+    std::uint32_t tile_no = 0;  // tiles cut so far (the same in every split)
     for (std::uint32_t w0 = 0; w0 < n_complete; w0 += kWindow) {
       // Thread i owns blocks w0 + 4i .. +3 of the window: flag the selected
-      // ones and compact their indices with a block-wide exclusive scan.
+      // ones and compact their indices with a block-wide exclusive scan,
+      // appending after the carried-over blocks.
       std::uint32_t flags = 0;
       std::uint32_t count = 0;
       for (std::uint32_t k = 0; k < 4; ++k) {
@@ -2292,21 +2307,44 @@ __global__ void AttentionKernel(const float* q, const __half* k_cache,
       for (std::uint32_t w = 0; w < 8; ++w) {
         total += wave_total[w];
       }
-      std::uint32_t slot = base + incl - count;
+      std::uint32_t slot = carry + base + incl - count;
       for (std::uint32_t k = 0; k < 4; ++k) {
         if ((flags >> k) & 1u) {
           list[slot++] = w0 + (i * 4) + k;
         }
       }
       __syncthreads();
-      for (std::uint32_t t0 = split * (kTile / ratio); t0 < total;
-           t0 += (kTile / ratio) * splits) {
-        const std::uint32_t entry = t0 + (i / ratio);
-        keys[i] = entry < total ? (list[entry] * ratio) + (i % ratio) : n_kv;
+      const std::uint32_t n = carry + total;
+      std::uint32_t t0 = 0;
+      for (; t0 < n; t0 += per_tile, ++tile_no) {
+        const std::uint32_t len = min(per_tile, n - t0);
+        if (len < per_tile && len <= kCarry) {
+          break;  // carried into the next window
+        }
+        if (tile_no % splits != split) {
+          continue;
+        }
+        const std::uint32_t entry = i / ratio;
+        keys[i] = entry < len ? (list[t0 + entry] * ratio) + (i % ratio) : n_kv;
         __syncthreads();
         tile_step();
       }
+      // Move the partial tile's blocks to the front for the next window.
+      carry = t0 < n ? n - t0 : 0;
+      if (t0 > 0) {
+        const std::uint32_t moved = i < carry ? list[t0 + i] : 0u;
+        __syncthreads();
+        if (i < carry) {
+          list[i] = moved;
+        }
+      }
       __syncthreads();
+    }
+    if (carry > 0 && tile_no % splits == split) {
+      const std::uint32_t entry = i / ratio;
+      keys[i] = entry < carry ? (list[entry] * ratio) + (i % ratio) : n_kv;
+      __syncthreads();
+      tile_step();
     }
     // The incomplete tail block is always visible.
     if (tail_start < n_kv && split == 0) {
@@ -2593,6 +2631,91 @@ __global__ void ArgmaxFinishKernel(const float* logits,
     out[t] =
         isnan(logits[static_cast<std::size_t>(t) * vocab]) ? 0 : best.index;
   }
+}
+
+__device__ __forceinline__ PenaltyArgmaxCandidate
+BetterPenaltyCandidate(PenaltyArgmaxCandidate a, PenaltyArgmaxCandidate b) {
+  return b.value > a.value || (b.value == a.value && b.index < a.index) ? b : a;
+}
+
+__device__ PenaltyArgmaxCandidate PenaltyArgmaxBlock(
+    PenaltyArgmaxCandidate best, PenaltyArgmaxCandidate* shared) {
+  const unsigned lane = threadIdx.x & 31u;
+  const unsigned wave = threadIdx.x >> 5u;
+  for (int offset = 16; offset > 0; offset >>= 1)
+    best = BetterPenaltyCandidate(
+        best, {__shfl_xor(best.value, offset), __shfl_xor(best.index, offset)});
+  if (lane == 0)
+    shared[wave] = best;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    for (unsigned w = 1; w < kThreads / 32; ++w)
+      best = BetterPenaltyCandidate(best, shared[w]);
+  }
+  return best;
+}
+
+__global__ void PenaltyArgmaxPartialKernel(const float* logits,
+                                           GreedyPenaltyRows penalties,
+                                           float repeat, float frequency,
+                                           float presence,
+                                           PenaltyArgmaxCandidate* partial,
+                                           std::uint32_t vocab) {
+  __shared__ PenaltyArgmaxCandidate shared[kThreads / 32];
+  const unsigned row = blockIdx.y;
+  const auto* src = logits + std::size_t(row) * vocab;
+  PenaltyArgmaxCandidate best{-INFINITY, INT32_MAX};
+  for (unsigned token = blockIdx.x * kThreads + threadIdx.x; token < vocab;
+       token += kArgmaxParts * kThreads) {
+    if (!isfinite(src[token]))
+      continue;
+    auto begin = penalties.offsets[row];
+    auto end = penalties.offsets[row + 1];
+    while (begin < end) {
+      const auto mid = begin + (end - begin) / 2;
+      if (penalties.penalties[mid].token < token)
+        begin = mid + 1;
+      else
+        end = mid;
+    }
+    double value = src[token];
+    if (begin < penalties.offsets[row + 1] &&
+        penalties.penalties[begin].token == token) {
+      const auto penalty = penalties.penalties[begin];
+      // Preserve the CPU's FP64 operations. In particular, do not narrow
+      // the adjusted logit before comparing close candidates.
+      if (penalty.repeated && repeat != 1.0F)
+        value = value <= 0 ? __dmul_rn(value, double(repeat))
+                           : __ddiv_rn(value, double(repeat));
+      value = __dadd_rn(value, -__dmul_rn(double(frequency),
+                                          double(penalty.generated_count)));
+      if (penalty.generated_count != 0)
+        value = __dadd_rn(value, -double(presence));
+    }
+    best =
+        BetterPenaltyCandidate(best, {value, static_cast<std::int32_t>(token)});
+  }
+  best = PenaltyArgmaxBlock(best, shared);
+  if (threadIdx.x == 0)
+    partial[row * kArgmaxParts + blockIdx.x] = best;
+}
+
+__global__ void PenaltyArgmaxFinishKernel(const float* logits,
+                                          const PenaltyArgmaxCandidate* partial,
+                                          ArgmaxCandidate* out,
+                                          std::uint32_t vocab) {
+  __shared__ PenaltyArgmaxCandidate shared[kThreads / 32];
+  const auto row = blockIdx.x;
+  PenaltyArgmaxCandidate best{-INFINITY, INT32_MAX};
+  if (threadIdx.x < kArgmaxParts)
+    best = partial[row * kArgmaxParts + threadIdx.x];
+  best = PenaltyArgmaxBlock(best, shared);
+  if (threadIdx.x == 0)
+    out[row] =
+        best.index < vocab
+            ? ArgmaxCandidate{logits[std::size_t(row) * vocab + best.index],
+                              best.index}
+            : ArgmaxCandidate{NAN, -1};
 }
 
 constexpr unsigned kMtpCandidateTile = 1024;
@@ -5772,7 +5895,7 @@ bool PrepareAttention(const float* packed, std::uint32_t stride,
                       float theta, float eps, hipStream_t stream,
                       const qwen::vision::DeviceRope* rope, bool prefill) {
   if (d == 0 || d > 256 || rotary_dim == 0 || rotary_dim > d ||
-      rotary_dim % 2 != 0 || heads == 0 || kv_heads == 0 ||
+      rotary_dim % 2 != 0 || kv_heads == 0 ||
       stride < static_cast<std::size_t>(2) * (heads + kv_heads) * d) {
     return false;
   }
@@ -6004,6 +6127,19 @@ void Argmax(const float* logits, ArgmaxCandidate* scratch, std::int32_t* out,
                      dim3(kThreads), 0, stream, logits, scratch, vocab);
   hipLaunchKernelGGL(ArgmaxFinishKernel, dim3(n_tokens), dim3(kThreads), 0,
                      stream, logits, scratch, out, vocab);
+}
+
+void PenalizedArgmax(const float* logits, GreedyPenaltyRows penalties,
+                     float repeat, float frequency, float presence,
+                     PenaltyArgmaxCandidate* partial, ArgmaxCandidate* out,
+                     std::uint32_t rows, std::uint32_t vocab,
+                     hipStream_t stream) {
+  if (rows == 0 || rows > 7 || vocab == 0)
+    throw std::invalid_argument("invalid penalty argmax shape");
+  PenaltyArgmaxPartialKernel<<<dim3(kArgmaxParts, rows), kThreads, 0, stream>>>(
+      logits, penalties, repeat, frequency, presence, partial, vocab);
+  PenaltyArgmaxFinishKernel<<<rows, kThreads, 0, stream>>>(logits, partial, out,
+                                                           vocab);
 }
 
 void GatherArgmaxCandidates(const float* logits, const std::uint32_t* ids,

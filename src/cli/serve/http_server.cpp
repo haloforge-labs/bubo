@@ -12,6 +12,9 @@
 #include <cctype>
 #include <cerrno>
 #include <charconv>
+#include <chrono>
+#include <cmath>
+#include <condition_variable>
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
@@ -24,6 +27,7 @@
 #include <ranges>
 #include <sstream>
 #include <stdexcept>
+#include <stop_token>
 #include <system_error>
 #include <thread>
 #include <utility>
@@ -284,6 +288,13 @@ bool HasHeader(const HttpResponse& response, std::string_view name) {
   });
 }
 
+bool IsEventStream(const HttpResponse& response) {
+  return std::ranges::any_of(response.headers, [](const auto& header) {
+    return ToLower(header.first) == "content-type" &&
+           ToLower(header.second).starts_with("text/event-stream");
+  });
+}
+
 std::string BuildResponseHead(const HttpResponse& resp,
                               std::optional<std::size_t> content_length) {
   std::string out;
@@ -394,6 +405,19 @@ HttpResponse Err(int status, const char* reason, const char* message,
   return {.status = status, .reason = reason, .body = e.dump()};
 }
 
+// Health, readiness and generation share one body once the device is lost:
+// `status` matches the health/readiness shape and `error` the API error shape.
+HttpResponse DeviceLost() {
+  json::Value error = json::Value::object();
+  error["message"] = kDeviceLostMessage;
+  error["type"] = "server_error";
+  error["code"] = "device_lost";
+  json::Value body = json::Value::object();
+  body["status"] = "device_lost";
+  body["error"] = std::move(error);
+  return {.status = 503, .reason = "Service Unavailable", .body = body.dump()};
+}
+
 HttpResponse NotImplemented(const HttpRequest&, TextGenerationBackend&) {
   return Err(501, "Not Implemented",
              "endpoint not implemented on this text model", "server_error",
@@ -413,13 +437,24 @@ tokenization::ChatRole RoleFrom(const std::string& r) {
   return tokenization::ChatRole::kUser;
 }
 
-bool ReadTextContent(const json::Value* content, std::string* out) {
+// Messages replays assistant reasoning as thinking blocks. Restore it as the
+// turn's thought so the prompt reproduces the generated tokens.
+bool ReadTextContent(const json::Value* content, std::string* out,
+                     std::string* thought = nullptr) {
   if (content == nullptr)
     return false;
   if (content->is_string()) {
     *out = content->get_str();
   } else if (content->is_array()) {
     for (const auto& part : content->items()) {
+      if (thought != nullptr && part.is_object() &&
+          part.member_str("type") == "thinking") {
+        const auto* thinking = part.find("thinking");
+        if (thinking == nullptr || !thinking->is_string())
+          return false;
+        *thought += thinking->str();
+        continue;
+      }
       const auto* text = part.find("text");
       const auto type = part.member_str("type");
       if (!part.is_object() || text == nullptr || !text->is_string() ||
@@ -436,10 +471,32 @@ bool ReadTextContent(const json::Value* content, std::string* out) {
 
 bool ReadTextMessages(const json::Value* input,
                       std::vector<tokenization::ChatMessage>* messages,
-                      bool responses = false) {
+                      bool responses = false,
+                      std::string* parse_error = nullptr) {
+  core::ImageReadBudget image_budget;
   if (input == nullptr || !input->is_array() || input->empty())
     return false;
   for (const auto& item : input->items()) {
+    if (responses && (item.member_str("type") == "function_call" ||
+                      item.member_str("type") == "function_call_output")) {
+      tokenization::ChatMessage message;
+      std::string error;
+      if (!ParseOpenAiResponseMessage(item, &message, image_budget, &error)) {
+        if (parse_error && !error.empty())
+          *parse_error = std::move(error);
+        return false;
+      }
+      if (message.role == tokenization::ChatRole::kAssistant &&
+          !messages->empty() &&
+          messages->back().role == tokenization::ChatRole::kAssistant) {
+        auto& calls = messages->back().tool_calls;
+        calls.insert(calls.end(), message.tool_calls.begin(),
+                     message.tool_calls.end());
+      } else {
+        messages->push_back(std::move(message));
+      }
+      continue;
+    }
     if (responses && item.member_str("type") == "reasoning") {
       const auto* summary = item.find("summary");
       const auto* encrypted = item.find("encrypted_content");
@@ -469,7 +526,18 @@ bool ReadTextMessages(const json::Value* input,
     }
     tokenization::ChatMessage message;
     message.role = RoleFrom(role);
-    if (!ReadTextContent(item.find("content"), &message.content))
+    if (responses) {
+      std::string error;
+      if (!ParseOpenAiResponseMessage(item, &message, image_budget, &error)) {
+        if (parse_error && !error.empty())
+          *parse_error = std::move(error);
+        return false;
+      }
+    } else if (!ReadTextContent(
+                   item.find("content"), &message.content,
+                   message.role == tokenization::ChatRole::kAssistant
+                       ? &message.thought
+                       : nullptr))
       return false;
     if (responses && message.role == tokenization::ChatRole::kAssistant &&
         !messages->empty() &&
@@ -488,13 +556,25 @@ HttpResponse InvalidCompatibilityRequest(std::string_view message) {
              "invalid_request_error", "invalid_request");
 }
 
+// Per-endpoint allowances for the shared compatibility validator. Every field
+// left false rejects its request field on that endpoint.
+struct CompatibilityAllowances {
+  /// Request field carrying stop sequences, empty when the endpoint has none.
+  std::string_view stop_field;
+  bool stream{false};
+  bool stream_options{false};
+  bool ignore_eos{false};
+  bool response_controls{false};
+  bool thinking{false};
+};
+
 // Validate the text subset before dispatch so a client never gets an answer
 // to a different request. Responses also supports streamed output.
 std::optional<HttpResponse> ReadCompatibilityOptions(
     const json::Value& body, TextGenerationBackend& backend,
     std::string_view token_field, std::size_t* max_tokens,
-    sampling::SamplingConfig* sampling_config, std::string_view stop_field = {},
-    bool allow_stream = false) {
+    sampling::SamplingConfig* sampling_config, std::optional<bool> thinking,
+    const CompatibilityAllowances& allowances = {}) {
   if (!body.is_object())
     return InvalidCompatibilityRequest("request body must be an object");
   if (const auto* model = body.find("model"); model != nullptr) {
@@ -508,7 +588,7 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
     if (const auto* value = body.find(field);
         value != nullptr &&
         (!value->is_bool() ||
-         (value->as_bool() && !(allow_stream && field == "stream")))) {
+         (value->as_bool() && !(allowances.stream && field == "stream")))) {
       return InvalidCompatibilityRequest("'" + field + "' must be false");
     }
   }
@@ -520,6 +600,7 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
     }
   }
   for (const std::string field : {"stream_options",
+                                  "ignore_eos",
                                   "stop",
                                   "stop_sequences",
                                   "logprobs",
@@ -541,7 +622,13 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
                                   "truncation",
                                   "modalities",
                                   "audio"}) {
-    if (field != stop_field && body.contains(field)) {
+    if (field != allowances.stop_field &&
+        !(field == "stream_options" && allowances.stream_options) &&
+        !(field == "ignore_eos" && allowances.ignore_eos) &&
+        !(field == "thinking" && allowances.thinking) && body.contains(field) &&
+        !(allowances.response_controls &&
+          (field == "text" || field == "reasoning" || field == "tools" ||
+           field == "tool_choice" || field == "parallel_tool_calls"))) {
       return InvalidCompatibilityRequest("request field '" + field +
                                          "' is not supported on this endpoint");
     }
@@ -560,8 +647,8 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
           std::size_t{std::numeric_limits<std::uint32_t>::max()}, max_tokens)) {
     return InvalidCompatibilityRequest(error->message);
   }
-  if (const auto error =
-          ParseSamplingConfig(body, defaults.sampling, sampling_config)) {
+  if (const auto error = ParseSamplingConfig(body, defaults.Resolve(thinking),
+                                             sampling_config)) {
     return Err(400, "Bad Request", error->message.c_str(),
                "invalid_request_error", error->code.c_str());
   }
@@ -585,6 +672,16 @@ HttpResponse ListModels(TextGenerationBackend* backend,
     model["object"] = "model";
     model["created"] = Now();
     model["owned_by"] = "gufo";
+    if (backend->max_context() > 0)
+      model["context_length"] =
+          static_cast<std::size_t>(backend->max_context());
+    json::Value input_modalities = json::Value::array();
+    input_modalities.push_back("text");
+    if (backend->supports_images())
+      input_modalities.push_back("image");
+    json::Value architecture = json::Value::object();
+    architecture["input_modalities"] = std::move(input_modalities);
+    model["architecture"] = std::move(architecture);
     data.push_back(std::move(model));
   }
   if (video_jobs != nullptr && video_jobs->ready()) {
@@ -652,8 +749,42 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
   std::size_t max_tokens = 0;
   sampling::SamplingConfig sampling_config;
   if (auto error = ReadCompatibilityOptions(body, b, "max_tokens", &max_tokens,
-                                            &sampling_config, "stop")) {
+                                            &sampling_config,
+                                            b.reasoning_defaults().enabled,
+                                            {
+                                                .stop_field = "stop",
+                                                .stream = true,
+                                                .stream_options = true,
+                                                .ignore_eos = true,
+                                            })) {
     return std::move(*error);
+  }
+  const auto* stream_field = body.find("stream");
+  const bool stream = stream_field != nullptr && stream_field->as_bool();
+  bool include_usage = false;
+  if (const auto* options = body.find("stream_options")) {
+    if (!stream || !options->is_object())
+      return InvalidCompatibilityRequest(
+          "'stream_options' requires streaming and must be an object");
+    for (const auto& [key, value] : options->members()) {
+      if (key != "include_usage" || !value.is_bool())
+        return InvalidCompatibilityRequest(
+            "only boolean 'stream_options.include_usage' is supported");
+      include_usage = value.as_bool();
+    }
+  }
+  bool ignore_eos = false;
+  if (const auto* value = body.find("ignore_eos")) {
+    if (!value->is_bool())
+      return InvalidCompatibilityRequest("'ignore_eos' must be a boolean");
+    ignore_eos = value->as_bool();
+  }
+  bool return_progress = false;
+  if (const auto* value = body.find("return_progress");
+      value != nullptr && !value->is_null()) {
+    if (!value->is_bool())
+      return InvalidCompatibilityRequest("'return_progress' must be a boolean");
+    return_progress = value->as_bool();
   }
   std::vector<std::string> stop_sequences;
   if (const auto error = ParseStopSequences(
@@ -670,15 +801,133 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
                "invalid_request_error", "missing_prompt");
   }
 
-  const auto res =
-      b.complete(prompt, max_tokens, sampling_config, req.is_cancelled, {},
-                 req.client_id, stop_sequences);
+  auto generation = b.start_complete(
+      prompt, max_tokens, sampling_config, req.is_cancelled, stream, ignore_eos,
+      req.client_id, stop_sequences, return_progress);
+  const std::string id = "cmpl-" + RandomId();
+  const long long created = Now();
+  const std::string model = b.model_id();
+  if (stream) {
+    auto stream_log = std::make_shared<HttpResponse::StreamLog>();
+    return {
+        .status = 200,
+        .reason = "OK",
+        .body = {},
+        .headers = {{"Content-Type", "text/event-stream"},
+                    {"Cache-Control", "no-cache"},
+                    {"X-Accel-Buffering", "no"}},
+        .streaming_body =
+            [generation = std::move(generation), id, created, model,
+             include_usage, return_progress,
+             stream_log](const HttpResponse::BodyWriter& writer) {
+              const auto write_chunk =
+                  [&](std::string_view piece, std::string_view finish_reason,
+                      const json::Value* usage = nullptr,
+                      const json::Value* timings = nullptr,
+                      const json::Value* progress = nullptr) {
+                    json::Value chunk = json::Value::object();
+                    chunk["id"] = id;
+                    chunk["object"] = "text_completion";
+                    chunk["created"] = created;
+                    chunk["model"] = model;
+                    json::Value choices = json::Value::array();
+                    if (usage == nullptr) {
+                      json::Value choice = json::Value::object();
+                      choice["text"] = std::string(piece);
+                      choice["index"] = 0;
+                      choice["logprobs"] = json::Value();
+                      choice["finish_reason"] =
+                          finish_reason.empty()
+                              ? json::Value()
+                              : json::Value(std::string(finish_reason));
+                      choices.push_back(std::move(choice));
+                    }
+                    chunk["choices"] = std::move(choices);
+                    if (usage != nullptr)
+                      chunk["usage"] = *usage;
+                    if (timings != nullptr)
+                      chunk["timings"] = *timings;
+                    if (progress != nullptr)
+                      chunk["prompt_progress"] = *progress;
+                    return writer("data: " + chunk.dump() + "\n\n");
+                  };
+              core::Utf8Decoder decoder;
+              bool connected = true;
+              TextGenerationBackend::ProgressCallback on_progress;
+              if (return_progress) {
+                on_progress =
+                    [&](const TextGenerationBackend::PromptProgress& value) {
+                      const auto progress = PromptProgressJson(value);
+                      connected =
+                          write_chunk({}, {}, nullptr, nullptr, &progress);
+                      return connected;
+                    };
+              }
+              try {
+                const auto result = generation->Wait(
+                    [&](std::string_view piece) {
+                      const auto text = decoder.Push(piece, false);
+                      connected = write_chunk(text, {});
+                      return connected;
+                    },
+                    on_progress);
+                stream_log->details = GenerationLogDetails(result);
+                RecordServerMetrics(result);
+                if (!connected || result.cancelled)
+                  return;
+                const auto trailing = decoder.Push({}, true);
+                const auto timings = GenerationTimings(result);
+                if (!write_chunk(
+                        trailing,
+                        result.finish_reason ==
+                                TextGenerationBackend::FinishReason::kLength
+                            ? "length"
+                            : "stop",
+                        nullptr, &timings))
+                  return;
+                if (include_usage) {
+                  const auto usage = UsageJson(result);
+                  if (!write_chunk({}, {}, &usage))
+                    return;
+                }
+                (void)writer("data: [DONE]\n\n");
+              } catch (const TextGenerationError& error) {
+                stream_log->error_code = error.stable_code();
+                json::Value detail = json::Value::object();
+                detail["message"] = error.what();
+                detail["type"] = "server_error";
+                detail["code"] = error.stable_code();
+                json::Value event = json::Value::object();
+                event["error"] = std::move(detail);
+                stream_log->error_event_sent =
+                    writer("data: " + event.dump() + "\n\n");
+                (void)writer("data: [DONE]\n\n");
+              } catch (const std::exception& error) {
+                stream_log->error_code = "generation_failed";
+                json::Value detail = json::Value::object();
+                const char* message = error.what();
+                detail["message"] =
+                    message && *message ? message : "generation failed";
+                detail["type"] = "server_error";
+                detail["code"] = "generation_failed";
+                json::Value event = json::Value::object();
+                event["error"] = std::move(detail);
+                stream_log->error_event_sent =
+                    writer("data: " + event.dump() + "\n\n");
+                (void)writer("data: [DONE]\n\n");
+              }
+            },
+        .stream_log = std::move(stream_log),
+    };
+  }
+
+  const auto res = generation->Wait();
 
   json::Value resp = json::Value::object();
-  resp["id"] = "cmpl-" + RandomId();
+  resp["id"] = id;
   resp["object"] = "text_completion";
-  resp["created"] = Now();
-  resp["model"] = b.model_id();
+  resp["created"] = created;
+  resp["model"] = model;
   json::Value choices = json::Value::array();
   json::Value c = json::Value::object();
   c["text"] = core::Utf8Decoder{}.Push(res.text, true);
@@ -711,11 +960,16 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
                "parse_error");
   }
 
+  ChatRequest chat;
+  chat.reasoning = b.reasoning_defaults();
+  if (auto error = ParseOpenAiResponseControls(body, &chat))
+    return std::move(*error);
   std::size_t max_tokens = 0;
   sampling::SamplingConfig sampling_config;
-  if (auto error =
-          ReadCompatibilityOptions(body, b, "max_output_tokens", &max_tokens,
-                                   &sampling_config, {}, true)) {
+  if (auto error = ReadCompatibilityOptions(
+          body, b, "max_output_tokens", &max_tokens, &sampling_config,
+          chat.reasoning.enabled,
+          {.stream = true, .response_controls = true})) {
     return std::move(*error);
   }
 
@@ -728,18 +982,17 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
         {tokenization::ChatRole::kSystem, instructions->str(), "", ""});
   }
   const auto* input = body.find("input");
+  std::string input_error =
+      "'input' must contain text, message items with text/images, reasoning "
+      "items, function calls or function outputs";
   if (input != nullptr && input->is_string() && !input->str().empty()) {
     messages.push_back({tokenization::ChatRole::kUser, input->str(), "", ""});
-  } else if (!ReadTextMessages(input, &messages, true)) {
-    return InvalidCompatibilityRequest(
-        "'input' must be nonempty text, text messages or Gufo reasoning items; "
-        "use "
-        "/v1/chat/completions for images and tools");
+  } else if (!ReadTextMessages(input, &messages, true, &input_error)) {
+    return InvalidCompatibilityRequest(input_error);
   }
 
-  ChatRequest chat{std::move(messages)};
+  chat.messages = std::move(messages);
   chat.client_id = req.client_id;
-  chat.reasoning = b.reasoning_defaults();
   return CreateOpenAiResponse(
       req, b, chat, max_tokens, sampling_config,
       body.find("stream") != nullptr && body.find("stream")->as_bool());
@@ -749,6 +1002,28 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
 } catch (const std::invalid_argument& error) {
   return Err(400, "Bad Request", error.what(), "invalid_request_error",
              "invalid_prompt");
+}
+
+// Messages selects reasoning with thinking.type. budget_tokens has no native
+// equivalent, so enabled thinking keeps the server's effort.
+std::optional<HttpResponse> ReadThinking(const json::Value& body,
+                                         ReasoningOptions* reasoning) {
+  const auto* thinking = body.find("thinking");
+  if (thinking == nullptr)
+    return {};
+  const auto* type = thinking->is_object() ? thinking->find("type") : nullptr;
+  if (type == nullptr || !type->is_string() ||
+      (type->str() != "enabled" && type->str() != "disabled"))
+    return InvalidCompatibilityRequest(
+        "'thinking.type' must be enabled or disabled");
+  if (const auto* budget = thinking->find("budget_tokens");
+      budget != nullptr &&
+      (!budget->is_number() || budget->as_double() < 1 ||
+       std::floor(budget->as_double()) != budget->as_double()))
+    return InvalidCompatibilityRequest(
+        "'thinking.budget_tokens' must be a positive integer");
+  reasoning->enabled = type->str() == "enabled";
+  return {};
 }
 
 HttpResponse AnthropicMessages(const HttpRequest& req,
@@ -761,11 +1036,18 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
                "parse_error");
   }
 
+  ChatRequest chat;
+  chat.reasoning = b.reasoning_defaults();
+  if (body.is_object()) {
+    if (auto error = ReadThinking(body, &chat.reasoning))
+      return std::move(*error);
+  }
   std::size_t max_tokens = 0;
   sampling::SamplingConfig sampling_config;
-  if (auto error =
-          ReadCompatibilityOptions(body, b, "max_tokens", &max_tokens,
-                                   &sampling_config, "stop_sequences")) {
+  if (auto error = ReadCompatibilityOptions(
+          body, b, "max_tokens", &max_tokens, &sampling_config,
+          chat.reasoning.enabled,
+          {.stop_field = "stop_sequences", .thinking = true})) {
     return std::move(*error);
   }
 
@@ -784,14 +1066,16 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
         "for images and tools");
   }
 
-  ChatRequest chat{std::move(messages)};
+  chat.messages = std::move(messages);
   chat.client_id = req.client_id;
-  chat.reasoning = b.reasoning_defaults();
   if (const auto error = ParseStopSequences(body.find("stop_sequences"),
                                             StopSequenceFormat::kAnthropic,
                                             &chat.stop_sequences))
     return InvalidCompatibilityRequest(*error);
+  const auto initial = b.initial_output_state(chat);
   const auto res = b.chat(chat, max_tokens, sampling_config, req.is_cancelled);
+  const auto generated =
+      SplitGeneratedText(core::Utf8Decoder{}.Push(res.text, true), initial);
 
   json::Value resp = json::Value::object();
   resp["id"] = "msg_" + RandomId();
@@ -799,10 +1083,20 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
   resp["role"] = "assistant";
   resp["model"] = b.model_id();
   json::Value content = json::Value::array();
-  json::Value txt = json::Value::object();
-  txt["type"] = "text";
-  txt["text"] = core::Utf8Decoder{}.Push(res.text, true);
-  content.push_back(std::move(txt));
+  if (!generated.reasoning.empty()) {
+    // Local reasoning is not signed; clients replay the block unchanged.
+    json::Value thinking = json::Value::object();
+    thinking["type"] = "thinking";
+    thinking["thinking"] = generated.reasoning;
+    thinking["signature"] = "";
+    content.push_back(std::move(thinking));
+  }
+  if (!generated.text.empty() || content.empty()) {
+    json::Value txt = json::Value::object();
+    txt["type"] = "text";
+    txt["text"] = generated.text;
+    content.push_back(std::move(txt));
+  }
   resp["content"] = std::move(content);
   resp["stop_reason"] =
       res.finish_reason == TextGenerationBackend::FinishReason::kLength
@@ -842,8 +1136,9 @@ HttpResponse LlamaCompletion(const HttpRequest& req,
 
   std::size_t max_tokens = 0;
   sampling::SamplingConfig sampling_config;
-  if (auto error = ReadCompatibilityOptions(body, b, "n_predict", &max_tokens,
-                                            &sampling_config, "stop")) {
+  if (auto error = ReadCompatibilityOptions(
+          body, b, "n_predict", &max_tokens, &sampling_config,
+          b.reasoning_defaults().enabled, {.stop_field = "stop"})) {
     return std::move(*error);
   }
 
@@ -916,7 +1211,8 @@ HttpResponse LlamaSlots(const HttpRequest&, TextGenerationBackend& b) {
 
 HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend&) {
   std::ostringstream out;
-  out << "# HELP llamacpp:prompt_tokens_total Total prompt tokens processed\n"
+  out << "# HELP llamacpp:prompt_tokens_total Total prompt tokens processed, "
+         "excluding cache hits\n"
       << "# TYPE llamacpp:prompt_tokens_total counter\n"
       << "llamacpp:prompt_tokens_total "
       << detail::TotalPromptTokens().load(std::memory_order_relaxed) << "\n"
@@ -934,6 +1230,16 @@ HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend&) {
       << "# TYPE llamacpp:predicted_tokens_seconds gauge\n"
       << "llamacpp:predicted_tokens_seconds "
       << detail::LastGenSpeed().load(std::memory_order_relaxed) << "\n"
+      << "# HELP llamacpp:requests_processing Number of admitted requests, "
+         "including cache preparation\n"
+      << "# TYPE llamacpp:requests_processing gauge\n"
+      << "llamacpp:requests_processing "
+      << detail::RequestsProcessing().load(std::memory_order_relaxed) << "\n"
+      << "# HELP llamacpp:requests_deferred Number of requests waiting for a "
+         "session\n"
+      << "# TYPE llamacpp:requests_deferred gauge\n"
+      << "llamacpp:requests_deferred "
+      << detail::RequestsDeferred().load(std::memory_order_relaxed) << "\n"
       << "# HELP llamacpp:kv_cache_usage_ratio KV cache usage ratio\n"
       << "# TYPE llamacpp:kv_cache_usage_ratio gauge\n"
       << "llamacpp:kv_cache_usage_ratio 0.0\n";
@@ -1118,17 +1424,14 @@ void HttpServer::run(bool handle_signals) {
   std::optional<ShutdownSignals> signals;
   if (handle_signals) {
     signals.emplace();
-    // A connection may disappear between poll and accept. Never let that
-    // race put the signal-aware loop back into an uninterruptible accept.
-    // Not on Windows: Winsock sockets inherit non-blocking mode from the
-    // listener, and the connection handlers rely on blocking reads.
-#ifndef _WIN32
-    const int flags = ::fcntl(listen_fd_, F_GETFL, 0);
-    if (flags < 0 || ::fcntl(listen_fd_, F_SETFL, flags | O_NONBLOCK) != 0)
-      throw std::system_error(errno, std::generic_category(),
-                              "configure HTTP listener");
-#endif
   }
+  // Winsock accepted sockets inherit listener mode; handlers need blocking I/O.
+#ifndef _WIN32
+  const int flags = ::fcntl(listen_fd_, F_GETFL, 0);
+  if (flags < 0 || ::fcntl(listen_fd_, F_SETFL, flags | O_NONBLOCK) != 0)
+    throw std::system_error(errno, std::generic_category(),
+                            "configure HTTP listener");
+#endif
   Logger::Info(
       "server",
       "event=listening address=http://" + host_ + ":" + std::to_string(port_) +
@@ -1136,6 +1439,7 @@ void HttpServer::run(bool handle_signals) {
           " max_connections=" + std::to_string(options_.max_connections) +
           " max_body_bytes=" + std::to_string(options_.max_request_body_bytes));
   while (!stopped_.load(std::memory_order_acquire)) {
+    (void)device_lost();
     if (handle_signals) {
       const int signal = shutdown_signal.load(std::memory_order_relaxed);
       if (signal != 0) {
@@ -1144,25 +1448,17 @@ void HttpServer::run(bool handle_signals) {
         stop();
         break;
       }
-#ifndef _WIN32
-      pollfd descriptor{.fd = listen_fd_, .events = POLLIN, .revents = 0};
-      const int ready = ::poll(&descriptor, 1, 100);
-      if (ready < 0 && errno != EINTR)
-        throw std::system_error(errno, std::generic_category(),
-                                "poll HTTP listener");
-      if (ready <= 0)
-        continue;
-#endif
     }
-#ifdef _WIN32
-    // Winsock does not wake a blocked accept() when stop() shuts the
-    // listening socket down, so wait in bounded slices instead; the slices
-    // also let the loop above notice a shutdown signal.
-    pollfd listening{
-        .fd = static_cast<SOCKET>(listen_fd_), .events = POLLIN, .revents = 0};
-    if (::poll(&listening, 1, 100) <= 0) {
+    pollfd descriptor{.fd = static_cast<decltype(pollfd::fd)>(listen_fd_),
+                      .events = POLLIN,
+                      .revents = 0};
+    const int ready = ::poll(&descriptor, 1, 100);
+    if (ready < 0 && errno != EINTR)
+      throw std::system_error(errno, std::generic_category(),
+                              "poll HTTP listener");
+    if (ready <= 0)
       continue;
-    }
+#ifdef _WIN32
     const int client_fd =
         static_cast<int>(::accept(listen_fd_, nullptr, nullptr));
 #else
@@ -1262,12 +1558,16 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
   if (req.method == "GET" &&
       (req.path == "/health" || req.path == "/v1/health" ||
        req.path == "/healthz")) {
+    if (device_lost())
+      return DeviceLost();
     json::Value body = json::Value::object();
     body["status"] = "ok";
     return Ok(body);
   }
   if (req.method == "GET" && (req.path == "/ready" || req.path == "/v1/ready" ||
                               req.path == "/readyz")) {
+    if (device_lost())
+      return DeviceLost();
     const bool ready = (backend_ != nullptr && backend_->ready()) ||
                        (video_jobs_ != nullptr && video_jobs_->ready()) ||
                        (tts_ != nullptr && tts_->ready()) ||
@@ -1340,11 +1640,28 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
   }
   for (const auto& entry : routes_) {
     if (entry.first.first == req.method && entry.first.second == req.path) {
+      if (req.method == "POST" && device_lost())
+        return DeviceLost();
       return entry.second(req, *backend_);
     }
   }
   return Err(404, "Not Found", "no route for this path",
              "invalid_request_error", "not_found");
+}
+
+bool HttpServer::device_lost() {
+  if (backend_ == nullptr || !backend_->device_lost())
+    return false;
+  if (options_.on_device_lost &&
+      !device_lost_reported_.exchange(true, std::memory_order_acq_rel)) {
+    try {
+      options_.on_device_lost();
+    } catch (const std::exception& error) {
+      Logger::Error("server", "event=device_lost_hook_failed reason=" +
+                                  std::string(error.what()));
+    }
+  }
+  return true;
 }
 
 void HttpServer::handle_connection(int client_fd) {
@@ -1477,16 +1794,24 @@ void HttpServer::handle_connection(int client_fd) {
       }
     }
 
-    // Successful health/metrics polling and video status polling stay quiet.
+    // Successful health/metrics polling and video status polling stay quiet at
+    // the default level. Under --log-level=debug they become visible, because
+    // "is anything actually arriving?" is the first question an operator asks
+    // when a client reports a hang.
     const bool log_request =
         req.method == "POST" || req.method == "DELETE" ||
         req.path == "/v1/models" || req.path.ends_with("/content") ||
         req.path == "/v1/realtime" || req.path == "/v1/audio/speech/stream";
-    if (ok && log_request) {
-      Logger::Info("http", "request=" + req.request_id +
-                               " event=received method=" + req.method +
-                               " path=" + req.path + " body_bytes=" +
-                               std::to_string(req.body.size()));
+    const LogLevel request_level =
+        log_request ? LogLevel::kInfo : LogLevel::kDebug;
+    // The tier check subsumes the method test: receipt lines are kInfo for
+    // the methods above and kDebug otherwise, so a quiet tier that discards
+    // the line also skips the concatenation that would build it.
+    if (ok && Logger::Enabled(request_level)) {
+      Logger::Log(request_level, "http",
+                  "request=" + req.request_id + " event=received method=" +
+                      req.method + " path=" + req.path +
+                      " body_bytes=" + std::to_string(req.body.size()));
     }
 
     HttpResponse resp;
@@ -1520,11 +1845,49 @@ void HttpServer::handle_connection(int client_fd) {
       response_started = true;
       connected = SendAll(client_fd, head);
       if (connected) {
-        resp.streaming_body([&](std::string_view chunk) {
-          connected = connected && (chunked ? SendChunk(client_fd, chunk)
-                                            : SendAll(client_fd, chunk));
+        std::mutex write_mutex;
+        std::condition_variable_any write_cv;
+        auto last_write = std::chrono::steady_clock::now();
+        const auto send_body = [&](std::string_view chunk) {
+          const std::lock_guard lock(write_mutex);
+          if (!connected)
+            return false;
+          connected =
+              chunked ? SendChunk(client_fd, chunk) : SendAll(client_fd, chunk);
+          if (connected && !chunk.empty()) {
+            last_write = std::chrono::steady_clock::now();
+          }
           return connected;
-        });
+        };
+        std::jthread heartbeat;
+        if (IsEventStream(resp) &&
+            options_.sse_heartbeat_interval.count() > 0) {
+          heartbeat = std::jthread([&](std::stop_token stop) {
+            std::unique_lock lock(write_mutex);
+            while (!stop.stop_requested() && connected) {
+              const auto deadline =
+                  last_write + options_.sse_heartbeat_interval;
+              // Stop-aware waiting cannot miss a stop requested just before
+              // sleeping. Ordinary writes only move the deadline; they need
+              // not wake a second thread for every generated token.
+              write_cv.wait_until(lock, stop, deadline,
+                                  [&] { return !connected; });
+              if (!stop.stop_requested() && connected &&
+                  std::chrono::steady_clock::now() >=
+                      last_write + options_.sse_heartbeat_interval) {
+                // SSE comments carry bytes without changing the API event
+                // stream.
+                connected = chunked ? SendChunk(client_fd, ": ping\n\n")
+                                    : SendAll(client_fd, ": ping\n\n");
+                last_write = std::chrono::steady_clock::now();
+              }
+            }
+          });
+        }
+        resp.streaming_body(send_body);
+        heartbeat.request_stop();
+        if (heartbeat.joinable())
+          heartbeat.join();
         // An SSE error is a complete protocol response. A failed raw PCM
         // stream must remain incomplete, or it looks like valid shorter audio.
         if (connected && chunked &&
@@ -1554,9 +1917,10 @@ void HttpServer::handle_connection(int client_fd) {
         // The status remains useful for an endpoint returning a non-JSON error.
       }
     }
-    if (log_request || resp.status >= 400 || !connected) {
+    if (Logger::Enabled(request_level) || resp.status >= 400 || !connected) {
       Logger::LogRequest(req.request_id, req.method, req.path, resp.status,
-                         elapsed_ms(), resp.log_details, outcome);
+                         elapsed_ms(), resp.log_details, outcome,
+                         request_level);
     }
   } catch (const TextGenerationError& exception) {
     const auto duration_ms = std::chrono::duration<double, std::milli>(
@@ -1609,6 +1973,8 @@ void HttpServer::handle_connection(int client_fd) {
     if (!response_started)
       (void)SendAll(client_fd, BuildResponse(resp));
   }
+  // Act on a loss found by this request now, not at the next health probe.
+  (void)device_lost();
 }
 
 }  // namespace gufo::server

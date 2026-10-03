@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -41,6 +42,14 @@ struct TextPreparedPrompt {
   std::size_t cache_prefix_tokens{0};
 };
 
+struct TextRunnerRamCacheOptions {
+  static constexpr std::size_t kAutomaticMaxBytes = std::size_t{32} << 30;
+  static constexpr std::size_t kMaxEntries = 128;
+  /// Zero selects min(model snapshot budget, 32 GiB), after session allocation.
+  /// Explicit limits are still clamped to the model's snapshot budget.
+  std::size_t capacity_bytes{0};
+};
+
 struct TextRunnerDiskCacheOptions {
   static constexpr std::size_t kDefaultCapacityBytes =
       std::size_t{8} * 1024U * 1024U * 1024U;
@@ -55,6 +64,13 @@ struct TextRunnerDiskCacheOptions {
   std::size_t shared_prefix_min_tokens{128};
   /// Bound on shared-prefix snapshots written while prefilling one request.
   std::size_t shared_prefix_max_boundaries{4};
+  /// Minimum token advance before a checkpoint is worth persisting.
+  ///
+  /// Continuations advance by a few hundred tokens per turn, so persisting
+  /// every turn rewrites a largely identical snapshot. The tokens between two
+  /// checkpoints are cheaper to re-prefill than that write. Zero disables the
+  /// gate.
+  std::size_t min_checkpoint_step_tokens{2048};
 };
 
 /// Host snapshot budget after accounting for cgroup limits and headroom.
@@ -158,6 +174,9 @@ class TextRunnerState : public ContinuationState {
 public:
   using CancellationCheck = std::function<bool()>;
 
+  void SetStopAtEos(bool value) noexcept { stop_at_eos_ = value; }
+  [[nodiscard]] bool stop_at_eos() const noexcept { return stop_at_eos_; }
+
   /// Installs a request-scoped cancellation check for model calls that can
   /// yield internally. Implementations that only yield between work units may
   /// keep the default no-op behavior.
@@ -168,6 +187,9 @@ public:
       const noexcept {
     return {};
   }
+
+private:
+  bool stop_at_eos_{true};
 };
 
 /// Immutable model-owned continuation payload.
@@ -216,6 +238,18 @@ public:
   [[nodiscard]] virtual TextRunnerResourceClaim ResourceClaim() const = 0;
   [[nodiscard]] virtual std::vector<TextExecutionPlan> SupportedPlans()
       const = 0;
+
+  /// Lazily built only for constrained requests; normal text loads pay nothing.
+  [[nodiscard]] virtual std::shared_ptr<const sampling::ConstraintVocabulary>
+  BuildConstraintVocabulary() const {
+    throw std::invalid_argument("model does not support structured output");
+  }
+  [[nodiscard]] virtual sampling::JsonConstraint::ToolFormat ToolFormat()
+      const {
+    return sampling::JsonConstraint::ToolFormat::kJson;
+  }
+  [[nodiscard]] std::shared_ptr<const sampling::TokenConstraint> BindConstraint(
+      std::shared_ptr<const sampling::JsonConstraint> grammar) const;
 
   [[nodiscard]] virtual std::vector<TextRunnerToken> Tokenize(
       std::string_view text) const = 0;
@@ -291,6 +325,10 @@ public:
   /// Retain a safe executed frontier when cancellation interrupts publication
   /// of a completed speculative block. Called with cancellation checks cleared.
   virtual void PrepareCancellation(TextRunnerState&) const {}
+  /// Bounded check, run only after a failed work unit, that the execution
+  /// device still accepts work. False means the context is permanently lost;
+  /// a probe that is still pending at its bound reports true.
+  [[nodiscard]] virtual bool DeviceUsable() const { return true; }
 
   /// Captures an immutable exact continuation at CheckpointPosition(state).
   ///
@@ -330,6 +368,13 @@ public:
   /// Restores a version-compatible serialized payload into an existing state.
   virtual void RestorePersistentSnapshot(
       TextRunnerState& state, std::span<const std::uint8_t> payload) const;
+
+private:
+  mutable std::mutex constraint_mutex_;
+  mutable std::shared_ptr<const sampling::ConstraintVocabulary>
+      constraint_vocabulary_;
+  mutable std::vector<std::shared_ptr<const sampling::TokenConstraint>>
+      constraints_;
 };
 
 /// Bounded pool of opaque runner states with exact-prefix continuation reuse.
@@ -368,6 +413,25 @@ public:
     [[nodiscard]] bool cache_disk_hit() const noexcept;
     [[nodiscard]] std::size_t prompt_tokens() const noexcept;
     [[nodiscard]] bool prefill_complete() const noexcept;
+    [[nodiscard]] std::span<const TextRunnerToken> prompt() const noexcept;
+    /// Prompt tokens already in model state, restored or prefilled.
+    [[nodiscard]] std::size_t prefill_position() const noexcept;
+    [[nodiscard]] std::span<const std::uint8_t> input_identity(
+        std::size_t token_count) const;
+
+    /// Lets another request reuse this prompt's first common_tokens.
+    ///
+    /// Returns the position, at most common_tokens, where this request will
+    /// publish a RAM checkpoint before prefilling past it, reusing a planned
+    /// checkpoint within kSharedCheckpointSlack tokens. Zero when the runner
+    /// cannot snapshot or this request is no longer before that position.
+    /// An awaited checkpoint has requests waiting for it, so it is retained
+    /// with continuation priority rather than as an optional copy.
+    [[nodiscard]] std::size_t ShareCheckpoint(std::size_t common_tokens,
+                                              bool awaited = true);
+    /// A planned checkpoint this close to the shared position is cheaper to
+    /// use than capturing another one: followers prefill the gap themselves.
+    static constexpr std::size_t kSharedCheckpointSlack = 64;
 
     void PrepareBatchExecution();
     [[nodiscard]] TextPrefillStep Prefill(std::size_t max_input_tokens);
@@ -401,7 +465,8 @@ public:
 
   TextRunnerPool(
       std::shared_ptr<TextModelRunner> runner, std::size_t state_count,
-      std::optional<TextRunnerDiskCacheOptions> disk_cache = std::nullopt);
+      std::optional<TextRunnerDiskCacheOptions> disk_cache = std::nullopt,
+      TextRunnerRamCacheOptions ram_cache = {});
   ~TextRunnerPool();
 
   TextRunnerPool(const TextRunnerPool&) = delete;
@@ -423,9 +488,15 @@ public:
       const sampling::SamplingConfig& sampling,
       const CancellationCheck& is_cancelled = {},
       std::shared_ptr<const TextPromptContext> context = {},
-      bool reuse_prompt = true, std::size_t cache_prefix_tokens = 0);
+      bool reuse_prompt = true, std::size_t cache_prefix_tokens = 0,
+      bool stop_at_eos = true);
   [[nodiscard]] Request Acquire(std::vector<TextRunnerToken> prompt,
                                 const CancellationCheck& is_cancelled = {});
+  /// Longest RAM-retained prefix of prompt that Acquire could reuse, without
+  /// leasing a state. An upper bound: Acquire may still prefer a shorter one.
+  [[nodiscard]] std::size_t CachedPrefixTokens(
+      std::span<const TextRunnerToken> prompt,
+      const TextPromptContext* context) const;
 
 private:
   struct Impl;

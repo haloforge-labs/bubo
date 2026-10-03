@@ -41,9 +41,10 @@ struct ServeConfig {
 }
 
 /// Loads the model and returns its runner (one session).
+/// On success supports_images reports whether a vision sidecar was loaded.
 [[nodiscard]] std::shared_ptr<server::TextModelRunner> CreateTextRunner(
     const std::string& model_path, const ServeConfig& config,
-    std::string* error);
+    std::string* error, bool* supports_images = nullptr);
 
 }  // namespace gufo::models::qwen36_a3b
 

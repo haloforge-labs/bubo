@@ -233,11 +233,26 @@ void TestRenderedPromptBoundFollowsContext() {
   const std::vector<ChatMessage> messages = {
       {ChatRole::kUser, std::string(1100000, 'a'), "", ""}};
   ChatTemplateOptions options;
+  Expect(options.max_output_bytes == 8 * kMiB,
+         "the Windows port preserves the 8 MiB shared template default");
+  Expect(QwenChatTemplate::Render(messages, options).has_value(),
+         "the 8 MiB default admits the long Windows prompt");
+  // Keep the upstream fixed-bound regression independent of the fork's larger
+  // default; the context-derived floor remains 1 MiB.
+  options.max_output_bytes = RenderedPromptBoundBytes(4096);
   Expect(!QwenChatTemplate::Render(messages, options).has_value(),
-         "the default 1 MiB bound still refuses");
+         "the explicit 1 MiB bound still refuses");
   options.max_output_bytes = RenderedPromptBoundBytes(262144);
   Expect(QwenChatTemplate::Render(messages, options).has_value(),
          "a context-sized bound admits a prompt the context can hold");
+  const std::vector<ChatMessage> larger_messages = {
+      {ChatRole::kUser, std::string(9 * kMiB, 'a'), "", ""}};
+  options = ChatTemplateOptions{};
+  Expect(!QwenChatTemplate::Render(larger_messages, options).has_value(),
+         "the 8 MiB default still enforces its bound");
+  options.max_output_bytes = RenderedPromptBoundBytes(262144);
+  Expect(QwenChatTemplate::Render(larger_messages, options).has_value(),
+         "the context-sized bound also admits prompts beyond 8 MiB");
 }
 
 void TestGgufTemplateExtraction() {

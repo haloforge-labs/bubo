@@ -12,6 +12,7 @@
 #include <cstring>
 #include <limits>
 #include <optional>
+#include <thread>
 #include <type_traits>
 
 #include "src/core/gguf_reader.hpp"
@@ -392,6 +393,8 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
     AssignError(error_msg, "snapshot needs a synced, non-empty context");
     return nullptr;
   }
+  if (!session_->CheckCancellation(error_msg))
+    return nullptr;
   if (!EnsureFrontier(error_msg)) {
     return nullptr;
   }
@@ -526,18 +529,38 @@ bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
 
 SessionSnapshot::SessionSnapshot(std::uint64_t size)
     : data_(new std::uint8_t[size]), size_(size) {
-  // Snapshot copies first-touch hundreds of MiB. Let Linux back the interior
-  // with transparent huge pages instead of faulting one 4 KiB page at a time.
-  // Advise only complete pages belonging to this allocation; this is optional
-  // and does not pin memory or change the serialized payload.
+  // Populate before asking for huge pages: first-touching an advised buffer
+  // can synchronously compact fragmented UMA memory for seconds. Background
+  // collapse may still promote the populated pages. Restrict both hints to
+  // complete pages owned by this allocation; neither changes the payload.
   const long page = sysconf(_SC_PAGESIZE);
   if (page > 0) {
     const auto address = reinterpret_cast<std::uintptr_t>(data_.get());
     const auto skip = (page - address % page) % page;
     if (size > skip) {
       const auto length = (size - skip) / page * page;
-      if (length != 0)
+      if (length != 0) {
+        // Bound the fault workers to four, with at least 32 MiB each. This
+        // avoids replacing compaction stalls with serial base-page faults.
+        const auto workers = std::min<std::size_t>(4, length / (32ULL << 20));
+        if (workers > 1) {
+          const auto pages = length / page;
+          std::vector<std::jthread> faults;
+          for (std::size_t worker = 0; worker < workers; ++worker) {
+            const auto begin = pages * worker / workers * page;
+            const auto end = pages * (worker + 1) / workers * page;
+            faults.emplace_back([this, skip, begin, end] {
+              (void)madvise(data_.get() + skip + begin, end - begin,
+                            MADV_POPULATE_WRITE);
+            });
+          }
+          // Join before huge-page advice or any snapshot writer uses the
+          // buffer.
+        } else {
+          (void)madvise(data_.get() + skip, length, MADV_POPULATE_WRITE);
+        }
         (void)madvise(data_.get() + skip, length, MADV_HUGEPAGE);
+      }
     }
   }
 }
@@ -887,11 +910,11 @@ bool Session::PrepareDecode(const DecodeRequest& request,
       MtpEnabled() && cap > 1
           ? 1 + (batch_drafts ? std::min<std::uint32_t>(*batch_drafts, cap - 1)
                  : survival   ? std::min<std::uint32_t>(
-                                  kMaxMtpDraftTokens,
-                                  static_cast<std::uint32_t>(cap - 1))
-                            : draft_length_.Choose(
-                                  static_cast<std::uint32_t>(cap - 1),
-                                  static_cast<std::uint32_t>(tokens_.size())))
+                                    kMaxMtpDraftTokens,
+                                    static_cast<std::uint32_t>(cap - 1))
+                              : draft_length_.Choose(
+                                    static_cast<std::uint32_t>(cap - 1),
+                                    static_cast<std::uint32_t>(tokens_.size())))
           : cap;
   if (width == 0) {
     result->stop = true;
@@ -932,7 +955,7 @@ bool Session::PrepareDecode(const DecodeRequest& request,
 
   const std::uint32_t base = static_cast<std::uint32_t>(tokens_.size());
   const bool sampled = sampler.config().uses_random_sampling();
-  const bool gpu_greedy = sampler.config().can_use_unmodified_argmax();
+  const bool gpu_greedy = sampler.config().temperature == 0.0F;
   const bool gpu_verification = gpu_greedy;
   if (!defer_head && !DraftCatchUp(anchor, true, error_msg,
                                    sampled ? &pending->candidates : nullptr)) {
@@ -942,7 +965,7 @@ bool Session::PrepareDecode(const DecodeRequest& request,
   // Target verification keeps its own draws after this independent seed.
   pending->draft_rng =
       sampled ? sampling::NextRandom(sampler.mutable_rng_state()) : 0;
-  pending->draft_sampler = sampler;
+  pending->draft_sampler = sampler.WithoutConstraint();
   pending->draft_sampler->Accept(static_cast<sampling::TokenId>(anchor));
   pending->chain = {anchor};
   pending->draft = draft_token_;
@@ -952,7 +975,8 @@ bool Session::PrepareDecode(const DecodeRequest& request,
   pending->sampled = sampled;
   pending->gpu_greedy = gpu_greedy;
   pending->gpu_verification = gpu_verification;
-  if (!gpu_verification && verify_logits_.empty()) {
+  if (!gpu_verification &&
+      verify_logits_.size() < exec.max_speculative() * model_->VocabSize()) {
     verify_logits_.resize(exec.max_speculative() * model_->VocabSize());
   }
   // ModelOptions::prompt_lookup (single session): after each kept MTP
@@ -1023,7 +1047,8 @@ bool Session::FinishDecode(const DecodeRequest& request,
   sampler.Accept(static_cast<sampling::TokenId>(anchor));
   std::array<rocm::ArgmaxCandidate, kMaxMtpDraftTokens> greedy{};
   if (gpu_greedy &&
-      !exec.GreedyMtpPredictions(std::span(greedy).first(k - 1), error_msg)) {
+      !exec.GreedyMtpPredictions(std::span(greedy).first(k - 1), sampler,
+                                 std::span(chain).subspan(1), error_msg)) {
     return false;
   }
   // Tuning::fast_sampling: sampled verification reads GPU-selected
@@ -1050,12 +1075,27 @@ bool Session::FinishDecode(const DecodeRequest& request,
   }
   std::uint32_t keep = 1;
   std::optional<std::int32_t> correction;
+  bool cpu_rows = false;
   while (keep < k) {
-    if (gpu_greedy) {
+    if (gpu_greedy && !cpu_rows) {
       const auto& prediction = greedy[keep - 1];
       if (!std::isfinite(prediction.value)) {
         AssignError(error_msg, "logit distribution contains no finite values");
         return false;
+      }
+      if (!sampler.CanSelectArgmax(prediction.index,
+                                   /*penalties_applied=*/true)) {
+        // Most native tool tokens already obey the grammar. On the first
+        // forbidden argmax, download the remaining rows once and use exact
+        // masked selection. Avoid one synchronization per rejected candidate.
+        // SelectBatchLogits has already installed this session's row offset.
+        verify_logits_.resize(exec.max_speculative() * vocab);
+        auto rows = std::span(verify_logits_)
+                        .subspan((keep - 1) * vocab, (k - keep + 1) * vocab);
+        if (!exec.ReadVerificationRows(keep - 1, rows, error_msg))
+          return false;
+        cpu_rows = true;
+        continue;
       }
       if (is_stop(prediction.index)) {
         result->stop = true;
@@ -1109,19 +1149,20 @@ bool Session::FinishDecode(const DecodeRequest& request,
   // lists, so the frontier row stays in flight (EnsureFrontier fetches it
   // when anything else needs it) and the rollback is not waited for: the
   // next draft queues behind it.
-  const bool defer_frontier =
-      !gpu_verification && pending.rows_on_device && have_candidates;
+  const bool defer_frontier = !gpu_verification && !cpu_rows &&
+                              pending.rows_on_device && have_candidates;
   frontier_pending_ = false;
-  if (!exec.Rollback(
-          *session_, keep, error_msg,
-          gpu_verification || pending.rows_on_device ? logits_.data() : nullptr,
-          defer_frontier)) {
+  if (!exec.Rollback(*session_, keep, error_msg,
+                     (gpu_verification || pending.rows_on_device) && !cpu_rows
+                         ? logits_.data()
+                         : nullptr,
+                     defer_frontier)) {
     return false;
   }
   frontier_pending_ = defer_frontier;
-  if (!gpu_verification) {
+  if (!gpu_verification || cpu_rows) {
     // Rows kept on the GPU: Rollback already wrote the frontier to logits_.
-    if (!pending.rows_on_device) {
+    if (!pending.rows_on_device || cpu_rows) {
       std::copy_n(verify_logits_.data() + (keep - 1) * vocab, vocab,
                   logits_.begin());
     }

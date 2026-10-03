@@ -45,6 +45,7 @@ struct TextSchedulerPolicy {
   std::size_t max_buffered_output_bytes_total{
       kDefaultMaxBufferedOutputBytesTotal};
   std::chrono::milliseconds request_timeout{0};
+  bool log_progress{false};
 };
 
 /// Single-owner scheduler for opaque text-model runner states.
@@ -57,6 +58,7 @@ public:
   using Result = TextGenerationBackend::Result;
   using CancellationCheck = TextGenerationBackend::CancellationCheck;
   using TokenCallback = TextGenerationBackend::TokenCallback;
+  using ProgressCallback = TextGenerationBackend::ProgressCallback;
 
   struct RequestMetadata {
     std::string client_id{"anonymous"};
@@ -65,7 +67,9 @@ public:
     std::shared_ptr<const TextPromptContext> prompt_context;
     bool cache_prompt{true};
     std::size_t cache_prefix_tokens{0};
+    bool stop_at_eos{true};
     std::vector<std::string> stop_sequences;
+    bool return_progress{false};
   };
 
   class Request {
@@ -83,8 +87,10 @@ public:
     [[nodiscard]] TextRequestPhase phase() const noexcept;
 
     /// Consumes queued output pieces on the calling thread and waits for the
-    /// scheduler-owned request to become terminal.
-    Result Wait(const TokenCallback& on_token = {});
+    /// scheduler-owned request to become terminal. Streaming requests report
+    /// only the latest prompt progress, always before their first piece.
+    Result Wait(const TokenCallback& on_token = {},
+                const ProgressCallback& on_progress = {});
     void Cancel() noexcept;
 
   private:
@@ -107,6 +113,9 @@ public:
 
   [[nodiscard]] const TextModelRunner& runner() const noexcept;
   [[nodiscard]] std::size_t capacity() const noexcept;
+  /// Set once a failed work unit finds the runner's device unusable; later
+  /// submissions and failures report TextGenerationErrorCode::kDeviceLost.
+  [[nodiscard]] bool device_lost() const noexcept;
   [[nodiscard]] std::size_t buffered_output_bytes() const noexcept;
   [[nodiscard]] std::size_t max_buffered_output_bytes() const noexcept;
 

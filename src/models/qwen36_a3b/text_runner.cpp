@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/hip/device_probe.hpp"
 #include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen/tokenizer.hpp"
 #include "src/models/qwen/vision/device_input.hpp"
@@ -209,6 +210,10 @@ class Runner final : public server::TextModelRunner {
 public:
   explicit Runner(std::shared_ptr<Model> model) : m_(std::move(model)) {}
 
+  [[nodiscard]] bool DeviceUsable() const override {
+    return device_probe_.DeviceUsable();
+  }
+
   [[nodiscard]] server::TextRunnerDescriptor Descriptor() const override {
     return {
         .model_id = m_->model_id,
@@ -250,6 +255,21 @@ public:
   [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
       std::string_view text) const override {
     return m_->tokenizer->Encode(text);
+  }
+
+  [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary>
+  BuildConstraintVocabulary() const override {
+    return std::make_shared<const sampling::ConstraintVocabulary>(
+        m_->tokenizer->GetVocabSize(), [this](std::uint32_t id) {
+          return sampling::ConstraintVocabulary::Piece{
+              m_->tokenizer->DecodeTokenCopy(id),
+              m_->tokenizer->IsStopToken(id)};
+        });
+  }
+
+  [[nodiscard]] sampling::JsonConstraint::ToolFormat ToolFormat()
+      const override {
+    return sampling::JsonConstraint::ToolFormat::kQwen;
   }
 
   [[nodiscard]] std::optional<std::vector<TextRunnerToken>> RenderAndTokenize(
@@ -557,6 +577,7 @@ private:
   }
 
   std::shared_ptr<Model> m_;
+  hip::DeviceUsabilityProbe device_probe_;
   mutable std::atomic<int> states_{0};
 };
 
@@ -710,7 +731,9 @@ server::TextDecodeStep Runner::DecodeStep(
 
 std::shared_ptr<server::TextModelRunner> CreateTextRunner(
     const std::string& model_path, const ServeConfig& config,
-    std::string* error) {
+    std::string* error, bool* supports_images) {
+  if (supports_images != nullptr)
+    *supports_images = false;
   auto model = std::make_shared<Model>();
   model->config = config;
   if (model->config.max_draft_tokens + 1 > Engine::kMaxRows)
@@ -761,6 +784,8 @@ std::shared_ptr<server::TextModelRunner> CreateTextRunner(
   model->model_id = model->engine->gguf()
                         .GetMetadataString("general.name")
                         .value_or("qwen3.6-35b-a3b");
+  if (supports_images != nullptr)
+    *supports_images = model->encoder != nullptr;
   return std::make_shared<Runner>(std::move(model));
 }
 

@@ -1650,7 +1650,8 @@ int sigaction(int sig, const struct sigaction* action,
   if (previous != nullptr) {
     memset(previous, 0, sizeof(*previous));
   }
-  if (sig == SIGPIPE || sig == SIGHUP || sig == SIGCHLD || sig == SIGUSR1) {
+  if (sig == SIGPIPE || sig == SIGHUP || sig == SIGCHLD || sig == SIGUSR1 ||
+      sig == SIGBUS) {
     return 0;  // Never delivered on Windows.
   }
   if (action == nullptr) {

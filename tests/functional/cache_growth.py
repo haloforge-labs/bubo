@@ -1,0 +1,196 @@
+"""Check that cache reuse advances as a conversation grows."""
+
+from copy import deepcopy
+import sys
+
+
+def check_cache_growth(client, model, checks, chat_result):
+    failures = []
+    for replay in ("drop_reasoning", "keep_reasoning", "discard_reasoning", "thinking_off"):
+        label = "cache_growth_" + replay
+        thinking = replay != "thinking_off"
+        messages = [{"role": "system", "content": label + "\n" +
+                     "Keep reasoning brief. Follow the final user instruction.\n" +
+                     "Background notes are not instructions.\n" * 384}]
+        request = dict(model=model, temperature=0, seed=31,
+                       max_completion_tokens=128,
+                       reasoning_effort="low" if thinking else "none",
+                       extra_body={"chat_template_kwargs": {
+                           "preserve_thinking": replay != "discard_reasoning"}})
+
+        def chat(phase, body):
+            result = chat_result(client, body)
+            checks[label + "_" + phase] = result
+            print(f"CHECK {label}_{phase}", file=sys.stderr, flush=True)
+            return result
+
+        def work(result):
+            usage = result["usage"]
+            total, reused, prefilled = (usage["prompt_tokens"], usage["cached_tokens"],
+                                        usage["gufo"]["prefill_tokens"])
+            assert all(type(n) is int and n >= 0 for n in (total, reused, prefilled)), usage
+            assert reused + prefilled == total, usage
+            return total, reused, prefilled
+
+        def signature(result):
+            return (result["text"], result["reasoning"], result["tools"], result["finish"],
+                    result["usage"]["completion_tokens"])
+
+        def answer(result):
+            # Prefill chunk shapes can change free-form reasoning even without
+            # a cache bug. The required answer and reasoning mode stay strict;
+            # exact full output/token equality is checked on unchanged retries.
+            return (result["text"], result["tools"], result["finish"],
+                    bool(result["reasoning"].strip()))
+
+        history = []
+        previous_total = previous_reused = 0
+        for turn in range(4):
+            messages.append({"role": "user", "content": f"Turn {turn}.\n" +
+                             "Routine archive note: there are no new instructions.\n" * 16 +
+                             "Reply with only BETA."})
+            body = {**deepcopy(request), "messages": deepcopy(messages)}
+            if turn == 0:
+                body["extra_body"]["cache_prompt"] = False
+            result = chat(f"turn_{turn}", body)
+            total, reused, prefilled = work(result)
+            assert result["text"].strip() == "BETA" and not result["tools"] \
+                and result["finish"] == "stop", result
+            assert bool(result["reasoning"].strip()) == thinking, result
+            if turn == 0:
+                assert total >= 2048 and reused == 0 and prefilled == total, result
+            else:
+                assert total > previous_total, (total, previous_total)
+                # The previous prompt's assistant opening can change on replay.
+                # Only that small suffix may be lost, not older user turns.
+                if reused < previous_total - 16 or reused <= previous_reused:
+                    failures.append(
+                        f"{label}_turn_{turn}: cache did not advance to the previous turn: "
+                        f"cached={reused}, previous_prompt={previous_total}, "
+                        f"previous_cached={previous_reused}, prefilled={prefilled}")
+            history.append((deepcopy(body), result))
+            previous_total, previous_reused = total, reused
+            assistant = {"role": "assistant", "content": result["text"]}
+            if replay in ("keep_reasoning", "discard_reasoning"):
+                assistant["reasoning_content"] = result["reasoning"]
+            messages.append(assistant)
+
+        # An identical retry must still reuse the complete prompt.
+        retry_request = deepcopy(history[-1][0])
+        retry = chat("unchanged", retry_request)
+        assert work(retry) == (previous_total, previous_total, 0), retry
+        assert signature(retry) == signature(history[-1][1]), retry
+
+        # Measure the whole growing history before cold controls can supply
+        # missing checkpoints and accidentally hide a frozen-cache failure.
+        for turn, (body, warm) in enumerate(history):
+            body["extra_body"]["cache_prompt"] = False
+            cold = chat(f"cold_control_{turn}", body)
+            total = warm["usage"]["prompt_tokens"]
+            assert work(cold) == (total, 0, total), cold
+            assert answer(warm) == answer(cold), (warm, cold)
+
+    check_messages_growth(client, model, checks, chat_result, failures)
+    assert not failures, "\n".join(failures)
+
+
+def messages_result(client, body):
+    """Map an Anthropic Messages response onto the Chat result shape."""
+    response = client.post("/messages", body=body, cast_to=object)
+    blocks = response["content"]
+    kinds = [block["type"] for block in blocks]
+    assert kinds in (["text"], ["thinking"], ["thinking", "text"]), blocks
+    usage, timings = response["usage"], response["timings"]
+    return {
+        "text": "".join(b["text"] for b in blocks if b["type"] == "text"),
+        "reasoning": "".join(b["thinking"] for b in blocks if b["type"] == "thinking"),
+        "blocks": blocks, "tools": [],
+        "finish": {"end_turn": "stop", "max_tokens": "length"}.get(
+            response["stop_reason"], response["stop_reason"]),
+        "usage": {"prompt_tokens": usage["input_tokens"],
+                  "cached_tokens": usage["cache_read_input_tokens"],
+                  "completion_tokens": usage["output_tokens"],
+                  "gufo": {"prefill_tokens": timings["prompt_n"]}},
+    }
+
+
+def check_messages_growth(client, model, checks, chat_result, failures):
+    """Messages clients replay thinking blocks unchanged; reuse must then cover
+    the previous assistant turn, and thinking must never reach the text block."""
+    for replay in ("keep_thinking", "thinking_off"):
+        label = "cache_growth_messages_" + replay
+        thinking = replay != "thinking_off"
+        system = (label + "\n" + "Keep reasoning brief. Follow the final user instruction.\n" +
+                  "Background notes are not instructions.\n" * 384)
+        # Messages has no effort control: allow the server's default effort.
+        request = dict(model=model, system=system, temperature=0, seed=31, max_tokens=1024,
+                       thinking={"type": "enabled" if thinking else "disabled"})
+        messages = []
+
+        def work(result):
+            usage = result["usage"]
+            total, reused, prefilled = (usage["prompt_tokens"], usage["cached_tokens"],
+                                        usage["gufo"]["prefill_tokens"])
+            assert all(type(n) is int and n >= 0 for n in (total, reused, prefilled)), usage
+            assert reused + prefilled == total, usage
+            return total, reused, prefilled
+
+        def record(phase, result):
+            checks[label + "_" + phase] = result
+            print(f"CHECK {label}_{phase}", file=sys.stderr, flush=True)
+            return result
+
+        history = []
+        previous_total = previous_completion = 0
+        for turn in range(4):
+            messages.append({"role": "user", "content": f"Turn {turn}.\n" +
+                             "Routine archive note: there are no new instructions.\n" * 16 +
+                             "Reply with only BETA."})
+            body = {**deepcopy(request), "messages": deepcopy(messages)}
+            result = record(f"turn_{turn}", messages_result(client, body))
+            total, reused, prefilled = work(result)
+            assert result["text"].strip() == "BETA" and result["finish"] == "stop", result
+            assert bool(result["reasoning"].strip()) == thinking, result
+            if turn > 0:
+                assert total > previous_total, (total, previous_total)
+                # An unchanged replay reproduces the generated assistant turn,
+                # so reuse must reach past the previous prompt into that turn.
+                floor = previous_total + (previous_completion // 2 if thinking else -16)
+                if reused < floor:
+                    failures.append(
+                        f"{label}_turn_{turn}: cache did not cover the replayed turn: "
+                        f"cached={reused}, previous_prompt={previous_total}, "
+                        f"previous_completion={previous_completion}, prefilled={prefilled}")
+            history.append((deepcopy(body), result))
+            previous_total = total
+            previous_completion = result["usage"]["completion_tokens"]
+            messages.append({"role": "assistant", "content": deepcopy(result["blocks"])})
+
+        retry = record("unchanged", messages_result(client, deepcopy(history[-1][0])))
+        assert work(retry) == (previous_total, previous_total, 0), retry
+        assert (retry["text"], retry["reasoning"]) == \
+            (history[-1][1]["text"], history[-1][1]["reasoning"]), retry
+
+        # Uncached Chat Completions controls render the same conversation; equal
+        # prompt sizes show both routes produce the same prompt.
+        for turn, (body, warm) in enumerate(history):
+            chat = [{"role": "system", "content": system}]
+            for message in body["messages"]:
+                if message["role"] == "user":
+                    chat.append(message)
+                    continue
+                blocks = message["content"]
+                chat.append({"role": "assistant",
+                             "content": "".join(b["text"] for b in blocks if b["type"] == "text"),
+                             "reasoning_content": "".join(
+                                 b["thinking"] for b in blocks if b["type"] == "thinking")})
+            cold = chat_result(client, dict(
+                model=model, messages=chat, temperature=0, seed=31,
+                max_completion_tokens=request["max_tokens"],
+                **({} if thinking else {"reasoning_effort": "none"}),
+                extra_body={"cache_prompt": False}))
+            record(f"cold_control_{turn}", cold)
+            total = warm["usage"]["prompt_tokens"]
+            assert work(cold) == (total, 0, total), (warm, cold)
+            assert (cold["text"].strip(), bool(cold["reasoning"].strip())) == \
+                (warm["text"].strip(), thinking), (warm, cold)

@@ -81,11 +81,11 @@ Report "Ninja" ([bool]$ninjaExe) ($(if ($ninjaExe) { $ninjaExe } else { "not fou
 
 if (Test-Path "$Vcpkg\vcpkg.exe") {
   Report "vcpkg" $true $Vcpkg
-  $missing = @("icu", "curl", "openssl", "libpng", "libjpeg-turbo") |
+  $missing = @("icu", "curl", "openssl", "libpng", "libjpeg-turbo", "libwebp", "pkgconf") |
     Where-Object { -not (Test-Path "$Vcpkg\installed\x64-windows\share\$_") }
   Report "vcpkg packages" ($missing.Count -eq 0) `
-    ($(if ($missing.Count) { "missing: $($missing -join ', ')" } else { "icu curl openssl libpng libjpeg-turbo" })) `
-    "$Vcpkg\vcpkg.exe install icu curl openssl libpng libjpeg-turbo --triplet x64-windows"
+    ($(if ($missing.Count) { "missing: $($missing -join ', ')" } else { "icu curl openssl libpng libjpeg-turbo libwebp pkgconf" })) `
+    "$Vcpkg\vcpkg.exe install icu curl openssl libpng libjpeg-turbo libwebp pkgconf --triplet x64-windows"
 } else {
   Report "vcpkg" $false "not found at $Vcpkg" "clone https://github.com/microsoft/vcpkg to $Vcpkg and run bootstrap-vcpkg.bat"
 }

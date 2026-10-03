@@ -1,0 +1,4 @@
+# Vendored provenance fixture: its tests verify the exact upstream SHA-256.
+tests/models/deepseek_v4_flash/fixtures/official-0731.json text eol=lf
+src/models/deepseek_v4_flash/reference/artifact_chat_template.jinja text eol=lf
+src/models/qwen/reference/chat_template.jinja text eol=lf

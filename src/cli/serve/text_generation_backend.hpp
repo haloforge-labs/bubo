@@ -15,6 +15,7 @@
 
 #include "src/core/reasoning.hpp"
 #include "src/core/sampling.hpp"
+#include "src/core/text_sampling_defaults.hpp"
 #include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen/tokenizer.hpp"
 
@@ -28,7 +29,12 @@ enum class TextGenerationErrorCode : std::uint8_t {
   kOutputBackpressure,
   kSchedulerStopping,
   kToolChoiceUnsatisfied,
+  kDeviceLost,
 };
+
+/// Client-facing message for a GPU context that can no longer execute work.
+inline constexpr const char* kDeviceLostMessage =
+    "GPU context lost; restart required";
 
 class TextGenerationError final : public std::runtime_error {
 public:
@@ -46,6 +52,7 @@ public:
       case TextGenerationErrorCode::kOutputLimit:
       case TextGenerationErrorCode::kOutputBackpressure:
       case TextGenerationErrorCode::kSchedulerStopping:
+      case TextGenerationErrorCode::kDeviceLost:
         return 503;
       case TextGenerationErrorCode::kToolChoiceUnsatisfied:
         return 502;
@@ -68,12 +75,15 @@ public:
         return "scheduler_stopping";
       case TextGenerationErrorCode::kToolChoiceUnsatisfied:
         return "tool_choice_unsatisfied";
+      case TextGenerationErrorCode::kDeviceLost:
+        return "device_lost";
     }
     return "generation_error";
   }
   [[nodiscard]] bool retryable() const noexcept {
     return code_ != TextGenerationErrorCode::kOutputLimit &&
-           code_ != TextGenerationErrorCode::kToolChoiceUnsatisfied;
+           code_ != TextGenerationErrorCode::kToolChoiceUnsatisfied &&
+           code_ != TextGenerationErrorCode::kDeviceLost;
   }
 
 private:
@@ -95,11 +105,19 @@ struct ChatRequest {
   std::vector<tokenization::ChatTool> tools;
   std::string client_id{"anonymous"};
   ToolChoice tool_choice{ToolChoice::kAuto};
+  std::string forced_tool_name;
+  bool constrained_tools{false};
+  bool parallel_tool_calls{true};
   ReasoningOptions reasoning;
   bool add_vision_id{false};
   /// Bypass prompt reuse for this request; its completed state may be retained.
   bool cache_prompt{true};
+  /// Optional streaming prompt progress; never changes prompt or cache
+  /// identity.
+  bool return_progress{false};
   std::vector<std::string> stop_sequences;
+  std::shared_ptr<const sampling::JsonConstraint> response_format;
+  std::string response_format_description;
 };
 
 /// Model-agnostic text generation boundary used by the HTTP transport.
@@ -111,6 +129,15 @@ class TextGenerationBackend {
 public:
   using CancellationCheck = std::function<bool()>;
   using TokenCallback = std::function<bool(std::string_view)>;
+
+  /// llama-server `prompt_progress`; `processed` includes cached tokens.
+  struct PromptProgress {
+    std::size_t total{0};
+    std::size_t cache{0};
+    std::size_t processed{0};
+    std::int64_t time_ms{0};
+  };
+  using ProgressCallback = std::function<bool(const PromptProgress&)>;
 
   enum class FinishReason : std::uint8_t {
     kStop,
@@ -129,6 +156,13 @@ public:
     /// Zero means generate until EOS or the remaining context is exhausted.
     std::size_t max_tokens{0};
     sampling::SamplingConfig sampling;
+    sampling::TextModelPreset model{sampling::TextModelPreset::kUnspecified};
+    sampling::SamplingOverrides supplied{sampling::SamplingOverrides::All()};
+
+    [[nodiscard]] sampling::SamplingConfig Resolve(
+        std::optional<bool> thinking) const {
+      return sampling::ResolveTextSampling(model, thinking, sampling, supplied);
+    }
   };
 
   struct Result {
@@ -164,6 +198,9 @@ public:
     std::size_t physical_execution_width{1};
     std::size_t max_buffered_output_bytes{0};
     double queue_ms{0.0};
+    /// Part of queue_ms spent waiting for a concurrent request to publish
+    /// the prompt prefix both share.
+    double shared_prefix_wait_ms{0.0};
     double cache_restore_ms{0.0};
     double cache_snapshot_ms{0.0};
     double cache_disk_enqueue_ms{0.0};
@@ -185,6 +222,8 @@ public:
     bool cache_hit{false};
     bool cache_disk_hit{false};
     bool cancelled{false};
+    /// Internal: token totals were already recorded during execution.
+    bool token_metrics_recorded{false};
   };
 
   class GenerationRequest {
@@ -197,7 +236,9 @@ public:
     GenerationRequest(GenerationRequest&&) = delete;
     GenerationRequest& operator=(GenerationRequest&&) = delete;
 
-    virtual Result Wait(const TokenCallback& on_token = {}) = 0;
+    /// Streaming requests may report prompt progress before any token.
+    virtual Result Wait(const TokenCallback& on_token = {},
+                        const ProgressCallback& on_progress = {}) = 0;
     virtual void Cancel() noexcept = 0;
   };
 
@@ -211,6 +252,14 @@ public:
 
   [[nodiscard]] virtual std::string model_id() const = 0;
   [[nodiscard]] virtual bool ready() const = 0;
+  /// True once a failed generation showed that the execution device can no
+  /// longer run work, for example after a GPU reset. The loss is permanent.
+  [[nodiscard]] virtual bool device_lost() const { return false; }
+  /// Maximum tokens accepted by the loaded model under the configured context.
+  /// Zero when no text model is loaded.
+  [[nodiscard]] virtual std::uint32_t max_context() const { return 0; }
+  /// Whether the loaded backend accepts image inputs in chat requests.
+  [[nodiscard]] virtual bool supports_images() const { return false; }
   [[nodiscard]] virtual SamplingDefaults sampling_defaults() const {
     return {};
   }
@@ -262,6 +311,15 @@ public:
       const sampling::SamplingConfig& sampling,
       const CancellationCheck& is_cancelled = {}, bool stream_output = false);
 
+  /// Raw prompt generation with admission reserved before SSE headers.
+  virtual std::shared_ptr<GenerationRequest> start_complete(
+      std::string_view prompt, std::size_t max_tokens,
+      const sampling::SamplingConfig& sampling,
+      const CancellationCheck& is_cancelled = {}, bool stream_output = false,
+      bool ignore_eos = false, std::string_view client_id = "anonymous",
+      const std::vector<std::string>& stop_sequences = {},
+      bool return_progress = false);
+
   std::shared_ptr<GenerationRequest> start_chat(
       const ChatRequest& request, std::size_t max_tokens, float temperature,
       const CancellationCheck& is_cancelled = {}, bool stream_output = false) {
@@ -273,6 +331,65 @@ public:
   [[nodiscard]] virtual std::size_t count_tokens(
       std::string_view text) const = 0;
 };
+
+inline std::shared_ptr<TextGenerationBackend::GenerationRequest>
+TextGenerationBackend::start_complete(
+    std::string_view prompt, std::size_t max_tokens,
+    const sampling::SamplingConfig& sampling,
+    const CancellationCheck& is_cancelled, bool stream_output, bool ignore_eos,
+    std::string_view client_id, const std::vector<std::string>& stop_sequences,
+    bool return_progress) {
+  (void)stream_output;
+  (void)return_progress;
+  if (ignore_eos)
+    throw std::invalid_argument("backend does not support ignore_eos");
+  class DeferredGenerationRequest final : public GenerationRequest {
+  public:
+    DeferredGenerationRequest(TextGenerationBackend& backend,
+                              std::string prompt, std::size_t max_tokens,
+                              sampling::SamplingConfig sampling,
+                              CancellationCheck cancellation,
+                              std::string client_id,
+                              std::vector<std::string> stop_sequences)
+        : backend_(backend),
+          prompt_(std::move(prompt)),
+          max_tokens_(max_tokens),
+          sampling_(sampling),
+          cancellation_(std::move(cancellation)),
+          client_id_(std::move(client_id)),
+          stop_sequences_(std::move(stop_sequences)) {}
+
+    Result Wait(const TokenCallback& on_token,
+                const ProgressCallback&) override {
+      if (waited_.exchange(true, std::memory_order_acq_rel))
+        throw std::logic_error("generation request was already consumed");
+      return backend_.complete(
+          prompt_, max_tokens_, sampling_,
+          [this] {
+            return cancelled_.load(std::memory_order_acquire) ||
+                   (cancellation_ && cancellation_());
+          },
+          on_token, client_id_, stop_sequences_);
+    }
+    void Cancel() noexcept override {
+      cancelled_.store(true, std::memory_order_release);
+    }
+
+  private:
+    TextGenerationBackend& backend_;
+    std::string prompt_;
+    std::size_t max_tokens_;
+    sampling::SamplingConfig sampling_;
+    CancellationCheck cancellation_;
+    std::string client_id_;
+    std::vector<std::string> stop_sequences_;
+    std::atomic<bool> waited_{false};
+    std::atomic<bool> cancelled_{false};
+  };
+  return std::make_shared<DeferredGenerationRequest>(
+      *this, std::string(prompt), max_tokens, sampling, is_cancelled,
+      std::string(client_id), stop_sequences);
+}
 
 inline std::shared_ptr<TextGenerationBackend::GenerationRequest>
 TextGenerationBackend::start_chat(const ChatRequest& request,
@@ -293,7 +410,8 @@ TextGenerationBackend::start_chat(const ChatRequest& request,
           sampling_(sampling_config),
           external_cancellation_(std::move(external_cancellation)) {}
 
-    Result Wait(const TokenCallback& on_token) override {
+    Result Wait(const TokenCallback& on_token,
+                const ProgressCallback&) override {
       if (waited_.exchange(true, std::memory_order_acq_rel)) {
         throw std::logic_error("generation request was already consumed");
       }

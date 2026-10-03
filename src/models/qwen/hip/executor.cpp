@@ -290,6 +290,8 @@ std::span<const float> QwenGpuExecutor::CopyLastLogits() {
 tokenization::TokenId QwenGpuExecutor::SampleLastLogits(
     sampling::SamplerState& sampler) {
   CheckReset();
+  if (sampler.NeedsConstraintMask())
+    return sampler.Sample(CopyLastLogits());
   auto parameters = PrepareGpuSamplingParameters(sampler);
   if (sampler.config().uses_random_sampling()) {
     parameters.uniform = sampler.Uniform();
@@ -315,6 +317,8 @@ tokenization::TokenId QwenGpuExecutor::SampleCachedLogits(
   if (logits.size() != weights_.config.vocab_size)
     throw std::invalid_argument(
         "cached Qwen frontier has the wrong vocabulary");
+  if (sampler.NeedsConstraintMask())
+    return sampler.Sample(logits);
   auto scratch = arena_.GetScratchView();
   HIP_CHECK(hipMemcpyAsync(scratch.decode.logits.data(), logits.data(),
                            logits.size_bytes(), hipMemcpyHostToDevice,
@@ -344,6 +348,8 @@ tokenization::TokenId QwenGpuExecutor::SampleVerificationLogits(
   if (row >= last_verification_rows_ || d_verification_logits_ == nullptr) {
     throw std::out_of_range("Qwen verification logit row is unavailable");
   }
+  if (sampler.NeedsConstraintMask())
+    return sampler.Sample(CopyVerificationLogits(row));
   auto parameters = PrepareGpuSamplingParameters(sampler);
   if (sampler.config().uses_random_sampling()) {
     parameters.uniform = sampler.Uniform();
@@ -380,6 +386,19 @@ QwenSampledVerificationResult QwenGpuExecutor::VerifySampledToken(
   }
 
   qwen27::PhaseScope profile(qwen27::Phase::kVerifyRow);
+  if (sampler.NeedsConstraintMask()) {
+    const auto target = sampler.Distribution(CopyVerificationLogits(row));
+    if (sampler.Uniform() * draft_token_probability <
+        target.probability(draft_token)) {
+      sampler.Accept(draft_token);
+      return {.token = draft_token, .accepted = true};
+    }
+    return {.token = target.SampleResidual(draft_candidate_ids,
+                                           draft_candidate_probabilities,
+                                           sampler.mutable_rng_state()),
+            .accepted = false};
+  }
+
   auto parameters = PrepareGpuSamplingParameters(sampler);
   const double acceptance_uniform = sampler.Uniform();
   const std::uint64_t residual_rng_checkpoint = sampler.rng_state();

@@ -1,6 +1,8 @@
 #ifndef GUFO_SERVER_GENERATION_METRICS_HPP_
 #define GUFO_SERVER_GENERATION_METRICS_HPP_
 
+#include <atomic>
+#include <cstdint>
 #include <iomanip>
 #include <sstream>
 
@@ -8,6 +10,37 @@
 #include "src/core/json.hpp"
 
 namespace gufo::server {
+
+// Process-wide `/metrics` values. Token counters advance per prefill chunk and
+// per generated token, so scrapes see work while requests are still running.
+namespace detail {
+inline std::atomic<std::uint64_t>& TotalPromptTokens() {
+  static std::atomic<std::uint64_t> count{0};
+  return count;
+}
+inline std::atomic<std::uint64_t>& TotalGenTokens() {
+  static std::atomic<std::uint64_t> count{0};
+  return count;
+}
+inline std::atomic<double>& LastPromptSpeed() {
+  static std::atomic<double> val{0.0};
+  return val;
+}
+inline std::atomic<double>& LastGenSpeed() {
+  static std::atomic<double> val{0.0};
+  return val;
+}
+// Schedulers add their own deltas, so a draining scheduler and its
+// replacement can both contribute during a model reload.
+inline std::atomic<std::int64_t>& RequestsProcessing() {
+  static std::atomic<std::int64_t> count{0};
+  return count;
+}
+inline std::atomic<std::int64_t>& RequestsDeferred() {
+  static std::atomic<std::int64_t> count{0};
+  return count;
+}
+}  // namespace detail
 
 inline double PrefillTokensPerSecond(
     const TextGenerationBackend::Result& result) {
@@ -38,7 +71,9 @@ inline std::string GenerationLogDetails(
       << " cache_restore_ms=" << result.cache_restore_ms
       << " queue_depth=" << result.queue_depth_at_submit
       << " resident_at_admission=" << result.resident_requests_at_admission
-      << " queue_ms=" << result.queue_ms << " ttft_ms=" << result.ttft_ms
+      << " queue_ms=" << result.queue_ms
+      << " shared_prefix_wait_ms=" << result.shared_prefix_wait_ms
+      << " ttft_ms=" << result.ttft_ms
       << " prefill_tps=" << PrefillTokensPerSecond(result) << " decode_tps="
       << (result.decode_ms > 0
               ? 1000.0 * result.completion_tokens / result.decode_ms
@@ -96,6 +131,17 @@ inline json::Value GenerationTimings(
     timings["lookup_n_accepted"] = result.lookup_accepted_tokens;
   }
   return timings;
+}
+
+/// llama-server `prompt_progress` object for streamed `return_progress`.
+inline json::Value PromptProgressJson(
+    const TextGenerationBackend::PromptProgress& progress) {
+  json::Value value = json::Value::object();
+  value["total"] = progress.total;
+  value["cache"] = progress.cache;
+  value["processed"] = progress.processed;
+  value["time_ms"] = progress.time_ms;
+  return value;
 }
 
 }  // namespace gufo::server
