@@ -39,7 +39,7 @@ inline MtpProposal SampleMtpProposal(const MtpCandidateLogits& candidates,
     throw std::invalid_argument("invalid MTP candidate count");
   }
   const auto distribution =
-      sampler.Distribution(std::span(candidates.logits).first(candidates.size),
+      sampler.WithoutBehaviour().Distribution(std::span(candidates.logits).first(candidates.size),
                            std::span(candidates.ids).first(candidates.size));
   constexpr std::uint32_t units = 1U << 24;
   std::array<std::uint32_t, kMtpCandidates> mass{};
@@ -96,14 +96,18 @@ inline MtpVerification VerifyMtpProposal(
   }
   if (total != 1 || selected != proposal.probability)
     throw std::invalid_argument("MTP proposal masses do not match the draw");
-  if (sampler.Uniform() * proposal.probability <
-      target.probability(proposal.token))
-    return {proposal.token, true};
-  return {target.SampleResidual(
-              std::span(proposal.ids).first(proposal.size),
-              std::span(proposal.probabilities).first(proposal.size),
-              sampler.mutable_rng_state()),
-          false};
+  const auto rng_before = sampler.rng_state();
+  const bool accepted = sampler.Uniform() * proposal.probability <
+                        target.probability(proposal.token);
+  const auto token = accepted ? proposal.token : target.SampleResidual(
+      std::span(proposal.ids).first(proposal.size),
+      std::span(proposal.probabilities).first(proposal.size),
+      sampler.mutable_rng_state());
+  sampler.ObserveBehaviour(target,token,rng_before,
+      std::span(proposal.ids).first(proposal.size),
+      std::span(proposal.probabilities).first(proposal.size),
+      proposal.token,proposal.probability);
+  return {token,accepted};
 }
 
 inline MtpVerification VerifyMtpProposal(std::span<const float> logits,
@@ -119,13 +123,13 @@ inline MtpVerification VerifyMtpProposal(std::span<const float> logits,
 template<typename IsStop>
 DraftDecision VerifyDraft(std::span<const float> logits, std::int32_t draft,
                           sampling::SamplerState& sampler, IsStop is_stop) {
-  const auto rng = sampler.rng_state();
+  const auto before = sampler;
   const auto token = sampler.Sample(logits);
   if (is_stop(static_cast<std::int32_t>(token))) {
     return DraftDecision::kStop;
   }
   if (token != static_cast<sampling::TokenId>(draft)) {
-    sampler.SetRngState(rng);
+    sampler = before;
     return DraftDecision::kReject;
   }
   sampler.Accept(token);

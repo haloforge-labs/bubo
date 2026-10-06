@@ -271,6 +271,15 @@ public:
       std::string_view text) const = 0;
   [[nodiscard]] virtual std::optional<std::vector<TextRunnerToken>>
   RenderAndTokenize(const ChatRequest& request) const = 0;
+  /// Bind optional policies to this model's tokenizer and request phase before
+  /// creating its sampler. The default leaves every other model unchanged.
+  [[nodiscard]] virtual sampling::SamplingConfig ConfigureSampling(
+      const sampling::SamplingConfig& config, const ChatRequest*,
+      std::span<const TextRunnerToken>) const {
+    if (config.behaviour)
+      throw std::invalid_argument("behaviour switches require Qwen3.8-Flash-Next");
+    return config;
+  }
   [[nodiscard]] virtual std::optional<TextPreparedPrompt> PreparePrompt(
       const ChatRequest& request) const {
     for (const auto& message : request.messages) {

@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdlib>
 #include <iostream>
@@ -9,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -17,6 +19,7 @@
 
 #include "src/core/json.hpp"
 #include "src/core/json_constraint.hpp"
+#include "src/cli/serve/behaviour_options.hpp"
 
 namespace {
 
@@ -1686,6 +1689,332 @@ void TestAssistantReasoningContentReachesBackend() {
       "Assistant reasoning_content reaches the model template");
   Expect(backend.last_request.messages[1].content == "Red",
          "Assistant visible content remains separate from reasoning");
+}
+
+void TestBehaviourRequestOptions() {
+  struct EnvironmentScope {
+    std::vector<std::pair<std::string, std::optional<std::string>>> previous;
+    static void Set(const char* name, const char* value) {
+#ifdef _WIN32
+      _putenv_s(name, value ? value : "");
+#else
+      if (value)
+        setenv(name, value, 1);
+      else
+        unsetenv(name);
+#endif
+    }
+    EnvironmentScope() {
+      for (const auto* name : {
+               "GUFO_THINK_EOG_GUARD", "GUFO_EOG_BOUNDARY",
+               "GUFO_EOG_MIN_PROB_EXACT", "GUFO_EOG_MIN_PROB",
+               "GUFO_EOG_DEFER_P", "GUFO_SPEC_EOG_STOP", "GUFO_LOOP_BREAKER",
+               "GUFO_LOOP_BREAKER_EOG_CLOSE", "GUFO_LOOP_BREAKER_TRANSITION",
+               "GUFO_REASONING_BUDGET", "GUFO_LOGIT_BIAS",
+               "GUFO_THINK_MARKER_BIAS", "GUFO_THINK_MARKER_BIAS_BY_EFFORT",
+               "GUFO_PRODUCTION_SAMPLING", "GUFO_MODEL_SUPPRESS_TOKENS"}) {
+        const char* value = std::getenv(name);
+        previous.emplace_back(name, value ? std::optional<std::string>(value)
+                                          : std::nullopt);
+        Set(name, nullptr);
+      }
+    }
+    ~EnvironmentScope() {
+      for (const auto& [name, value] : previous)
+        Set(name.c_str(), value ? value->c_str() : nullptr);
+    }
+  } environment;
+  using gufo::server::ParseBehaviourOptions;
+  using gufo::server::ResolveMarkerBias;
+  const auto parse = [](std::string_view body) {
+    return ParseBehaviourOptions(gufo::json::parse(body));
+  };
+  const auto invalid = [&](std::string_view body) {
+    bool rejected = false;
+    try {
+      (void)parse(body);
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    Expect(rejected, "invalid behaviour request is rejected deterministically");
+  };
+  Expect(parse("{}") == nullptr, "all unset switches preserve native sampling");
+  {
+    FakeBackend backend;
+    const auto response = gufo::server::HandleOpenAiChat(Request(R"({
+      "model":"test-model","messages":[{"role":"user","content":"hello"}],
+      "logit_bias":{"12":1}})"), backend);
+    Expect(response.status == 400 &&
+               response.body.find("unsupported_sampling") != std::string::npos &&
+               backend.chat_calls == 0,
+           "unset bias switch retains gufo's unsupported_sampling contract");
+  }
+  EnvironmentScope::Set("GUFO_LOGIT_BIAS", "1");
+  auto cfg = parse(R"({"logit_bias":{"12":1.25,"hello":false}})");
+  Expect(cfg && cfg->logit_bias_enabled && cfg->logit_bias.size() == 1 &&
+             cfg->logit_bias[0].first == 12 &&
+             cfg->logit_bias[0].second == 1.25F &&
+             cfg->text_logit_bias.size() == 1 &&
+             cfg->text_logit_bias[0].first == "hello" &&
+             std::isinf(cfg->text_logit_bias[0].second) &&
+             cfg->text_logit_bias[0].second < 0,
+         "enabled logit bias accepts numeric ids and false bans of tokenized text");
+  cfg = parse(R"({"logit_bias":[[12,-2],["hello",0.5],[13,false]]})");
+  Expect(cfg->logit_bias.size() == 2 && cfg->text_logit_bias.size() == 1,
+         "production array form preserves numeric ids and text bias");
+  for (const auto* body : {R"({"logit_bias":null})",
+                           R"({"logit_bias":{}})",
+                           R"({"logit_bias":[]})"}) {
+    cfg = parse(body);
+    Expect(cfg && cfg->logit_bias_enabled && cfg->logit_bias.empty() &&
+               cfg->text_logit_bias.empty(),
+           "null and empty bias containers preserve the unmodified distribution");
+  }
+  for (const auto* body : {
+           R"({"logit_bias":{"-1":1}})", R"({"logit_bias":{"+1":1}})",
+           R"({"logit_bias":[[1.5,1]]})", R"({"logit_bias":[[-1,1]]})",
+           R"({"logit_bias":[[4294967296,1]]})",
+           R"({"logit_bias":{"4294967296":1}})",
+           R"({"logit_bias":{"12":true}})",
+           R"({"logit_bias":{"12":"1"}})",
+           R"({"logit_bias":12})", R"({"logit_bias":true})",
+           R"({"logit_bias":false})", R"({"logit_bias":"oops"})",
+           R"({"logit_bias":""})"})
+    invalid(body);
+  EnvironmentScope::Set("GUFO_REASONING_BUDGET", "1");
+  for (const auto* body : {R"({"reasoning_budget_tokens":0})",
+                           R"({"reasoning_budget_tokens":-1})",
+                           R"({"reasoning_budget_tokens":2147483647})"}) {
+    cfg = parse(body);
+    Expect(cfg && cfg->reasoning_budget_enabled &&
+               cfg->reasoning_budget ==
+                   static_cast<std::int64_t>(gufo::json::parse(body)
+                                                .find("reasoning_budget_tokens")
+                                                ->as_double()),
+           "budget accepts zero, unlimited and the production integer maximum");
+  }
+  for (const auto* body : {R"({"reasoning_budget_tokens":0.5})",
+                           R"({"reasoning_budget_tokens":-2})",
+                           R"({"reasoning_budget_tokens":2147483648})",
+                           R"({"reasoning_budget_tokens":"0"})"})
+    invalid(body);
+  cfg = parse(R"({"reasoning_budget_start_tag":"<reason>",
+                   "reasoning_budget_end_tag":"</reason>"})");
+  Expect(cfg->reasoning_start_tag == "<reason>" &&
+             cfg->reasoning_end_tags == std::vector<std::string>{"</reason>"},
+         "budget start and single end tags preserve custom phase delimiters");
+  cfg = parse(R"({"reasoning_budget_end_tag":42,
+                   "reasoning_budget_end_tags":["</reason>","<done>"]})");
+  Expect(cfg->reasoning_end_tags ==
+             std::vector<std::string>{"</reason>", "<done>"},
+         "budget end-tag list takes precedence over the single-tag field");
+  for (const auto* body : {
+           R"({"reasoning_budget_start_tag":""})",
+           R"({"reasoning_budget_start_tag":null})",
+           R"({"reasoning_budget_start_tag":42})",
+           R"({"reasoning_budget_end_tag":""})",
+           R"({"reasoning_budget_end_tag":null})",
+           R"({"reasoning_budget_end_tag":[]})",
+           R"({"reasoning_budget_end_tags":[]})",
+           R"({"reasoning_budget_end_tags":null})",
+           R"({"reasoning_budget_end_tags":"</reason>"})",
+           R"({"reasoning_budget_end_tags":[""]})",
+           R"({"reasoning_budget_end_tags":["</reason>",42]})"})
+    invalid(body);
+  EnvironmentScope::Set("GUFO_THINK_MARKER_BIAS", "-0.25");
+  EnvironmentScope::Set("GUFO_THINK_MARKER_BIAS_BY_EFFORT",
+                        "low:-2,medium:-1,xhigh:0");
+  cfg = parse("{}");
+  Expect(ResolveMarkerBias(*cfg, "low") == -2 &&
+             ResolveMarkerBias(*cfg, "minimal") == -2 &&
+             ResolveMarkerBias(*cfg, "medium") == -1 &&
+             ResolveMarkerBias(*cfg, "xhigh") == 0 &&
+             ResolveMarkerBias(*cfg, "high") == 0 &&
+             ResolveMarkerBias(*cfg, "max") == 0 &&
+             ResolveMarkerBias(*cfg, "unknown") == -0.25,
+         "effort map overrides global bias and aliases preserve production semantics");
+  cfg = parse(R"({"think_marker_bias":0.75})");
+  Expect(ResolveMarkerBias(*cfg, "low") == 0.75 &&
+             ResolveMarkerBias(*cfg, "xhigh") == 0.75,
+         "explicit request bias wins over effort mapping");
+  EnvironmentScope::Set("GUFO_THINK_MARKER_BIAS_BY_EFFORT",
+                        " low : -2 ,\tmedium : -1 , xhigh : 0 \r\n");
+  cfg = parse("{}");
+  Expect(ResolveMarkerBias(*cfg, "low") == -2 &&
+             ResolveMarkerBias(*cfg, "medium") == -1 &&
+             ResolveMarkerBias(*cfg, "xhigh") == 0,
+         "production effort map trims whitespace around labels and values");
+  // server-common.cpp:40-74 accepts arbitrary nonempty labels. Keep that
+  // compatibility for future efforts while enforcing the original syntax.
+  EnvironmentScope::Set("GUFO_THINK_MARKER_BIAS_BY_EFFORT",
+                        "experimental:-3,low:-2");
+  cfg = parse("{}");
+  Expect(ResolveMarkerBias(*cfg, "experimental") == -3 &&
+             ResolveMarkerBias(*cfg, "medium") == -0.25,
+         "unknown nonempty map labels remain legal and unmatched efforts inherit global bias");
+  for (const auto* map : {"low:-2,low:-1", "low:-2,", "low:-2, ",
+                          "low", ":-2", "low:", "low:-2:3",
+                          "low:nan", "low:inf", "low:1e999"}) {
+    bool rejected = false;
+    try {
+      EnvironmentScope::Set("GUFO_THINK_MARKER_BIAS_BY_EFFORT", map);
+      cfg = parse("{}");
+      (void)ResolveMarkerBias(*cfg, "low");
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    Expect(rejected,
+           "production effort map rejects duplicate, empty, malformed and nonfinite entries");
+  }
+}
+
+void TestNullReasoningHistory() {
+  // Production common/chat.cpp:454 assigned null to a string and rejected
+  // valid OpenAI history. gufo already accepts null; retain that protection.
+  for (const bool stream : {false, true}) {
+    FakeBackend backend;
+    backend.pieces = {"next"};
+    auto body = gufo::json::parse(R"({"model":"test-model","messages":[
+      {"role":"assistant","content":"previous","reasoning_content":null},
+      {"role":"user","content":"continue"}]})");
+    body["stream"] = stream;
+    const auto response =
+        gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+    Expect(response.status == 200, "null reasoning history is accepted");
+    if (response.streaming_body)
+      response.streaming_body([](std::string_view) { return true; });
+    Expect(backend.last_request.messages[0].thought.empty() &&
+               backend.last_request.messages[0].content == "previous",
+           "null reasoning means absent reasoning, preserving visible history");
+  }
+}
+
+void TestProductionSamplingSelection() {
+  using namespace gufo::sampling;
+  SamplingConfig configured;
+  auto policy = std::make_shared<BehaviourConfig>();
+  policy->think_eog_guard = true;
+  configured.behaviour = policy;
+  for (const bool thinking : {false, true}) {
+    const auto native = ResolveTextSampling(TextModelPreset::kQwen38, thinking,
+                                           configured, {}, false);
+    const auto production = ResolveTextSampling(
+        TextModelPreset::kQwen38, thinking, configured, {}, true);
+    Expect(native.temperature == (thinking ? 1.0F : 0.7F) &&
+               native.top_p == (thinking ? 0.95F : 0.8F) &&
+               native.presence_penalty == (thinking ? 0.0F : 1.5F),
+           "native gufo presets remain selectable");
+    Expect(production.temperature == (thinking ? 1.0F : 0.7F) &&
+               production.top_p == 0.95F && production.top_k == 20 &&
+               production.min_p == 0.0F && production.presence_penalty == 0.0F,
+           "production thinking on/off uses the launcher distribution");
+    Expect(production.behaviour->think_eog_guard &&
+               production.behaviour->production_sampling &&
+               native.behaviour == configured.behaviour,
+           "preset selection preserves the request policy and native comparator");
+    Expect(production.behaviour->native_temperature == native.temperature &&
+               production.behaviour->native_top_p == native.top_p &&
+               production.behaviour->native_presence_penalty ==
+                   native.presence_penalty,
+           "preset comparator records the effective native distribution");
+  }
+  configured.temperature = 0.0F;
+  configured.top_p = 0.0F;
+  configured.top_k = 0;
+  configured.min_p = 0.25F;
+  configured.presence_penalty = 0.5F;
+  configured.seed = 123;
+  const auto explicit_config = ResolveTextSampling(
+      TextModelPreset::kQwen38, false, configured, SamplingOverrides::All(),
+      true);
+  Expect(explicit_config.temperature == 0.0F && explicit_config.top_p == 0.0F &&
+             explicit_config.top_k == 0 && explicit_config.min_p == 0.25F &&
+             explicit_config.presence_penalty == 0.5F &&
+             explicit_config.seed == 123,
+         "explicit overrides, including zero, win over production presets");
+  Expect(explicit_config.behaviour->native_temperature == 0.0F &&
+             explicit_config.behaviour->native_top_k == 0 &&
+             explicit_config.behaviour->native_top_p == 0.0F &&
+             explicit_config.behaviour->native_presence_penalty == 0.5F,
+         "explicit overrides also apply to the native intervention comparator");
+}
+
+void TestProductionParserRecovery() {
+  // Port the output cases from wt-pfbt/tests/test-chat.cpp:2157-2175.
+  const std::string replacement = "\xEF\xBF\xBD";
+  struct Case {
+    std::string raw;
+    std::string thought;
+    std::string content;
+  };
+  for (const auto& item : {
+           Case{"We need to think further.", "We need to think further.", ""},
+           Case{"</think>\n\n", "", ""},
+           Case{"</think>\n\nThe bound is $x^2+", "", "The bound is $x^2+"},
+           Case{std::string("</think>\n\nCost: ") + "\xE2\x82", "",
+                "Cost: " + replacement},
+           Case{std::string("Reasoning ") + "\xB0" + "geq 0</think>Answer",
+                "Reasoning " + replacement + "geq 0", "Answer"}}) {
+    for (const bool stream : {false, true}) {
+      FakeBackend backend;
+      for (const char byte : item.raw)
+        backend.pieces.emplace_back(1, byte);
+      auto body = gufo::json::parse(R"({"model":"test-model","messages":[
+        {"role":"user","content":"solve"}],
+        "chat_template_kwargs":{"enable_thinking":true}})");
+      body["stream"] = stream;
+      const auto response =
+          gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+      Expect(response.status == 200, "partial production output stays valid");
+      std::string thought, content;
+      if (!stream) {
+        const auto output = gufo::json::parse(response.body);
+        const auto& message =
+            *output.find("choices")->items()[0].find("message");
+        thought = message.member_str("reasoning_content");
+        content = message.member_str("content");
+      } else {
+        response.streaming_body([&](std::string_view chunk) {
+          if (chunk == "data: [DONE]\n\n")
+            return true;
+          const auto event = gufo::json::parse(chunk.substr(6));
+          for (const auto& choice : event.find("choices")->items()) {
+            if (const auto* delta = choice.find("delta")) {
+              thought += delta->member_str("reasoning_content");
+              content += delta->member_str("content");
+            }
+          }
+          return true;
+        });
+      }
+      Expect(thought == item.thought && content == item.content,
+             "split UTF-8, unfinished reasoning and truncated math are retained");
+    }
+  }
+  for (const bool malformed : {false, true}) {
+    FakeBackend backend;
+    backend.pieces = {
+        std::string(16384, 'r') + "\n</think>\n\n<tool_call>\n"
+        "<function=run_in_terminal>\n<parameter=command>\npwd\n" +
+        (malformed ? "" : "</parameter>\n</function>\n</tool_call>")};
+    const auto response = gufo::server::HandleOpenAiChat(Request(R"({
+      "model":"test-model","messages":[{"role":"user","content":"pwd"}],
+      "chat_template_kwargs":{"enable_thinking":true},"tools":[{
+        "type":"function","function":{"name":"run_in_terminal",
+          "parameters":{"type":"object","properties":{
+            "command":{"type":"string"}},"required":["command"]}}}]})"),
+        backend);
+    Expect(response.status == 200, "long reasoning tool output is valid");
+    const auto output = gufo::json::parse(response.body);
+    const auto& message = *output.find("choices")->items()[0].find("message");
+    const auto* calls = message.find("tool_calls");
+    Expect(malformed ? calls == nullptr : calls && calls->items().size() == 1,
+           "only a complete call invokes a tool; malformed output is never invented");
+    if (calls)
+      Expect(calls->items()[0].find("function")->member_str("name") ==
+                 "run_in_terminal",
+             "long reasoning preserves the production tool name");
+  }
 }
 
 void TestPiReasoningControlsAndOutputFraming() {
@@ -5029,6 +5358,10 @@ void TestBracketDenseContent() {
 
 int main() {
   TestHistoricalTypedArgumentsUseTojson();
+  TestBehaviourRequestOptions();
+  TestNullReasoningHistory();
+  TestProductionSamplingSelection();
+  TestProductionParserRecovery();
   TestStreamingPromptProgress();
   TestResponsesPromptProgress();
   TestToolMarkersInsideConstrainedReasoning();

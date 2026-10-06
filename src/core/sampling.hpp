@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "src/core/json_constraint.hpp"
+#include "src/core/behaviour.hpp"
 
 namespace gufo::sampling {
 
@@ -31,6 +32,7 @@ struct SamplingConfig {
   float frequency_penalty{0.0F};
   float presence_penalty{0.0F};
   std::shared_ptr<const TokenConstraint> constraint;
+  std::shared_ptr<const BehaviourConfig> behaviour;
 
   void Validate() const;
 
@@ -51,6 +53,8 @@ struct Probability {
   double value{0.0};
 };
 
+struct BehaviourDistribution;
+
 /// A normalized, post-filter sampling distribution.
 class SamplingDistribution {
 public:
@@ -66,11 +70,24 @@ public:
       std::span<const float> candidate_probabilities,
       std::uint64_t* rng_state) const;
 
+public:
+  [[nodiscard]] const std::shared_ptr<const BehaviourDistribution>& behaviour() const { return behaviour_; }
 private:
   friend class SamplerState;
+  std::shared_ptr<const BehaviourDistribution> behaviour_;
   // Entries generated internally have unique IDs; retain their stable order.
   SamplingDistribution(std::vector<Probability> entries, double total);
   std::vector<Probability> entries_;
+};
+
+struct BehaviourStage {
+  std::string name, reason;
+  SamplingDistribution before, after;
+  bool before_random{true}, after_random{true}, before_valid{true};
+};
+struct BehaviourDistribution {
+  std::vector<BehaviourStage> stages;
+  bool defer_stop{false}, close_eog{false}, random{false};
 };
 
 /// Builds the exact distribution from prompt and request-generated tokens.
@@ -97,6 +114,15 @@ public:
   /// Draft q may remain unconstrained; target p always uses this request's
   /// grammar.
   [[nodiscard]] SamplerState WithoutConstraint() const;
+  [[nodiscard]] SamplerState WithoutBehaviour() const;
+  [[nodiscard]] bool BehaviourEnabled() const noexcept;
+  [[nodiscard]] std::vector<std::string> BehaviourSummary() const;
+  void RecordSpecEogStop(std::size_t skipped);
+  void ObserveBehaviour(const SamplingDistribution& distribution,
+      TokenId actual, std::uint64_t rng_before,
+      std::span<const TokenId> proposal_ids = {},
+      std::span<const float> proposal_probabilities = {},
+      TokenId proposed = 0, double q = 0);
   /// A finite argmax can bypass downloading logits if it satisfies the grammar.
   /// Set penalties_applied only for a winner computed with this state's exact
   /// penalty arithmetic and history; raw model argmaxes leave it false.
@@ -113,17 +139,19 @@ public:
   [[nodiscard]] std::uint64_t* mutable_rng_state() noexcept;
   void SetRngState(std::uint64_t state) noexcept;
   /// Publish RNG and any deferred draw without accepting tentative history.
-  void CopyDrawStateFrom(const SamplerState& other) noexcept;
+  void CopyDrawStateFrom(const SamplerState& other);
   struct DrawState {
     std::uint64_t rng;
     std::optional<TokenId> pending;
+    std::optional<BehaviourState> behaviour;
   };
-  [[nodiscard]] DrawState SaveDrawState() const noexcept {
-    return {rng_state_, pending_sample_};
+  [[nodiscard]] DrawState SaveDrawState() const {
+    return {rng_state_, pending_sample_, BehaviourEnabled() ? std::optional(behaviour_state_) : std::nullopt};
   }
-  void RestoreDrawState(DrawState state) noexcept {
+  void RestoreDrawState(DrawState state) {
     rng_state_ = state.rng;
     pending_sample_ = state.pending;
+    if(state.behaviour) behaviour_state_ = std::move(*state.behaviour);
   }
 
   /// Starts a request: tokens initialize repetition only; generated counts
@@ -163,6 +191,14 @@ public:
   [[nodiscard]] double Uniform();
 
 private:
+  [[nodiscard]] SamplerState BehaviourWithoutIntervention(std::string_view name) const;
+  [[nodiscard]] SamplingDistribution BehaviourDistributionFor(
+      std::span<const float> logits, std::span<const TokenId> ids = {},
+      std::size_t vocab = 0) const;
+  [[nodiscard]] bool BehaviourTopSafe(std::span<const float> values,
+      std::span<const TokenId> ids, std::size_t vocab) const;
+  mutable BehaviourState behaviour_state_;
+  bool observe_behaviour_{true};
   [[nodiscard]] std::vector<float> ConstrainedLogits(
       std::span<const float> logits, std::span<const TokenId> ids = {}) const;
   void TrimHistory();

@@ -6,6 +6,7 @@
 #include <iostream>
 #include <memory>
 #include <sstream>
+#include <stdexcept>
 #include <string_view>
 #include <vector>
 
@@ -327,6 +328,48 @@ void TestSnapshotCanBranchIntoTwoIndependentStateSlots() {
   Expect(dynamic_cast<FakeState&>(root_again.state()).value == 7,
          "branch mutation never changes the immutable root payload");
   root_again.Invalidate();
+}
+
+void TestRestoreFailureDoesNotLeakRequestStateOrSlot() {
+  // Production server-context.cpp:610-613 marks errored partial state invalid.
+  // gufo's restore catch must also release the slot and retain immutable roots.
+  std::vector<std::size_t> invalidations(1);
+  bool fail_restore = false;
+  gufo::server::ContinuationCache cache(
+      1, [&] { return std::make_unique<FakeState>(0, &invalidations); },
+      {.restore = [&](auto& state, const auto& snapshot) {
+         dynamic_cast<FakeState&>(state).value = 999;
+         if (fail_restore)
+           throw std::runtime_error("injected restore failure");
+         dynamic_cast<FakeState&>(state).value =
+             dynamic_cast<const FakeSnapshot&>(snapshot).value;
+       },
+       .capacity_bytes = [] { return 64; },
+       .on_event = {}});
+  {
+    auto seed = cache.Acquire(std::vector<gufo::server::ContinuationToken>{1, 2});
+    Expect(seed.TryReserveSnapshot(8, 2), "root snapshot admitted");
+    seed.Commit({1, 2}, std::make_unique<FakeSnapshot>(42, 8));
+  }
+  fail_restore = true;
+  bool threw = false;
+  try {
+    auto broken =
+        cache.Acquire(std::vector<gufo::server::ContinuationToken>{1, 2, 3});
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  Expect(threw && invalidations[0] > 0,
+         "restore failure invalidates mutated state and propagates the error");
+  Expect(cache.reserved_snapshot_bytes() == 0 &&
+             cache.retained_snapshot_bytes() == 8,
+         "failed request leaks neither a reservation nor the immutable root");
+  fail_restore = false;
+  auto next = cache.Acquire(std::vector<gufo::server::ContinuationToken>{1, 2, 4});
+  Expect(next.cache_hit() && next.cached_tokens() == 2 &&
+             dynamic_cast<FakeState&>(next.state()).value == 42,
+         "next request reacquires the released slot and its exact root payload");
+  next.Invalidate();
 }
 
 void TestByteCapacityEvictsBeforeSnapshotAllocation() {
@@ -1102,6 +1145,7 @@ int main() {
   TestWaitingAcquireCanBeCancelled();
   TestSnapshotCanBranchIntoTwoIndependentStateSlots();
   TestBorrowedSnapshotPrefersAvailableOwner();
+  TestRestoreFailureDoesNotLeakRequestStateOrSlot();
   TestCachedPrefixTokensPeeksWithoutLeasing();
   TestBranchPointOutlivesOlderTurnsUnderPressure();
   TestByteCapacityEvictsBeforeSnapshotAllocation();

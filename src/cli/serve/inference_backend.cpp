@@ -14,6 +14,7 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <span>
 #include <sstream>
 #include <stdexcept>
@@ -22,6 +23,7 @@
 #include <utility>
 
 #include "src/cli/serve/logging.hpp"
+#include "src/cli/serve/behaviour_options.hpp"
 #include "src/cli/serve/text_generation_scheduler.hpp"
 #include "src/cli/serve/text_model_runner.hpp"
 #include "src/core/gguf_identity.hpp"
@@ -2424,8 +2426,10 @@ public:
                           std::uint32_t max_context, bool use_mtp,
                           std::uint32_t max_draft_tokens,
                           std::string artifact_fingerprint = {},
-                          std::string mtp_fingerprint = {})
+                          std::string mtp_fingerprint = {},
+                          std::vector<std::uint32_t> suppress_tokens = {})
       : model_(std::move(model)),
+        suppress_tokens_(std::move(suppress_tokens)),
         max_context_(max_context),
         use_mtp_(use_mtp),
         max_draft_tokens_(max_draft_tokens) {
@@ -2944,8 +2948,133 @@ public:
     restored.set_position(position);
   }
 
+  [[nodiscard]] sampling::SamplingConfig ConfigureSampling(
+      const sampling::SamplingConfig& config, const ChatRequest* request,
+      std::span<const TextRunnerToken> prompt) const override {
+    if (!config.behaviour) return config;
+    auto result = config;
+    auto policy = std::make_shared<sampling::BehaviourConfig>(*config.behaviour);
+    policy->suppress_ids = suppress_tokens_;
+    const auto& tokenizer = model_->tokenizer();
+    {
+      const std::lock_guard<std::mutex> lock(behaviour_mutex_);
+      if (!behaviour_pieces_) {
+        auto pieces = std::make_shared<std::vector<std::string>>();
+        pieces->reserve(tokenizer.GetVocabSize());
+        for (std::uint32_t id=0; id<tokenizer.GetVocabSize(); ++id) {
+          pieces->push_back(tokenizer.DecodeTokenCopy(id));
+          if (tokenizer.IsStopToken(id)) behaviour_eog_.push_back(id);
+        }
+        behaviour_pieces_ = std::move(pieces);
+      }
+      policy->token_pieces = behaviour_pieces_;
+      policy->eog_ids = behaviour_eog_;
+    }
+    policy->think_start = tokenizer.Encode(policy->reasoning_start_tag);
+    policy->think_ends.clear();
+    for (const auto& tag : policy->reasoning_end_tags)
+      policy->think_ends.push_back(tokenizer.Encode(tag));
+    policy->think_end = policy->think_ends.front();
+    policy->budget_forced = tokenizer.Encode(policy->reasoning_budget_message);
+    policy->budget_forced.insert(policy->budget_forced.end(),
+                                 policy->think_end.begin(),policy->think_end.end());
+    const char* transition_text=std::getenv("GUFO_LOOP_BREAKER_TRANSITION_TEXT");
+    policy->loop_prefix = tokenizer.Encode(transition_text ? transition_text : policy->loop_transition==2 ?
+        "I'm going in circles. Let me" :
+        "\nI've been repeating myself; I'll answer now.\n",
+        {.parse_special_tokens=false});
+    if (policy->eog_ids.empty() || policy->think_start.empty() || policy->think_end.empty())
+      throw std::invalid_argument("behaviour policy needs model stop and thinking tokens");
+    // Chat templates pre-open the current assistant reasoning segment. Raw
+    // completion continuations use the final matched start/end in the prompt.
+    if (request) {
+      policy->loop_exempt = !request->tools.empty();
+      const bool thinking_on=QwenChatOptions(*request,max_context_).enable_thinking;
+      auto tracker=*policy;
+      tracker.initial_thinking=false;
+      tracker.reasoning_budget_enabled=false;
+      tracker.loop_breaker=false;
+      sampling::BehaviourState phase;
+      phase.Reset(tracker);
+      for (auto id : tokenizer.Encode(tokenization::GenerationPrompt(thinking_on)))
+        phase.Accept(tracker,id,false);
+      policy->initial_thinking=phase.thinking;
+      policy->marker_bias = ResolveMarkerBias(*policy,BehaviourEffortName(request->reasoning.effort));
+      if (!thinking_on) {
+        policy->think_eog_guard=false;
+        policy->marker_bias=0;
+      }
+    } else {
+      policy->initial_thinking = false;
+      for (std::size_t end=0; end<prompt.size(); ++end) {
+        const auto ends = [&](const auto& seq) {
+          return end+1>=seq.size() && std::equal(seq.rbegin(),seq.rend(),
+              std::make_reverse_iterator(prompt.begin()+end+1));
+        };
+        if (ends(policy->think_start)) policy->initial_thinking=true;
+        for (const auto& end_tag : policy->think_ends)
+          if (ends(end_tag)) policy->initial_thinking=false;
+      }
+      policy->marker_bias = ResolveMarkerBias(*policy,"");
+    }
+    static constexpr std::string_view markers =
+        "perhaps maybe wait Wait actually hold Hmm hmm Alternatively alternatively However however "
+        "instead Instead But but though although yet rather unless otherwise nonetheless nevertheless "
+        "regardless still anyway Or or either whether uncertain unsure possibly might could another "
+        "different reconsider rethink backtrack retry recheck revisit doubt confused wrong mistake error incorrect";
+    std::set<std::uint32_t> ids;
+    if (policy->marker_bias != 0) {
+      std::vector<std::string> marker_words;
+      if (const char* list=std::getenv("GUFO_THINK_MARKER_LIST"); list && *list) {
+        std::ifstream input(list);
+        if (!input) throw std::invalid_argument("cannot read GUFO_THINK_MARKER_LIST");
+        std::string line;
+        while (std::getline(input,line)) {
+          if (!line.empty() && line.back()=='\r') line.pop_back();
+          if (!line.empty()) marker_words.push_back(line);
+        }
+        if (input.bad()) throw std::invalid_argument("cannot finish GUFO_THINK_MARKER_LIST");
+      } else {
+        std::istringstream words{std::string(markers)};
+        std::string word;
+        while (words >> word) marker_words.push_back(word);
+      }
+      for (auto word : marker_words) {
+        if (!word.empty() && word.front()==' ') word.erase(0,1);
+        if (word.empty()) continue;
+        std::string lower=word;
+        std::transform(lower.begin(),lower.end(),lower.begin(),
+            [](unsigned char c){return static_cast<char>(std::tolower(c));});
+        std::string capital=lower;
+        capital[0]=static_cast<char>(std::toupper(static_cast<unsigned char>(capital[0])));
+        for (const auto& variant : {word,lower,capital}) {
+          for (const auto& text : {variant," "+variant}) {
+            const auto tokens=tokenizer.Encode(text,{.parse_special_tokens=false});
+            if (tokens.size()==1 && tokenizer.DecodeTokenCopy(tokens.front())==text)
+              ids.insert(tokens.front());
+          }
+        }
+      }
+    }
+    policy->marker_ids.assign(ids.begin(),ids.end());
+    for (const auto& [text,bias] : policy->text_logit_bias)
+      for (auto id : tokenizer.Encode(text)) policy->logit_bias.emplace_back(id,bias);
+    policy->text_logit_bias.clear();
+    for (const auto& [id,bias] : policy->logit_bias) {
+      (void)bias;
+      if (id>=tokenizer.GetVocabSize())
+        throw std::invalid_argument("logit_bias token id is outside the model vocabulary");
+    }
+    result.behaviour = std::move(policy);
+    return result;
+  }
+
 private:
+  mutable std::mutex behaviour_mutex_;
+  mutable std::shared_ptr<const std::vector<std::string>> behaviour_pieces_;
+  mutable std::vector<std::uint32_t> behaviour_eog_;
   std::shared_ptr<QwenFlashNextModel> model_;
+  std::vector<std::uint32_t> suppress_tokens_;
   std::uint32_t max_context_;
   bool use_mtp_;
   std::uint32_t max_draft_tokens_;
@@ -3621,12 +3750,16 @@ bool InferenceBackend::load(
     new_state->sampling_defaults.model = sampling::TextModelPreset::kQwen38;
     new_state->sampling_defaults.supplied = {};
     new_state->supports_images = model->VisionEncoder() != nullptr;
+    std::vector<std::uint32_t> suppress_tokens;
+    if (BehaviourSwitch("GUFO_MODEL_SUPPRESS_TOKENS"))
+      suppress_tokens=model->SuppressedTokens();
     auto runner = std::make_shared<QwenFlashNextTextRunner>(
         std::move(model), max_context,
         speculative_config.backend == TextSpeculativeBackend::kMtp,
         speculative_config.max_draft_tokens,
         disk_cache_config.model_artifact_fingerprint,
-        disk_cache_config.draft_model_artifact_fingerprint);
+        disk_cache_config.draft_model_artifact_fingerprint,
+        std::move(suppress_tokens));
     new_state->model_id = runner->Descriptor().model_id;
     new_state->max_context = max_context;
     std::optional<TextRunnerDiskCacheOptions> runner_disk_cache;
@@ -3806,9 +3939,11 @@ InferenceBackend::Result InferenceBackend::complete(
     return {};
   }
   auto prompt_tokens = state->scheduler->runner().Tokenize(prompt);
+  const auto effective_sampling = state->scheduler->runner().ConfigureSampling(
+      sampling_config,nullptr,prompt_tokens);
   return impl_->GenerateScheduled(
       state, std::move(prompt_tokens), request_start, max_tokens,
-      sampling_config, is_cancelled, on_token, std::string(client_id), {}, true,
+      effective_sampling, is_cancelled, on_token, std::string(client_id), {}, true,
       0, stop_sequences);
 #else
   (void)client_id;
@@ -3840,6 +3975,8 @@ InferenceBackend::Result InferenceBackend::chat(
   if (!prompt.has_value() || prompt->tokens.empty()) {
     return {};
   }
+  effective_sampling = state->scheduler->runner().ConfigureSampling(
+      effective_sampling,&effective_request,prompt->tokens);
   return impl_->GenerateScheduled(
       state, std::move(prompt->tokens), request_start, max_tokens,
       effective_sampling, is_cancelled, on_token, request.client_id,
@@ -3872,8 +4009,10 @@ InferenceBackend::start_complete(
         ignore_eos, client_id, stop_sequences, return_progress);
   }
   auto prompt_tokens = state->scheduler->runner().Tokenize(prompt);
+  const auto effective_sampling = state->scheduler->runner().ConfigureSampling(
+      sampling_config,nullptr,prompt_tokens);
   auto scheduled_request = state->scheduler->Submit(
-      std::move(prompt_tokens), max_tokens, sampling_config, is_cancelled,
+      std::move(prompt_tokens), max_tokens, effective_sampling, is_cancelled,
       stream_output,
       TextRequestMetadata{
           .client_id = client_id.empty() ? "anonymous" : std::string(client_id),
@@ -3921,6 +4060,8 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
 
   const std::string client_id =
       request.client_id.empty() ? "anonymous" : request.client_id;
+  effective_sampling = state->scheduler->runner().ConfigureSampling(
+      effective_sampling,&effective_request,prompt->tokens);
   auto scheduled_request = state->scheduler->Submit(
       std::move(prompt->tokens), max_tokens, effective_sampling, is_cancelled,
       stream_output,

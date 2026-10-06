@@ -13,6 +13,7 @@
 
 #include "src/core/json.hpp"
 #include "src/core/sampling.hpp"
+#include "src/cli/serve/behaviour_options.hpp"
 
 namespace gufo::server {
 
@@ -94,6 +95,16 @@ inline std::optional<SamplingRequestError> ParseSamplingConfig(
     };
   }
   *output = defaults;
+  try {
+    output->behaviour = ParseBehaviourOptions(body, defaults.behaviour);
+    if (output->behaviour) {
+      auto validate_map = *output->behaviour;
+      validate_map.request_marker_bias.reset();
+      (void)ResolveMarkerBias(validate_map, "");
+    }
+  } catch (const std::exception& error) {
+    return SamplingRequestError{error.what(), "invalid_behaviour"};
+  }
 
   // These controls alter proposal/target probabilities. Reject unsupported
   // spellings instead of accepting a request with a different distribution.
@@ -151,7 +162,8 @@ inline std::optional<SamplingRequestError> ParseSamplingConfig(
         field == "mirostat_tau" || field == "dynatemp_range" ||
         field == "dynatemp_exponent" || field.starts_with("xtc_") ||
         field.starts_with("dry_") || field == "top_n_sigma" ||
-        field == "logit_bias") {
+        (field == "logit_bias" &&
+         !(output->behaviour && output->behaviour->logit_bias_enabled))) {
       return SamplingRequestError{
           .message = "request field '" + field + "' is not supported",
           .code = "unsupported_sampling",
@@ -224,6 +236,21 @@ inline std::optional<SamplingRequestError> ParseSamplingConfig(
     }
   }
 
+  if (output->behaviour && output->behaviour->production_sampling) {
+    auto policy = std::make_shared<sampling::BehaviourConfig>(*output->behaviour);
+    // Compare presets after identical explicit request overrides, never claim
+    // that an explicitly supplied control was changed by the preset switch.
+    if (body.find("temperature") && !body.find("temperature")->is_null()) policy->native_temperature=output->temperature;
+    if (body.find("top_k")) policy->native_top_k=output->top_k;
+    if (body.find("top_p") && !body.find("top_p")->is_null()) policy->native_top_p=output->top_p;
+    if (body.find("min_p")) policy->native_min_p=output->min_p;
+    if (body.find("min_keep")) policy->native_min_keep=output->min_keep;
+    if (body.find("repeat_penalty")) policy->native_repeat_penalty=output->repeat_penalty;
+    if (body.find("repeat_last_n")) policy->native_repeat_last_n=output->repeat_last_n;
+    if (body.find("frequency_penalty") && !body.find("frequency_penalty")->is_null()) policy->native_frequency_penalty=output->frequency_penalty;
+    if (body.find("presence_penalty") && !body.find("presence_penalty")->is_null()) policy->native_presence_penalty=output->presence_penalty;
+    output->behaviour=std::move(policy);
+  }
   try {
     output->Validate();
   } catch (const std::invalid_argument& exception) {

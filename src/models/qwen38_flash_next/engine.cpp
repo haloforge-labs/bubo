@@ -256,6 +256,19 @@ bool Model::IsStopToken(std::int32_t token) const noexcept {
   return tokenizer_->IsStopToken(static_cast<tokenization::TokenId>(token));
 }
 
+std::vector<std::uint32_t> Model::SuppressedTokens() const {
+  std::vector<std::uint32_t> result;
+  const auto* metadata=reader_->FindMetadata("tokenizer.ggml.suppress_tokens");
+  if (!metadata) return result;
+  const auto* ids=std::get_if<std::vector<std::int64_t>>(&metadata->value);
+  if (metadata->type!=core::GgufValueType::kArray || !ids)
+    throw std::invalid_argument("tokenizer.ggml.suppress_tokens must be an integer array");
+  for (auto id : *ids)
+    if (id>=0 && static_cast<std::uint64_t>(id)<VocabSize())
+      result.push_back(static_cast<std::uint32_t>(id));
+  return result;
+}
+
 std::uint32_t Model::VocabSize() const noexcept {
   return weights_->config.vocab_size;
 }
@@ -1169,6 +1182,7 @@ bool Session::FinishDecode(const DecodeRequest& request,
         continue;
       }
       if (is_stop(prediction.index)) {
+        if(prediction.index==chain[keep]) sampler.RecordSpecEogStop(k-keep-1);
         result->stop = true;
         break;
       }
@@ -1196,6 +1210,7 @@ bool Session::FinishDecode(const DecodeRequest& request,
       const auto token = static_cast<std::int32_t>(verified.token);
       const bool accepted = verified.accepted;
       if (is_stop(token)) {
+        if (accepted) sampler.RecordSpecEogStop(k-keep-1);
         result->stop = true;
         break;
       }

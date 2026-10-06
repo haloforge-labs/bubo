@@ -414,6 +414,11 @@ if (BUILD_TESTING)
   add_test(NAME arg_parser_test COMMAND arg_parser_test)
   set_tests_properties(arg_parser_test PROPERTIES LABELS "cpu;cli")
 
+  add_executable(behaviour_test tests/core/behaviour_test.cpp)
+  target_link_libraries(behaviour_test PRIVATE gufo_core)
+  add_test(NAME behaviour_test COMMAND behaviour_test)
+  set_tests_properties(behaviour_test PROPERTIES LABELS "cpu;sampling;behaviour")
+
   add_executable(json_constraint_test tests/core/json_constraint_test.cpp)
   target_link_libraries(json_constraint_test PRIVATE gufo_core)
   target_compile_definitions(json_constraint_test PRIVATE

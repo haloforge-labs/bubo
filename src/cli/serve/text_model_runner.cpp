@@ -746,6 +746,12 @@ struct TextRunnerPool::Request::Impl {
     // destroyed.
     if (snapshot_future.valid())
       snapshot_future.wait();
+    try {
+      for (const auto& line : sampler.BehaviourSummary())
+        Logger::Info("behaviour", line);
+    } catch (...) {
+      // Destruction must release the continuation lease even if logging fails.
+    }
   }
 
   void CapturePromptSnapshot(bool wait = true) noexcept {

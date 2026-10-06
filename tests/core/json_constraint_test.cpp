@@ -979,6 +979,54 @@ void TestAutomaticTools() {
   }
 }
 
+void TestLazyQwenToolSplitTriggerRollback() {
+  // Production sampling.cpp:556-602 keeps tool grammar lazy until its trigger.
+  // Exercise every tokenizer split, including the snapshot used for MTP reject.
+  using Format = JsonConstraint::ToolFormat;
+  const auto schema = parse(R"({"type":"object","properties":{
+    "text":{"type":"string"}},"required":["text"]})");
+  const auto grammar = JsonConstraint::WithTools(
+      nullptr,
+      {{"f", JsonConstraint::ToolParameters(schema, false, Format::kQwen)}},
+      false, true, Format::kQwen);
+  const std::string opener = "<tool_call>";
+  const std::string call =
+      "\n<function=f>\n<parameter=text>\nalpha\n</parameter>\n"
+      "</function>\n</tool_call>";
+  for (std::size_t split = 1; split < opener.size(); ++split) {
+    auto binding = std::make_shared<TokenConstraint>();
+    binding->grammar = grammar;
+    binding->vocabulary = std::make_shared<ConstraintVocabulary>(259,
+        [&](std::uint32_t i) {
+          return ConstraintVocabulary::Piece{
+              i < 256 ? std::string(1, static_cast<char>(i))
+              : i == 257 ? opener.substr(0, split)
+              : i == 258 ? opener.substr(split) : "",
+              i == 256};
+        });
+    SamplerState sampler({.temperature = 0.0F, .constraint = binding});
+    assert(!sampler.NeedsConstraintMask());
+    sampler.Accept(257);
+    const auto before_accept = sampler;
+    sampler.Accept(258);
+    assert(sampler.NeedsConstraintMask());
+    std::vector<float> logits(259, -INFINITY);
+    logits['!'] = 100;
+    logits['\n'] = 1;
+    logits[256] = 200;
+    assert(sampler.Sample(logits) == '\n');
+    // Reject an accepted speculative suffix and replay from the exact prefix.
+    sampler = before_accept;
+    sampler.Accept(258);
+    assert(sampler.Sample(logits) == '\n');
+    for (const unsigned char byte : call)
+      sampler.Accept(byte);
+    assert(!sampler.NeedsConstraintMask());
+    sampler.ResetHistory({});
+    assert(!sampler.NeedsConstraintMask());
+  }
+}
+
 void TestNativeTools() {
   using Format = JsonConstraint::ToolFormat;
   const auto schema = parse(R"({
@@ -2049,6 +2097,7 @@ int main(int argc, char** argv) {
   TestNativeRequestMaskReuse();
   TestReasoningConstraint();
   TestAutomaticTools();
+  TestLazyQwenToolSplitTriggerRollback();
   TestNativeTools();
   TestOpenNativeTools();
   TestNonStrictAgentTools();

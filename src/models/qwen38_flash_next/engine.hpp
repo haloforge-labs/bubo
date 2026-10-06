@@ -105,6 +105,7 @@ public:
     return options_.decode_concurrency;
   }
   [[nodiscard]] std::string ModelName() const;
+  [[nodiscard]] std::vector<std::uint32_t> SuppressedTokens() const;
   [[nodiscard]] const Config& config() const noexcept;
   [[nodiscard]] const tokenization::QwenTokenizer& tokenizer() const noexcept {
     return *tokenizer_;

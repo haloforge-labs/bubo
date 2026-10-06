@@ -841,6 +841,73 @@ void TestSnapshotRetentionUsesPromptBoundary() {
   }
 }
 
+void TestBehaviourBudgetAndPhaseDoNotLeakThroughPromptSnapshot() {
+  // sampling.cpp:447-453 resets request policy state; text_model_runner.cpp:571
+  // creates a fresh sampler even when the model frontier comes from a snapshot.
+  class PolicySnapshotRunner final : public SnapshotRunner {
+  public:
+    using SnapshotRunner::SnapshotRunner;
+    [[nodiscard]] TextDecodeSelection SelectNext(
+        TextRunnerState& state,
+        gufo::sampling::SamplerState& sampler) const override {
+      if (!RequireFakeState(state).frontier)
+        throw std::logic_error("policy test needs a restored decode frontier");
+      const std::array<float, 3> row{10.0F, 9.0F, 8.0F};
+      const auto token = sampler.Sample(row);
+      return {.stop = token == 0,
+              .token = token,
+              .piece = token == 1 ? "word" : token == 2 ? "</think>" : ""};
+    }
+  };
+  auto stats = std::make_shared<FakeStats>();
+  auto runner = std::make_shared<PolicySnapshotRunner>(stats);
+  TextRunnerPool pool(runner, 1);
+  auto policy = std::make_shared<gufo::sampling::BehaviourConfig>();
+  policy->initial_thinking = true;
+  policy->think_eog_guard = true;
+  policy->reasoning_budget_enabled = true;
+  policy->reasoning_budget = 1;
+  policy->eog_ids = {0};
+  policy->think_end = {2};
+  policy->token_pieces = std::make_shared<const std::vector<std::string>>(
+      std::vector<std::string>{"", "word", "</think>"});
+  gufo::sampling::SamplingConfig config;
+  config.behaviour = policy;
+  const std::vector<TextRunnerToken> prompt{1, 1, 1, 1};
+  {
+    auto first = pool.Acquire(prompt, config);
+    Expect(!first.cache_hit() && first.Prefill(4).decode_ready,
+           "first policy request creates its prompt frontier");
+    const auto word = first.SelectNext();
+    Expect(!word.stop && word.token == 1,
+           "thinking guard suppresses the higher-logit EOG");
+    first.Advance();
+    const auto end = first.SelectNext();
+    Expect(!end.stop && end.token == 2,
+           "one accepted word consumes the request reasoning budget");
+    first.Advance();
+    Expect(first.Commit().snapshot_bytes == sizeof(FakeSnapshot),
+           "first request retains an immutable prompt-boundary snapshot");
+  }
+  const auto previous_restores = stats->snapshot_restores;
+  auto repeated = pool.Acquire(prompt, config);
+  Expect(repeated.cache_hit() &&
+             repeated.cached_prompt_tokens() == prompt.size() &&
+             repeated.cache_restore_bytes() == sizeof(FakeSnapshot) &&
+             repeated.prefill_complete() &&
+             stats->snapshot_restores == previous_restores + 1,
+         "identical prompt restores the immutable frontier without prefill");
+  const auto word = repeated.SelectNext();
+  Expect(!word.stop && word.token == 1,
+         "restored model state inherits neither closed thinking nor spent budget");
+  repeated.Advance();
+  const auto end = repeated.SelectNext();
+  Expect(!end.stop && end.token == 2,
+         "restored request receives its own complete one-token reasoning budget");
+  repeated.Advance();
+  repeated.Invalidate();
+}
+
 void TestGeneratedFrontierForksBeforeMutation() {
   auto stats = std::make_shared<FakeStats>();
   auto runner = std::make_shared<SnapshotRunner>(stats);
@@ -2153,6 +2220,7 @@ int main() {
   ::setenv("NO_COLOR", "1", 1);
   TestInPassStableCheckpoint();
   TestInPassFailureRetainsOnlyCompletedCheckpoints();
+  TestBehaviourBudgetAndPhaseDoNotLeakThroughPromptSnapshot();
   TestNewImageGetsAStableCheckpoint();
   TestGeneratedFrontierForksBeforeMutation();
   TestGeneratedFrontierPersistsForForks();

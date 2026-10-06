@@ -1,7 +1,9 @@
 #ifndef GUFO_CORE_TEXT_SAMPLING_DEFAULTS_HPP_
 #define GUFO_CORE_TEXT_SAMPLING_DEFAULTS_HPP_
 
+#include <cstdlib>
 #include <optional>
+#include <string_view>
 
 #include "src/core/model_config.hpp"
 #include "src/core/sampling.hpp"
@@ -9,6 +11,12 @@
 namespace gufo::sampling {
 
 enum class TextModelPreset { kUnspecified, kQwen38, kDeepSeekV4Flash };
+
+// Opt in explicitly: an unset switch preserves gufo's native model presets.
+inline bool ProductionTextSamplingEnabled() noexcept {
+  const char* value = std::getenv("GUFO_PRODUCTION_SAMPLING");
+  return value != nullptr && std::string_view(value) == "1";
+}
 
 // Presence is independent of value: an explicit zero must override a preset.
 struct SamplingOverrides {
@@ -41,20 +49,23 @@ inline TextModelPreset TextPreset(const core::ModelConfig& config) {
 inline SamplingConfig ResolveTextSampling(TextModelPreset model,
                                           std::optional<bool> thinking,
                                           const SamplingConfig& configured,
-                                          const SamplingOverrides& supplied) {
+                                          const SamplingOverrides& supplied,
+                                          bool production_preset =
+                                              ProductionTextSamplingEnabled()) {
   if (model == TextModelPreset::kUnspecified)
     return configured;
   SamplingConfig result;
   // Presets change sampling controls, never the caller's output grammar.
   result.constraint = configured.constraint;
+  result.behaviour = configured.behaviour;
   result.temperature = 1.0F;
   result.top_p = 0.95F;
   if (model == TextModelPreset::kQwen38) {
     result.top_k = 20;
     if (!thinking.value_or(true)) {
       result.temperature = 0.7F;
-      result.top_p = 0.8F;
-      result.presence_penalty = 1.5F;
+      result.top_p = production_preset ? 0.95F : 0.8F;
+      result.presence_penalty = production_preset ? 0.0F : 1.5F;
     }
   }
   if (supplied.temperature)
@@ -77,6 +88,26 @@ inline SamplingConfig ResolveTextSampling(TextModelPreset model,
     result.frequency_penalty = configured.frequency_penalty;
   if (supplied.presence_penalty)
     result.presence_penalty = configured.presence_penalty;
+  if (production_preset && model == TextModelPreset::kQwen38) {
+    // Store the effective native comparator after the same explicit overrides.
+    // The sampler uses it to count only selections changed by this preset.
+    const auto native =
+        ResolveTextSampling(model, thinking, configured, supplied, false);
+    auto behaviour = configured.behaviour
+                         ? std::make_shared<BehaviourConfig>(*configured.behaviour)
+                         : std::make_shared<BehaviourConfig>();
+    behaviour->production_sampling = true;
+    behaviour->native_temperature = native.temperature;
+    behaviour->native_top_k = native.top_k;
+    behaviour->native_top_p = native.top_p;
+    behaviour->native_min_p = native.min_p;
+    behaviour->native_min_keep = native.min_keep;
+    behaviour->native_repeat_penalty = native.repeat_penalty;
+    behaviour->native_repeat_last_n = native.repeat_last_n;
+    behaviour->native_frequency_penalty = native.frequency_penalty;
+    behaviour->native_presence_penalty = native.presence_penalty;
+    result.behaviour = std::move(behaviour);
+  }
   return result;
 }
 
