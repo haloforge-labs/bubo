@@ -343,6 +343,33 @@ std::uint32_t Session::ContextSize() const noexcept {
   return session_->max_context();
 }
 
+// GUFO_MTP_TRACE=1 (literal value only; default off = behaviour and output unchanged): one stderr line per decode cycle,
+// '[mtp-cycle] t_ms=<ms on the steady clock, at the end of the cycle> base=<context position> drafts=<MTP drafts proposed>
+// accepted=<MTP drafts accepted> lookup=<copied (n-gram) proposals> stop=<0|1>', and '[mtp-ar] t_ms= base=' per plain autoregressive token.
+// The gaps between successive t_ms values are the cycle times (wall, incl. catch-up of the previous chain); decode-thread lead-2 capture.
+static bool MtpCycleTraceEnabled() {
+  static const bool on = [] {
+    const char* e = std::getenv("GUFO_MTP_TRACE");
+    return e != nullptr && e[0] == '1' && e[1] == '\0';
+  }();
+  return on;
+}
+static double MtpTraceNowMs() {
+  return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+bool Session::ThinkingAfter(const std::vector<std::int32_t>& chain, std::size_t keep) const {
+  for (std::size_t i = std::min(keep, chain.size()); i > 0; --i) {
+    if (chain[i - 1] == kMtpThinkStartToken) return true;
+    if (chain[i - 1] == kMtpThinkEndToken || chain[i - 1] == kMtpToolCallToken) return false;
+  }
+  for (std::size_t i = tokens_.size(); i > 0; --i) {
+    if (tokens_[i - 1] == kMtpThinkStartToken) return true;
+    if (tokens_[i - 1] == kMtpThinkEndToken || tokens_[i - 1] == kMtpToolCallToken) return false;
+  }
+  return false;
+}
+
 bool Session::EnsureFrontier(std::string* error_msg) const {
   if (!frontier_pending_) {
     return true;
@@ -1122,6 +1149,7 @@ bool Session::FinishDecode(const DecodeRequest& request,
   };
   if (!pending.speculative) {
     draft_length_.ObserveArToken();
+    if (MtpCycleTraceEnabled()) std::fprintf(stderr, "[mtp-ar] t_ms=%.3f base=%zu\n", MtpTraceNowMs(), tokens_.size());
     hidden_base_ = base;
     tokens_.push_back(anchor);
     sampler.Accept(static_cast<sampling::TokenId>(anchor));
@@ -1203,10 +1231,19 @@ bool Session::FinishDecode(const DecodeRequest& request,
       if (!target && !ensure_rows()) {
         return false;
       }
+      double accept_scale = 1.0;
+      if (MtpLenient().enabled) {
+        const auto draft_token = static_cast<std::int32_t>(proposals[keep - 1].token);
+        if (is_stop(draft_token) || draft_token == kMtpThinkEndToken || draft_token == kMtpToolCallToken) {
+          MtpLenientStats().skipped_special.fetch_add(1, std::memory_order_relaxed);
+        } else {
+          accept_scale = MtpLenientScale(ThinkingAfter(chain, keep));
+        }
+      }
       const auto verified =
           target
-              ? VerifyMtpProposal(*target, vocab, proposals[keep - 1], sampler)
-              : VerifyMtpProposal(row, proposals[keep - 1], sampler);
+              ? VerifyMtpProposal(*target, vocab, proposals[keep - 1], sampler, accept_scale)
+              : VerifyMtpProposal(row, proposals[keep - 1], sampler, accept_scale);
       const auto token = static_cast<std::int32_t>(verified.token);
       const bool accepted = verified.accepted;
       if (is_stop(token)) {
@@ -1274,6 +1311,10 @@ bool Session::FinishDecode(const DecodeRequest& request,
   // proposals as failed predictions.
   draft_length_.Observe(mtp_accepted, result->stop ? mtp_accepted : mtp_drafts,
                         base);
+  if (MtpCycleTraceEnabled()) {
+    std::fprintf(stderr, "[mtp-cycle] t_ms=%.3f base=%u drafts=%u accepted=%u lookup=%u stop=%d\n", MtpTraceNowMs(), static_cast<unsigned>(base),
+                 static_cast<unsigned>(mtp_drafts), static_cast<unsigned>(mtp_accepted), static_cast<unsigned>(pending.lookup), result->stop ? 1 : 0);
+  }
 
   // The next call knows the next sampled anchor. Defer draft catch-up until
   // then, retaining this session's target hidden rows across interleaving.

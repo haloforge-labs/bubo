@@ -313,6 +313,9 @@ private:
   std::shared_ptr<Model> model_;
   std::unique_ptr<rocm::Session> session_;
   std::vector<std::int32_t> tokens_;
+  /// True when, after the committed context plus chain[0, keep), the most recent of <think> / </think> / <tool_call> is <think> (lenient acceptance gate;
+  /// a backward scan, so it is restore- and rollback-safe by construction).
+  bool ThinkingAfter(const std::vector<std::int32_t>& chain, std::size_t keep) const;
   mutable std::vector<float> logits_;
   /// A sampled cycle's rollback left the frontier row in flight (see
   /// FinishDecode): logits_ is stale until EnsureFrontier fetches it.
