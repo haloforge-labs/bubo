@@ -20,7 +20,7 @@ constexpr std::size_t kWorkers = 32;
 [[maybe_unused]] constexpr std::size_t kWindowsWorkers = 128;
 constexpr std::size_t kReadBatch = 8;
 constexpr std::size_t kBatchJobs = 1024;
-constexpr std::size_t kCacheBytes = 8 * 1024 * 1024;
+constexpr std::size_t kCacheBytes = 128 * 1024 * 1024;
 
 }  // namespace
 

@@ -61,6 +61,12 @@ public:
   ContinuationSnapshot& operator=(ContinuationSnapshot&&) = delete;
 
   [[nodiscard]] virtual std::size_t PayloadBytes() const noexcept = 0;
+  /// Prefer an available state that still holds this snapshot's borrowed rows.
+  /// This is an allocation hint; every state must remain able to restore it.
+  [[nodiscard]] virtual bool PrefersState(
+      const ContinuationState&) const noexcept {
+    return false;
+  }
 };
 
 enum class SnapshotEventAction : std::uint8_t {
@@ -245,6 +251,15 @@ public:
   /// Longest retained prefix of prompt with a matching input identity,
   /// ignoring stable-prefix fallback rules. Leases nothing.
   [[nodiscard]] std::size_t CachedPrefixTokens(
+      std::span<const ContinuationToken> prompt,
+      std::span<const std::uint8_t> input_identity = {},
+      std::span<const ContinuationInputPrefix> input_prefixes = {}) const;
+
+  /// Longest prefix prompt shares with any retained checkpoint or live
+  /// frontier of the same input identity, whether or not that record ends
+  /// there. This is where prompts diverge, so a checkpoint captured there
+  /// serves later prompts that share it. Leases nothing.
+  [[nodiscard]] std::size_t CommonPrefixTokens(
       std::span<const ContinuationToken> prompt,
       std::span<const std::uint8_t> input_identity = {},
       std::span<const ContinuationInputPrefix> input_prefixes = {}) const;

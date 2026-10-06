@@ -136,8 +136,8 @@ void HcCombineF16(float* res, const float* block_out, const float* inject,
 /// MoeEpilogueVec4F16's result over `expert_out` ([tokens][used][hidden]
 /// F16 rows), `weights`, the gated shared expert; it is formed in
 /// registers and never written. Returns false (launching nothing) for a
-/// geometry the fused kernel does not cover (four 2,560-wide streams with a
-/// norm and the tiled Q8 output are required).
+/// geometry the fused kernel does not cover (four 2,560-wide streams).
+/// A null gamma updates only the residual; otherwise xn_q8 is required.
 bool HcCombineMoeF16(float* res, const __half* expert_out, const float* weights,
                      const float* shared_out, const float* gate,
                      std::uint32_t gate_stride, std::uint32_t used,
@@ -216,6 +216,12 @@ bool UnquantizedF16Gemm(const void* w, const __half* x, float* out,
                         hipStream_t stream);
 bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
                   std::size_t m, std::size_t k, hipStream_t stream);
+/// BF16 weight rows [m][k] times BF16 activation rows [batch][k] with one
+/// F32 K16 chain per output. Token t's chain starts ((t / 32) % 4) * 128
+/// elements into K and wraps: hipBLASLt's MT32x32x64 order (BlasLt::Gemm).
+/// out is [batch][m].
+bool DenseBf16Gemm(const void* w, const void* x, float* out, std::size_t batch,
+                   std::size_t m, std::size_t k, hipStream_t stream);
 
 /// SSM Q8_0 projection fused with its four-tap convolution. Supports
 /// [m=16384,k=2560,channels=10240] and at least 1024 tokens. qkvz retains
@@ -228,7 +234,7 @@ bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
                      const float* history, float* qkvz, float* convolved,
                      std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
                      std::uint32_t channels, std::uint32_t kernel,
-                     hipStream_t stream);
+                     hipStream_t stream, std::uint32_t checkpoint_tokens = 0);
 
 /// Routed expert GEMMs. RoutedCompact sorts the (token, slot) assignments
 /// by expert into `rows_token`/`rows_slot` (RoutedCompactRows(slots,
@@ -300,6 +306,18 @@ void PleConv(const float* in, const float* w, float* history,
 void PleInject(float* res, const float* gated, const float* conv,
                std::size_t count, hipStream_t stream);
 
+/// Copies rolling history at a prefix without advancing the live history.
+void HistoryPrefix(const float* in, std::uint32_t stride, const float* history,
+                   float* destination, std::uint32_t tokens,
+                   std::uint32_t channels, std::uint32_t history_rows,
+                   hipStream_t stream);
+
+struct GdnCheckpoint {
+  float* state = nullptr;
+  float* history = nullptr;
+  std::uint32_t tokens = 0;
+};
+
 /// Gated DeltaNet over a chunk of tokens for one layer. Runs the causal
 /// conv (with rolling `conv_state`, [kernel-1][channels]) and the recurrence
 /// on `state` ([v_heads][d][d]) sequentially over tokens, parallel over heads
@@ -329,7 +347,7 @@ void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
                    std::uint32_t k_heads, std::uint32_t v_heads,
                    std::uint32_t d, std::uint32_t kernel, bool row_split,
                    bool convolved, float eps, hipStream_t stream,
-                   __half* out_half = nullptr);
+                   __half* out_half = nullptr, GdnCheckpoint checkpoint = {});
 
 /// Private rows for one request in a decode batch. Scratch regions and all
 /// recurrent/history/rollback buffers must be disjoint between requests.
@@ -419,12 +437,15 @@ void PoolIndexerBlocks(const float* raw_keys, const float* gamma,
 /// b visible). Every block is visible when the count fits the budget.
 /// Queries retain F32 precision; pooled cache keys are F16. Scores
 /// still accumulate in FP32. `scores` holds n_tokens * max_blocks floats.
+/// `live_blocks`, when nonzero, bounds the complete blocks of the last
+/// query (eager launches only: a captured graph must cover max_blocks).
 void SelectBlocks(const float* q, const __half* blocks, std::uint32_t* mask,
                   float* scores, std::uint32_t n_tokens,
                   const std::uint32_t* start_pos, std::uint32_t first_token,
                   std::uint32_t heads, std::uint32_t dim, std::uint32_t ratio,
                   std::uint32_t budget, std::uint32_t mask_words,
-                  std::uint32_t max_blocks, hipStream_t stream);
+                  std::uint32_t max_blocks, hipStream_t stream,
+                  std::uint32_t live_blocks = 0);
 
 /// Per-token attention (decode and narrow batches). With `partials`
 /// (n_tokens * heads * splits * (d + 2) floats) the key tiles are split

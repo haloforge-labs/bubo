@@ -1,7 +1,11 @@
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
 
+#include <sys/mman.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <chrono>
 #include <cmath>
@@ -172,11 +176,488 @@ bool CopyFloats(const float* src, float* dst, std::size_t count,
   return Check(hipMemcpyAsync(dst, src, count * sizeof(float),
                               hipMemcpyDeviceToDevice, stream),
                what, error_msg);
+
+void PopulateSnapshotPrefix(std::uint8_t* data, std::uint64_t bytes,
+                            std::uint64_t worker_limit = 4) {
+  const long page = sysconf(_SC_PAGESIZE);
+  if (page <= 0)
+    return;
+  const auto address = reinterpret_cast<std::uintptr_t>(data);
+  const auto skip = (page - address % page) % page;
+  if (bytes <= skip)
+    return;
+  const auto length = (bytes - skip) / page * page;
+  if (length == 0)
+    return;
+  // Populate before huge-page advice to avoid synchronous UMA compaction on
+  // first touch. Borrowed checkpoints prepare host pages only when exported.
+  const auto workers = std::max<std::uint64_t>(
+      1, std::min<std::uint64_t>(worker_limit, length / (32ULL << 20)));
+  const auto pages = length / page;
+  {
+    std::vector<std::jthread> faults;
+    for (std::uint64_t worker = 1; worker < workers; ++worker) {
+      const auto begin = pages * worker / workers * page;
+      const auto end = pages * (worker + 1) / workers * page;
+      faults.emplace_back([=] {
+        (void)madvise(data + skip + begin, end - begin, MADV_POPULATE_WRITE);
+      });
+    }
+    (void)madvise(data + skip, pages / workers * page, MADV_POPULATE_WRITE);
+  }
+  (void)madvise(data + skip, length, MADV_HUGEPAGE);
 }
 
 }  // namespace
 
+namespace {
+constexpr std::uint64_t kSnapshotReuseBytes = 8ULL << 20;
+}  // namespace
+// Legacy hipFree synchronizes unrelated inference streams. Pool allocations
+// have stream-ordered release, so evicting a checkpoint cannot stall a peer.
+// Every transfer finishes before dropping its last storage reference.
+class SnapshotAllocator
+    : public std::enable_shared_from_this<SnapshotAllocator> {
+public:
+  // Every capture freezes the same mutable state size. Keep this many released
+  // blocks of it committed for the next captures: ROCm commits pool pages on
+  // each allocation (about 25 GB/s here), and an allocation also stalls other
+  // HIP calls, so a background refill would land in a peer's decode instead.
+  static constexpr std::size_t kSpareBlocks = 2;
+
+  SnapshotAllocator() {
+    hipMemPoolProps properties{};
+    properties.allocType = hipMemAllocationTypePinned;
+    properties.handleTypes = hipMemHandleTypeNone;
+    properties.location.type = hipMemLocationTypeDevice;
+    CheckStatus(hipGetDevice(&properties.location.id), "snapshot pool device");
+    CheckStatus(hipMemPoolCreate(&pool_, &properties), "snapshot pool");
+    const auto created =
+        hipStreamCreateWithFlags(&stream_, hipStreamNonBlocking);
+    if (created != hipSuccess) {
+      (void)hipMemPoolDestroy(pool_);
+      CheckStatus(created, "snapshot allocator stream");
+    }
+  }
+  ~SnapshotAllocator() {
+    for (void* spare : spares_)
+      (void)hipFree(spare);
+    (void)hipStreamSynchronize(stream_);
+    (void)hipStreamDestroy(stream_);
+    for (hipStream_t stream : free_streams_)
+      (void)hipStreamDestroy(stream);
+    (void)hipMemPoolDestroy(pool_);
+  }
+  std::shared_ptr<void> Allocate(std::uint64_t bytes) {
+    std::lock_guard lock(mutex_);
+    return Own(Commit(bytes), bytes);
+  }
+  /// Allocates the recurring mutable-state size, from a released block when
+  /// one is kept.
+  std::shared_ptr<void> AllocateSpare(std::uint64_t bytes) {
+    std::lock_guard lock(mutex_);
+    if (spare_bytes_ != bytes) {
+      for (void* spare : spares_)
+        (void)hipFree(spare);
+      spares_.clear();
+      spare_bytes_ = bytes;
+    }
+    if (spares_.empty())
+      return Own(Commit(bytes), bytes);
+    void* data = spares_.back();
+    spares_.pop_back();
+    return Own(data, bytes);
+  }
+  /// Bytes the spare blocks may hold, for scratch accounting.
+  [[nodiscard]] static std::uint64_t SpareBytes(std::uint64_t block) {
+    return kSpareBlocks * block;
+  }
+  /// A transfer on a stream of its own, reused across transfers: creating a
+  /// stream can stall for milliseconds, and a shared stream would make a
+  /// capture wait for a peer's bulk materialization.
+  [[nodiscard]] std::unique_ptr<gufo::hip::SnapshotTransfer> Transfer() {
+    hipStream_t stream = nullptr;
+    {
+      std::lock_guard lock(streams_mutex_);
+      if (!free_streams_.empty()) {
+        stream = free_streams_.back();
+        free_streams_.pop_back();
+      }
+    }
+    if (stream == nullptr)
+      CheckStatus(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking),
+                  "snapshot transfer stream");
+    return std::make_unique<gufo::hip::SnapshotTransfer>(
+        stream, [owner = shared_from_this()](hipStream_t done) {
+          std::lock_guard lock(owner->streams_mutex_);
+          owner->free_streams_.push_back(done);
+        });
+  }
+
+private:
+  static void CheckStatus(hipError_t error, const char* operation) {
+    if (error != hipSuccess)
+      throw std::runtime_error(std::string(operation) + ": " +
+                               hipGetErrorString(error));
+  }
+  void* Commit(std::uint64_t bytes) {
+    void* data = nullptr;
+    CheckStatus(hipMallocFromPoolAsync(&data, bytes, pool_, stream_),
+                "snapshot allocate");
+    const auto ready = hipStreamSynchronize(stream_);
+    if (ready != hipSuccess) {
+      (void)hipFree(data);
+      (void)hipStreamSynchronize(stream_);
+      CheckStatus(ready, "snapshot allocation ready");
+    }
+    return data;
+  }
+  std::shared_ptr<void> Own(void* data, std::uint64_t bytes) {
+    return {data, [owner = shared_from_this(), bytes](void* pointer) {
+              owner->Release(pointer, bytes);
+            }};
+  }
+  void Release(void* pointer, std::uint64_t bytes) {
+    std::lock_guard lock(mutex_);
+    if (bytes == spare_bytes_ && spares_.size() < kSpareBlocks) {
+      spares_.push_back(pointer);
+      return;
+    }
+    // In ROCm, hipFree recognizes pool allocations and bypasses SyncAllStreams.
+    // Unlike hipFreeAsync, it also permits a peer blocking-stream capture.
+    (void)hipFree(pointer);
+    // Keep physical memory bounded by retained checkpoints and the spares,
+    // including when their source session has already been destroyed.
+    (void)hipStreamSynchronize(stream_);
+  }
+  std::mutex mutex_;
+  std::vector<void*> spares_;
+  std::uint64_t spare_bytes_{0};
+  hipStream_t stream_{nullptr};
+  std::mutex streams_mutex_;
+  std::vector<hipStream_t> free_streams_;
+  hipMemPool_t pool_{nullptr};
+};
+
+std::shared_ptr<SnapshotAllocator> Executor::GetSnapshotAllocator() const {
+  std::call_once(snapshot_allocator_once_, [&] {
+    snapshot_allocator_ = std::make_shared<SnapshotAllocator>();
+  });
+  return snapshot_allocator_;
+}
+
+// Provenance describes rows actually copied by a restore, rather than token
+// equality: different prefill shapes can produce different KV for the same
+// tokens. A branch shares its parent's rows only below its restored frontier.
+// These nodes retain metadata alone, never snapshot payloads or device storage.
+struct SnapshotLineage {
+  using Rows = std::array<std::uint32_t, 4>;
+  std::shared_ptr<const SnapshotLineage> parent;
+  Rows prefix{};
+  std::size_t depth = 0;
+  explicit SnapshotLineage(
+      std::shared_ptr<const SnapshotLineage> source = nullptr, Rows rows = {})
+      : parent(std::move(source)),
+        prefix(rows),
+        depth(parent ? parent->depth + 1 : 0) {}
+
+  static Rows Common(std::shared_ptr<const SnapshotLineage> left,
+                     std::shared_ptr<const SnapshotLineage> right,
+                     Rows bounds) {
+    const auto ascend = [&](auto& node) {
+      for (std::size_t i = 0; i < bounds.size(); ++i)
+        bounds[i] = std::min(bounds[i], node->prefix[i]);
+      node = node->parent;
+    };
+    if (!left || !right)
+      return {};
+    while (left->depth > right->depth)
+      ascend(left);
+    while (right->depth > left->depth)
+      ascend(right);
+    while (left != right) {
+      if (!left->parent || !right->parent)
+        return {};
+      ascend(left);
+      ascend(right);
+    }
+    return bounds;
+  }
+};
+
+struct SnapshotBlock {
+  SnapshotBlock(const std::shared_ptr<SnapshotAllocator>& allocator,
+                std::uint64_t bytes)
+      : storage(allocator->Allocate(bytes)), capacity(bytes) {}
+  std::shared_ptr<void> storage;
+  std::uint64_t capacity;
+  std::atomic<std::uint32_t> chunks{0};
+  std::uint64_t used = 0;
+};
+struct SnapshotChunk {
+  std::shared_ptr<SnapshotBlock> block;
+  std::uint8_t* device;
+  ~SnapshotChunk() { --block->chunks; }
+};
+struct SnapshotRegistry {
+  explicit SnapshotRegistry(std::shared_ptr<SnapshotAllocator> allocator)
+      : allocator(std::move(allocator)) {}
+  std::shared_ptr<SnapshotAllocator> allocator;
+  std::mutex mutex;
+  std::vector<std::weak_ptr<SnapshotState>> pending;
+  std::vector<std::weak_ptr<SnapshotBlock>> reserve;
+  std::exception_ptr failure;
+  void Preserve(std::uint32_t position, std::uint32_t mtp_position,
+                std::uint32_t blocks, std::uint32_t mtp_blocks);
+};
+
+void SnapshotState::Preserve(std::uint32_t position, std::uint32_t mtp_position,
+                             std::uint32_t blocks, std::uint32_t mtp_blocks,
+                             bool detach) const {
+  std::unique_ptr<gufo::hip::SnapshotTransfer> transfer;
+  for (auto& region : regions_) {
+    auto rows = region.draft ? mtp_position : position;
+    if (region.pooled)
+      rows = region.draft ? mtp_blocks : blocks;
+    const auto keep = std::uint64_t{rows} * region.row_bytes;
+    if (keep < region.pending_bytes) {
+      if (!transfer)
+        transfer = registry_->allocator->Transfer();
+      transfer->Copy(region.host + keep,
+                     static_cast<const std::uint8_t*>(region.device) + keep,
+                     region.pending_bytes - keep);
+      region.pending_bytes = keep;
+    }
+    if (detach)
+      region.live_bytes = std::min(region.live_bytes, keep);
+  }
+}
+
+void SnapshotState::Materialize() const {
+  std::lock_guard lock(registry_->mutex);
+  if (registry_->failure)
+    std::rethrow_exception(registry_->failure);
+  const auto transfer = registry_->allocator->Transfer();
+  for (const auto& region : regions_) {
+    PopulateSnapshotPrefix(region.host, region.bytes);
+    for (const auto& saved : region.saved)
+      transfer->Enqueue(region.host + saved.offset, saved.chunk->device,
+                        saved.bytes);
+  }
+  transfer->Finish();
+  Preserve(0, 0, 0, 0, false);
+  if (mutable_storage_) {
+    PopulateSnapshotPrefix(payload_ + mutable_offset_, mutable_bytes_);
+    transfer->Copy(payload_ + mutable_offset_, mutable_device_, mutable_bytes_);
+    mutable_storage_.reset();
+  }
+  if (extra_storage_) {
+    for (const auto& extra : extras_)
+      transfer->Enqueue(payload_ + extra.offset, extra.device, extra.bytes);
+    transfer->Finish();
+    extras_.clear();
+    extra_storage_.reset();
+  }
+  for (auto& region : regions_)
+    region.saved.clear();
+}
+
+std::uint64_t SnapshotState::DeviceBytes() const {
+  std::lock_guard lock(registry_->mutex);
+  std::uint64_t bytes = (mutable_storage_ ? mutable_bytes_ : 0) +
+                        (extra_storage_ ? extra_bytes_ : 0);
+  std::vector<const SnapshotBlock*> blocks;
+  for (const auto& region : regions_)
+    for (const auto& saved : region.saved) {
+      const auto* block = saved.chunk->block.get();
+      if (std::find(blocks.begin(), blocks.end(), block) == blocks.end()) {
+        blocks.push_back(block);
+        bytes += block->capacity;
+      }
+    }
+  return bytes;
+}
+
+void SnapshotRegistry::Preserve(std::uint32_t position,
+                                std::uint32_t mtp_position,
+                                std::uint32_t blocks,
+                                std::uint32_t mtp_blocks) {
+  struct Group {
+    void* device;
+    std::uint64_t keep;
+    std::uint64_t end;
+    std::vector<std::pair<SnapshotState::Region*, std::size_t>> regions;
+  };
+  std::vector<std::shared_ptr<SnapshotState>> snapshots;
+  std::vector<Group> groups;
+  std::vector<std::shared_ptr<SnapshotBlock>> available;
+  // Only overwritten rows need backing storage. Appending borrows K/V in
+  // place and does not allocate another context's worth of device pages.
+  for (auto it = reserve.begin(); it != reserve.end();) {
+    if (auto block = it->lock()) {
+      if (block->chunks == 0)
+        block->used = 0;
+      if (block->used < block->capacity &&
+          block->capacity - block->used <= kSnapshotReuseBytes)
+        available.push_back(std::move(block));
+      ++it;
+    } else {
+      it = reserve.erase(it);
+    }
+  }
+  for (auto it = pending.begin(); it != pending.end();) {
+    if (auto snapshot = it->lock()) {
+      for (auto& region : snapshot->regions_) {
+        auto rows = region.draft ? mtp_position : position;
+        if (region.pooled)
+          rows = region.draft ? mtp_blocks : blocks;
+        const auto keep = std::uint64_t{rows} * region.row_bytes;
+        if (keep < region.pending_bytes) {
+          auto group = std::find_if(
+              groups.begin(), groups.end(),
+              [&](const auto& entry) { return entry.device == region.device; });
+          if (group == groups.end()) {
+            groups.push_back({region.device,
+                              keep,
+                              region.pending_bytes,
+                              {{&region, snapshots.size()}}});
+          } else {
+            group->end = std::max(group->end, region.pending_bytes);
+            group->regions.emplace_back(&region, snapshots.size());
+          }
+        }
+      }
+      snapshots.push_back(std::move(snapshot));
+      ++it;
+    } else {
+      it = pending.erase(it);
+    }
+  }
+  struct Copy {
+    void* device;
+    std::uint64_t begin;
+    std::uint64_t end;
+    std::vector<SnapshotState::Region*> regions;
+    std::vector<std::size_t> owners;
+  };
+  std::vector<Copy> copies;
+  for (const auto& group : groups) {
+    std::vector<std::uint64_t> ends{group.keep};
+    for (const auto& [region, owner] : group.regions) {
+      (void)owner;
+      ends.push_back(region->pending_bytes);
+    }
+    std::sort(ends.begin(), ends.end());
+    ends.erase(std::unique(ends.begin(), ends.end()), ends.end());
+    for (std::size_t index = 1; index < ends.size(); ++index) {
+      Copy copy{group.device, ends[index - 1], ends[index], {}, {}};
+      for (const auto& [region, owner] : group.regions)
+        if (region->pending_bytes >= copy.end) {
+          copy.regions.push_back(region);
+          copy.owners.push_back(owner);
+        }
+      copies.push_back(std::move(copy));
+    }
+  }
+  // Pack rows with the same consumers together across layers. Each consumer
+  // set gets one allocation, so protecting a deep prefix avoids dozens of
+  // small allocations. A short checkpoint retains only its own rows and at
+  // most bounded slack from a reused block belonging to other consumers.
+  std::stable_sort(copies.begin(), copies.end(),
+                   [](const auto& left, const auto& right) {
+                     return left.owners < right.owners;
+                   });
+  std::uint64_t capacity = 0;
+  for (const auto& block : available)
+    capacity += block->capacity - block->used;
+  // Allocate before enqueuing any copy or changing a checkpoint. Allocation
+  // failure then leaves the source and every retained checkpoint intact.
+  for (std::size_t first = 0; first < copies.size();) {
+    auto last = first;
+    std::uint64_t bytes = 0;
+    while (last < copies.size() &&
+           copies[last].owners == copies[first].owners) {
+      bytes += copies[last].end - copies[last].begin;
+      ++last;
+    }
+    const auto reused = std::min(capacity, bytes);
+    capacity -= reused;
+    bytes -= reused;
+    if (bytes != 0) {
+      auto block = std::make_shared<SnapshotBlock>(allocator, bytes);
+      reserve.push_back(block);
+      available.push_back(std::move(block));
+    }
+    first = last;
+  }
+  std::size_t block_index = 0;
+  std::unique_ptr<gufo::hip::SnapshotTransfer> transfer;
+  for (auto& copy : copies) {
+    for (auto begin = copy.begin; begin < copy.end;) {
+      if (block_index < available.size() &&
+          available[block_index]->used == available[block_index]->capacity)
+        ++block_index;
+      if (block_index >= available.size())
+        throw std::logic_error(
+            "snapshot protection exceeded allocated storage");
+      auto& used = available[block_index]->used;
+      const auto bytes =
+          std::min(available[block_index]->capacity - used, copy.end - begin);
+      auto chunk = std::make_shared<SnapshotChunk>();
+      chunk->block = available[block_index];
+      ++chunk->block->chunks;
+      chunk->device =
+          static_cast<std::uint8_t*>(chunk->block->storage.get()) + used;
+      if (!transfer)
+        transfer = allocator->Transfer();
+      transfer->Enqueue(chunk->device,
+                        static_cast<const std::uint8_t*>(copy.device) + begin,
+                        bytes, hipMemcpyDeviceToDevice);
+      for (auto* region : copy.regions)
+        region->saved.push_back({begin, bytes, chunk});
+      used += bytes;
+      begin += bytes;
+    }
+  }
+  if (transfer)
+    transfer->Finish();
+  for (const auto& snapshot : snapshots) {
+    for (auto& region : snapshot->regions_) {
+      auto rows = region.draft ? mtp_position : position;
+      if (region.pooled)
+        rows = region.draft ? mtp_blocks : blocks;
+      const auto keep = std::uint64_t{rows} * region.row_bytes;
+      region.pending_bytes = std::min(region.pending_bytes, keep);
+      region.live_bytes = std::min(region.live_bytes, keep);
+    }
+  }
+}
+
+void Session::PreserveSnapshots(std::uint32_t position,
+                                std::uint32_t mtp_position) const {
+  if (!snapshots_ || (position >= snapshot_position_ &&
+                      mtp_position >= snapshot_mtp_position_))
+    return;
+  std::lock_guard lock(snapshots_->mutex);
+  if (snapshots_->failure)
+    std::rethrow_exception(snapshots_->failure);
+  const auto ratio = owner_->config().compress_ratio;
+  snapshots_->Preserve(position, mtp_position,
+                       ratio ? std::min(blocks_, position / ratio) : 0,
+                       ratio ? std::min(mtp_.blocks, mtp_position / ratio) : 0);
+  snapshot_position_ = std::min(snapshot_position_, position);
+  snapshot_mtp_position_ = std::min(snapshot_mtp_position_, mtp_position);
+}
+
 Session::~Session() {
+  try {
+    PreserveSnapshots(0, 0);
+  } catch (...) {
+    // The backing device may be lost. Leave retained checkpoints readable as
+    // failures instead of allowing a later reader to touch freed allocations.
+    std::lock_guard lock(snapshots_->mutex);
+    snapshots_->failure = std::current_exception();
+  }
   TrimRollback(0);
   for (auto& [key, exec] : graphs_) {
     (void)hipGraphExecDestroy(exec);
@@ -245,6 +726,99 @@ std::size_t Session::AllocatedBytes() const noexcept {
 /// token count.
 constexpr std::uint64_t kRollbackKey = std::uint64_t{1} << 48;
 
+PrefillCheckpoint::~PrefillCheckpoint() {
+  if (!state)
+    return;
+  source->snapshot_position_ =
+      std::max(source->snapshot_position_, state->snapshot_position_);
+  source->snapshot_mtp_position_ =
+      std::max(source->snapshot_mtp_position_, state->snapshot_mtp_position_);
+  // The view owns no cache allocations. Its borrowed rows belong to source.
+  state->snapshots_.reset();
+}
+
+std::unique_ptr<PrefillCheckpoint> Executor::MakePrefillCheckpoint(
+    Session& source, std::span<const std::int32_t> tokens, std::uint32_t prefix,
+    std::string* error_msg) const {
+  if (source.owner_ != this || prefix == 0 || prefix > tokens.size() ||
+      tokens.size() - prefix > kVecBatch ||
+      !source.VisionLayout().images.empty()) {
+    AssignError(error_msg, "prefill checkpoint must be in the text tail");
+    return nullptr;
+  }
+  const auto& c = config();
+  auto checkpoint = std::make_unique<PrefillCheckpoint>();
+  checkpoint->source = &source;
+  checkpoint->tokens = prefix;
+  checkpoint->hidden_rows =
+      source.mtp_enabled_ ? std::min(prefix, options_.max_speculative) : 0;
+  checkpoint->logits.resize(c.vocab_size);
+  checkpoint->state.reset(new Session);
+  auto& view = *checkpoint->state;
+  view.owner_ = this;
+  view.max_context_ = source.max_context_;
+  view.index_capacity_ = source.index_capacity_;
+  view.position_ = source.position_ + prefix;
+  view.mtp_enabled_ = source.mtp_enabled_;
+  view.attention_ = source.attention_;
+  view.linear_.resize(source.linear_.size());
+  view.blocks_ = c.compress_ratio > 0 && view.position_ > c.indexer_top_k
+                     ? view.position_ / c.compress_ratio
+                     : source.blocks_;
+  view.mtp_ = source.mtp_;
+  if (source.mtp_enabled_) {
+    view.mtp_.position = view.position_ - 1;
+    view.mtp_.blocks = view.mtp_.position > c.indexer_top_k
+                           ? view.mtp_.position / c.compress_ratio
+                           : source.mtp_.blocks;
+    if (prefix > 1)
+      view.mtp_.residual_valid = false;
+  }
+  view.ngram_ = source.ngram_;
+  std::vector<std::uint32_t> rows(std::size_t{prefix} * c.ple_heads);
+  if (c.ple_layer >= 0)
+    HashNgramRows(c, view.ngram_, tokens.first(prefix), rows);
+  if (!source.snapshots_)
+    source.snapshots_ =
+        std::make_shared<SnapshotRegistry>(GetSnapshotAllocator());
+  if (!source.snapshot_lineage_)
+    source.snapshot_lineage_ = std::make_shared<SnapshotLineage>();
+  view.snapshots_ = source.snapshots_;
+  view.snapshot_lineage_ = source.snapshot_lineage_;
+  const auto conv = std::size_t{c.ssm_conv_kernel - 1} * c.SsmConvChannels();
+  const auto recurrent =
+      std::size_t{c.ssm_num_v_heads} * c.ssm_head_dim * c.ssm_head_dim;
+  std::size_t floats =
+      has_mtp() ? std::size_t{options_.max_speculative} * c.HcDim() : 0;
+  for (const auto& linear : source.linear_)
+    if (linear.state)
+      floats += conv + recurrent;
+  if (c.ple_layer >= 0)
+    floats += std::size_t{c.PleConvHistory()} * c.HcDim();
+  if (!checkpoint_storage_) {
+    // Forward scratch is shared by the executor. The checkpoint is frozen
+    // into private snapshot storage before another session can reuse it.
+    checkpoint_storage_ =
+        source.snapshots_->allocator->Allocate(floats * sizeof(float));
+  }
+  auto* storage = static_cast<float*>(checkpoint_storage_.get());
+  for (std::size_t il = 0; il < source.linear_.size(); ++il) {
+    if (!source.linear_[il].state)
+      continue;
+    view.linear_[il].conv_state = storage;
+    storage += conv;
+    view.linear_[il].state = storage;
+    storage += recurrent;
+  }
+  if (c.ple_layer >= 0) {
+    view.ple_history_ = storage;
+    storage += std::size_t{c.PleConvHistory()} * c.HcDim();
+  }
+  if (source.mtp_enabled_)
+    view.mtp_.target_hidden = storage;
+  return checkpoint;
+}
+
 void Session::TrimRollback(std::uint32_t depth) noexcept {
   if (depth >= rollback_depth_)
     return;
@@ -281,6 +855,8 @@ void Session::TrimRollback(std::uint32_t depth) noexcept {
 }
 
 void Session::Reset() {
+  // Reset leaves append-only rows intact. Preserve them at the first write
+  // that would overwrite them, allowing cancellation to resume by rewind.
   // With Tuning::keep_rollback_rows the rows stay allocated: every verify
   // rewrites them before a rollback reads them, and freeing them would move
   // the pointers recorded in this session's verify and rollback graphs,
@@ -288,6 +864,7 @@ void Session::Reset() {
   if (!Tune().keep_rollback_rows) {
     TrimRollback(0);
   }
+  snapshot_lineage_.reset();
   position_ = 0;
   spec_tokens_ = 0;
   ngram_.Reset();
@@ -297,19 +874,22 @@ void Session::Reset() {
   const Config& c = owner_->config();
   for (auto& l : linear_) {
     if (l.state != nullptr) {
-      (void)hipMemset(l.conv_state, 0,
-                      static_cast<std::size_t>(c.ssm_conv_kernel - 1) *
-                          c.SsmConvChannels() * sizeof(float));
-      (void)hipMemset(l.state, 0,
-                      static_cast<std::size_t>(c.ssm_num_v_heads) *
-                          c.ssm_head_dim * c.ssm_head_dim * sizeof(float));
+      (void)hipMemsetAsync(l.conv_state, 0,
+                           static_cast<std::size_t>(c.ssm_conv_kernel - 1) *
+                               c.SsmConvChannels() * sizeof(float),
+                           owner_->stream());
+      (void)hipMemsetAsync(l.state, 0,
+                           static_cast<std::size_t>(c.ssm_num_v_heads) *
+                               c.ssm_head_dim * c.ssm_head_dim * sizeof(float),
+                           owner_->stream());
     }
   }
   blocks_ = 0;
   if (ple_history_ != nullptr) {
-    (void)hipMemset(ple_history_, 0,
-                    static_cast<std::size_t>(c.PleConvHistory()) * c.HcDim() *
-                        sizeof(float));
+    (void)hipMemsetAsync(ple_history_, 0,
+                         static_cast<std::size_t>(c.PleConvHistory()) *
+                             c.HcDim() * sizeof(float),
+                         owner_->stream());
   }
 }
 
@@ -439,8 +1019,13 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
       (c.context_length + c.compress_ratio - 1) / c.compress_ratio;
   e->mask_words_ = (max_blocks + 31) / 32;
   s.mask = Alloc<std::uint32_t>(a, T * e->mask_words_, error_msg);
-  s.scores =
-      f32(static_cast<std::size_t>(e->select_chunk_) * e->mask_words_ * 32);
+  // Keep score/selection traffic near the device cache size. Captured
+  // verification still needs all its rows at the maximum context.
+  const std::size_t score_stride = std::size_t{e->mask_words_} * 32;
+  e->select_score_floats_ =
+      std::max(kVecBatch * score_stride,
+               std::min(std::size_t{5 * 1024 * 1024}, 512 * score_stride));
+  s.scores = f32(e->select_score_floats_);
   s.ctx = f32(T * c.AttentionQDim());
   s.attn_partials = f32(static_cast<std::size_t>(kVecBatch) * c.num_heads *
                         kAttnSplits * (c.head_dim + 2));
@@ -819,7 +1404,21 @@ std::size_t Executor::DeferredScratchBytes() const {
                                 std::min(8U, options_.max_logit_rows) *
                                 c.vocab_size * sizeof(float)
                           : 0;
-  return bytes;
+  const auto linear = c.num_layers - c.num_layers / c.full_attention_interval;
+  const auto conv = std::size_t{c.ssm_conv_kernel - 1} * c.SsmConvChannels();
+  const auto state =
+      std::size_t{c.ssm_num_v_heads} * c.ssm_head_dim * c.ssm_head_dim;
+  const auto ple =
+      c.ple_layer >= 0 ? std::size_t{c.PleConvHistory()} * c.HcDim() : 0;
+  const auto mutable_bytes = (linear * (conv + state) + ple) * sizeof(float);
+  if (!checkpoint_storage_) {
+    bytes +=
+        mutable_bytes + (has_mtp() ? std::size_t{options_.max_speculative} *
+                                         c.HcDim() * sizeof(float)
+                                   : 0);
+  }
+  // Committed spare blocks for captures, whether or not they exist yet.
+  return bytes + SnapshotAllocator::SpareBytes(mutable_bytes);
 }
 
 /// Column-tile width for the routed expert GEMMs: the tile at or above twice
@@ -1235,7 +1834,7 @@ void Executor::Combine(float* res, const float* gamma,
     // The MoE epilogue was deferred to this combine (see Moe).
     moe_pending_ = false;
     const auto* down = reinterpret_cast<const __half*>(s_.down_e);
-    if (xn_half_ &&
+    if (wide_mixer_ && MatrixRows(n_tokens) &&
         HcCombineMoeF16(res, down, s_.weights, s_.shexp_out,
                         s_.router + c.num_experts, c.num_experts + 1,
                         c.num_experts_used, s_.inject, inject_parts_, gamma,
@@ -1479,7 +2078,7 @@ bool Executor::WaitPle(std::string* error_msg) const {
 
 bool Executor::Ple(const DeviceLayer& l, Session& session, std::uint32_t n,
                    float* res, bool speculative, std::string* error_msg,
-                   bool embeddings_ready) const {
+                   bool embeddings_ready, PrefillCheckpoint* checkpoint) const {
   const Config& c = config();
   const std::size_t emb_count =
       static_cast<std::size_t>(n) * c.PleEmbeddingDim();
@@ -1505,6 +2104,10 @@ bool Executor::Ple(const DeviceLayer& l, Session& session, std::uint32_t n,
           c.hidden_size, c.hc_count, stream_);
   RmsNormRows(s_.ple_gated, l.ple_norm_conv.f32(), s_.ple_norm, n, hc_dim,
               c.hc_count, c.rms_eps, stream_);
+  if (checkpoint)
+    HistoryPrefix(s_.ple_norm, hc_dim, session.ple_history_,
+                  checkpoint->state->ple_history_, checkpoint->tokens, hc_dim,
+                  c.PleConvHistory(), stream_);
   PleConv(s_.ple_norm, l.ple_conv1d.f32(), session.ple_history_,
           s_.ple_history_scratch, s_.ple_conv,
           speculative ? session.ple_snapshots_ : RollbackRows{}, n, hc_dim,
@@ -1518,7 +2121,8 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
                                const float* x, float* out,
                                std::uint32_t n_tokens, bool speculative,
                                std::string* error_msg, bool projections_ready,
-                               bool project_output) const {
+                               bool project_output,
+                               GdnCheckpoint checkpoint) const {
   const Config& c = config();
   const std::uint32_t channels = c.SsmConvChannels();
   const float* qkv = s_.qkv;
@@ -1535,7 +2139,8 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
       convolved = DenseF16SsmGemm(
           l.ssm_in.data, static_cast<const __half*>(s_.x_half),
           l.ssm_conv1d.f32(), s.conv_state, s_.qkvz, s_.conv_scratch, n_tokens,
-          l.ssm_in.rows, l.ssm_in.cols, channels, c.ssm_conv_kernel, stream_);
+          l.ssm_in.rows, l.ssm_in.cols, channels, c.ssm_conv_kernel, stream_,
+          checkpoint.tokens);
     }
     if (!projections_ready && !convolved &&
         !Dense(l.ssm_in, x, s_.qkvz, n_tokens, error_msg)) {
@@ -1574,7 +2179,7 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
                 speculative ? s.conv_snapshots : RollbackRows{}, n_tokens,
                 c.ssm_num_k_heads, c.ssm_num_v_heads, c.ssm_head_dim,
                 c.ssm_conv_kernel, MatrixRows(n_tokens) && !speculative,
-                convolved, c.rms_eps, stream_, out_half);
+                convolved, c.rms_eps, stream_, out_half, checkpoint);
   if (!project_output) {
     return true;
   }
@@ -1605,7 +2210,8 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
                          std::uint32_t start_pos, std::uint32_t pool_grid,
                          std::uint32_t max_context, bool sparse,
                          std::string* error_msg, bool last_only,
-                         bool projections_ready, bool project_output) const {
+                         bool projections_ready, bool project_output,
+                         std::uint32_t checkpoint_tokens) const {
   const Config& c = config();
   const std::uint32_t kv_row = c.AttentionKvDim();
   const std::uint32_t index_capacity =
@@ -1696,34 +2302,71 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
                       index_capacity, stream_, s.rope);
     // Align score rows to full cache lines. The selector still considers
     // only complete causal blocks, so padding cannot change the ranking.
+    // Wide prefill is never captured: compact score rows to the populated
+    // context. Graphs retain the maximum stride for replay at later positions.
+    const auto score_context =
+        n_tokens > kVecBatch ? start_pos + n_tokens : max_context;
     const std::uint32_t blocks =
-        (max_context + c.compress_ratio - 1) / c.compress_ratio;
+        (score_context + c.compress_ratio - 1) / c.compress_ratio;
     const std::uint32_t max_blocks = (blocks + 31) / 32 * 32;
+    const auto select_chunk = static_cast<std::uint32_t>(std::min(
+        std::size_t{512}, std::bit_floor(select_score_floats_ / max_blocks)));
     // Catch-up consumes only the final attention tile. Keep all its query
     // masks (sparse attention packs four queries; dense tiles hold sixteen)
     // but avoid scoring the unused prefix against the complete context.
     const auto first_query = last_only ? (n_tokens - 1) / 16 * 16 : 0U;
-    for (std::uint32_t t0 = first_query; t0 < n_tokens; t0 += select_chunk_) {
-      const std::uint32_t n = std::min(select_chunk_, n_tokens - t0);
+    for (std::uint32_t t0 = first_query; t0 < n_tokens; t0 += select_chunk) {
+      const std::uint32_t n = std::min(select_chunk, n_tokens - t0);
+      // Batches wider than kVecBatch are never captured, so the host
+      // position bounds the scored range (a replayed graph must cover
+      // max_blocks).
+      const std::uint32_t live =
+          n_tokens > kVecBatch ? (start_pos + t0 + n) / c.compress_ratio : 0;
       SelectBlocks(s_.iq + static_cast<std::size_t>(t0) * c.indexer_heads *
                                c.indexer_head_dim,
                    s.block_k,
                    s_.mask + static_cast<std::size_t>(t0) * mask_words_,
                    s_.scores, n, pos, t0, c.indexer_heads, c.indexer_head_dim,
                    c.compress_ratio, c.indexer_top_k / c.compress_ratio,
-                   mask_words_, max_blocks, stream_);
+                   mask_words_, max_blocks, stream_, live);
     }
     mask = s_.mask;
   }
   // Wide batches run the fused WMMA kernel (never inside a graph: the kv
   // extent is a host value), output gate included, skipping the key tiles
   // no query of a block selected; the per-token kernel covers the rest.
-  if (last_only && !Check(hipMemsetAsync(s_.ctx, 0,
-                                         static_cast<std::size_t>(n_tokens) *
-                                             c.AttentionQDim() * sizeof(float),
-                                         stream_),
-                          "draft attention output initialization", error_msg)) {
+  if (last_only &&
+      !Check(hipMemsetAsync(s_.ctx, 0,
+                            static_cast<std::size_t>(n_tokens) *
+                                c.AttentionQDim() * sizeof(float),
+                            stream_),
+             "partial attention output initialization", error_msg)) {
     return false;
+  }
+  if (checkpoint_tokens != 0 && checkpoint_tokens < n_tokens) {
+    // Sparse tiles compact the union of their queries' selected keys.
+    // Keep the checkpoint's query grouping identical to a pass ending there.
+    const auto prefix_sparse =
+        c.compress_ratio > 0 && start_pos + checkpoint_tokens > c.indexer_top_k;
+    const auto tail = n_tokens - checkpoint_tokens;
+    const auto offset = std::size_t{checkpoint_tokens} * c.AttentionQDim();
+    if (!WmmaCausalAttention(s_.q, s_.attn_gate, s.k_cache, s.v_cache,
+                             prefix_sparse ? mask : nullptr, mask_words_,
+                             s_.ctx, checkpoint_tokens, start_pos, c.num_heads,
+                             c.num_kv_heads, c.head_dim, c.compress_ratio,
+                             stream_) ||
+        !WmmaCausalAttention(
+            s_.q + offset, s_.attn_gate + offset, s.k_cache, s.v_cache,
+            mask ? mask + std::size_t{checkpoint_tokens} * mask_words_
+                 : nullptr,
+            mask_words_, s_.ctx + offset, tail, start_pos + checkpoint_tokens,
+            c.num_heads, c.num_kv_heads, c.head_dim, c.compress_ratio,
+            stream_)) {
+      AssignError(error_msg, "checkpoint attention geometry is unsupported");
+      return false;
+    }
+    return !project_output ||
+           Dense(l.attn_out, s_.ctx, out, n_tokens, error_msg);
   }
   if (MatrixRows(n_tokens) &&
       WmmaCausalAttention(s_.q, s_.attn_gate, s.k_cache, s.v_cache, mask,
@@ -2057,7 +2700,9 @@ bool Executor::Run(Session& session, std::uint64_t key, bool graph,
 
 bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
                        std::uint32_t n_logits, float* logits, ForwardMode mode,
-                       std::string* error_msg, bool verify_candidates) const {
+                       std::string* error_msg,
+                       PrefillCheckpoint* checkpoint,
+                       bool verify_candidates) const {
   verify_candidates_ready_ = 0;
   // Only decode-sized passes may run on the alternate stream.
   if ((mode == ForwardMode::kPrefill || tokens.size() > kVecBatch) &&
@@ -2069,6 +2714,13 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   selected_logits_ = nullptr;
   const Config& c = config();
   const auto n = static_cast<std::uint32_t>(tokens.size());
+  if (checkpoint && (mode != ForwardMode::kPrefill ||
+                     checkpoint->source != &session || checkpoint->tokens > n ||
+                     checkpoint->state->position_ !=
+                         session.position_ + checkpoint->tokens)) {
+    AssignError(error_msg, "prefill checkpoint does not match this pass");
+    return false;
+  }
   if (n == 0 || n > options_.max_batch ||
       (speculative && n > options_.max_speculative)) {
     AssignError(error_msg, "token batch is empty or exceeds the batch limit");
@@ -2099,6 +2751,26 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   }
   if (speculative && !EnsureRollback(session, n - 1, error_msg))
     return false;
+  // Start the disk rows before protecting checkpoint rows, which can commit
+  // device pages: layer 0 alone cannot hide the whole read.
+  const auto ngram = session.ngram_;
+  if (c.ple_layer >= 0) {
+    if (ngram_ == nullptr) {
+      AssignError(error_msg, "n-gram table is not open");
+      return false;
+    }
+    if (!PleFetch(session, tokens, speculative, error_msg)) {
+      return false;
+    }
+  }
+  try {
+    session.PreserveSnapshots(session.position_, session.mtp_.position);
+  } catch (...) {
+    // The forward never ran; leave the n-gram window where it was.
+    (void)WaitPle(nullptr);
+    session.ngram_ = ngram;
+    throw;
+  }
   ++session.mutation_epoch_;
   session.spec_base_ = start_pos;
   session.spec_tokens_ = speculative ? n : 0;
@@ -2184,7 +2856,7 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   const auto body = [&] {
     return ForwardBody(session, n, n_logits, logits != nullptr, speculative,
                        sparse, start_pos, graph ? graph_pool_grid : pool_grid,
-                       first_layer, c.num_layers, error_msg);
+                       first_layer, c.num_layers, error_msg, checkpoint);
   };
   // Only the suffix waits for its pinned n-gram rows. During eager
   // execution and capture, Ple performs this wait at the same boundary.
@@ -2241,7 +2913,8 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
                            bool speculative, bool sparse,
                            std::uint32_t start_pos, std::uint32_t pool_grid,
                            std::uint32_t first_layer, std::uint32_t end_layer,
-                           std::string* error_msg) const {
+                           std::string* error_msg,
+                           PrefillCheckpoint* checkpoint) const {
   const Config& c = config();
   if (first_layer == 0) {
     if (!CopyPinned(control_host_, session.control_, sizeof(Session::Control),
@@ -2263,46 +2936,107 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
     if (!session.CheckCancellation(error_msg))
       return false;
     const DeviceLayer& l = layers[il];
-    if (c.IsPleLayer(il) &&
-        !Ple(l, session, n, s_.res, speculative, error_msg)) {
+    if (c.IsPleLayer(il) && !Ple(l, session, n, s_.res, speculative, error_msg,
+                                 false, checkpoint)) {
       return false;
     }
     if (!HcMix(l.hc_attn, s_.res, normed, s_.mixed, s_.inject, n, error_msg)) {
       return false;
     }
+    // The last target layer's query outputs have no later cache consumer.
+    // Preserve all K/V/indexer rows and the final query's original tile.
+    const bool last_attention = prefill_phase && !session.mtp_enabled_ &&
+                                il + 1 == c.num_layers && n >= 1024 &&
+                                n_logits == 1 && checkpoint == nullptr;
     if (l.linear) {
+      const auto capture =
+          checkpoint ? GdnCheckpoint{checkpoint->state->linear_[il].state,
+                                     checkpoint->state->linear_[il].conv_state,
+                                     checkpoint->tokens}
+                     : GdnCheckpoint{};
       if (!LinearAttention(l, session.linear_[il], s_.mixed, s_.block_out, n,
-                           speculative, error_msg)) {
+                           speculative, error_msg, false, true, capture)) {
         return false;
       }
     } else if (!Attention(l, session.attention_[il], s_.mixed, s_.block_out, n,
                           &session.control_->position,
                           &session.control_->blocks, start_pos, pool_grid,
-                          session.max_context_, sparse, error_msg)) {
+                          session.max_context_, sparse, error_msg,
+                          last_attention, false, true,
+                          checkpoint ? checkpoint->tokens : 0)) {
       return false;
     }
 
-    // Each combine also norms the residual for the mixer that follows it,
-    // unless PLE rewrites the residual first.
-    Combine(s_.res, l.hc_ffn.norm.f32(), n);
-    if (!HcMix(l.hc_ffn, s_.res, true, s_.mixed, s_.inject, n, error_msg) ||
-        !Moe(l, s_.mixed, s_.block_out, n, error_msg)) {
-      return false;
-    }
     const float* next_norm =
         il + 1 < c.num_layers
             ? (c.IsPleLayer(il + 1) ? nullptr
                                     : layers[il + 1].hc_attn.norm.f32())
-            : model_->hc_head().norm.f32();
-    Combine(s_.res, next_norm, n);
+            : nullptr;
+    // Cache updates precede the FFN. Without MTP, only requested head rows
+    // and the checkpoint frontier consume the final layer's residual.
+    // Keep aligned tiles and at least 96 rows to retain the wide arithmetic.
+    const auto needed =
+        std::max({96U, n_logits, checkpoint ? n - checkpoint->tokens + 1 : 0U});
+    const auto skipped = prefill_phase && !session.mtp_enabled_ &&
+                                 il + 1 == c.num_layers && n > needed
+                             ? (n - needed) / 128 * 128
+                             : 0U;
+    const auto finish = [&](std::uint32_t rows) {
+      Combine(s_.res, l.hc_ffn.norm.f32(), rows);
+      if (!HcMix(l.hc_ffn, s_.res, true, s_.mixed, s_.inject, rows,
+                 error_msg) ||
+          !Moe(l, s_.mixed, s_.block_out, rows, error_msg))
+        return false;
+      Combine(s_.res, next_norm, rows);
+      return true;
+    };
+    if (skipped != 0) {
+      struct RestoreScratch {
+        const Executor* executor;
+        Scratch scratch;
+        ~RestoreScratch() { executor->UseScratch(scratch); }
+      } restore{this, s_};
+      auto tail = RowScratch(s_, skipped);
+      tail.inject =
+          s_.inject + std::size_t{skipped} * c.hc_count * inject_parts_;
+      UseScratch(tail);
+      if (!finish(n - skipped))
+        return false;
+    } else if (!finish(n)) {
+      return false;
+    }
     normed = next_norm != nullptr;
   }
   if (end_layer < c.num_layers) {
     return true;
   }
+  if (checkpoint) {
+    if (checkpoint->hidden_rows != 0 &&
+        !Check(hipMemcpyAsync(checkpoint->state->mtp_.target_hidden,
+                              s_.res + std::size_t{checkpoint->tokens -
+                                                   checkpoint->hidden_rows} *
+                                           c.HcDim(),
+                              std::size_t{checkpoint->hidden_rows} * c.HcDim() *
+                                  sizeof(float),
+                              hipMemcpyDeviceToDevice, stream_),
+               "checkpoint hidden rows", error_msg))
+      return false;
+    PrefillPhase head_phase(false);
+    if (!HcMix(model_->hc_head(),
+               s_.res + std::size_t{checkpoint->tokens - 1} * c.HcDim(), false,
+               s_.mixed, nullptr, 1, error_msg) ||
+        !Dense(model_->output(), s_.mixed, s_.logits, 1, error_msg) ||
+        !Check(hipMemcpyAsync(checkpoint->logits.data(), s_.logits,
+                              std::size_t{c.vocab_size} * sizeof(float),
+                              hipMemcpyDeviceToHost, stream_),
+               "checkpoint logits", error_msg))
+      return false;
+  }
   // Prefill catches up immediately from shared scratch. Only the short tail
   // needed across calls belongs to this session.
-  const auto kept = std::min(n, options_.max_speculative);
+  const auto kept = std::min(
+      checkpoint && checkpoint->tokens < n ? n - checkpoint->tokens : n,
+      options_.max_speculative);
   if (session.mtp_enabled_ &&
       !CopyFloats(s_.res + static_cast<std::size_t>(n - kept) * c.HcDim(),
                   session.mtp_.target_hidden,
@@ -2312,9 +3046,7 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
   }
   if (n_logits > 0) {
     PrefillPhase head_phase(false);
-    // The head mixer norms its tail rows itself: the last combine's norm is
-    // laid out for the whole batch (and tiled on the wide route), so a row
-    // offset into it is not addressable.
+    // Only the requested tail needs the head's normalization.
     const std::size_t skip = static_cast<std::size_t>(n - n_logits);
     const DeviceMixer& head = model_->hc_head();
     if (!HcMix(head, s_.res + skip * c.HcDim(), false, s_.mixed, nullptr,
@@ -2529,8 +3261,11 @@ template<typename Visit>
 std::uint64_t Executor::WalkSnapshot(const SnapshotHeader& h,
                                      const Session* session, Visit&& visit) {
   std::uint64_t offset = sizeof(SnapshotHeader);
-  const auto region = [&](void* device, std::uint64_t bytes, const char* what) {
-    if (bytes != 0 && !visit(device, offset, bytes, what)) {
+  const auto region = [&](void* device, std::uint64_t bytes, const char* what,
+                          std::uint64_t row_bytes = 0, bool draft = false,
+                          bool pooled = false) {
+    if (bytes != 0 &&
+        !visit(device, offset, bytes, what, row_bytes, draft, pooled)) {
       return false;
     }
     offset += bytes;
@@ -2570,8 +3305,10 @@ std::uint64_t Executor::WalkSnapshot(const SnapshotHeader& h,
   for (std::uint32_t il = 0; il < h.num_layers; ++il) {
     if (((il + 1) % h.full_attention_interval) == 0) {
       const auto* at = attention(il);
-      if (!region(at != nullptr ? at->k_cache : nullptr, kv_bytes, "K cache") ||
-          !region(at != nullptr ? at->v_cache : nullptr, kv_bytes, "V cache")) {
+      if (!region(at != nullptr ? at->k_cache : nullptr, kv_bytes, "K cache",
+                  std::uint64_t{h.kv_row} * sizeof(__half)) ||
+          !region(at != nullptr ? at->v_cache : nullptr, kv_bytes, "V cache",
+                  std::uint64_t{h.kv_row} * sizeof(__half))) {
         return 0;
       }
       // Serialize only unpooled rows, in chronological order. The physical
@@ -2590,7 +3327,9 @@ std::uint64_t Executor::WalkSnapshot(const SnapshotHeader& h,
           return 0;
       }
       if (!region(at != nullptr ? at->block_k : nullptr, block_bytes,
-                  "pooled block keys"))
+                  "pooled block keys",
+                  std::uint64_t{h.indexer_head_dim} * sizeof(__half), false,
+                  true))
         return 0;
     }
   }
@@ -2613,14 +3352,17 @@ std::uint64_t Executor::WalkSnapshot(const SnapshotHeader& h,
     if (!region(
             mtp ? mtp->block_k : nullptr,
             std::uint64_t{h.mtp_blocks} * h.indexer_head_dim * sizeof(__half),
-            "draft pooled keys"))
+            "draft pooled keys",
+            std::uint64_t{h.indexer_head_dim} * sizeof(__half), true, true))
       return 0;
     const std::uint64_t mtp_kv_bytes =
         std::uint64_t{h.mtp_position} * h.kv_row * sizeof(__half);
     if (!region(mtp != nullptr ? mtp->k_cache : nullptr, mtp_kv_bytes,
-                "draft K cache") ||
+                "draft K cache", std::uint64_t{h.kv_row} * sizeof(__half),
+                true) ||
         !region(mtp != nullptr ? mtp->v_cache : nullptr, mtp_kv_bytes,
-                "draft V cache") ||
+                "draft V cache", std::uint64_t{h.kv_row} * sizeof(__half),
+                true) ||
         !region(
             mtp != nullptr ? mtp->h : nullptr,
             h.mtp_residual_valid ? std::uint64_t{h.hc_dim} * sizeof(float) : 0,
@@ -2644,14 +3386,16 @@ std::uint64_t Executor::SnapshotBytes(const Session& session,
   h.mtp_position = session.mtp_.position;
   h.mtp_residual_valid = session.mtp_.residual_valid;
   h.hidden_rows = hidden_rows;
-  return WalkSnapshot(
-      h, nullptr,
-      [](void*, std::uint64_t, std::uint64_t, const char*) { return true; });
+  return WalkSnapshot(h, nullptr,
+                      [](void*, std::uint64_t, std::uint64_t, const char*,
+                         std::uint64_t, bool, bool) { return true; });
 }
 
 bool Executor::SaveSnapshot(const Session& session, std::uint32_t hidden_rows,
                             std::span<std::uint8_t> payload,
-                            std::string* error_msg) const {
+                            std::string* error_msg,
+                            std::shared_ptr<SnapshotState>* deferred,
+                            std::shared_ptr<void> storage) const {
   if (!UsePrimaryStream(error_msg)) {
     return false;
   }
@@ -2682,7 +3426,54 @@ bool Executor::SaveSnapshot(const Session& session, std::uint32_t hidden_rows,
     AssignError(error_msg, "snapshot buffer size does not match the payload");
     return false;
   }
-  gufo::hip::SnapshotTransfer transfer;
+  std::shared_ptr<SnapshotState> pending;
+  const auto transfer = GetSnapshotAllocator()->Transfer();
+  if (deferred) {
+    if (!storage) {
+      AssignError(error_msg, "borrowed snapshot needs owned payload storage");
+      return false;
+    }
+    if (!session.snapshots_)
+      session.snapshots_ =
+          std::make_shared<SnapshotRegistry>(GetSnapshotAllocator());
+    pending = std::make_shared<SnapshotState>();
+    pending->registry_ = session.snapshots_;
+    if (!session.snapshot_lineage_)
+      session.snapshot_lineage_ = std::make_shared<SnapshotLineage>();
+    pending->lineage_ = session.snapshot_lineage_;
+    pending->storage_ = std::move(storage);
+    pending->payload_ = payload.data();
+    std::uint64_t mutable_prefix = sizeof(SnapshotHeader);
+    (void)WalkSnapshot(h, nullptr,
+                       [&](void*, std::uint64_t offset, std::uint64_t bytes,
+                           const char*, std::uint64_t row_bytes, bool, bool) {
+                         if (row_bytes != 0)
+                           return false;
+                         mutable_prefix = offset + bytes;
+                         return true;
+                       });
+    std::uint64_t extra_bytes = 0;
+    (void)WalkSnapshot(h, nullptr,
+                       [&](void*, std::uint64_t offset, std::uint64_t bytes,
+                           const char*, std::uint64_t row_bytes, bool, bool) {
+                         if (row_bytes == 0 && offset >= mutable_prefix)
+                           extra_bytes += bytes;
+                         return true;
+                       });
+    pending->mutable_offset_ = sizeof(SnapshotHeader);
+    pending->mutable_bytes_ = mutable_prefix - sizeof(SnapshotHeader);
+    pending->mutable_storage_ =
+        session.snapshots_->allocator->AllocateSpare(pending->mutable_bytes_);
+    pending->mutable_device_ =
+        static_cast<std::uint8_t*>(pending->mutable_storage_.get());
+    if (extra_bytes != 0) {
+      pending->extra_storage_ =
+          session.snapshots_->allocator->Allocate(extra_bytes);
+      pending->extra_bytes_ = extra_bytes;
+    }
+  } else {
+    PopulateSnapshotPrefix(payload.data(), payload.size());
+  }
   std::memcpy(payload.data(), &h, sizeof(h));
   const auto grid_bytes =
       std::size_t{h.image_count} * sizeof(qwen::vision::ImageGrid);
@@ -2690,20 +3481,91 @@ bool Executor::SaveSnapshot(const Session& session, std::uint32_t hidden_rows,
     std::memcpy(payload.data() + payload.size() - grid_bytes,
                 session.VisionLayout().images.data(), grid_bytes);
   }
-  return WalkSnapshot(h, &session,
-                      [&](void* device, std::uint64_t offset,
-                          std::uint64_t bytes, const char*) {
-                        if (!session.CheckCancellation(error_msg))
-                          return false;
-                        transfer.Copy(payload.data() + offset, device, bytes);
-                        return true;
-                      }) != 0;
+  std::uint64_t extra_used = 0;
+  const bool saved =
+      WalkSnapshot(
+          h, &session,
+          [&](void* device, std::uint64_t offset, std::uint64_t bytes,
+              const char*, std::uint64_t row_bytes, bool draft, bool pooled) {
+            if (!session.CheckCancellation(error_msg))
+              return false;
+            if (pending && row_bytes != 0) {
+              pending->regions_.push_back({device,
+                                           payload.data() + offset,
+                                           bytes,
+                                           bytes,
+                                           bytes,
+                                           row_bytes,
+                                           draft,
+                                           pooled,
+                                           {}});
+            } else {
+              auto* destination = payload.data() + offset;
+              auto kind = hipMemcpyDeviceToHost;
+              if (pending && offset >= pending->mutable_offset_ &&
+                  offset + bytes <=
+                      pending->mutable_offset_ + pending->mutable_bytes_) {
+                destination = pending->mutable_device_ + offset -
+                              pending->mutable_offset_;
+                kind = hipMemcpyDeviceToDevice;
+              } else if (pending && pending->extra_storage_) {
+                if (extra_used + bytes > pending->extra_bytes_)
+                  throw std::logic_error("snapshot extra regions overflow");
+                destination =
+                    static_cast<std::uint8_t*>(pending->extra_storage_.get()) +
+                    extra_used;
+                kind = hipMemcpyDeviceToDevice;
+                pending->extras_.push_back({offset, bytes, destination});
+                extra_used += bytes;
+              }
+              if (pending)
+                transfer->Enqueue(destination, device, bytes, kind);
+              else
+                transfer->Copy(destination, device, bytes);
+            }
+            return true;
+          }) != 0;
+  transfer->Finish();
+  if (saved && pending) {
+    std::lock_guard lock(session.snapshots_->mutex);
+    std::erase_if(session.snapshots_->pending,
+                  [](const auto& entry) { return entry.expired(); });
+    session.snapshots_->pending.push_back(pending);
+    session.snapshot_position_ =
+        std::max(session.snapshot_position_, session.position_);
+    session.snapshot_mtp_position_ =
+        std::max(session.snapshot_mtp_position_, session.mtp_.position);
+    *deferred = std::move(pending);
+  }
+  return saved;
+}
+
+std::uint64_t Executor::PrefillCheckpointBytes(const Session& session,
+                                               std::uint32_t position) const {
+  const auto& c = config();
+  auto h = MakeSnapshotHeader(c, session.mtp_enabled_, session);
+  h.position = position;
+  h.blocks = c.compress_ratio > 0 && position > c.indexer_top_k
+                 ? position / c.compress_ratio
+                 : session.blocks_;
+  if (session.mtp_enabled_) {
+    h.mtp_position = position - 1;
+    h.mtp_blocks = h.mtp_position > c.indexer_top_k
+                       ? h.mtp_position / c.compress_ratio
+                       : session.mtp_.blocks;
+    h.hidden_rows =
+        std::min(position - session.position_, options_.max_speculative);
+  }
+  return WalkSnapshot(h, nullptr,
+                      [](void*, std::uint64_t, std::uint64_t, const char*,
+                         std::uint64_t, bool, bool) { return true; });
 }
 
 bool Executor::RestoreSnapshot(Session& session,
                                std::span<const std::uint8_t> payload,
                                SnapshotInfo* info, std::string* error_msg,
-                               std::uint32_t next_drafts) const {
+                               std::uint32_t next_drafts,
+                               const SnapshotState* deferred) const {
   if (!UsePrimaryStream(error_msg)) {
     return false;
   }
@@ -2725,7 +3587,7 @@ bool Executor::RestoreSnapshot(Session& session,
   }
   const std::uint32_t max_blocks =
       h.compress_ratio == 0 ? 0 : h.position / h.compress_ratio;
-  if (h.image_count > 256 || h.position == 0 ||
+  if (h.image_count > h.position || h.position == 0 ||
       h.position > session.max_context_ || h.blocks > max_blocks ||
       h.mtp_position > h.position ||
       h.mtp_blocks > h.mtp_position / h.compress_ratio ||
@@ -2745,9 +3607,9 @@ bool Executor::RestoreSnapshot(Session& session,
   }
   if (h.payload_bytes != payload.size() ||
       WalkSnapshot(h, nullptr,
-                   [](void*, std::uint64_t, std::uint64_t, const char*) {
-                     return true;
-                   }) != payload.size()) {
+                   [](void*, std::uint64_t, std::uint64_t, const char*,
+                      std::uint64_t, bool, bool) { return true; }) !=
+          payload.size()) {
     AssignError(error_msg, "snapshot payload size does not match its header");
     return false;
   }
@@ -2777,6 +3639,80 @@ bool Executor::RestoreSnapshot(Session& session,
   if (!Check(hipStreamSynchronize(stream_), "restore drain", error_msg)) {
     return false;
   }
+  const bool borrowed = deferred && deferred->registry_ == session.snapshots_;
+  std::unique_lock<std::mutex> snapshot_lock;
+  std::unique_lock<std::mutex> source_lock;
+  if (session.snapshots_)
+    snapshot_lock =
+        std::unique_lock(session.snapshots_->mutex, std::defer_lock);
+  if (deferred && !borrowed)
+    source_lock = std::unique_lock(deferred->registry_->mutex, std::defer_lock);
+  if (snapshot_lock.mutex() && source_lock.mutex())
+    std::lock(snapshot_lock, source_lock);
+  else if (snapshot_lock.mutex())
+    snapshot_lock.lock();
+  else if (source_lock.mutex())
+    source_lock.lock();
+  if (session.snapshots_ && session.snapshots_->failure)
+    std::rethrow_exception(session.snapshots_->failure);
+  if (deferred && deferred->registry_->failure)
+    std::rethrow_exception(deferred->registry_->failure);
+  // A same-session restore retains the still-live prefix. Only detached rows
+  // are uploaded. Save other checkpoints' overwritten suffixes first.
+  std::uint32_t trunk_keep = 0;
+  std::uint32_t draft_keep = 0;
+  std::uint32_t trunk_blocks = 0;
+  std::uint32_t draft_blocks = 0;
+  if (borrowed) {
+    trunk_keep = h.position;
+    draft_keep = h.mtp_position;
+    trunk_blocks = h.blocks;
+    draft_blocks = h.mtp_blocks;
+    for (const auto& region : deferred->regions_) {
+      const auto rows =
+          static_cast<std::uint32_t>(region.live_bytes / region.row_bytes);
+      if (region.pooled) {
+        if (region.draft)
+          draft_blocks = std::min(draft_blocks, rows);
+        else
+          trunk_blocks = std::min(trunk_blocks, rows);
+      } else {
+        if (region.draft)
+          draft_keep = std::min(draft_keep, rows);
+        else
+          trunk_keep = std::min(trunk_keep, rows);
+      }
+    }
+  } else if (deferred) {
+    const auto common = SnapshotLineage::Common(
+        session.snapshot_lineage_, deferred->lineage_,
+        {std::min(session.position_, h.position),
+         std::min(session.mtp_.position, h.mtp_position),
+         std::min(session.blocks_, h.blocks),
+         std::min(session.mtp_.blocks, h.mtp_blocks)});
+    trunk_keep = common[0];
+    draft_keep = common[1];
+    trunk_blocks = common[2];
+    draft_blocks = common[3];
+  }
+  trunk_blocks = h.compress_ratio
+                     ? std::min(trunk_blocks, trunk_keep / h.compress_ratio)
+                     : 0;
+  draft_blocks = h.compress_ratio
+                     ? std::min(draft_blocks, draft_keep / h.compress_ratio)
+                     : 0;
+  auto restored_lineage =
+      deferred ? std::make_shared<SnapshotLineage>(
+                     deferred->lineage_,
+                     SnapshotLineage::Rows{h.position, h.mtp_position, h.blocks,
+                                           h.mtp_blocks})
+               : nullptr;
+  if (session.snapshots_) {
+    session.snapshots_->Preserve(trunk_keep, draft_keep, trunk_blocks,
+                                 draft_blocks);
+  }
+  // If restoration fails after a partial write, no provenance may survive.
+  session.snapshot_lineage_.reset();
   // Every live state region is overwritten below. Retain only scratch that
   // the restored operation can use; this never allocates new rollback rows.
   // Explicit reset and failed restoration still release all scratch. With
@@ -2787,23 +3723,147 @@ bool Executor::RestoreSnapshot(Session& session,
     session.TrimRollback(std::min({next_drafts, options_.max_speculative - 1,
                                    remaining ? remaining - 1 : 0}));
   }
-  if (WalkSnapshot(h, &session,
-                   [&](void* device, std::uint64_t offset, std::uint64_t bytes,
-                       const char* what) {
-                     return session.CheckCancellation(error_msg) &&
-                            Check(hipMemcpy(device, payload.data() + offset,
-                                            bytes, hipMemcpyHostToDevice),
-                                  what, error_msg);
-                   }) == 0) {
+  // A borrowed restore may reuse its source slot. Keep recorded graphs, but
+  // let unrecorded shapes run eagerly once in the restored request before
+  // recording them, just as they would in a fresh execution slot.
+  std::erase_if(session.warmed_,
+                [&](const auto key) { return !session.graphs_.contains(key); });
+  std::unique_ptr<gufo::hip::SnapshotTransfer> fork_transfer;
+  const auto upload = [&](void* device, const std::uint8_t* source,
+                          std::uint64_t bytes, const char* what,
+                          hipMemcpyKind kind = hipMemcpyHostToDevice) {
+    if (!session.CheckCancellation(error_msg))
+      return false;
+    if (deferred) {
+      if (!fork_transfer)
+        fork_transfer = GetSnapshotAllocator()->Transfer();
+      fork_transfer->Enqueue(device, source, bytes, kind);
+      return true;
+    }
+    return Check(hipMemcpy(device, source, bytes, hipMemcpyHostToDevice), what,
+                 error_msg);
+  };
+
+  if (WalkSnapshot(
+          h, &session,
+          [&](void* device, std::uint64_t offset, std::uint64_t bytes,
+              const char* what, std::uint64_t row_bytes, bool draft,
+              bool pooled) {
+            const auto original_offset = offset;
+            const auto original_bytes = bytes;
+            if (deferred && row_bytes != 0) {
+              auto rows = draft ? draft_keep : trunk_keep;
+              if (pooled)
+                rows = draft ? draft_blocks : trunk_blocks;
+              const auto skip =
+                  std::min(bytes, std::uint64_t{rows} * row_bytes);
+              device = static_cast<std::uint8_t*>(device) + skip;
+              offset += skip;
+              bytes -= skip;
+            }
+            if (deferred && !borrowed && row_bytes != 0) {
+              // Fork directly from the source's still-live prefix.
+              // Its detached tail is already present in the payload.
+              // Hold both registries until the copy completes so a
+              // reset or destruction cannot invalidate either side.
+              for (const auto& region : deferred->regions_) {
+                if (region.host != payload.data() + original_offset)
+                  continue;
+                const auto skip = offset - original_offset;
+                const auto copied =
+                    region.live_bytes > skip
+                        ? std::min(bytes, region.live_bytes - skip)
+                        : 0;
+                if (copied != 0) {
+                  if (!session.CheckCancellation(error_msg))
+                    return false;
+                  if (!fork_transfer)
+                    fork_transfer = GetSnapshotAllocator()->Transfer();
+                  fork_transfer->Enqueue(
+                      device,
+                      static_cast<const std::uint8_t*>(region.device) + skip,
+                      copied, hipMemcpyDeviceToDevice);
+                }
+                device = static_cast<std::uint8_t*>(device) + copied;
+                offset += copied;
+                bytes -= copied;
+                break;
+              }
+            }
+            if (bytes == 0)
+              return true;
+            if (deferred && row_bytes != 0) {
+              for (const auto& region : deferred->regions_) {
+                if (region.host != payload.data() + original_offset ||
+                    region.saved.empty())
+                  continue;
+                const auto skip = offset - original_offset;
+                for (const auto& saved : region.saved) {
+                  const auto begin = std::max(skip, saved.offset);
+                  const auto end =
+                      std::min(original_bytes, saved.offset + saved.bytes);
+                  if (begin < end) {
+                    if (!session.CheckCancellation(error_msg))
+                      return false;
+                    if (!fork_transfer)
+                      fork_transfer = GetSnapshotAllocator()->Transfer();
+                    fork_transfer->Enqueue(
+                        static_cast<std::uint8_t*>(device) + begin - skip,
+                        saved.chunk->device + begin - saved.offset, end - begin,
+                        hipMemcpyDeviceToDevice);
+                  }
+                }
+                return true;
+              }
+            }
+            const auto* source = payload.data() + offset;
+            auto kind = hipMemcpyHostToDevice;
+            if (deferred && deferred->mutable_storage_ &&
+                offset >= deferred->mutable_offset_ &&
+                offset + bytes <=
+                    deferred->mutable_offset_ + deferred->mutable_bytes_) {
+              source = deferred->mutable_device_ + offset -
+                       deferred->mutable_offset_;
+              kind = hipMemcpyDeviceToDevice;
+            } else if (deferred && deferred->extra_storage_ && row_bytes == 0) {
+              // The destination may split a ring region differently from the
+              // source, so copy every overlapping frozen piece.
+              auto* target = static_cast<std::uint8_t*>(device);
+              for (const auto& extra : deferred->extras_) {
+                const auto begin = std::max(offset, extra.offset);
+                const auto end =
+                    std::min(offset + bytes, extra.offset + extra.bytes);
+                if (begin < end &&
+                    !upload(target + (begin - offset),
+                            extra.device + (begin - extra.offset), end - begin,
+                            what, hipMemcpyDeviceToDevice))
+                  return false;
+              }
+              return true;
+            }
+            return upload(device, source, bytes, what, kind);
+          }) == 0) {
+    if (fork_transfer)
+      fork_transfer->Finish();
+    if (snapshot_lock.owns_lock())
+      snapshot_lock.unlock();
     session.Reset();
     return false;
   }
+  if (fork_transfer)
+    fork_transfer->Finish();
   session.RestoreVisionLayout(layout, stream_);
   session.position_ = h.position;
   session.blocks_ = h.blocks;
   session.mtp_.position = h.mtp_position;
   session.mtp_.blocks = h.mtp_blocks;
   session.mtp_.residual_valid = h.mtp_residual_valid != 0;
+  session.snapshot_lineage_ = std::move(restored_lineage);
+  if (borrowed)
+    for (auto& region : deferred->regions_)
+      region.live_bytes = region.bytes;
+  session.snapshot_position_ = borrowed ? h.position : trunk_keep;
+  session.snapshot_mtp_position_ = borrowed ? h.mtp_position : draft_keep;
   session.spec_base_ = h.position;
   session.spec_tokens_ = 0;
   session.ngram_.prev = h.ngram_prev;
@@ -3008,6 +4068,7 @@ bool Executor::MtpForward(Session& session,
     AssignError(error_msg, "MTP context is full");
     return false;
   }
+  session.PreserveSnapshots(session.position_, session.mtp_.position);
   ++session.mutation_epoch_;
   session.mtp_.residual_valid = false;
   std::copy(tokens.begin(), tokens.end(), tokens_host_);

@@ -41,6 +41,7 @@
 #include "src/cli/serve/openai_chat.hpp"
 #include "src/cli/serve/sampling_request.hpp"
 #include "src/cli/serve/stop_sequences.hpp"
+#include "src/cli/serve/trace.hpp"
 #include "src/cli/serve/tts_service.hpp"
 #include "src/cli/serve/video_api.hpp"
 #include "src/cli/serve/video_jobs.hpp"
@@ -141,14 +142,25 @@ bool SendAll(int fd, std::string_view data) {
   return true;
 }
 
-bool SendChunk(int fd, std::string_view data) {
+bool SendChunk(int fd, std::string_view data, std::string_view prefix = {}) {
   if (data.empty())
-    return true;
+    return prefix.empty() || SendAll(fd, prefix);
   char header[2 * sizeof(std::size_t) + 2];
   const auto length =
       std::to_chars(header, header + sizeof(header) - 2, data.size(), 16);
   *length.ptr = '\r';
   *(length.ptr + 1) = '\n';
+  if (!prefix.empty()) {
+    // Deferred headers and the first event travel in one send, avoiding a
+    // separate small packet before the client can start parsing the stream.
+    std::string first;
+    first.reserve(prefix.size() + data.size() + sizeof(header) + 2);
+    first.append(prefix);
+    first.append(header, length.ptr + 2);
+    first.append(data);
+    first.append("\r\n");
+    return SendAll(fd, first);
+  }
   return SendAll(fd, std::string_view(header, length.ptr + 2 - header)) &&
          SendAll(fd, data) && SendAll(fd, "\r\n");
 }
@@ -286,6 +298,34 @@ bool HasHeader(const HttpResponse& response, std::string_view name) {
   return std::ranges::any_of(response.headers, [&](const auto& header) {
     return ToLower(header.first) == lowered;
   });
+}
+
+// Text generation routes, whose bodies and replies `--trace` records. Media
+// routes carry audio, image and video payloads the trace does not explain.
+bool IsTracedRoute(const HttpRequest& req) {
+  return req.method == "POST" &&
+         (req.path == "/v1/completions" || req.path == "/v1/chat/completions" ||
+          req.path == "/v1/responses" || req.path == "/v1/messages" ||
+          req.path == "/completion");
+}
+
+void TraceRequest(const HttpRequest& req) {
+  auto record = Trace::Record("request", req.request_id);
+  record["method"] = req.method;
+  record["path"] = req.path;
+  record["body"] = Trace::Text(req.body);
+  Trace::Write(record);
+}
+
+void TraceResponse(std::string_view request_id, int status,
+                   std::string_view outcome, bool stream,
+                   std::string_view body) {
+  auto record = Trace::Record("response", request_id);
+  record["status"] = status;
+  record["outcome"] = std::string(outcome);
+  record["stream"] = stream;
+  record["body"] = Trace::Text(body);
+  Trace::Write(record);
 }
 
 bool IsEventStream(const HttpResponse& response) {
@@ -476,6 +516,16 @@ bool ReadTextMessages(const json::Value* input,
   core::ImageReadBudget image_budget;
   if (input == nullptr || !input->is_array() || input->empty())
     return false;
+  // Responses replays one assistant turn as several reasoning, message and
+  // function_call items. A system/developer item between them would split
+  // that turn, so it waits until the next item that starts a new message.
+  std::vector<tokenization::ChatMessage> deferred;
+  const auto push = [&](tokenization::ChatMessage message) {
+    for (auto& system : deferred)
+      messages->push_back(std::move(system));
+    deferred.clear();
+    messages->push_back(std::move(message));
+  };
   for (const auto& item : input->items()) {
     if (responses && (item.member_str("type") == "function_call" ||
                       item.member_str("type") == "function_call_output")) {
@@ -493,16 +543,19 @@ bool ReadTextMessages(const json::Value* input,
         calls.insert(calls.end(), message.tool_calls.begin(),
                      message.tool_calls.end());
       } else {
-        messages->push_back(std::move(message));
+        push(std::move(message));
       }
       continue;
     }
     if (responses && item.member_str("type") == "reasoning") {
       const auto* summary = item.find("summary");
       const auto* encrypted = item.find("encrypted_content");
+      const auto* content = item.find("content");
+      // Codex replays null-valued content and encrypted_content echoed by
+      // OpenAI; only non-null payload carries reasoning we cannot restore.
       if (summary == nullptr || !summary->is_array() ||
           (encrypted != nullptr && !encrypted->is_null()) ||
-          item.contains("content"))
+          (content != nullptr && !content->is_null()))
         return false;
       tokenization::ChatMessage reasoning;
       reasoning.role = tokenization::ChatRole::kAssistant;
@@ -513,7 +566,7 @@ bool ReadTextMessages(const json::Value* input,
           return false;
         reasoning.thought += text->str();
       }
-      messages->push_back(std::move(reasoning));
+      push(std::move(reasoning));
       continue;
     }
     const auto role = item.member_str("role");
@@ -539,15 +592,25 @@ bool ReadTextMessages(const json::Value* input,
                        ? &message.thought
                        : nullptr))
       return false;
+    if (responses &&
+        (message.role == tokenization::ChatRole::kSystem ||
+         message.role == tokenization::ChatRole::kDeveloper) &&
+        !messages->empty() &&
+        messages->back().role == tokenization::ChatRole::kAssistant) {
+      deferred.push_back(std::move(message));
+      continue;
+    }
     if (responses && message.role == tokenization::ChatRole::kAssistant &&
         !messages->empty() &&
         messages->back().role == tokenization::ChatRole::kAssistant &&
         messages->back().content.empty() && !messages->back().thought.empty()) {
       messages->back().content = std::move(message.content);
     } else {
-      messages->push_back(std::move(message));
+      push(std::move(message));
     }
   }
+  for (auto& system : deferred)
+    messages->push_back(std::move(system));
   return true;
 }
 
@@ -566,6 +629,7 @@ struct CompatibilityAllowances {
   bool ignore_eos{false};
   bool response_controls{false};
   bool thinking{false};
+  bool output_config{false};
 };
 
 // Validate the text subset before dispatch so a client never gets an answer
@@ -625,10 +689,16 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
     if (field != allowances.stop_field &&
         !(field == "stream_options" && allowances.stream_options) &&
         !(field == "ignore_eos" && allowances.ignore_eos) &&
-        !(field == "thinking" && allowances.thinking) && body.contains(field) &&
+        !(field == "thinking" && allowances.thinking) &&
+        !(field == "output_config" && allowances.output_config) &&
+        body.contains(field) &&
         !(allowances.response_controls &&
           (field == "text" || field == "reasoning" || field == "tools" ||
-           field == "tool_choice" || field == "parallel_tool_calls"))) {
+           field == "tool_choice" || field == "parallel_tool_calls" ||
+           // include is a standard Responses field (for example encrypted
+           // reasoning); gufo keeps no server-side conversation, so its value
+           // is accepted and ignored.
+           field == "include"))) {
       return InvalidCompatibilityRequest("request field '" + field +
                                          "' is not supported on this endpoint");
     }
@@ -820,6 +890,7 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
             [generation = std::move(generation), id, created, model,
              include_usage, return_progress,
              stream_log](const HttpResponse::BodyWriter& writer) {
+              bool started = return_progress;
               const auto write_chunk =
                   [&](std::string_view piece, std::string_view finish_reason,
                       const json::Value* usage = nullptr,
@@ -849,6 +920,7 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
                       chunk["timings"] = *timings;
                     if (progress != nullptr)
                       chunk["prompt_progress"] = *progress;
+                    started = true;
                     return writer("data: " + chunk.dump() + "\n\n");
                   };
               core::Utf8Decoder decoder;
@@ -870,7 +942,13 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
                       connected = write_chunk(text, {});
                       return connected;
                     },
-                    on_progress);
+                    on_progress,
+                    [&] {
+                      // Admitted or long-queued: later failures are SSE.
+                      started = true;
+                      connected = writer({});
+                      return connected;
+                    });
                 stream_log->details = GenerationLogDetails(result);
                 RecordServerMetrics(result);
                 if (!connected || result.cancelled)
@@ -892,6 +970,8 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
                 }
                 (void)writer("data: [DONE]\n\n");
               } catch (const TextGenerationError& error) {
+                if (!started)
+                  throw;
                 stream_log->error_code = error.stable_code();
                 json::Value detail = json::Value::object();
                 detail["message"] = error.what();
@@ -903,6 +983,10 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
                     writer("data: " + event.dump() + "\n\n");
                 (void)writer("data: [DONE]\n\n");
               } catch (const std::exception& error) {
+                if (!started)
+                  throw;
+                // Retain the cause in logs alongside the client's stable code.
+                Logger::Error("chat", error.what());
                 stream_log->error_code = "generation_failed";
                 json::Value detail = json::Value::object();
                 const char* message = error.what();
@@ -918,6 +1002,7 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
               }
             },
         .stream_log = std::move(stream_log),
+        .defer_stream_headers = !return_progress,
     };
   }
 
@@ -1004,8 +1089,11 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
              "invalid_prompt");
 }
 
-// Messages selects reasoning with thinking.type. budget_tokens has no native
-// equivalent, so enabled thinking keeps the server's effort.
+// Messages selects reasoning with thinking.type; adaptive leaves the choice to
+// the server's default. budget_tokens has no native equivalent, so enabled
+// thinking keeps the server's effort unless output_config.effort sets it.
+// Reasoning is returned for every display, because replayed thinking blocks
+// restore the cached thought.
 std::optional<HttpResponse> ReadThinking(const json::Value& body,
                                          ReasoningOptions* reasoning) {
   const auto* thinking = body.find("thinking");
@@ -1013,16 +1101,52 @@ std::optional<HttpResponse> ReadThinking(const json::Value& body,
     return {};
   const auto* type = thinking->is_object() ? thinking->find("type") : nullptr;
   if (type == nullptr || !type->is_string() ||
-      (type->str() != "enabled" && type->str() != "disabled"))
+      (type->str() != "enabled" && type->str() != "adaptive" &&
+       type->str() != "disabled"))
     return InvalidCompatibilityRequest(
-        "'thinking.type' must be enabled or disabled");
+        "'thinking.type' must be enabled, adaptive, or disabled");
   if (const auto* budget = thinking->find("budget_tokens");
       budget != nullptr &&
       (!budget->is_number() || budget->as_double() < 1 ||
        std::floor(budget->as_double()) != budget->as_double()))
     return InvalidCompatibilityRequest(
         "'thinking.budget_tokens' must be a positive integer");
-  reasoning->enabled = type->str() == "enabled";
+  if (const auto* display = thinking->find("display");
+      display != nullptr &&
+      (!display->is_string() ||
+       (display->str() != "summarized" && display->str() != "omitted" &&
+        display->str() != "updates")))
+    return InvalidCompatibilityRequest(
+        "'thinking.display' must be summarized, omitted, or updates");
+  if (type->str() != "adaptive")
+    reasoning->enabled = type->str() == "enabled";
+  return {};
+}
+
+std::optional<HttpResponse> ReadMessagesOutputConfig(
+    const json::Value& body, ReasoningOptions* options) {
+  const auto* config = body.find("output_config");
+  if (config == nullptr || config->is_null())
+    return {};
+  if (!config->is_object())
+    return InvalidCompatibilityRequest("'output_config' must be an object");
+  for (const auto& [key, value] : config->members()) {
+    if (key != "effort")
+      return InvalidCompatibilityRequest("unsupported output_config member: " +
+                                         key);
+    if (value.is_null())
+      continue;
+    // Anthropic effort does not select thinking, so it never enables it;
+    // formatters apply it only while thinking is on. Anthropic has no minimal
+    // effort.
+    const auto effort = value.is_string() && value.str() != "minimal"
+                            ? ParseReasoningEffortName(value.str())
+                            : std::nullopt;
+    if (!effort.has_value())
+      return InvalidCompatibilityRequest(
+          "'output_config.effort' must be low, medium, high, xhigh, or max");
+    options->effort = effort;
+  }
   return {};
 }
 
@@ -1041,13 +1165,17 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
   if (body.is_object()) {
     if (auto error = ReadThinking(body, &chat.reasoning))
       return std::move(*error);
+    if (auto error = ReadMessagesOutputConfig(body, &chat.reasoning))
+      return std::move(*error);
   }
   std::size_t max_tokens = 0;
   sampling::SamplingConfig sampling_config;
-  if (auto error = ReadCompatibilityOptions(
-          body, b, "max_tokens", &max_tokens, &sampling_config,
-          chat.reasoning.enabled,
-          {.stop_field = "stop_sequences", .thinking = true})) {
+  if (auto error =
+          ReadCompatibilityOptions(body, b, "max_tokens", &max_tokens,
+                                   &sampling_config, chat.reasoning.enabled,
+                                   {.stop_field = "stop_sequences",
+                                    .thinking = true,
+                                    .output_config = true})) {
     return std::move(*error);
   }
 
@@ -1196,30 +1324,112 @@ HttpResponse LlamaProps(const HttpRequest& req, TextGenerationBackend&) {
   return Ok(resp);
 }
 
+/// llama-server slots, one per execution session. `task_id`, `state` and an
+/// always-empty `prompt` remain for older clients; prompt text is not exposed.
 HttpResponse LlamaSlots(const HttpRequest&, TextGenerationBackend& b) {
+  auto sessions = b.session_states();
+  if (sessions.empty()) {
+    sessions.emplace_back();
+  }
+  const std::size_t context = b.max_context();
+  const std::string model = b.model_id();
   json::Value resp = json::Value::array();
-  json::Value slot = json::Value::object();
-  slot["id"] = 0;
-  slot["task_id"] = 0;
-  slot["state"] = 0;
-  slot["prompt"] = "";
-  slot["next_token"] = json::Value();
-  slot["model"] = b.model_id();
-  resp.push_back(std::move(slot));
+  for (std::size_t index = 0; index < sessions.size(); ++index) {
+    const auto& session = sessions[index];
+    const std::int64_t task =
+        session.processing ? static_cast<std::int64_t>(session.request_id) : -1;
+    json::Value next_token = json::Value::object();
+    next_token["has_next_token"] = session.processing;
+    next_token["has_new_line"] = false;
+    next_token["n_remain"] =
+        session.processing ? static_cast<std::int64_t>(session.remaining_tokens)
+                           : std::int64_t{-1};
+    next_token["n_decoded"] = session.generated_tokens;
+    json::Value slot = json::Value::object();
+    slot["id"] = index;
+    slot["n_ctx"] = context;
+    slot["speculative"] = session.speculative;
+    slot["is_processing"] = session.processing;
+    slot["id_task"] = task;
+    slot["task_id"] = task;
+    slot["state"] = session.processing ? 1 : 0;
+    slot["n_prompt_tokens"] = session.prompt_tokens;
+    slot["n_prompt_tokens_cache"] = session.cached_prompt_tokens;
+    slot["n_prompt_tokens_processed"] = session.processed_prompt_tokens;
+    slot["prompt"] = "";
+    slot["next_token"] = json::Value::array();
+    slot["next_token"].push_back(std::move(next_token));
+    slot["model"] = model;
+    resp.push_back(std::move(slot));
+  }
   return Ok(resp);
 }
 
-HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend&) {
+/// Context held by in-flight requests across all sessions.
+double KvCacheUsageRatio(const TextGenerationBackend& b) {
+  const auto sessions = b.session_states();
+  const std::size_t capacity = sessions.size() * b.max_context();
+  if (capacity == 0) {
+    return 0.0;
+  }
+  std::size_t used = 0;
+  for (const auto& session : sessions) {
+    used += session.prompt_tokens + session.generated_tokens;
+  }
+  return static_cast<double>(used) / static_cast<double>(capacity);
+}
+
+HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend& b) {
   std::ostringstream out;
+  out << std::setprecision(std::numeric_limits<double>::max_digits10);
+  out << "# HELP gufo_device_lost_total Confirmed GPU context losses\n"
+      << "# TYPE gufo_device_lost_total counter\n"
+      << "gufo_device_lost_total "
+      << detail::DeviceLostTotal().load(std::memory_order_relaxed) << "\n";
   out << "# HELP llamacpp:prompt_tokens_total Total prompt tokens processed, "
          "excluding cache hits\n"
       << "# TYPE llamacpp:prompt_tokens_total counter\n"
       << "llamacpp:prompt_tokens_total "
       << detail::TotalPromptTokens().load(std::memory_order_relaxed) << "\n"
+      << "# HELP llamacpp:prompt_tokens_cached_total Total prompt tokens "
+         "reused from cache\n"
+      << "# TYPE llamacpp:prompt_tokens_cached_total counter\n"
+      << "llamacpp:prompt_tokens_cached_total "
+      << detail::TotalCachedPromptTokens().load(std::memory_order_relaxed)
+      << "\n"
+      << "# HELP llamacpp:prompt_seconds_total Prompt process time\n"
+      << "# TYPE llamacpp:prompt_seconds_total counter\n"
+      << "llamacpp:prompt_seconds_total "
+      << detail::TotalPromptSeconds().load(std::memory_order_relaxed) << "\n"
       << "# HELP llamacpp:tokens_predicted_total Total tokens generated\n"
       << "# TYPE llamacpp:tokens_predicted_total counter\n"
       << "llamacpp:tokens_predicted_total "
       << detail::TotalGenTokens().load(std::memory_order_relaxed) << "\n"
+      << "# HELP llamacpp:tokens_predicted_seconds_total Predict process "
+         "time\n"
+      << "# TYPE llamacpp:tokens_predicted_seconds_total counter\n"
+      << "llamacpp:tokens_predicted_seconds_total "
+      << detail::TotalGenSeconds().load(std::memory_order_relaxed) << "\n"
+      << "# HELP llamacpp:n_tokens_max Largest observed n_tokens.\n"
+      << "# TYPE llamacpp:n_tokens_max counter\n"
+      << "llamacpp:n_tokens_max "
+      << detail::MaxSequenceTokens().load(std::memory_order_relaxed) << "\n"
+      << "# HELP llamacpp:spec_decode_num_drafts_total Total speculative "
+         "verification rounds\n"
+      << "# TYPE llamacpp:spec_decode_num_drafts_total counter\n"
+      << "llamacpp:spec_decode_num_drafts_total "
+      << detail::TotalDraftRounds().load(std::memory_order_relaxed) << "\n"
+      << "# HELP llamacpp:spec_decode_num_draft_tokens_total Total draft "
+         "tokens proposed\n"
+      << "# TYPE llamacpp:spec_decode_num_draft_tokens_total counter\n"
+      << "llamacpp:spec_decode_num_draft_tokens_total "
+      << detail::TotalDraftTokens().load(std::memory_order_relaxed) << "\n"
+      << "# HELP llamacpp:spec_decode_num_accepted_tokens_total Total draft "
+         "tokens accepted\n"
+      << "# TYPE llamacpp:spec_decode_num_accepted_tokens_total counter\n"
+      << "llamacpp:spec_decode_num_accepted_tokens_total "
+      << detail::TotalDraftAcceptedTokens().load(std::memory_order_relaxed)
+      << "\n"
       << "# HELP llamacpp:prompt_tokens_seconds Prompt processing speed in "
          "tokens per second\n"
       << "# TYPE llamacpp:prompt_tokens_seconds gauge\n"
@@ -1240,9 +1450,10 @@ HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend&) {
       << "# TYPE llamacpp:requests_deferred gauge\n"
       << "llamacpp:requests_deferred "
       << detail::RequestsDeferred().load(std::memory_order_relaxed) << "\n"
-      << "# HELP llamacpp:kv_cache_usage_ratio KV cache usage ratio\n"
+      << "# HELP llamacpp:kv_cache_usage_ratio In-flight prompt and generated "
+         "tokens over sessions times context; excludes retained cache\n"
       << "# TYPE llamacpp:kv_cache_usage_ratio gauge\n"
-      << "llamacpp:kv_cache_usage_ratio 0.0\n";
+      << "llamacpp:kv_cache_usage_ratio " << KvCacheUsageRatio(b) << "\n";
   return {.status = 200,
           .reason = "OK",
           .body = out.str(),
@@ -1680,6 +1891,10 @@ void HttpServer::handle_connection(int client_fd) {
       ::inet_ntop(AF_INET, &peer.sin_addr, peer_address, sizeof(peer_address)))
     req.client_id = peer_address;
   req.request_id = "r" + std::to_string(next_request.fetch_add(1) + 1);
+  // Set for routes `--trace` records; `traced_stream` collects the body bytes
+  // a streaming reply delivered.
+  bool traced = false;
+  std::string traced_stream;
   bool response_started = false;
   bool http11 = false;
   int response_status = 0;
@@ -1688,6 +1903,17 @@ void HttpServer::handle_connection(int client_fd) {
                std::chrono::steady_clock::now() - start_time)
         .count();
   };
+  // A failure after a stream started keeps the bytes it already delivered.
+  const auto trace_failure = [&](const HttpResponse& error) {
+    if (traced)
+      TraceResponse(
+          req.request_id, response_started ? response_status : error.status,
+          response_started ? "stream_error" : "failed", response_started,
+          response_started ? traced_stream : error.body);
+  };
+  // Generation submitted on this thread, by the handler or by a stream body
+  // that defers it, names this request in its trace record.
+  const Trace::RequestScope trace_scope(req.request_id);
   try {
     bool ok = false;
     bool payload_too_large = false;
@@ -1824,6 +2050,12 @@ void HttpServer::handle_connection(int client_fd) {
     } else if (req.method == "OPTIONS") {
       resp = {.status = 204, .reason = "No Content"};
     } else {
+      // A client without the API key cannot write into the trace.
+      traced = Trace::Enabled() && IsTracedRoute(req) &&
+               IsAuthorized(req, api_key_hash_);
+      if (traced) {
+        TraceRequest(req);
+      }
       resp = handle_request(req);
     }
 
@@ -1842,8 +2074,10 @@ void HttpServer::handle_connection(int client_fd) {
       if (chunked)
         resp.headers.emplace_back("Transfer-Encoding", "chunked");
       const auto head = BuildResponseHead(resp, std::nullopt);
-      response_started = true;
-      connected = SendAll(client_fd, head);
+      if (!resp.defer_stream_headers) {
+        response_started = true;
+        connected = SendAll(client_fd, head);
+      }
       if (connected) {
         std::mutex write_mutex;
         std::condition_variable_any write_cv;
@@ -1852,10 +2086,19 @@ void HttpServer::handle_connection(int client_fd) {
           const std::lock_guard lock(write_mutex);
           if (!connected)
             return false;
-          connected =
-              chunked ? SendChunk(client_fd, chunk) : SendAll(client_fd, chunk);
+          if (!response_started) {
+            response_started = true;
+            connected = chunked ? SendChunk(client_fd, chunk, head)
+                                : SendAll(client_fd, head + std::string(chunk));
+            write_cv.notify_all();
+          } else {
+            connected = chunked ? SendChunk(client_fd, chunk)
+                                : SendAll(client_fd, chunk);
+          }
           if (connected && !chunk.empty()) {
             last_write = std::chrono::steady_clock::now();
+            if (traced)
+              traced_stream.append(chunk);
           }
           return connected;
         };
@@ -1864,6 +2107,8 @@ void HttpServer::handle_connection(int client_fd) {
             options_.sse_heartbeat_interval.count() > 0) {
           heartbeat = std::jthread([&](std::stop_token stop) {
             std::unique_lock lock(write_mutex);
+            write_cv.wait(lock, stop,
+                          [&] { return response_started || !connected; });
             while (!stop.stop_requested() && connected) {
               const auto deadline =
                   last_write + options_.sse_heartbeat_interval;
@@ -1880,6 +2125,8 @@ void HttpServer::handle_connection(int client_fd) {
                 connected = chunked ? SendChunk(client_fd, ": ping\n\n")
                                     : SendAll(client_fd, ": ping\n\n");
                 last_write = std::chrono::steady_clock::now();
+                if (traced && connected)
+                  traced_stream.append(": ping\n\n");
               }
             }
           });
@@ -1890,7 +2137,7 @@ void HttpServer::handle_connection(int client_fd) {
           heartbeat.join();
         // An SSE error is a complete protocol response. A failed raw PCM
         // stream must remain incomplete, or it looks like valid shorter audio.
-        if (connected && chunked &&
+        if (connected && response_started && chunked &&
             (!resp.stream_log || resp.stream_log->error_code.empty() ||
              resp.stream_log->error_event_sent))
           connected = SendAll(client_fd, "0\r\n\r\n");
@@ -1922,6 +2169,11 @@ void HttpServer::handle_connection(int client_fd) {
                          elapsed_ms(), resp.log_details, outcome,
                          request_level);
     }
+    if (traced) {
+      const bool stream = static_cast<bool>(resp.streaming_body);
+      TraceResponse(req.request_id, resp.status, outcome, stream,
+                    stream ? traced_stream : resp.body);
+    }
   } catch (const TextGenerationError& exception) {
     const auto duration_ms = std::chrono::duration<double, std::milli>(
                                  std::chrono::steady_clock::now() - start_time)
@@ -1943,19 +2195,22 @@ void HttpServer::handle_connection(int client_fd) {
                        duration_ms,
                        std::string("error_code=") + exception.stable_code(),
                        response_started ? "stream_error" : "failed");
+    trace_failure(resp);
     if (!response_started)
       (void)SendAll(client_fd, BuildResponse(resp));
   } catch (const std::exception& e) {
     const auto duration_ms = std::chrono::duration<double, std::milli>(
                                  std::chrono::steady_clock::now() - start_time)
                                  .count();
-    HttpResponse resp = Err(500, "Internal Server Error", e.what(),
+    HttpResponse resp = Err(500, "Internal Server Error",
+                            *e.what() ? e.what() : "generation failed",
                             "internal_error", "server_exception");
     resp.headers.emplace_back("X-Request-ID", req.request_id);
     Logger::LogRequest(req.request_id, req.method, req.path,
                        response_started ? response_status : resp.status,
                        duration_ms, "error_code=server_exception",
                        response_started ? "stream_error" : "failed");
+    trace_failure(resp);
     if (!response_started)
       (void)SendAll(client_fd, BuildResponse(resp));
   } catch (...) {
@@ -1970,6 +2225,7 @@ void HttpServer::handle_connection(int client_fd) {
                        response_started ? response_status : resp.status,
                        duration_ms, "error_code=server_exception",
                        response_started ? "stream_error" : "failed");
+    trace_failure(resp);
     if (!response_started)
       (void)SendAll(client_fd, BuildResponse(resp));
   }

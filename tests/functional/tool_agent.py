@@ -5,13 +5,13 @@ from copy import deepcopy
 import json
 import sys
 
-import openai
-
 from tool_reasoning import response_result
 
 
 def check_tool_history(client, model, checks, chat_result, vision, image_content):
     """Old names do not declare new tools or prevent the next turn (#357)."""
+    import openai
+
     tools = [{"type": "function", "function": {
         "name": "finish", "parameters": {"type": "object", "properties": {
             "value": {"type": "string", "const": "RECOVERED"}},
@@ -241,7 +241,9 @@ def check_untyped_agent_tools(client, model, checks, chat_result, vision, image_
     finite["tool_choice"] = {"type": "function", "function": {"name": "record"}}
     finite["messages"] = [{"role": "user", "content": "Call record with value beta."}]
     result = record("untyped_finite_object", chat_result(client, finite, True))
-    check_call(result)
+    # A finite root declares no parameters; as in llama.cpp the call stays
+    # native with none rather than switching to a JSON envelope (#438).
+    check_call(result, arguments={})
 
 
 def check_tool_agent_json(client, model, checks, chat_result):
@@ -272,15 +274,19 @@ def check_tool_agent_json(client, model, checks, chat_result):
         assert json.loads(result["text"]) == expected, result
 
 
-def check_mixed_tool_schemas(client, model, checks, chat_result, vision, image_content):
+def check_mixed_tool_schemas(client, model, checks, chat_result, vision, image_content,
+                             sampling_preset="qwen38"):
     """Mixed native/JSON tool sets retain arguments, types and continuation."""
-    def record(name, result, expected):
+    def record(name, result, expected, undeclared=False):
         checks[f"mixed_{name}"] = result
         print(f"CHECK mixed_{name}", file=sys.stderr, flush=True)
         assert result["finish"] == "tool_calls" and len(result["tools"]) == 1, result
         function = result["tools"][0]["function"]
         assert function["name"] == "record", result
-        assert json.loads(function["arguments"]) == expected, result
+        arguments = json.loads(function["arguments"])
+        # A root that is not a plain object declares no parameters in
+        # llama.cpp's native grammar; the call stays native with none (#438).
+        assert arguments == expected or (undeclared and arguments == {}), result
         # Auto calls may include ordinary assistant prose. Check that the
         # envelope was parsed rather than requiring a tool-only response.
         assert not any(marker in result["text"] for marker in
@@ -292,13 +298,13 @@ def check_mixed_tool_schemas(client, model, checks, chat_result, vision, image_c
                   max_completion_tokens=160, reasoning_effort="none")
     inline = {"type": "object", "properties": {"value": {"type": "string"}},
               "required": ["value"], "additionalProperties": False}
-    # A nullable string deliberately needs JSON to distinguish null from the
-    # string "null". This neighbor keeps testing fallback after URI support.
+    # Typed wildcard keys have no native Qwen representation. As llama.cpp,
+    # the request stays native and Qwen generates declared names only (#438).
     nullable = {"type": "function", "function": {
-        "name": "lookup", "description": "Look up an optional key.",
+        "name": "lookup", "description": "Look up a key.",
         "parameters": {"type": "object", "properties": {
-            "key": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
-            "required": ["key"]}}}
+            "key": {"type": "string"}}, "required": ["key"],
+            "patternProperties": {"^x_": {"type": "integer"}}}}}
     fetch = {"type": "function", "function": {
         "name": "fetch", "description": "Fetch a URL.",
         "parameters": {"type": "object", "properties": {
@@ -365,9 +371,11 @@ def check_mixed_tool_schemas(client, model, checks, chat_result, vision, image_c
                          extra_body={"seed": 41, "presence_penalty": 0},
                          tools=[{"type": "function", **t["function"], "strict": False}
                                 for t in tools])
-        result = record(f"{name}_chat", chat_result(client, request, bool(index % 2)), expected)
+        combined = name in ("one_of", "all_of")
+        result = record(f"{name}_chat", chat_result(client, request, bool(index % 2)),
+                        expected, combined)
         record(f"{name}_responses", response_result(
-            client, responses, not bool(index % 2)), expected)
+            client, responses, not bool(index % 2)), expected, combined)
         if index == 0:
             # Exercise reuse before cycling through enough distinct schemas
             # to evict this prompt from the bounded cache.
@@ -387,19 +395,88 @@ def check_mixed_tool_schemas(client, model, checks, chat_result, vision, image_c
             "value": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
             "required": ["value"]}, {"value": None}),
         ("nullable_string", {"type": "object", "properties": {
-            "value": {"type": ["string", "null"]}}, "required": ["value"]}, {"value": "null"}),
+            "value": {"type": ["string", "null"]}}, "required": ["value"]}, {"value": "none"}),
     ):
         prompt = ("Call record exactly once with these exact arguments: " +
                   json.dumps(arguments) + ". Preserve every JSON type. No explanation.")
+        if name == "pattern_root" and sampling_preset != "deepseek4":
+            # Only DeepSeek's string flag can carry an undeclared typed key.
+            arguments = {"value": "alpha"}
         if name == "nullable_string":
             # Both alternatives are valid schema values; explicitly select
-            # the string rather than measuring the model's default choice.
-            prompt += (" The value is the four-letter STRING null, not the JSON null value. "
-                       "Put the four letters inside JSON quotation marks.")
+            # the string. Qwen's native syntax, like its chat template and
+            # llama.cpp, cannot represent the four-letter string null.
+            prompt += " The value is the STRING none, not the JSON null value."
         body = {**common, "tools": [*agent_tools(), {"type": "function", "function": {
             "name": "record", "parameters": parameters}}],
             "messages": [{"role": "user", "content": prompt}]}
         record(name, chat_result(client, body, True), arguments)
+    check_union_continuation(client, model, checks, chat_result)
+
+
+def check_union_continuation(client, model, checks, chat_result):
+    """Replayed tool turns reuse every token the model generated.
+
+    Pi's web_search declares provider as an untyped anyOf of string consts.
+    That switched every call to a JSON envelope while history rendered native
+    XML, so each next turn re-prefilled the reasoning and call it generated.
+    Typed arguments such as edit's array must also replay as generated.
+    """
+    search = {"type": "function", "function": {
+        "name": "web_search", "description": "Search the web.",
+        "parameters": {"type": "object", "required": ["query"], "properties": {
+            "query": {"type": "string"},
+            "max_results": {"type": "number", "default": 5, "minimum": 1, "maximum": 10},
+            "provider": {"anyOf": [{"type": "string", "const": name}
+                                   for name in ("brave", "tavily", "exa")]}}}}}
+    tools = [*agent_tools(), search]
+    common = dict(model=model, tools=tools, tool_choice="auto", parallel_tool_calls=False,
+                  temperature=0, seed=41, reasoning_effort="low",
+                  max_completion_tokens=1024)
+
+    def call(name, result, function, arguments):
+        checks[f"union_{name}"] = result
+        print(f"CHECK union_{name}", file=sys.stderr, flush=True)
+        assert result["finish"] == "tool_calls" and len(result["tools"]) == 1, result
+        called = result["tools"][0]["function"]
+        assert called["name"] == function, result
+        assert json.loads(called["arguments"]) == arguments, result
+        assert not any(marker in result["text"] for marker in
+                       ("<tool_call>", "<function=", "<｜DSML｜invoke")), result
+        return result
+
+    call("search", chat_result(client, {**common, "messages": [{"role": "user", "content":
+        'Call web_search once with query "gufo", max_results 3 and provider exa. '
+        "No explanation."}]}, True),
+         "web_search", {"query": "gufo", "max_results": 3, "provider": "exa"})
+
+    def continued(name, prompt, function, arguments, output):
+        messages = [{"role": "user", "content": prompt}]
+        first = call(name, chat_result(client, {**common, "messages": messages}, True),
+                     function, arguments)
+        assert first["reasoning"], first
+        tool_call = first["tools"][0]
+        messages += [{"role": "assistant", "content": first["text"] or None,
+                      "reasoning_content": first["reasoning"], "tool_calls": [tool_call]},
+                     {"role": "tool", "tool_call_id": tool_call["id"], "content": output}]
+        second = chat_result(client, {**common, "messages": messages}, True)
+        checks[f"union_{name}_continued"] = second
+        print(f"CHECK union_{name}_continued", file=sys.stderr, flush=True)
+        # The client replays the reasoning and call exactly as returned, so
+        # every token of the first turn must be reused, not prefilled again.
+        reused = first["usage"]["prompt_tokens"] + first["usage"]["completion_tokens"]
+        cached = second["usage"]["prompt_tokens_details"]["cached_tokens"]
+        assert cached >= reused, (first["usage"], second["usage"])
+
+    old, new = "    return a - b", "    return a + b"
+    continued("read", "Read calc.py with the read tool, then stop.", "read",
+              {"path": "calc.py"}, "def add(a, b):\n" + old + "\n")
+    # Typed arguments render with the template's tojson spacing, which the
+    # model also generates; a compact rendering re-prefilled every edit call.
+    continued("edit", "Fix calc.py by calling edit exactly once, replacing " + repr(old) +
+              " with " + repr(new) + ". Do not read it first. No explanation.", "edit",
+              {"path": "calc.py", "edits": [{"oldText": old, "newText": new}]},
+              "Replaced one block.")
 
 
 def check_tool_schema_edges(client, model, checks, chat_result, vision, image_content):
@@ -420,8 +497,10 @@ def check_tool_schema_edges(client, model, checks, chat_result, vision, image_co
     cases = [
         ("wildcard", wildcard, {"value": "alpha", "x_n": 1, "x_b": True,
                                "x_z": None, "x_a": [1], "x_o": {"n": 1}, "x_s": "1"}, "auto"),
-        ("conditional", conditional, {"kind": "x", "payload": 1}, "auto"),
-        ("dependency", dependency, {"kind": "x", "payload": 1}, "auto"),
+        # Require these calls: Qwen cannot pass a branch-only payload (as in
+        # llama.cpp), so optional selection may otherwise answer in text.
+        ("conditional", conditional, {"kind": "x", "payload": 1}, "required"),
+        ("dependency", dependency, {"kind": "x", "payload": 1}, "required"),
         ("empty_interval", {"type": "object", "properties": {
             "x": {"type": "integer", "minimum": 5, "maximum": 2}},
             "required": ["x"]}, {"x": 5}, "required"),
@@ -436,13 +515,19 @@ def check_tool_schema_edges(client, model, checks, chat_result, vision, image_co
          {"url": "https://example.org/test"}, "required"),
     ]
 
-    def save(label, result, expected):
+    def save(label, result, expected, declared=None):
         checks["schema_edges_" + label] = result
         print("CHECK schema_edges_" + label, file=sys.stderr, flush=True)
         assert result["finish"] == "tool_calls" and len(result["tools"]) == 1, result
         call = result["tools"][0]["function"]
         assert call["name"] == "record", result
         actual = json.loads(call["arguments"])
+        if declared is not None:
+            # Names only a pattern or branch admits are not native parameters
+            # in llama.cpp's Qwen grammar; DeepSeek's string flag may carry them.
+            # Whatever is returned keeps its exact JSON type (#438).
+            assert declared <= actual.keys() <= expected.keys(), result
+            expected = {key: expected[key] for key in actual}
         # Python equality equates true and 1; canonical JSON also checks types.
         assert json.dumps(actual, sort_keys=True) == json.dumps(expected, sort_keys=True), result
         return result
@@ -469,9 +554,11 @@ def check_tool_schema_edges(client, model, checks, chat_result, vision, image_co
                          reasoning={"effort": "none"}, max_output_tokens=192, store=False,
                          extra_body={"seed": 41, "presence_penalty": 0, "cache_prompt": True},
                          tools=[{"type": "function", **t["function"]} for t in tools])
-        save(name + "_chat", chat_result(client, chat, bool(index % 2)), arguments)
+        declared = {"wildcard": {"value"}, "conditional": {"kind"},
+                    "dependency": {"kind"}}.get(name)
+        save(name + "_chat", chat_result(client, chat, bool(index % 2)), arguments, declared)
         save(name + "_responses", response_result(
-            client, responses, not bool(index % 2)), arguments)
+            client, responses, not bool(index % 2)), arguments, declared)
         if name == "uri":
             repeated = save(name + "_cached", chat_result(client, chat, True), arguments)
             assert repeated["usage"]["gufo"]["prefill_tokens"] == 0, repeated

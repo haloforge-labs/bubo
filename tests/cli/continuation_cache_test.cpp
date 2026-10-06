@@ -33,16 +33,53 @@ struct FakeState final : gufo::server::ContinuationState {
 
 struct FakeSnapshot final : gufo::server::ContinuationSnapshot {
   explicit FakeSnapshot(std::size_t value,
-                        std::size_t payload_bytes = sizeof(std::size_t))
-      : value(value), payload_bytes(payload_bytes) {}
+                        std::size_t payload_bytes = sizeof(std::size_t),
+                        const gufo::server::ContinuationState* owner = nullptr)
+      : value(value), payload_bytes(payload_bytes), owner(owner) {}
 
   [[nodiscard]] std::size_t PayloadBytes() const noexcept override {
     return payload_bytes;
   }
+  [[nodiscard]] bool PrefersState(
+      const gufo::server::ContinuationState& state) const noexcept override {
+    return owner == &state;
+  }
 
   std::size_t value;
   std::size_t payload_bytes;
+  const gufo::server::ContinuationState* owner;
 };
+
+void TestBorrowedSnapshotPrefersAvailableOwner() {
+  using Tokens = std::vector<gufo::server::ContinuationToken>;
+  std::vector<std::size_t> invalidations(2);
+  std::size_t next_id = 0;
+  gufo::server::ContinuationCache cache(
+      2, [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+      {.restore =
+           [](gufo::server::ContinuationState& state,
+              const gufo::server::ContinuationSnapshot& snapshot) {
+             dynamic_cast<FakeState&>(state).value =
+                 dynamic_cast<const FakeSnapshot&>(snapshot).value;
+           },
+       .capacity_bytes = [] { return 1024; },
+       .on_event = {}});
+  auto root = cache.Acquire(Tokens{1, 2, 3});
+  auto* owner = &root.state();
+  Expect(root.TryReserveSnapshot(sizeof(std::size_t), 3), "reserve root");
+  root.Commit({1, 2, 3},
+              std::make_unique<FakeSnapshot>(7, sizeof(std::size_t), owner));
+  auto first = cache.Acquire(Tokens{1, 2, 3, 4});
+  Expect(first.cache_hit() && &first.state() == owner &&
+             dynamic_cast<FakeState&>(first.state()).value == 7,
+         "restore prefers the owner over an older unused state");
+  auto second = cache.Acquire(Tokens{1, 2, 3, 5});
+  Expect(second.cache_hit() && &second.state() != owner &&
+             dynamic_cast<FakeState&>(second.state()).value == 7,
+         "a busy owner does not block a branch into another state");
+  first.Invalidate();
+  second.Invalidate();
+}
 
 void TestColdMissThenExactExtensionHit() {
   std::vector<std::size_t> invalidations(1);
@@ -195,6 +232,44 @@ void TestCachedPrefixTokensPeeksWithoutLeasing() {
   Expect(lease.cache_hit() && lease.cached_tokens() == 3,
          "a peek does not consume the checkpoint or the state slot");
   lease.Invalidate();
+}
+
+void TestBranchPointOutlivesOlderTurnsUnderPressure() {
+  using Tokens = std::vector<gufo::server::ContinuationToken>;
+  for (const bool branched : {false, true}) {
+    std::vector<std::size_t> invalidations(1);
+    std::size_t next_id = 0;
+    // Room for four snapshots; the fifth evicts one.
+    gufo::server::ContinuationCache cache(
+        1,
+        [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+        {
+            .restore = [](gufo::server::ContinuationState&,
+                          const gufo::server::ContinuationSnapshot&) {},
+            .capacity_bytes = [] { return 4 * sizeof(std::size_t); },
+            .on_event = {},
+        },
+        8);
+    const auto retain = [&](const Tokens& tokens) {
+      auto lease = cache.Acquire(tokens);
+      Expect(lease.TryReserveSnapshot(sizeof(std::size_t), tokens.size()),
+             "test snapshot is admitted");
+      lease.Commit(tokens, std::make_unique<FakeSnapshot>(tokens.size()));
+    };
+    retain({9, 9, 9});        // An older, unrelated conversation.
+    retain({1, 2, 3});        // The shared system prompt.
+    retain({1, 2, 3, 4, 4});  // A conversation continuing from it.
+    if (branched)
+      retain({1, 2, 3, 5, 5});  // A second one diverging after it.
+    else
+      retain({7, 7});
+    retain({8, 8, 8, 8});  // Pressure: one checkpoint must go.
+    const auto prefix = cache.CachedPrefixTokens(Tokens{1, 2, 3, 6});
+    const auto unrelated = cache.CachedPrefixTokens(Tokens{9, 9, 9, 1});
+    Expect(branched ? prefix == 3 && unrelated == 0
+                    : prefix == 0 && unrelated == 3,
+           "a shared prefix outlives older checkpoints only once it branches");
+  }
 }
 
 void TestSnapshotCanBranchIntoTwoIndependentStateSlots() {
@@ -1026,7 +1101,9 @@ int main() {
   TestLongestAvailablePrefixWins();
   TestWaitingAcquireCanBeCancelled();
   TestSnapshotCanBranchIntoTwoIndependentStateSlots();
+  TestBorrowedSnapshotPrefersAvailableOwner();
   TestCachedPrefixTokensPeeksWithoutLeasing();
+  TestBranchPointOutlivesOlderTurnsUnderPressure();
   TestByteCapacityEvictsBeforeSnapshotAllocation();
   TestConcurrentReservationsCannotOvercommitBudget();
   TestImpossibleReservationPreservesRetainedEntries();

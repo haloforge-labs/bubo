@@ -187,12 +187,45 @@ fallback and complete prompt. Prefill stops at those positions and captures the
 whole model state before advancing. Positions lie on a 2,048-token grid spread
 across the prompt; the final grid point is within 2,048 tokens of its end.
 Warm continuations skip grid positions less than 2,048 tokens beyond the reused
-frontier. Capture runs asynchronously while that session is frozen, so other
-requests can continue; a single execution slot skips the extra worker.
+frontier, and every request skips grid positions within 128 tokens of its end:
+such a point would split the final prefill pass for a checkpoint next to the
+complete prompt. Capture runs asynchronously while that session is frozen, so other
+requests can continue; a single execution slot skips the extra worker. A
+request whose first token is already published decodes as soon as its capture
+finishes, before the next bounded prefill chunk of a peer.
 Coincident RAM and disk boundaries share one copy. Admission
 remains subject to the existing byte budget, and intermediate copies preserve
 the original branching fallback. These intermediate checkpoints live in RAM;
 the disk tier continues to retain prompt and learned shared-prefix boundaries.
+
+### Learned divergence points
+
+Grid checkpoints sit at fixed positions, not where conversations actually
+diverge. Agents start many conversations with the same system prompt and tool
+definitions, then a different task:
+
+```text
+Conversation 1:  [ shared 4,500 tokens ][ task A, 10,000 tokens ]
+grid checkpoints:       ^2,048    ^6,144    ^10,240    ^14,336
+```
+
+Only the 2,048 checkpoint lies inside the shared part, so a second
+conversation would restore 2,048 tokens and prefill the other 2,450 shared
+tokens again. The longer the tasks, the further the grid spreads.
+
+The point that matters, token 4,500, is unknown until a second prompt shows
+where the two differ. When a request arrives, the cache compares it with the
+tokens of every retained checkpoint and live frontier of the same input
+identity. If the longest common prefix adds at least 512 tokens to what the
+request can already restore, the request stops its prefill there and retains
+an extra checkpoint. Other conversations depend on it, so it is retained like a
+stable boundary, not as an optional copy, and the branch-point rule below keeps
+it while it is shared. From the third conversation on, every new one restores
+the whole shared prefix and prefills only its own task. A divergence within
+the request's last 64 tokens, such as an edited final message, is covered by
+its own stable checkpoint and takes no extra copy. The same position from the same prefix family is captured
+once; records whose images differ from the prompt are not used to find it.
+Without disk, this needs no configuration.
 
 Execution and retention have separate limits. `--sessions N` allocates N
 mutable execution states and controls active request concurrency. A separate
@@ -209,7 +242,9 @@ When space is needed, RAM retention prefers removing:
 
 1. A full-prompt retry copy with a stable fallback still retained.
 2. An intermediate copy with a related stable continuation retained.
-3. An older stable boundary covered by a newer one.
+3. An older stable boundary covered by a newer one. A checkpoint that two
+   retained conversations extend and then diverge after is the prefix they
+   share, not an older turn, and never counts as covered.
 4. Remaining checkpoints, oldest-used first within each priority.
 
 Under entry pressure, an edited branch can first replace its incompatible
@@ -228,7 +263,7 @@ still lose reuse; this is not unlimited retention.
 The actual selected limits are reported at startup:
 
 ```text
-event=snapshot_cache_configured sessions=1 snapshot_entries=128 capacity_bytes=8589934592
+event=snapshot_cache_configured sessions=1 snapshot_entries=128 capacity_bytes=8589934592 automatic_bytes=8589934592 max_bytes=13958643712
 ```
 
 ## Invariants
@@ -236,15 +271,51 @@ event=snapshot_cache_configured sessions=1 snapshot_entries=128 capacity_bytes=8
 These constraints are why several design choices are not preferences. Change
 them deliberately or not at all.
 
-**A snapshot can only be captured where the state actually sits.** The runner
-serialises the state as it is; there is no way to capture position *N* while
-the state is at *M*. Retaining a checkpoint at a stable boundary therefore
-requires prefill to **stop** at that boundary. A warm continuation cannot both
-reuse a frontier and retain its own boundary in a single uninterrupted pass.
+**A checkpoint must contain the state at its exact token boundary.** Most
+runners stop prefill at that boundary before capturing it. Flash-Next can
+capture a text prompt's stable boundary within the final prefill pass: its
+recurrent kernels retain the boundary state, convolution and PLE retain their
+history, and a one-row head computes the boundary logits. Attention queries
+on either side keep the grouping of separate passes. The final batch can
+include up to 128 tokens beyond the normal 2,048-token chunk, so a prompt that
+ends just past a chunk needs no separate tail pass; the stable boundary must be
+within eight tokens of that batch's end.
+The cache reserves the full payload before enabling this capture. Disk,
+image, intermediate and learned-prefix checkpoints still stop prefill at
+their boundary.
 
 **The reused frontier must be frozen before prefill.** Prefill mutates the
 leased state in place, so a frontier another request might branch from has to
 be captured first.
+
+Flash-Next copies its mutable recurrent, convolution and PLE state into
+private device storage at capture; the small indexer-ring, draft-residual and
+kept-row regions go directly into the host payload. Committed K/V and pooled
+rows remain in the live session while it appends, without a K/V copy.
+A same-session rewind allocates backing blocks for only the rows it would
+overwrite and copies them once for checkpoints sharing those rows. Appending
+allocates no K/V backing blocks. Restore keeps the still-live prefix without
+a K/V upload.
+Reset leaves append-only rows intact; the first write that would overwrite
+them preserves pending checkpoints. Session destruction preserves remaining
+rows before releasing device buffers. Byte readers assemble a complete
+payload before export. Forks copy the live prefix directly between device
+buffers, including detached rows in the shared backing blocks. When both
+sessions branch from a shared checkpoint, restore retains their proven shared
+rows and copies only the different suffix. Equal token histories alone do not
+prove identical K/V, since prefill shapes can change rounding.
+A private HIP pool shared by the executor's sessions allocates and releases
+snapshot storage without synchronizing peer inference streams. Each fresh
+allocation commits device pages, about 4.5 ms per 111 MB on gfx1151, so a
+restore into a slot whose rows other checkpoints still borrow pays that cost
+for the rows it protects. A retained
+Flash-Next snapshot prefers its source execution slot when
+that slot is available, avoiding a full-prefix copy for a rewritten turn.
+A busy source never blocks a branch into another slot; other choices use LRU.
+RAM admission continues to charge the complete payload size, and the disk
+byte format is unchanged. Captures intended for disk complete all device
+copies before prefill resumes, so disk serialization does not introduce a
+background K/V transfer during inference.
 
 **Admission is advisory, never fatal.** A refused reservation or a failed
 capture is a skipped optimisation. The request must still complete.
@@ -259,24 +330,26 @@ captured; RAM-retained snapshots and their captures in progress share the RAM bu
 
 | Limit | Default | Set by |
 | --- | --- | --- |
-| Retained snapshot bytes, RAM | smaller of 32 GiB and half the available host RAM; 27B also checks HIP free memory | `--cache-ram-bytes` |
+| Retained snapshot bytes, RAM | smaller of 32 GiB and half the available host RAM; an explicit value up to the available host RAM minus 4 GiB; 27B also checks HIP free memory | `--cache-ram-bytes` |
 | RAM checkpoint records | 128, independent of `--sessions` | internal safety limit |
 | Disk bytes | 8 GiB | `--cache-disk-bytes` |
 | Disk staging bytes | smallest of 1 GiB, `MemAvailable / 8`, the disk budget | `--cache-disk-staging-bytes` |
 
-`--cache-ram-bytes 0` selects automatic sizing. A positive value replaces the
-32 GiB automatic cap, but remains clamped to the model's reported budget.
-Zero does not disable reuse. For an 8 GiB cap, use
-`--cache-ram-bytes 8589934592`.
+`--cache-ram-bytes 0` selects automatic sizing. Zero does not disable reuse.
+A positive value replaces the automatic budget and may exceed it: it trades the
+free half of host RAM for retention, but always leaves 4 GiB to the OS and other
+processes. For an 8 GiB cap, use `--cache-ram-bytes 8589934592`. The startup
+line reports the selected `capacity_bytes`, the `automatic_bytes` budget and
+the `max_bytes` an explicit value may claim.
 
-The model budget is sampled after weights and execution states are allocated,
-then fixed for the server run. Flash-Next and Qwen3.8-27B use half the available
+Both are sampled after weights and execution states are allocated, then fixed
+for the server run. Flash-Next and Qwen3.8-27B use half the available
 host RAM, respecting container/cgroup limits. 27B also clamps this to HIP's free
 device memory. CPU and GPU allocations compete for the same physical RAM on
 Strix Halo, so HIP's free-memory estimate alone is not enough.
-For example, 44 GiB available at load gives at most a 22 GiB RAM cache,
-even when HIP reports more free memory. An explicit limit cannot bypass this
-model budget.
+For example, 44 GiB available at load gives a 22 GiB automatic RAM cache and
+allows an explicit limit of up to 40 GiB, even when HIP reports more free
+memory.
 The RAM payload budget excludes weights, execution states, token metadata
 and disk staging. It also excludes temporary host buffers used to save
 checkpoints to disk; this is not a limit on total server memory.
@@ -290,10 +363,25 @@ divide the byte budget by the retained checkpoint bytes per conversation.
 For example, 8 GiB holds at most eight sets of two 512 MiB checkpoints, or
 two sets of two 2 GiB checkpoints, before extra copies and in-flight captures.
 
-Increasing context or sessions can still reduce the reported memory budget.
-On Flash-Next at 262144 context a single snapshot reached 5.70 GB against a
-7.76 GB budget, so a second could not be retained **(measured)**. The automatic
-cap does not fix this large-context constraint. See #343.
+Increasing context or sessions reduces the memory left after loading, and
+with it both budgets, exactly when snapshots grow. On Flash-Next with
+`--sessions 2` at 262144 context, 14.8 GB remained after loading: a 7.76 GB
+automatic budget against 5.70 GB snapshots at 200k tokens, so only one deep
+conversation stays retained **(measured)**. A newer conversation's stable
+boundary then replaces the older one's checkpoint; only optional intermediate
+and retry copies are refused. This is a hardware ratio, not a cache policy:
+weights, execution states and the OS leave no more memory. To keep more deep
+conversations:
+
+- Raise `--cache-ram-bytes` towards the reported `max_bytes`: about 10.5 GB
+  here, enough for a 200k-token checkpoint plus a 50k one instead of only the
+  first.
+- Run fewer `--sessions`: each Flash-Next session at 262144 context holds about
+  6.3 GB of state that the cache can use instead.
+- Add `--cache-disk` with `--cache-disk-staging-bytes` above the snapshot size,
+  so checkpoints that leave RAM can still be restored from disk.
+
+See #343.
 
 Snapshot size scales with retained tokens and differs sharply between models:
 roughly 0.5 GB at 5k tokens on Flash-Next, and 3.7 GB at 24k tokens on
@@ -310,13 +398,11 @@ global least-recently-used, without conversation or rebuild-cost awareness.
 written before a restart restored a 24,866-token prompt in 1.8 s against about
 50 s for a cold prefill **(measured)**.
 
-It also **learns exact shared-prefix boundaries**, which the RAM tier does
-not currently do. When several prompts share a long prefix and then diverge, it can
-capture a checkpoint at the divergence point so later conversations resume from
-it. RAM's intermediate checkpoints may reuse part of a shared prefix; disk can
-retain the learned divergence boundary itself. The boundary is not learned on
-first sight; in one run it became usable from the fifth conversation
-**(measured)**. See #267.
+It also **learns shared-prefix boundaries** that survive restarts. RAM learns a
+divergence point from the second conversation and restores it from the third
+(see above); the disk index needs more conversations, and in one run its
+boundary became usable from the fifth **(measured)**. When both tiers choose the
+same position, one capture feeds both. See #267.
 
 **Disk checkpoints are spaced at least 2048 tokens apart.** A conversation
 advances a few hundred tokens per turn, so writing every turn serialises, fsyncs
@@ -371,7 +457,7 @@ still populate the cache.
 
 | Log line | Meaning |
 | --- | --- |
-| `event=snapshot_cache_configured` | retained capacity, at startup |
+| `event=snapshot_cache_configured` | retained capacity at startup, with the automatic budget and the most an explicit `--cache-ram-bytes` may claim |
 | `event=snapshot action=removed reason=entry_capacity` | a retained prefix was evicted because every entry was taken |
 | `event=snapshot action=skipped reason=entry_capacity` | no checkpoint record could be replaced safely for this capture |
 | `event=snapshot action=skipped reason=byte_capacity` | a checkpoint did not fit the RAM budget |

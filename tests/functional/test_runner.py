@@ -1,6 +1,7 @@
 """Fast checks for the functional runner's failure reporting and process ownership."""
 
 import contextlib
+from copy import deepcopy
 import base64
 import importlib.util
 import io
@@ -9,6 +10,7 @@ from pathlib import Path
 import socket
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -21,18 +23,137 @@ spec.loader.exec_module(functional)
 from metrics import (CaseComplete, Recorder, canonical, compare, join_server_timings,
                      qualify, summarize, validate_tool_events)
 from progress import ProgressTrace
-from tool_reasoning import ARGUMENTS, assert_edit
+from tool_reasoning import ARGUMENTS, assert_edit, assert_terminal_call, assert_no_envelope_framing
 from discovery import assert_model_listing
 from image_inputs import assert_color, image_cases, invalid_image_cases
 from cache_concurrency import check_cache_concurrency
+from cache_shared_prefix import check_cache_shared_prefix
 from cache_disk_spacing import check_disk_spacing
 from cache_growth import check_cache_growth
+from cache_depth import check_cache_depth
 from cache_rotation import check_cache_rotation, check_snapshot_budget, host_available_bytes
 from server_metrics import (COUNTERS, TYPES, PROMPT, GENERATED, PROCESSING,
+                            CACHED, MAX_SEQUENCE, DRAFT_ROUNDS, DRAFTS, ACCEPTED, PROMPT_SECONDS,
+                            GENERATED_SECONDS, KV_USAGE, assert_slots,
                             parse_metrics, assert_accounting, validate_metrics_report)
 
 
 class FunctionalRunnerTest(unittest.TestCase):
+    def test_continuation_restore_reports_observed_equality(self):
+        import continuation
+
+        def result(text, prefill=37, cached=672, disk=True):
+            return {"choices": [{"message": {"role": "assistant", "content": text}}],
+                    "usage": {"cached_tokens": cached, "gufo": {
+                        "prefill_tokens": prefill, "ttft_ms": 1, "cache_disk_hit": disk}}}
+
+        cases = [
+            ({"resume_equal": False}, None),
+            ({"followup_equal": False}, None),
+            ({}, None),
+            ({"followup_equal": None}, None),
+            ({"resume_equal": False, "followup_equal": None}, None),
+            ({"temperature": 0}, None),
+            ({"prefill": 0}, None),
+            ({"followup_cached": 671}, "disk-restored third turn differs"),
+            ({"prefill": 2048}, "disk restore lost too much"),
+            ({"disk": False}, "restart did not restore disk state"),
+            ({"cached": 0}, "restart did not restore disk state"),
+        ]
+        for strict in ({"temperature": 0}, {"prefill": 0}):
+            cases += [({**strict, "resume_equal": False}, "disk restore changed seeded output"),
+                      ({**strict, "followup_equal": False}, "disk-restored third turn differs")]
+        for changes, error in cases:
+            settings = {"temperature": .8, "prefill": 37, "cached": 672, "disk": True,
+                        "resume_equal": True, "followup_equal": True, "followup_cached": 672,
+                        **changes}
+            with self.subTest(changes=changes), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                output = root / "restored.json"
+                previous = {"case": "synthetic", "request": {
+                    "temperature": settings["temperature"]}, "sha256": continuation.digest(result("7"))}
+                replies = [result("7" if settings["resume_equal"] else "8",
+                                  settings["prefill"], settings["cached"], settings["disk"])]
+                if settings["followup_equal"] is not None:
+                    previous["followup"] = {"request": {"temperature": settings["temperature"]},
+                                            "sha256": continuation.digest(result("seven"))}
+                    replies.append(result("seven" if settings["followup_equal"] else "eight",
+                                          cached=settings["followup_cached"]))
+                source = root / "previous.json"
+                source.write_text(json.dumps([previous]))
+                argv = ["continuation.py", "--restore", str(source), "--output", str(output)]
+                with patch.object(sys, "argv", argv), \
+                        patch.object(continuation.TRACE, "path", None), \
+                        patch.object(continuation, "call", side_effect=replies) as request, \
+                        patch("http.client.HTTPConnection.request",
+                              side_effect=AssertionError("HTTP is forbidden")) as http, \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    if error:
+                        with self.assertRaisesRegex(RuntimeError, error):
+                            continuation.main()
+                        self.assertFalse(output.exists())
+                    else:
+                        continuation.main()
+                        self.assertEqual(request.call_count, len(replies))
+                        report, = json.loads(output.read_text())
+                        self.assertEqual(report["exact"], settings["resume_equal"]
+                                         and settings["followup_equal"] is not False)
+                        self.assertEqual(report.get("status"), "passed")
+                        self.assertEqual(report.get("exact_required"),
+                                         settings["temperature"] == 0 or settings["prefill"] == 0)
+                    http.assert_not_called()
+
+    def test_continuation_drop_reasoning_omits_seeded_tool_thought(self):
+        import continuation
+
+        class FirstRequestCaptured(Exception):
+            pass
+
+        control = None
+        for drop_reasoning in (False, True):
+            with self.subTest(drop_reasoning=drop_reasoning), \
+                    tempfile.TemporaryDirectory() as directory:
+                captured = []
+
+                def capture(url, body, stop_field=None):
+                    captured.append((deepcopy(body), stop_field))
+                    raise FirstRequestCaptured
+
+                argv = ["continuation.py", "--url", "http://example.invalid:1",
+                        "--output", str(Path(directory) / "unused.json"), "--tools",
+                        "--case", "reasoning_content-preserve1-sampled0",
+                        "--prefix-repetitions", "1"]
+                if drop_reasoning:
+                    argv.append("--drop-reasoning")
+                with patch.object(sys, "argv", argv), \
+                        patch.object(continuation.TRACE, "path", None), \
+                        patch.object(continuation, "call", side_effect=capture) as request, \
+                        patch("http.client.HTTPConnection.request",
+                              side_effect=AssertionError("HTTP is forbidden")) as http:
+                    with self.assertRaises(FirstRequestCaptured):
+                        continuation.main()
+                    request.assert_called_once()
+                    http.assert_not_called()
+                self.assertEqual(list(Path(directory).iterdir()), [])
+                body, stop_field = captured[0]
+                self.assertEqual(stop_field, "reasoning_content")
+                messages = body["messages"]
+                self.assertEqual([m["role"] for m in messages],
+                                 ["system", "user", "assistant", "tool"])
+                self.assertEqual(messages[2]["tool_calls"], [{
+                    "id": "fixture-call", "type": "function",
+                    "function": {"name": "read_fixture", "arguments": "{}"}}])
+                self.assertEqual(messages[3], {
+                    "role": "tool", "tool_call_id": "fixture-call",
+                    "content": "The fixture is ready. Answer the user's request directly."})
+                if drop_reasoning:
+                    self.assertNotIn("reasoning_content", messages[2])
+                    del control["messages"][2]["reasoning_content"]
+                    self.assertEqual(body, control)
+                else:
+                    self.assertEqual(messages[2]["reasoning_content"], "Read the fixture.")
+                    control = body
+
     def test_pi_proxy_discovery_and_missing_content_type(self):
         import http.client
         import http.server
@@ -125,6 +246,21 @@ class FunctionalRunnerTest(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(AssertionError):
                 assert_edit({**result, **change})
 
+    def test_envelope_workflow_rejects_missing_calls_and_damaged_arguments(self):
+        command = "printf '%s' '</invoke>'"
+        call = {"function": {"name": "terminal", "arguments": json.dumps({"command": command})}}
+        result = {"text": "", "finish": "tool_calls", "tools": [call]}
+        assert_terminal_call(result, command)
+        for change in ({"tools": []}, {"tools": [call, call]}, {"finish": "stop"},
+                       {"tools": [{"function": {"name": "other", "arguments": call["function"]["arguments"]}}]},
+                       {"tools": [{"function": {"name": "terminal", "arguments":
+                                   json.dumps({"command": "echo '</' + 'invoke>'"})}}]}):
+            with self.subTest(change=change), self.assertRaises(AssertionError):
+                assert_terminal_call({**result, **change}, command)
+        for text in ("</invoke>", '<invoke name="terminal">', '<parameter name="command">pwd'):
+            with self.subTest(text=text), self.assertRaises(AssertionError):
+                assert_no_envelope_framing({**result, "text": text})
+
     def test_discovery_requires_an_explicit_expectation_before_starting_a_server(self):
         for suite in ("discovery", "all"):
             argv = ["run.py", "--output", "/unused", "--sampling-preset", "qwen38",
@@ -202,13 +338,15 @@ class FunctionalRunnerTest(unittest.TestCase):
         for available, requested, capacity in (
             (44 * gib, 0, 22 * gib), (128 * gib, 0, 32 * gib),
             (44 * gib, 20 * gib, 20 * gib), (44 * gib, 64 * gib, 22 * gib),
-            (128 * gib, 48 * gib, 48 * gib),
+            (44 * gib, 30 * gib, 30 * gib),  # Explicit limits may pass half.
+            (44 * gib, 64 * gib, 40 * gib), (128 * gib, 48 * gib, 48 * gib),
         ):
             result = check_snapshot_budget(log(capacity), available, requested, 1)
             self.assertEqual(result["capacity_bytes"], capacity)
         for output, available, requested in (
             (log(32 * gib), 44 * gib, 0),  # A fixed cap can exceed host headroom.
-            (log(64 * gib), 44 * gib, 64 * gib),  # Overrides cannot bypass it.
+            (log(64 * gib), 44 * gib, 64 * gib),  # Overrides keep 4 GiB free.
+            (log(41 * gib), 44 * gib, 64 * gib),
             (log(48 * gib), 128 * gib, 0), (log(21 * gib), 44 * gib, 20 * gib),
             (log(0), 44 * gib, 0), (log(20 * gib, sessions=4), 44 * gib, 0),
             (log(20 * gib, entries=8), 44 * gib, 0), ("", 44 * gib, 0),
@@ -239,6 +377,78 @@ class FunctionalRunnerTest(unittest.TestCase):
         ):
             with self.subTest(label), self.assertRaises(ValueError):
                 check_disk_spacing(grown_log, restored_log, report)
+
+    def run_cache_depth(self, lost=False, retry_work=False, contaminated=False,
+                        recorder=None, concurrency=4):
+        owner = threading.get_ident()
+
+        class Checks(dict):
+            def __setitem__(inner, label, value):
+                self.assertEqual(threading.get_ident(), owner)
+                super(Checks, inner).__setitem__(label, value)
+                if recorder:
+                    recorder.mark(label)
+
+        requests, checks, seen = [], Checks(), set()
+
+        def chat_result(client, body):
+            requests.append(deepcopy(body))
+            if recorder:
+                recorder.begin("/v1/chat/completions", body).row["status"] = "complete"
+            messages = body["messages"]
+            side = messages[0]["content"].startswith("cache_depth_side")
+            total = 64 if side else 20000 + (len(messages) - 2) * 100
+            cold = body.get("extra_body", {}).get("cache_prompt") is False
+            key = json.dumps(messages, sort_keys=True)
+            repeated = key in seen and not cold
+            cached = (0 if cold or lost else total if repeated else max(0, total - 200))
+            if repeated and retry_work:
+                cached = total - 1
+            seen.add(key)
+            code = messages[-1]["content"].rsplit("only ", 1)[-1].rstrip(".")
+            if contaminated and cached:
+                code = "WRONG"
+            return {"text": code, "reasoning": "", "tools": [], "finish": "stop",
+                    "usage": {"prompt_tokens": total, "cached_tokens": cached,
+                              "completion_tokens": 2,
+                              "gufo": {"prefill_tokens": total - cached}}}
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            check_cache_depth(None, "fixture", checks, chat_result, concurrency)
+        return requests, checks
+
+    def test_cache_depth_replays_branches_before_cold_controls(self):
+        requests, checks = self.run_cache_depth()
+        self.assertEqual(len(checks), 17)
+        self.assertEqual(len(requests), 16)
+        self.assertTrue(all(body.get("extra_body", {}).get("cache_prompt") is False
+                            for body in requests[-7:]))
+        for code in ("RED", "GREEN", "BLUE"):
+            self.assertEqual(checks["depth_branch_" + code]["text"], code)
+        self.assertEqual(requests[7]["messages"], requests[8]["messages"])
+        self.assertEqual(requests[7]["messages"], requests[-1]["messages"])
+
+    def test_cache_depth_records_one_concurrent_history_group(self):
+        import metrics
+        recorder = Recorder(None)
+        requests, _ = self.run_cache_depth(recorder=recorder)
+        cohort = [row for row in recorder.rows if row.get("case") == "depth_branches"]
+        self.assertEqual(len(cohort), 3)
+        self.assertEqual({row["request_sha256"] for row in cohort},
+                         {metrics.digest({"endpoint": "/v1/chat/completions", "body": body})
+                          for body in requests[3:6]})
+
+    def test_cache_depth_single_slot_keeps_branch_admission_order(self):
+        requests, checks = self.run_cache_depth(concurrency=1)
+        self.assertEqual([body["messages"][-1]["content"] for body in requests[3:6]],
+                         ["Reply with only RED.", "Reply with only GREEN.",
+                          "Reply with only BLUE."])
+        self.assertEqual(set(checks["depth_branches"]), {"RED", "GREEN", "BLUE"})
+
+    def test_cache_depth_rejects_lost_frontiers_and_retry_work(self):
+        for options in ({"lost": True}, {"retry_work": True}, {"contaminated": True}):
+            with self.subTest(options=options), self.assertRaises(AssertionError):
+                self.run_cache_depth(**options)
 
     def run_cache_rotation(self, lost=False, contaminated=False):
         requests, checks, previous = [], {}, {}
@@ -408,7 +618,14 @@ class FunctionalRunnerTest(unittest.TestCase):
                               "gufo": {"prefill_tokens": total - cached,
                                        "shared_prefix_wait_ms": wait}}}
 
-        checks = {}
+        owner = threading.get_ident()
+
+        class Checks(dict):
+            def __setitem__(inner, label, value):
+                self.assertEqual(threading.get_ident(), owner)
+                super(Checks, inner).__setitem__(label, value)
+
+        checks = Checks()
         with contextlib.redirect_stderr(io.StringIO()):
             check_cache_concurrency(None, "fixture", checks, chat_result, 4,
                                     abandon=lambda client, body, delay: None)
@@ -425,6 +642,14 @@ class FunctionalRunnerTest(unittest.TestCase):
                 if body.get("extra_body", {}).get("cache_prompt") is False]
         self.assertTrue(cold and all(body["temperature"] == 0 for body in cold))
 
+    def test_cache_concurrency_admits_distinct_tasks_in_a_fixed_order(self):
+        requests, _ = self.run_cache_concurrency()
+        tasks = [body["messages"][-1]["content"] for body in requests
+                 if body["messages"][0]["content"].startswith("cache_concurrency_fanout\n")
+                 and not body.get("extra_body", {}).get("cache_prompt") is False]
+        self.assertEqual(tasks, [f"Task {index}. Reply with only the code {code}."
+                                 for index, code in enumerate(("ALPHA", "BETA", "GAMMA", "DELTA"))])
+
     def test_cache_concurrency_rejects_followers_that_prefill_everything(self):
         with self.assertRaisesRegex(AssertionError, "after restoring the shared prefix"):
             self.run_cache_concurrency(regress="prefill")
@@ -432,6 +657,52 @@ class FunctionalRunnerTest(unittest.TestCase):
     def test_cache_concurrency_rejects_waiting_without_a_shared_prefix(self):
         with self.assertRaisesRegex(AssertionError, "waited without a shared prefix"):
             self.run_cache_concurrency(regress="wait")
+
+    def run_cache_shared_prefix(self, regress=False):
+        import re
+        seen, requests = {}, []
+
+        def tokens(messages):
+            return sum(len(m["content"]) // 4 + 10 for m in messages)
+
+        def chat_result(client, body):
+            # Model-independent server model: the second conversation under a
+            # system prompt learns its boundary, later ones restore it.
+            requests.append(json.loads(json.dumps(body)))
+            messages = body["messages"]
+            label = messages[0]["content"].split("\n")[0]
+            total = tokens(messages)
+            cached = 0
+            if body.get("extra_body", {}).get("cache_prompt") is not False:
+                count = seen.get(label, 0)
+                seen[label] = count + 1
+                if count == 1:
+                    cached = 2048
+                elif count >= 2:
+                    cached = 2048 if regress else tokens(messages[:1])
+            code = re.search(r"code (\w+)\.$", messages[-1]["content"])
+            return {"text": code[1] if code else "Z", "reasoning": "", "tools": [],
+                    "finish": "stop",
+                    "usage": {"prompt_tokens": total, "cached_tokens": cached,
+                              "completion_tokens": 2,
+                              "gufo": {"prefill_tokens": total - cached}}}
+
+        checks = {}
+        with contextlib.redirect_stderr(io.StringIO()):
+            check_cache_shared_prefix(None, "fixture", checks, chat_result)
+        return requests, checks
+
+    def test_cache_shared_prefix_runs_conversations_then_cold_controls(self):
+        requests, checks = self.run_cache_shared_prefix()
+        for group in ("long_tasks", "short_tasks"):
+            self.assertTrue(all(f"{group}_{index}" in checks for index in range(4)))
+            self.assertTrue(all(f"{group}_cold_{index}" in checks for index in range(4)))
+        warm = [body for body in requests if "extra_body" not in body]
+        self.assertEqual(len(warm), 8)
+
+    def test_cache_shared_prefix_rejects_grid_only_reuse(self):
+        with self.assertRaisesRegex(AssertionError, "of the shared system prompt"):
+            self.run_cache_shared_prefix(regress=True)
 
     def test_prompt_progress_contract_and_output_order(self):
         def event(processed, elapsed=0):
@@ -469,6 +740,8 @@ class FunctionalRunnerTest(unittest.TestCase):
             text.replace(f"{PROCESSING} 0", f"{PROCESSING} 0.5"),
             text.replace(f"{GENERATED} 0", f"{GENERATED} nan"),
             text.replace(f"{GENERATED} 0", f"{GENERATED} inf"),
+            text.replace(f"{DRAFT_ROUNDS} 0", f"{DRAFT_ROUNDS} 0.5"),
+            text.replace(f"{KV_USAGE} 0", f"{KV_USAGE} 1.1"),
         ):
             with self.subTest(text=bad), self.assertRaises(ValueError):
                 parse_metrics(bad)
@@ -478,18 +751,25 @@ class FunctionalRunnerTest(unittest.TestCase):
         rows = [
             {"http_status": 200, "status": "complete", "metrics": {
                 "prompt_tokens": 100, "cached_tokens": 98,
-                "prefill_tokens": 2, "completion_tokens": 7}},
+                "prefill_tokens": 2, "completion_tokens": 7,
+                "draft_rounds": 3, "draft_tokens": 8, "draft_tokens_accepted": 5, "prefill_ms": 100, "decode_ms": 200}},
             {"http_status": 200, "status": "complete", "metrics": {
                 "prompt_tokens": 100, "cached_tokens": 100,
-                "prefill_tokens": 0, "completion_tokens": 3}},
+                "prefill_tokens": 0, "completion_tokens": 3,
+                "draft_rounds": 2, "draft_tokens": 4, "draft_tokens_accepted": 2, "prefill_ms": 0, "decode_ms": 100}},
             {"http_status": 400, "status": "complete", "metrics": {}},
         ]
-        after = {PROMPT: 12, GENERATED: 20}
+        after = {**before, PROMPT: 12, GENERATED: 20, CACHED: 208,
+                 MAX_SEQUENCE: 107, DRAFT_ROUNDS: 15, DRAFTS: 22, ACCEPTED: 17,
+                 PROMPT_SECONDS: 10.1, GENERATED_SECONDS: 10.3}
         assert_accounting(before, after, rows)
         for bad in ({PROMPT: 210, GENERATED: 20}, {PROMPT: 14, GENERATED: 30},
                     {PROMPT: 12, GENERATED: 19}):
             with self.subTest(after=bad), self.assertRaises(AssertionError):
-                assert_accounting(before, bad, rows)
+                assert_accounting(before, {**after, **bad}, rows)
+        for metric in (CACHED, MAX_SEQUENCE, DRAFT_ROUNDS, DRAFTS, ACCEPTED, PROMPT_SECONDS, GENERATED_SECONDS):
+            with self.subTest(metric=metric), self.assertRaises(AssertionError):
+                assert_accounting(before, {**after, metric: after[metric] + 1}, rows)
         rows[0]["status"] = "disconnected"
         with self.assertRaisesRegex(AssertionError, "missing completed"):
             assert_accounting(before, after, rows)
@@ -502,14 +782,15 @@ class FunctionalRunnerTest(unittest.TestCase):
                 {"request_id": "r2", "http_status": 200, "status": "complete"},
                 {"request_id": "r3", "http_status": 400, "status": "complete"}]}))
             (root / "metrics.json").write_text(json.dumps({"checks": {
-                "metrics_chat_cold": {"before": {PROMPT: 100, GENERATED: 200}},
+                "metrics_chat_cold": {"before": {**dict.fromkeys(COUNTERS, 0), PROMPT: 100, GENERATED: 200}},
                 "metrics_live_queue_cancel": {"cancelled": [{"cancelled": True}]},
-                "metrics_after_cancel_cached": {"after": {PROMPT: 112, GENERATED: 207}}}}))
+                "metrics_after_cancel_cached": {"after": {**dict.fromkeys(COUNTERS, 0),
+                    PROMPT: 112, GENERATED: 207, CACHED: 20, MAX_SEQUENCE: 24, DRAFT_ROUNDS: 3, DRAFTS: 8, ACCEPTED: 4}}}}))
             log = (
                 "[http] request=r1 event=completed status=200 prefill_tokens=12 "
-                "generated_tokens=3 finish=cancelled\n"
+                "generated_tokens=3 prompt_tokens=12 cached_tokens=0 draft_rounds=1 draft_proposed=4 draft_accepted=2 finish=cancelled\n"
                 "[http] request=r2 event=completed status=200 prefill_tokens=0 "
-                "generated_tokens=4 finish=length\n"
+                "generated_tokens=4 prompt_tokens=20 cached_tokens=20 draft_rounds=2 draft_proposed=4 draft_accepted=2 finish=length\n"
                 "[http] request=r3 event=completed status=400\n")
             (root / "server.log").write_text(log)
             self.assertEqual(validate_metrics_report(root), {"requests": 2, "cancelled": 1})
@@ -518,6 +799,22 @@ class FunctionalRunnerTest(unittest.TestCase):
             (root / "server.log").write_text(log.replace("generated_tokens=3", "generated_tokens=0"))
             with self.assertRaises(AssertionError):
                 validate_metrics_report(root)
+
+    def test_live_slots_reject_stale_identity_progress_and_prompt_disclosure(self):
+        slot = {"id": 0, "model": "test", "n_ctx": 4096, "speculative": True,
+                "is_processing": True, "id_task": 7, "task_id": 7, "state": 1,
+                "n_prompt_tokens": 20, "n_prompt_tokens_cache": 12,
+                "n_prompt_tokens_processed": 8, "prompt": "",
+                "next_token": [{"has_next_token": True, "has_new_line": False,
+                                "n_remain": 6, "n_decoded": 2}]}
+        assert_slots([slot], 1, "test", 4096, True)
+        for change in ({"prompt": "private"}, {"task_id": 0},
+                       {"n_prompt_tokens_processed": 7}, {"speculative": False},
+                       {"is_processing": False}, {"id": 2}):
+            with self.subTest(change=change), self.assertRaises(AssertionError):
+                assert_slots([{**slot, **change}], 1, "test", 4096, True)
+        with self.assertRaises(AssertionError):
+            assert_slots([slot, {**slot, "id": 1}], 2, "test", 4096, True)
 
     def test_fingerprints_preserve_schema_payload_ids(self):
         for key in ("schema", "parameters", "metadata", "arguments"):
@@ -618,6 +915,77 @@ class FunctionalRunnerTest(unittest.TestCase):
             self.assertEqual(measured["decode_ms"], 3)
             self.assertEqual(measured["prefill_ms"], 2)
             self.assertIsNotNone(fingerprint)
+
+    def messages_fixture(self):
+        request = {"model": "fixture", "max_tokens": 2, "temperature": 0, "seed": 31,
+                   "stop_sequences": ["END", "HALT"],
+                   "messages": [{"role": "user", "content": "Reply BETA."}]}
+        # Buffered Messages uses input_tokens including cached work, no total_tokens,
+        # ordered content blocks, and the separate GenerationTimings object.
+        response = {"id": "msg_fixture", "type": "message", "role": "assistant",
+                    "model": "fixture", "content": [
+                        {"type": "thinking", "thinking": "The code is BETA.", "signature": ""},
+                        {"type": "text", "text": "BETA"}],
+                    "stop_reason": "end_turn", "stop_sequence": None,
+                    "usage": {"input_tokens": 10, "output_tokens": 2,
+                              "cache_creation_input_tokens": 0, "cache_read_input_tokens": 6},
+                    "timings": {"prompt_n": 4, "prompt_ms": 2, "prompt_per_token_ms": .5,
+                                "prompt_per_second": 2000, "predicted_n": 2, "predicted_ms": 3,
+                                "predicted_per_token_ms": 1.5, "predicted_per_second": 2000 / 3,
+                                "cache_n": 6, "cache_restore_ms": 1, "cache_snapshot_ms": 1,
+                                "cache_disk_enqueue_ms": 0, "draft_rounds": 1,
+                                "draft_n": 3, "draft_n_accepted": 1}}
+        return request, response
+
+    def test_buffered_messages_preserves_output_cache_and_timings(self):
+        request, response = self.messages_fixture()
+        measured, fingerprint = summarize([(5, json.dumps(response).encode())], False, True,
+                                          ("/v1/messages", request, 200))
+        expected = {"prompt_tokens": 10, "completion_tokens": 2, "cached_tokens": 6,
+                    "prefill_tokens": 4, "prefill_ms": 2, "decode_ms": 3,
+                    "prefill_ms_per_token": .5, "decode_ms_per_token": 1.5,
+                    "cache_restore_ms": 1, "cache_snapshot_ms": 1, "cache_disk_enqueue_ms": 0,
+                    "draft_rounds": 1, "draft_tokens": 3, "draft_tokens_accepted": 1}
+        for key, value in expected.items():
+            with self.subTest(metric=key):
+                self.assertEqual(measured.get(key), value)
+        self.assertIsInstance(fingerprint, str)
+        self.assertEqual(len(fingerprint), 64)
+
+    def test_buffered_messages_comparison_detects_output_changes(self):
+        request, response = self.messages_fixture()
+        text, thinking = deepcopy(response), deepcopy(response)
+        text["content"][1]["text"] = "OTHER"
+        thinking["content"][0]["thinking"] = "The code is OTHER."
+        stopped = {**response, "stop_reason": "stop_sequence", "stop_sequence": "END"}
+        cases = [
+            ("text", response, text, "failed"),
+            ("thinking", response, thinking, "failed"),
+            ("stop_reason", response, {**response, "stop_reason": "max_tokens"}, "failed"),
+            ("stop_sequence", stopped, {**stopped, "stop_sequence": "HALT"}, "failed"),
+            ("generated_id", response, {**response, "id": "msg_other"}, "passed"),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            baseline, candidate = Path(directory) / "baseline", Path(directory) / "candidate"
+            baseline.mkdir()
+            candidate.mkdir()
+            for label, before, after, expected in cases:
+                with self.subTest(change=label):
+                    for root, payload in ((baseline, before), (candidate, after)):
+                        with patch("metrics.time.monotonic", return_value=1):
+                            recorder = Recorder(root / "messages.requests.json")
+                            step = recorder.begin("/v1/messages", request)
+                            step.row["http_status"] = 200
+                            step.feed(json.dumps(payload).encode())
+                            step.ended = True
+                            step.finish()
+                    result = compare(baseline, candidate)
+                    self.assertEqual(result["status"], expected)
+                    if expected == "failed":
+                        self.assertTrue(any("output_sha256 changed" in issue
+                                            for issue in result["quality_or_coverage_changes"]))
+                    else:
+                        self.assertFalse(result["quality_or_coverage_changes"])
 
     def test_missing_timings_or_logs_cannot_qualify(self):
         completed = {"choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
@@ -833,6 +1201,35 @@ class FunctionalRunnerTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "history"):
                 qualify([original, compare(a, b)])
 
+    def test_identical_concurrent_requests_match_cache_work_without_hiding_regressions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            a, b = Path(directory) / "a", Path(directory) / "b"
+            a.mkdir()
+            b.mkdir()
+            rows = [{"index": index, "case": "cohort", "request_sha256": "same",
+                     "status": "complete", "wall_ms": 100,
+                     "metrics": {"prefill_tokens": 100 if index == 0 else 0,
+                                 "cached_tokens": 0 if index == 0 else 100,
+                                 "decode_ms": 100}} for index in range(3)]
+
+            def write(path, items):
+                (path / "batch.requests.json").write_text(json.dumps(
+                    {"version": 1, "requests": items}))
+
+            write(a, rows)
+            swapped = json.loads(json.dumps(rows))
+            swapped[0]["metrics"], swapped[2]["metrics"] = (
+                swapped[2]["metrics"], swapped[0]["metrics"])
+            write(b, swapped)
+            self.assertEqual(compare(a, b)["status"], "passed")
+            swapped[1]["metrics"]["decode_ms"] = 125
+            write(b, swapped)
+            self.assertEqual(compare(a, b)["status"], "inconclusive")
+            swapped[1]["metrics"]["prefill_tokens"] = 100
+            swapped[1]["metrics"]["cached_tokens"] = 0
+            write(b, swapped)
+            self.assertTrue(compare(a, b)["quality_or_coverage_changes"])
+
     def test_evidence_requires_independent_runs_and_identical_builds(self):
         from compare import evidence
         with tempfile.TemporaryDirectory() as directory:
@@ -975,8 +1372,16 @@ p.with_suffix(".requests.json").write_text(json.dumps({{
                 self.assertEqual(status, 0 if expected == "passed" else 1)
 
     def test_disk_cache_is_removed_after_restart_checks(self):
-        for exit_code in (0, 7):
-            with self.subTest(exit_code=exit_code), tempfile.TemporaryDirectory() as directory:
+        for exit_code, continuation_report, spacing_exact, expected in (
+            (0, {"status": "passed", "exact": True}, True, "passed"),
+            (7, {"status": "passed", "exact": True}, True, "failed"),
+            (0, {"status": "passed", "exact": False}, True, "passed"),
+            (0, {"exact": True}, True, "failed"),
+            (0, {"status": "failed", "exact": True}, True, "failed"),
+            (0, {"status": "passed", "exact": True}, False, "failed"),
+        ):
+            with self.subTest(exit_code=exit_code, continuation=continuation_report,
+                              spacing_exact=spacing_exact), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 # Stands in for the server filling its runner-owned disk cache.
                 child = f'''
@@ -985,7 +1390,9 @@ from pathlib import Path
 output = Path(sys.argv[sys.argv.index("--output") + 1])
 (output.parent / "disk").mkdir(exist_ok=True)
 (output.parent / "disk" / "entry.kvc").write_bytes(b"x")
-output.write_text(json.dumps([{{"exact": True}}]))
+payload = ({continuation_report!r} if Path(__file__).name == "continuation.py"
+           else {{"exact": {spacing_exact!r}}})
+output.write_text(json.dumps([payload]))
 output.with_suffix(".requests.json").write_text(json.dumps({{"version": 1, "requests": [{{
     "status": "complete", "wall_ms": 1, "endpoint": "/v1/chat/completions",
     "request_sha256": "fixture"}}]}}))
@@ -1011,7 +1418,12 @@ sys.exit({exit_code})
                      contextlib.redirect_stdout(io.StringIO()):
                     functional.main()
                 report = json.loads((root / "report/report.json").read_text())
-                self.assertEqual(report["status"], "failed" if exit_code else "passed", report)
+                self.assertEqual(report["status"], expected, report)
+                continuation_passed = not exit_code and continuation_report.get("status") == "passed"
+                self.assertEqual(report["suites"]["text-cancel"]["status"],
+                                 "passed" if continuation_passed else "failed")
+                self.assertEqual(report["suites"]["disk-spacing"]["status"],
+                                 "passed" if not exit_code and spacing_exact else "failed")
                 self.assertIn("--cache-disk", report["command"])
                 self.assertFalse((root / "report/disk").exists())
                 self.assertTrue((root / "report/text-cancel.json").is_file())

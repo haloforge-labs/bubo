@@ -626,6 +626,7 @@ __global__ void HcCombineVec4Kernel(float* res, const float* block_out,
 /// their weights and the gated shared expert (MoeEpilogueVec4Kernel), so the
 /// block output never round-trips memory. Threads own hidden lanes (up to
 /// three float4 each) across the four streams.
+template<bool kNormalize>
 __global__ void HcCombineMoeF16Kernel(
     float* res, const __half* expert_out, const float* weights,
     const float* shared_out, const float* gate, std::uint32_t gate_stride,
@@ -689,6 +690,8 @@ __global__ void HcCombineMoeF16Kernel(
       }
     }
   }
+  if constexpr (!kNormalize)
+    return;
   const std::uint32_t lane = threadIdx.x & 31u;
   const std::uint32_t wave = threadIdx.x >> 5u;
 #pragma unroll
@@ -1112,7 +1115,7 @@ __launch_bounds__(256) __global__
     void GdnRowSplitKernel(const float* conv_out, const float* scales,
                            const float* ab, float* state, float* raw,
                            std::uint32_t n_tokens, std::uint32_t k_heads,
-                           std::uint32_t v_heads) {
+                           std::uint32_t v_heads, GdnCheckpoint checkpoint) {
   constexpr int d = kGdnDim;
   constexpr int kKeysPerLane = 32;
   constexpr int kVec = kKeysPerLane / 4;
@@ -1258,6 +1261,13 @@ __launch_bounds__(256) __global__
         s[i].z += update * kc[i].z;
         s[i].w += update * kc[i].w;
       }
+      if (checkpoint.state != nullptr && w * kW + tl + 1 == checkpoint.tokens) {
+        auto* target = reinterpret_cast<float4*>(
+            checkpoint.state + (static_cast<std::size_t>(h) * d + row) * d);
+#pragma unroll
+        for (int i = 0; i < kVec; ++i)
+          target[vec0 + i] = s[i];
+      }
       out_base += v_heads * d;
     }
     // The other slot was last read one window ago (before the previous
@@ -1312,7 +1322,7 @@ __global__ void GdnKernel(const float* conv_out, const float* qn,
                           float* raw, RollbackRows snapshots,
                           std::uint32_t n_tokens, std::uint32_t k_heads,
                           std::uint32_t v_heads, const GdnBatchItem* batch,
-                          std::uint32_t active) {
+                          std::uint32_t active, GdnCheckpoint checkpoint) {
   if constexpr (kBatch) {
     if ((active & (1U << blockIdx.z)) == 0)
       return;
@@ -1384,6 +1394,15 @@ __global__ void GdnKernel(const float* conv_out, const float* qn,
     if (lane == 0) {
       raw[static_cast<std::size_t>(t) * v_heads * d + h * d + j] =
           acc * q_scale;
+    }
+    if constexpr (!kBatch) {
+      if (checkpoint.state != nullptr && t + 1 == checkpoint.tokens) {
+        float* target =
+            checkpoint.state + static_cast<std::size_t>(h) * d * d + j * d + i0;
+#pragma unroll
+        for (std::uint32_t i = 0; i < slice; ++i)
+          target[i] = row[i];
+      }
     }
     if ((kBatch ? batch[blockIdx.z].state_snapshots.rows[0]
                 : snapshots.rows[0]) != nullptr &&
@@ -1865,6 +1884,14 @@ using v8f = __attribute__((__vector_size__(8 * sizeof(float)))) float;
 
 __device__ __forceinline__ v8f Wmma(v16h a, v16h b, v8f c) {
   return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c);
+}
+
+// BF16 fragments carry the same sixteen 16-bit lanes.
+using v16bf = __attribute__((ext_vector_type(16))) __bf16;
+
+__device__ __forceinline__ v8f WmmaBf16(v16h a, v16h b, v8f c) {
+  return __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(
+      __builtin_bit_cast(v16bf, a), __builtin_bit_cast(v16bf, b), c);
 }
 
 // Keep indexer queries in F32: narrowing them before ranking can swap blocks
@@ -2784,6 +2811,16 @@ inline unsigned Blocks(std::size_t count) {
   return static_cast<unsigned>((count + kThreads - 1) / kThreads);
 }
 
+// A barrier for kernels whose waves exchange data through LDS only.
+// __syncthreads also waits for every outstanding global load and drops the
+// L0 cache, which serializes register prefetches behind the barrier. The
+// global inputs are read-only here, so completing LDS traffic is enough.
+__device__ __forceinline__ __attribute__((convergent)) void SyncLds() {
+  asm volatile("s_waitcnt lgkmcnt(0)" ::: "memory");
+  __builtin_amdgcn_s_barrier();
+  asm volatile("" ::: "memory");
+}
+
 // Masked prefill attention on the WMMA matrix cores, ported from the Qwen
 // 27B route (src/models/qwen/hip/kernels/attention_wmma.hip) to this
 // model's 24 x 256 query heads over two KV heads. Wave32 fragment layout: A
@@ -2953,6 +2990,11 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
   // Four 512-block selections plus their incomplete tail. The same LDS
   // stores a mask for arbitrary wider selections used by operator callers.
   constexpr unsigned kListCapacity = 4 * 512 + 4;
+  // A compact entry also carries which of the packed queries selected the
+  // block, so the softmax reads its mask bits from the tile, not global.
+  constexpr unsigned kMaskRows = kPackHeads ? kQueryRows : 1;
+  constexpr unsigned kMemberShift = 28;
+  static_assert(kMaskRows <= 32 - kMemberShift, "membership bits fit");
   __shared__ unsigned union_words[kListCapacity];
   __shared__ unsigned wave_counts[8];
   bool compact = false;
@@ -2964,14 +3006,23 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
     const unsigned word_count = (n_blocks + 31) / 32;
     const unsigned words_per_thread = (word_count + 255) / 256;
     unsigned local_words[8];
+    unsigned row_words[8][kMaskRows];
     unsigned count = 0;
 #pragma unroll
     for (unsigned j = 0; j < 8; ++j) {
       const unsigned w = tid * words_per_thread + j;
       unsigned bits = 0;
+#pragma unroll
+      for (unsigned r = 0; r < kMaskRows; ++r)
+        row_words[j][r] = 0;
       if (j < words_per_thread && w < word_count) {
-        for (unsigned r = 0; r < live_rows; ++r)
-          bits |= mask[size_t(query_start + r) * mask_words + w];
+#pragma unroll
+        for (unsigned r = 0; r < kMaskRows; ++r) {
+          if (r < live_rows) {
+            row_words[j][r] = mask[size_t(query_start + r) * mask_words + w];
+            bits |= row_words[j][r];
+          }
+        }
         if (w * 32 >= tail_block)
           bits = ~0u;
         else if ((w + 1) * 32 > tail_block)
@@ -3007,7 +3058,11 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
       if (compact) {
         while (bits) {
           unsigned bit = __builtin_ctz(bits);
-          union_words[prefix++] = word * 32 + bit;
+          unsigned members = 0;
+#pragma unroll
+          for (unsigned r = 0; r < kMaskRows; ++r)
+            members |= ((row_words[j][r] >> bit) & 1u) << r;
+          union_words[prefix++] = (word * 32 + bit) | (members << kMemberShift);
           bits &= bits - 1;
         }
       } else if (j < words_per_thread && word < word_count) {
@@ -3036,18 +3091,25 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
   struct Tile {
     std::uint32_t block[kBlocksPerTile];
     std::uint32_t count;
+    std::uint32_t members;  // kMaskRows bits per block, compact lists only
   };
   // Gathers the next tile starting the search at block `b`; returns the
   // block to continue from.
   const auto gather_tile = [&](std::uint32_t b, Tile& tile) {
     if (compact) {
       tile.count = min(kBlocksPerTile, selected - min(b, selected));
+      tile.members = 0;
 #pragma unroll
-      for (unsigned i = 0; i < kBlocksPerTile; ++i)
-        tile.block[i] = b + i < selected ? union_words[b + i] : n_blocks;
+      for (unsigned i = 0; i < kBlocksPerTile; ++i) {
+        const unsigned entry = b + i < selected ? union_words[b + i] : 0u;
+        tile.block[i] =
+            b + i < selected ? entry & ((1u << kMemberShift) - 1u) : n_blocks;
+        tile.members |= (entry >> kMemberShift) << (i * kMaskRows);
+      }
       return b + tile.count;
     }
     tile.count = 0;
+    tile.members = 0;
 #pragma unroll
     for (std::uint32_t i = 0; i < kBlocksPerTile; ++i) {
       b = next_block(b);
@@ -3125,7 +3187,7 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
 
   while (cur.count != 0) {
     // --- stage K from the registers the previous iteration prefetched
-    __syncthreads();
+    SyncLds();
 #pragma unroll
     for (std::uint32_t n = 0; n < kKRegs; ++n) {
       const std::uint32_t idx = tid + (n * 256);
@@ -3134,7 +3196,7 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
       *reinterpret_cast<uint4*>(&kv_lds[(key_row * kWmmaKStride) + d8]) =
           k_cur[n];
     }
-    __syncthreads();
+    SyncLds();
 
     // --- prefetch the next tile. Everything below covers its latency.
     cursor = gather_tile(cursor, pre);
@@ -3160,7 +3222,7 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
         s_lds[s_kh][s_tile][(2 * i) + half_id][sub] = s_acc[i];
       }
     }
-    __syncthreads();
+    SyncLds();
 
     // QK has finished reading K. V and softmax P use separate LDS, so
     // their writes can share the barrier at the end of softmax.
@@ -3206,8 +3268,14 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
           bool valid = live_row && key_position <= absolute_query &&
                        key_position < context_end;
           if (valid && words != nullptr && key_position < tail_start) {
-            const std::uint32_t b = key_position / ratio;
-            valid = ((words[b / 32] >> (b % 32)) & 1u) != 0u;
+            if (compact) {
+              const std::uint32_t slot =
+                  ((col / ratio) * kMaskRows) + (local_query - query_start);
+              valid = ((cur.members >> slot) & 1u) != 0u;
+            } else {
+              const std::uint32_t b = key_position / ratio;
+              valid = ((words[b / 32] >> (b % 32)) & 1u) != 0u;
+            }
           }
           const std::uint32_t tile = ((col / 16) * kRowBlocks) + rb;
           vals[m] = valid ? (s_lds[0][tile][row][col % 16] +
@@ -3241,7 +3309,7 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
         }
       }
     }
-    __syncthreads();
+    SyncLds();
 
     // --- rescale the running O by the new maximum. A lane touches only rows
     // 2i + half_id, so the factors are read once per row block.
@@ -3323,7 +3391,7 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
   }
   if (tid < kRows * kSoftmaxLanes && tid % kSoftmaxLanes == 0)
     row_sum[tid / kSoftmaxLanes] = running_sum;
-  __syncthreads();
+  SyncLds();
 
   // --- epilogue: normalize and apply the sigmoid output gate ---
 #pragma unroll
@@ -4510,13 +4578,14 @@ bool HcCombineMoeF16(float* res, const __half* expert_out, const float* weights,
                      std::uint32_t n_tokens, std::uint32_t hidden,
                      std::uint32_t streams, float eps, hipStream_t stream) {
   if (streams != 4 || hidden % 128 != 0 || hidden > 3 * 4 * kThreads ||
-      gamma == nullptr || xn_q8 == nullptr) {
+      (gamma != nullptr && xn_q8 == nullptr)) {
     return false;
   }
-  hipLaunchKernelGGL(HcCombineMoeF16Kernel, dim3(n_tokens), dim3(kThreads), 0,
-                     stream, res, expert_out, weights, shared_out, gate,
-                     gate_stride, used, inject, inject_parts, gamma, xn, xn_q8,
-                     hidden, eps);
+  const auto combine =
+      gamma ? HcCombineMoeF16Kernel<true> : HcCombineMoeF16Kernel<false>;
+  hipLaunchKernelGGL(combine, dim3(n_tokens), dim3(kThreads), 0, stream, res,
+                     expert_out, weights, shared_out, gate, gate_stride, used,
+                     inject, inject_parts, gamma, xn, xn_q8, hidden, eps);
   return true;
 }
 
@@ -4863,15 +4932,20 @@ struct AttentionProjectionOutput {
 /// and use the same ordered K16 products. y is [batch][m].
 template<int BM, int BN, int BK, int WM, int WN, int kRowGroup = 1,
          bool kHcMix = false, bool kSsmConv = false, bool kAttention = false,
-         bool kHalfWeights = false>
+         bool kHalfWeights = false, bool kBf16 = false>
 __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     const void* __restrict__ w, const __half* __restrict__ x,
     float* __restrict__ y, std::size_t batch, std::size_t m, std::size_t k,
     const __half* xn = nullptr, __half* mixed_half = nullptr,
     void* mixed_q8 = nullptr, const float* conv_w = nullptr,
-    float* conv_out = nullptr, AttentionProjectionOutput attention = {}) {
+    float* conv_out = nullptr, AttentionProjectionOutput attention = {},
+    std::uint32_t checkpoint_tokens = 0) {
   static_assert(WM * WN == 8, "256 threads is 8 waves");
   static_assert(BM % (16 * WM) == 0 && BN % (16 * WN) == 0);
+  static_assert(!(kBf16 && kHalfWeights));
+  // 16-bit weight rows staged as they are: F16, or BF16 with BF16
+  // activations.
+  constexpr bool kRawWeights = kHalfWeights || kBf16;
   constexpr int kRowTiles = BM / 16;
   constexpr int kTokTiles = BN / 16;
   constexpr int kWaveRowTiles = kRowTiles / WM;
@@ -4913,6 +4987,25 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
   const unsigned within = (blockIdx.y % kRowGroup) * gridDim.x + blockIdx.x;
   const int r_block = (row_group * kRowGroup + within % kRowGroup) * BM;
   const int t_block = (within / kRowGroup) * BN;
+  // BF16 replaces a library GEMM whose 32-token tile g starts its K loop
+  // (g % 4) * 4 blocks in and wraps. A block takes the four tiles of one
+  // rotation class, one per token wave, so every dot product keeps the
+  // library's order.
+  const int bf16_class = kBf16 ? static_cast<int>(blockIdx.x % 4) : 0;
+  const int k_rotation = kBf16 ? (bf16_class * 4) % num_kb : 0;
+  const auto token_of = [&](int local) {
+    if constexpr (kBf16) {
+      static_assert(BN == 128 && WN == 4 && kRowGroup == 1);
+      return (static_cast<int>(blockIdx.x / 4) * 512) + (bf16_class * 32) +
+             ((local / 32) * 128) + (local % 32);
+    } else {
+      return t_block + local;
+    }
+  };
+  const auto rotate = [&](int kb) {
+    const int r = kb + k_rotation;
+    return r >= num_kb ? r - num_kb : r;
+  };
 
   // Weight fetch unit p of a thread: row (p * 256 + tid) / BK, K block
   // (p * 256 + tid) % BK of the stage; rows past m read the last row with
@@ -4929,19 +5022,19 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     const int weight_row = kHcMix ? (r % 4) * (m_i / 4) + r / 4 : r;
     a_ptr[p] = w_bytes +
                static_cast<std::size_t>(a_live[p] ? weight_row : (m_i - 1)) *
-                   static_cast<std::size_t>(num_kb) * (kHalfWeights ? 64 : 34);
+                   static_cast<std::size_t>(num_kb) * (kRawWeights ? 64 : 34);
   }
   const __half* b_ptr[kBPer];
 #pragma unroll
   for (int p = 0; p < kBPer; ++p) {
     const int idx = (p * 256) + tid;
-    const int t = t_block + (idx / BK);
+    const int t = token_of(idx / BK);
     b_ptr[p] = idx < kBUnits && t < static_cast<int>(batch)
                    ? x + (static_cast<std::size_t>(t) * k)
                    : nullptr;
   }
   uint4 a_codes[kAPer][2];
-  uint4 a_half[kHalfWeights ? kAPer : 1][4];
+  uint4 a_half[kRawWeights ? kAPer : 1][4];
   std::uint32_t a_d[kAPer];
   uint4 b_data[kBPer][4];
 
@@ -4950,9 +5043,9 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     for (int p = 0; p < kAPer; ++p) {
       const int kb = kb0 + (((p * 256) + tid) % BK);
       const bool live = a_live[p] && kb < num_kb;
-      if constexpr (kHalfWeights) {
+      if constexpr (kRawWeights) {
         const auto* src = reinterpret_cast<const uint4*>(
-            a_ptr[p] + static_cast<std::size_t>(kb) * 64);
+            a_ptr[p] + static_cast<std::size_t>(rotate(kb)) * 64);
 #pragma unroll
         for (int c = 0; c < 4; ++c)
           a_half[p][c] = live ? src[c] : make_uint4(0u, 0u, 0u, 0u);
@@ -4969,7 +5062,8 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     for (int p = 0; p < kBPer; ++p) {
       const int kb = kb0 + (((p * 256) + tid) % BK);
       if (b_ptr[p] != nullptr && kb < num_kb) {
-        const auto* src = reinterpret_cast<const uint4*>(b_ptr[p] + (kb * 32));
+        const auto* src =
+            reinterpret_cast<const uint4*>(b_ptr[p] + (rotate(kb) * 32));
 #pragma unroll
         for (int c = 0; c < 4; ++c) {
           b_data[p][c] = src[c];
@@ -4994,7 +5088,7 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
       }
       const int row = idx / BK;
       const int kk = idx % BK;
-      if constexpr (kHalfWeights) {
+      if constexpr (kRawWeights) {
 #pragma unroll
         for (int c = 0; c < 4; ++c)
           s_a[kk][row][swizzle(row, c)] = a_half[p][c];
@@ -5088,11 +5182,17 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
         __builtin_memcpy(&b_hi, &c[2], 32);
 #pragma unroll
         for (int i = 0; i < kWaveRowTiles; ++i) {
-          acc[i][j] = Wmma(a_lo[i], b_lo, acc[i][j]);
-          if constexpr (kHalfWeights)
+          if constexpr (kBf16) {
+            // One K16 chain in K order, as the library GEMM it replaces.
+            acc[i][j] = WmmaBf16(a_lo[i], b_lo, acc[i][j]);
+            acc[i][j] = WmmaBf16(a_hi[i], b_hi, acc[i][j]);
+          } else if constexpr (kHalfWeights) {
+            acc[i][j] = Wmma(a_lo[i], b_lo, acc[i][j]);
             acc_high[i][j] = Wmma(a_hi[i], b_hi, acc_high[i][j]);
-          else
+          } else {
+            acc[i][j] = Wmma(a_lo[i], b_lo, acc[i][j]);
             acc[i][j] = Wmma(a_hi[i], b_hi, acc[i][j]);
+          }
         }
       }
     }
@@ -5109,8 +5209,8 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
   }
 
   if constexpr (kAttention) {
-    static_assert(BM == 256 && BN == 128 && BK == 2 && WM == 8 && WN == 1);
-    static_assert(!kHcMix && !kSsmConv && kRowGroup == 1);
+    static_assert(BM == 256 && BN == 128 && WM == 8 && WN == 1);
+    static_assert(!kHcMix && !kSsmConv);
     constexpr unsigned stride = 36, dim = 256, width = 6144, kvwidth = 512;
     float* scratch = reinterpret_cast<float*>(s_lds);
     float* tile = scratch + wave_id * 16 * stride;
@@ -5320,9 +5420,8 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
       const std::size_t r0 =
           static_cast<std::size_t>(r_block) +
           static_cast<std::size_t>((((wave_row * kWaveRowTiles) + i) * 16));
-      const std::size_t t0 =
-          static_cast<std::size_t>(t_block) +
-          static_cast<std::size_t>((((wave_tok * kWaveTokTiles) + j) * 16));
+      const std::size_t t0 = static_cast<std::size_t>(
+          token_of(((wave_tok * kWaveTokTiles) + j) * 16));
 #pragma unroll
       for (unsigned group = 0; group < kOutputGroups; ++group) {
         // Lane pair (2p, 2p + 1) stores token p's 32 rows as eight float4.
@@ -5334,7 +5433,7 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
         if constexpr (kSsmConv) {
           static_assert(BM == 256 && BN == 128 && BK == 2 && WM == 8 &&
                         WN == 1);
-          static_assert(!kHcMix && kRowGroup == 1);
+          static_assert(!kHcMix);
           constexpr std::uint32_t channels = 10240;
           if (tok < batch) {
 #pragma unroll
@@ -5344,7 +5443,8 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
                 continue;
               const float4 current = src[v];
               if (row >= channels || tok_l < 3 || tok_l >= kOutputTokens - 3 ||
-                  tok + 3 >= batch) {
+                  tok + 3 >= batch ||
+                  (tok < checkpoint_tokens && tok + 3 >= checkpoint_tokens)) {
                 *reinterpret_cast<float4*>(y + tok * m + row) = current;
               }
               if (row < channels && tok_l >= 3) {
@@ -5410,8 +5510,13 @@ bool AttentionF16Gemm(const void* weights, const __half* input,
     return false;
   const AttentionProjectionOutput output{q_gamma, k_gamma,  query, gate, keys,
                                          values,  position, theta, eps,  rope};
+  // One 256-row tile per query, gate, key or value head (52). Four row
+  // tiles per token tile in launch order share each activation tile's read
+  // (8.8 to 7.9 ms at 4,096 tokens). One K block per LDS stage halves the
+  // stage to 24 KB, so three blocks share a WGP instead of two (7.8 to
+  // 7.3 ms); the K order is unchanged.
   hipLaunchKernelGGL(
-      (DenseF16GEMMKernel<256, 128, 2, 8, 1, 1, false, false, true>),
+      (DenseF16GEMMKernel<256, 128, 1, 8, 1, 4, false, false, true>),
       dim3((n_tokens + 127) / 128, 52), dim3(kThreads), 0, stream, weights,
       input, nullptr, n_tokens, 13312, 2560, nullptr, nullptr, nullptr, nullptr,
       nullptr, output);
@@ -5453,6 +5558,19 @@ bool UnquantizedF16Gemm(const void* w, const __half* x, float* out,
   return true;
 }
 
+bool DenseBf16Gemm(const void* w, const void* x, float* out, std::size_t batch,
+                   std::size_t m, std::size_t k, hipStream_t stream) {
+  if (m == 0 || batch == 0 || k == 0 || k % 32 != 0)
+    return false;
+  // Four blocks, one per K rotation class, cover each 512 tokens.
+  hipLaunchKernelGGL((DenseF16GEMMKernel<64, 128, 2, 2, 4, 1, false, false,
+                                         false, false, true>),
+                     dim3(((batch + 511) / 512) * 4, (m + 63) / 64),
+                     dim3(kThreads), 0, stream, w,
+                     static_cast<const __half*>(x), out, batch, m, k);
+  return true;
+}
+
 bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
                   std::size_t m, std::size_t k, hipStream_t stream) {
   if (m == 0 || k == 0 || batch == 0 || k % 32 != 0) {
@@ -5478,11 +5596,22 @@ bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
     if (m == 10240 && k == 320 && batch >= 1024) {
       hipLaunchKernelGGL((DenseF16GEMMKernel<kWideBM, kBN, 1, 4, 2, 8>), grid,
                          dim3(kThreads), 0, stream, w, x, out, batch, m, k);
-    } else if (batch >= 1024 && (((m == 16384 || m == 13312) && k == 2560) ||
-                                 (m == 2560 && k == 6144))) {
+    } else if (batch >= 1024 && m == 2560 && k == 6144) {
+      // The output projection's activation is 50 MB at 4,096 tokens. In
+      // grid order the resident blocks each walk a different token tile of
+      // it; walking five row tiles of a token tile first shares each
+      // activation tile between them (5.7 to 3.4 ms). Only the launch order
+      // changes.
+      hipLaunchKernelGGL((DenseF16GEMMKernel<kWideBM, kBN, 2, 8, 1, 5>), grid,
+                         dim3(kThreads), 0, stream, w, x, out, batch, m, k);
+    } else if (batch >= 1024 && (m == 16384 || m == 13312) && k == 2560) {
       // Eight row groups reuse each weight fragment across all token tiles
       // and keep fewer weight fragments live. K accumulation is unchanged.
       hipLaunchKernelGGL((DenseF16GEMMKernel<kWideBM, kBN, 2, 8, 1>), grid,
+                         dim3(kThreads), 0, stream, w, x, out, batch, m, k);
+    } else if (batch >= 1024 && m == 2560) {
+      // Shared-expert down: pairs of row tiles per token tile (-11 %).
+      hipLaunchKernelGGL((DenseF16GEMMKernel<kWideBM, kBN, 1, 4, 2, 2>), grid,
                          dim3(kThreads), 0, stream, w, x, out, batch, m, k);
     } else {
       hipLaunchKernelGGL((DenseF16GEMMKernel<kWideBM, kBN, 1, 4, 2>), grid,
@@ -5502,15 +5631,17 @@ bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
                      const float* history, float* qkvz, float* convolved,
                      std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
                      std::uint32_t channels, std::uint32_t kernel,
-                     hipStream_t stream) {
+                     hipStream_t stream, std::uint32_t checkpoint_tokens) {
   if (n_tokens < 1024 || m != 16384 || k != 2560 || channels != 10240 ||
       kernel != kSsmConvTaps) {
     return false;
   }
-  hipLaunchKernelGGL((DenseF16GEMMKernel<256, 128, 2, 8, 1, 1, false, true>),
+  // Row-tile pairs per token tile in launch order (-0.9 %).
+  hipLaunchKernelGGL((DenseF16GEMMKernel<256, 128, 2, 8, 1, 2, false, true>),
                      dim3((n_tokens + 127) / 128, m / 256), dim3(kThreads), 0,
                      stream, w, x, qkvz, n_tokens, m, k, nullptr, nullptr,
-                     nullptr, conv_w, convolved);
+                     nullptr, conv_w, convolved, AttentionProjectionOutput{},
+                     checkpoint_tokens);
   hipLaunchKernelGGL(
       SsmConvBoundaryKernel,
       dim3(Blocks(channels),
@@ -5763,6 +5894,16 @@ void RestoreGdnState(float* state, RollbackRows snapshots, std::uint32_t keep,
       state, snapshots, keep, k_heads, v_heads);
 }
 
+void HistoryPrefix(const float* in, std::uint32_t stride, const float* history,
+                   float* destination, std::uint32_t tokens,
+                   std::uint32_t channels, std::uint32_t history_rows,
+                   hipStream_t stream) {
+  hipLaunchKernelGGL(HistoryShiftKernel,
+                     dim3(Blocks(std::size_t{history_rows} * channels)),
+                     dim3(kThreads), 0, stream, in, stride, history,
+                     destination, tokens, channels, history_rows);
+}
+
 void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
                    std::uint32_t z_stride, const float* alpha_beta,
                    const float* conv_w, const float* a, const float* dt,
@@ -5773,11 +5914,14 @@ void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
                    std::uint32_t k_heads, std::uint32_t v_heads,
                    std::uint32_t d, std::uint32_t kernel, bool row_split,
                    bool convolved, float eps, hipStream_t stream,
-                   __half* out_half) {
+                   __half* out_half, GdnCheckpoint checkpoint) {
   const std::uint32_t channels = 2 * k_heads * d + v_heads * d;
   const std::size_t count = static_cast<std::size_t>(n_tokens) * channels;
   const bool saved_history = !convolved && kernel == kSsmConvTaps &&
                              n_tokens <= kSsmConvTokensPerThread;
+  if (checkpoint.history != nullptr)
+    HistoryPrefix(qkv, qkv_stride, conv_state, checkpoint.history,
+                  checkpoint.tokens, channels, kernel - 1, stream);
   if (!convolved) {
     if (saved_history) {
       hipLaunchKernelGGL((SsmConv4Kernel<true, false>), dim3(Blocks(channels)),
@@ -5827,17 +5971,17 @@ void GatedDeltaNet(const float* qkv, std::uint32_t qkv_stride, const float* z,
         static_cast<std::size_t>(n_tokens) * v_heads, v_heads);
     hipLaunchKernelGGL(GdnRowSplitKernel, dim3(kGdnDim / 64, v_heads),
                        dim3(kThreads), 0, stream, conv_scratch, qn, kn, state,
-                       raw, n_tokens, k_heads, v_heads);
+                       raw, n_tokens, k_heads, v_heads, checkpoint);
   } else {
     hipLaunchKernelGGL(GdnPrepKernel<false>,
                        dim3((n_tokens * k_heads + waves - 1) / waves),
                        dim3(kThreads), 0, stream, conv_scratch, qn, kn,
                        n_tokens * k_heads, k_heads, channels, eps, nullptr, 0);
-    hipLaunchKernelGGL(GdnKernel<false>,
-                       dim3(v_heads, kGdnDim / kGdnRowsPerBlock),
-                       dim3(kGdnRowsPerBlock * kGdnLanes), 0, stream,
-                       conv_scratch, qn, kn, alpha_beta, a, dt, state, raw,
-                       state_snapshots, n_tokens, k_heads, v_heads, nullptr, 0);
+    hipLaunchKernelGGL(
+        GdnKernel<false>, dim3(v_heads, kGdnDim / kGdnRowsPerBlock),
+        dim3(kGdnRowsPerBlock * kGdnLanes), 0, stream, conv_scratch, qn, kn,
+        alpha_beta, a, dt, state, raw, state_snapshots, n_tokens, k_heads,
+        v_heads, nullptr, 0, checkpoint);
   }
   hipLaunchKernelGGL(
       GdnEpilogueKernel<false>, dim3((n_tokens * v_heads + waves - 1) / waves),
@@ -5869,7 +6013,7 @@ bool GatedDeltaNetBatch(const GdnBatchItem* items, std::uint32_t count,
       GdnKernel<true>, dim3(v_heads, kGdnDim / kGdnRowsPerBlock, count),
       dim3(kGdnRowsPerBlock * kGdnLanes), 0, stream, nullptr, nullptr, nullptr,
       nullptr, a, dt, nullptr, nullptr, RollbackRows{}, max_tokens, k_heads,
-      v_heads, items, active);
+      v_heads, items, active, GdnCheckpoint{});
   hipLaunchKernelGGL(GdnEpilogueKernel<true>,
                      dim3((max_tokens * v_heads + waves - 1) / waves, 1, count),
                      dim3(kThreads), 0, stream, nullptr, nullptr, z_stride,
@@ -5960,13 +6104,17 @@ void SelectBlocks(const float* q, const __half* blocks, std::uint32_t* mask,
                   const std::uint32_t* start_pos, std::uint32_t first_token,
                   std::uint32_t heads, std::uint32_t dim, std::uint32_t ratio,
                   std::uint32_t budget, std::uint32_t mask_words,
-                  std::uint32_t max_blocks, hipStream_t stream) {
+                  std::uint32_t max_blocks, hipStream_t stream,
+                  std::uint32_t live_blocks) {
   if (heads != kSelectHeads || dim != kSelectDim) {
     return;
   }
-  // Grids are sized by max_blocks so a captured decode graph replays at any
-  // position; blocks past the live range return at once.
-  const dim3 grid(n_tokens, (max_blocks + kThreads - 1) / kThreads);
+  // Graph grids are sized by max_blocks so a captured decode graph replays
+  // at any position; blocks past the live range return at once. An eager
+  // launch passes its live range, sparing the empty workgroups.
+  const std::uint32_t grid_blocks =
+      live_blocks != 0 ? std::min(live_blocks, max_blocks) : max_blocks;
+  const dim3 grid(n_tokens, (grid_blocks + kThreads - 1) / kThreads);
   hipLaunchKernelGGL(SelectScoreKernel, grid, dim3(kThreads), 0, stream, q,
                      blocks, scores, n_tokens, start_pos, first_token, ratio,
                      budget, max_blocks);

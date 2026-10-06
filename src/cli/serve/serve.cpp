@@ -42,6 +42,7 @@
 
 #include "src/core/platform/device_memory.hpp"
 #endif
+#include "src/cli/serve/trace.hpp"
 #include "src/cli/serve/tts_service.hpp"
 #include "src/cli/serve/video_jobs.hpp"
 #include "src/cli/video/video.hpp"
@@ -237,6 +238,9 @@ struct ServerLogOptions {
 constexpr std::string_view kLogLevelHelp =
     "Log verbosity: error, warn, info or debug (default: info)";
 constexpr std::string_view kVerboseHelp = "Shorthand for --log-level=debug";
+constexpr std::string_view kTraceHelp =
+    "Append text request bodies, rendered prompts, generated text and replies "
+    "to PATH as JSON Lines; the file holds client content";
 
 void AddServerOptions(gufo::cli::ArgParser& parser, std::string* host,
                       int* port, std::size_t* session_count,
@@ -611,6 +615,7 @@ void PrintServeHelp(std::string_view program_name,
         server::TextRunnerDiskCacheOptions::kDefaultCapacityBytes;
     std::size_t cache_disk_staging_bytes = 0;
     bool log_progress = false;
+    std::string trace_path;
 
     gufo::cli::ArgParser parser(
         std::string(program_name) + " serve llm",
@@ -720,7 +725,8 @@ void PrintServeHelp(std::string_view program_name,
         "Scheduling", &max_buffered_output_bytes_total);
     parser.AddOption(
         "", "--cache-ram-bytes", "N",
-        "Retained RAM-cache byte budget (default: 0 = auto, at most 32 GiB)",
+        "Retained RAM-cache byte budget (default: 0 = auto: half of free "
+        "RAM, at most 32 GiB; explicit values may use free RAM minus 4 GiB)",
         "Cache", &cache_ram_bytes);
     parser.AddOption("", "--cache-disk", "DIR",
                      "Opt-in restart-safe continuation cache directory",
@@ -737,6 +743,7 @@ void PrintServeHelp(std::string_view program_name,
                    "Log live prefill and decode progress (needs "
                    "--log-level=info or debug)",
                    "Logging", &log_progress);
+    parser.AddOption("", "--trace", "PATH", kTraceHelp, "Logging", &trace_path);
     ServerOptionHelpTargets server_help;
     AddServerOptionsForHelp(parser, &server_help);
     parser.PrintHelp();
@@ -1163,6 +1170,7 @@ int RunServe(std::span<const char* const> args) {
         server::TextRunnerDiskCacheOptions::kDefaultCapacityBytes;
     std::size_t cache_disk_staging_bytes = 0;
     bool log_progress = false;
+    std::string trace_path;
 
     gufo::cli::ArgParser llm_parser(
         "gufo serve llm",
@@ -1268,7 +1276,8 @@ int RunServe(std::span<const char* const> args) {
         "Scheduling", &max_buffered_output_bytes_total);
     llm_parser.AddOption(
         "", "--cache-ram-bytes", "N",
-        "Retained RAM-cache byte budget (default: 0 = auto, at most 32 GiB)",
+        "Retained RAM-cache byte budget (default: 0 = auto: half of free "
+        "RAM, at most 32 GiB; explicit values may use free RAM minus 4 GiB)",
         "Cache", &cache_ram_bytes);
     llm_parser.AddOption("", "--cache-disk", "DIR",
                          "Opt-in restart-safe continuation cache directory",
@@ -1286,6 +1295,8 @@ int RunServe(std::span<const char* const> args) {
                        "Log live prefill and decode progress (needs "
                        "--log-level=info or debug)",
                        "Logging", &log_progress);
+    llm_parser.AddOption("", "--trace", "PATH", kTraceHelp, "Logging",
+                         &trace_path);
 
     add_server_options(llm_parser);
     if (!llm_parser.Parse(sub_args, &parse_err)) {
@@ -1307,6 +1318,18 @@ int RunServe(std::span<const char* const> args) {
       std::cerr << "Error: --log-progress needs --log-level=info or "
                    "--log-level=debug\n";
       return 2;
+    }
+    // Opened before the model loads, so an unwritable path fails at once
+    // instead of after the weights are resident.
+    if (!trace_path.empty()) {
+      if (const auto error = server::Trace::Open(trace_path)) {
+        std::cerr << "Error: cannot open --trace file '" << trace_path
+                  << "': " << *error << "\n";
+        return 2;
+      }
+      server::Logger::Warn("trace",
+                           "event=trace_enabled path=" + trace_path +
+                               " content=prompts,generated_text,replies");
     }
     sampling::SamplingConfig validated_sampling;
     const bool sampling_valid = !server::ParseSamplingConfig(
