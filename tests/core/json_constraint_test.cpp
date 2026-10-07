@@ -1021,7 +1021,10 @@ void TestLazyQwenToolSplitTriggerRollback() {
     assert(sampler.Sample(logits) == '\n');
     for (const unsigned char byte : call)
       sampler.Accept(byte);
-    assert(!sampler.NeedsConstraintMask());
+    // Upstream (#397/#441) ends tool output after the call block: the grammar then
+    // admits only the end token, so the mask is still needed here and picks it.
+    assert(sampler.NeedsConstraintMask());
+    assert(sampler.Sample(logits) == 256);
     sampler.ResetHistory({});
     assert(!sampler.NeedsConstraintMask());
   }
