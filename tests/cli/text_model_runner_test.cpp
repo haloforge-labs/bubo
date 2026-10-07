@@ -2280,6 +2280,8 @@ void TestServerInstructionsAreFraming() {
 }  // namespace
 
 int main() {
+  // Lead 1 (learned shared-prefix boundaries rounded down to a multiple of 256) is off in these tests: they assert exact tiny boundaries.
+  ::setenv("GUFO_DISK_BOUNDARY_ALIGN", "0", 1);
   TestServerInstructionsAreFraming();
   // The cache warning assertion in this binary matches the plain "[WARN]
   // [cache]" text captured from a redirected sink; a TTY stderr tints it.

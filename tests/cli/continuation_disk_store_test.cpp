@@ -1215,6 +1215,8 @@ void TestMinimumCheckpointStep() {
 }
 
 int main() {
+  // Lead 1 (learned shared-prefix boundaries rounded down to a multiple of 256) is off in these tests: they assert exact tiny boundaries.
+  ::setenv("GUFO_DISK_BOUNDARY_ALIGN", "0", 1);
   TestAppendedImagePrefixesSurviveRestart();
   TestBoundedAsyncPersistenceDoesNotBlockLookup();
   TestIndexedPrefixLookup();
