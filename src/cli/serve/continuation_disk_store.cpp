@@ -12,6 +12,7 @@
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <filesystem>
@@ -1421,8 +1422,25 @@ struct ContinuationDiskStore::Impl {
     std::ranges::sort(boundaries);
     boundaries.erase(std::unique(boundaries.begin(), boundaries.end()),
                      boundaries.end());
-    std::erase_if(boundaries,
-                  [min_tokens](auto length) { return length < min_tokens; });
+    // Prefill chunk boundaries are numerically free only at multiples of 256 tokens (lead 1 quality gate T2b, 2026-10-06: grids 3584 / 3840 identical to
+    // 4096, 4160 / 3500 not): a split at any other position changes the resulting state and so the later output. Round every learned boundary DOWN to a
+    // multiple of the alignment (cost < 256 re-prefilled tokens per hit) so a disk-cache run stays bit-identical to a run without it.
+    // GUFO_DISK_BOUNDARY_ALIGN=0 (or 1) disables the rounding (A/B), any other value N rounds down to a multiple of N.
+    static const std::size_t boundary_align = [] {
+      const char* e = std::getenv("GUFO_DISK_BOUNDARY_ALIGN");
+      if (e == nullptr || *e == '\0') return std::size_t{256};
+      const auto v = std::strtoull(e, nullptr, 10);
+      return static_cast<std::size_t>(v);
+    }();
+    if (boundary_align > 1) {
+      for (auto& length : boundaries) length -= length % boundary_align;
+      std::ranges::sort(boundaries);
+      boundaries.erase(std::unique(boundaries.begin(), boundaries.end()),
+                       boundaries.end());
+    }
+    std::erase_if(boundaries, [min_tokens](auto length) {
+      return length == 0 || length < min_tokens;
+    });
     // Keep the longest ones: they save the most prefill when they hit.
     if (boundaries.size() > max_boundaries) {
       boundaries.erase(
