@@ -9,6 +9,8 @@ namespace gufo::server {
 /// Handles the supported OpenAI Chat Completions subset. Streaming responses
 /// consume scheduler-published token pieces from HttpResponse::streaming_body;
 /// socket writes never own or execute model state.
+HttpResponse InspectDebugPrompt(const HttpRequest&, TextGenerationBackend&);
+
 HttpResponse HandleOpenAiChat(const HttpRequest& request,
                               TextGenerationBackend& backend);
 

@@ -35,6 +35,7 @@ struct HttpRequest {
   /// Transport-derived peer address, never read from client headers.
   std::string client_id{"anonymous"};
   bool debug_hooks{false};
+  bool debug_loopback{true};
   std::size_t max_score_tokens{8192};
 
   /// URL-decoded value of a query param, or "" if absent.

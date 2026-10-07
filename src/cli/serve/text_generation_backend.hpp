@@ -134,6 +134,8 @@ class TextGenerationBackend {
 public:
   using CancellationCheck = std::function<bool()>;
   using TokenCallback = std::function<bool(std::string_view)>;
+  using ScoredTokenCallback =
+      std::function<bool(std::string_view, const sampling::TokenLogprob&)>;
 
   /// llama-server `prompt_progress`; `processed` includes cached tokens.
   struct PromptProgress {
@@ -268,6 +270,9 @@ public:
     virtual Result Wait(const TokenCallback& on_token = {},
                         const ProgressCallback& on_progress = {},
                         const StartCallback& on_start = {}) = 0;
+    virtual Result WaitScored(const ScoredTokenCallback&) {
+      throw std::logic_error("backend does not implement scored streaming");
+    }
     virtual void Cancel() noexcept = 0;
     /// Effective constrained tool format, including any schema fallback.
     /// Available before Wait and stable for this admitted request. Backends
@@ -301,6 +306,12 @@ public:
   /// Whether the loaded backend accepts image inputs in chat requests.
   [[nodiscard]] virtual bool supports_images() const { return false; }
   [[nodiscard]] virtual bool supports_logprobs() const { return false; }
+  [[nodiscard]] virtual bool supports_timeline() const { return false; }
+  [[nodiscard]] virtual json::Value debug_prompt(const ChatRequest*,
+                                                 std::string_view) const {
+    throw std::invalid_argument(
+        "prompt inspection is not supported for this model");
+  }
   [[nodiscard]] virtual std::string token_piece(tokenization::TokenId) const {
     throw std::invalid_argument("logprobs are not supported for this model");
   }

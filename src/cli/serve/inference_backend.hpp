@@ -131,6 +131,11 @@ public:
   [[nodiscard]] std::vector<SessionState> session_states() const override;
   [[nodiscard]] ReasoningOptions reasoning_defaults() const override;
   [[nodiscard]] bool supports_logprobs() const override;
+  [[nodiscard]] bool supports_timeline() const override {
+    return supports_logprobs();
+  }
+  [[nodiscard]] json::Value debug_prompt(const ChatRequest*,
+                                         std::string_view) const override;
   [[nodiscard]] std::string token_piece(sampling::TokenId token) const override;
   std::shared_ptr<GenerationRequest> start_score(
       std::string_view prompt, const sampling::SamplingConfig& sampling,

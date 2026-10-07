@@ -1,9 +1,5 @@
 #include "src/cli/serve/openai_chat.hpp"
 
-#include "src/cli/serve/debug_request.hpp"
-#include "src/cli/serve/debug_response.hpp"
-#include "src/cli/serve/logprobs.hpp"
-
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -25,9 +21,13 @@
 #include <utility>
 #include <vector>
 
+#include "src/cli/serve/debug_request.hpp"
+#include "src/cli/serve/debug_response.hpp"
+#include "src/cli/serve/logprobs.hpp"
 #include "src/cli/serve/quote_tracker.hpp"
 #include "src/cli/serve/response_format.hpp"
 #include "src/cli/serve/sampling_request.hpp"
+#include "src/cli/serve/scored_stream.hpp"
 #include "src/cli/serve/stop_sequences.hpp"
 #include "src/core/image.hpp"
 #include "src/core/json.hpp"
@@ -817,9 +817,13 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
   }
 
   if (const auto error = ParseDebugRequest(body, request.debug_hooks,
-                                            &output->chat.debug_timeline))
+                                           &output->chat.debug_timeline,
+                                           request.debug_loopback))
     return Error(400, "Bad Request", *error, "debug_hook_unavailable");
 
+  if (output->chat.debug_timeline && !backend.supports_timeline())
+    return Error(400, "Bad Request", "timeline is not supported for this model",
+                 "debug_hook_unavailable");
   output->model = body.member_str("model");
   if (output->model.empty()) {
     return Error(400, "Bad Request", "'model' is required", "missing_model");
@@ -958,11 +962,13 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
     return Error(400, "Bad Request", sampling_error->message,
                  sampling_error->code.c_str());
   }
-  if (const auto error = ParseChatLogprobs(body, &parsed_sampling.logprobs))
-    return Error(400, "Bad Request", *error, "invalid_logprobs");
-  if (parsed_sampling.logprobs >= 0 && !backend.supports_logprobs())
-    return Error(400, "Bad Request", "token logprobs are not supported for this model",
-                 "unsupported_logprobs");
+  const auto* logprobs = body.find("logprobs");
+  const bool scored = logprobs && logprobs->is_bool() && logprobs->as_bool() &&
+                      backend.supports_logprobs();
+  if (scored) {
+    if (const auto error = ParseChatLogprobs(body, &parsed_sampling.logprobs))
+      return Error(400, "Bad Request", *error, "invalid_logprobs");
+  }
   output->sampling = parsed_sampling;
 
   if (const json::Value* choices = body.find("n");
@@ -979,10 +985,16 @@ std::optional<HttpResponse> ParseRequest(const HttpRequest& request,
                  "unsupported_field");
   }
   for (const std::string_view unsupported :
-       {"modalities", "audio"}) {
+       {"logprobs", "top_logprobs", "modalities", "audio"}) {
     if (const auto* value = body.find(std::string(unsupported));
         value != nullptr && !value->is_null()) {
-      if ((unsupported == "modalities" && value->is_array() &&
+      if ((scored &&
+           (unsupported == "logprobs" || unsupported == "top_logprobs")) ||
+          (unsupported == "logprobs" && value->is_bool() &&
+           !value->as_bool()) ||
+          (unsupported == "top_logprobs" && value->is_number() &&
+           value->as_double() == 0.0) ||
+          (unsupported == "modalities" && value->is_array() &&
            value->size() == 1 && value->items().front().is_string() &&
            value->items().front().str() == "text"))
         continue;
@@ -2636,39 +2648,46 @@ public:
     return Emit(std::move(delta));
   }
 
-  // Scored streams are buffered until token records are complete. Keeping this
-  // separate leaves the ordinary append/close path and its state unchanged.
-  bool AppendScored(std::string_view text, const json::Value& scores,
-                    const char* status) {
-    if (text.empty())
-      return true;
-    item_ = json::Value::object();
-    item_["id"] = RandomId("msg_");
-    item_["type"] = "message";
-    item_["status"] = "in_progress";
-    item_["role"] = "assistant";
-    item_["content"] = json::Value::array();
-    auto added = IndexedEvent("response.output_item.added");
-    added["item"] = item_;
-    if (!Emit(std::move(added)))
-      return false;
-    auto part_added = PartEvent("response.content_part.added");
-    part_added["part"] = Part();
-    if (!Emit(std::move(part_added)))
-      return false;
-    text_ = std::string(text);
+  bool AppendScoredToken(std::string_view text, const json::Value& scores) {
+    if (!active_) {
+      active_ = true;
+      reasoning_ = false;
+      item_ = json::Value::object();
+      item_["id"] = RandomId("msg_");
+      item_["type"] = "message";
+      item_["status"] = "in_progress";
+      item_["role"] = "assistant";
+      item_["content"] = json::Value::array();
+      text_.clear();
+      scored_records_ = json::Value::array();
+      auto added = IndexedEvent("response.output_item.added");
+      added["item"] = item_;
+      if (!Emit(std::move(added)))
+        return false;
+      auto part = PartEvent("response.content_part.added");
+      part["part"] = Part();
+      if (!Emit(std::move(part)))
+        return false;
+    }
+    text_.append(text);
+    for (const auto& record : scores.items())
+      scored_records_.push_back(record);
     auto delta = PartEvent("response.output_text.delta");
-    delta["delta"] = text_;
+    delta["delta"] = std::string(text);
     delta["logprobs"] = scores;
-    if (!Emit(std::move(delta)))
-      return false;
+    return Emit(std::move(delta));
+  }
+
+  bool CloseScored(const char* status) {
+    if (!active_)
+      return true;
     auto done = PartEvent("response.output_text.done");
     done["text"] = text_;
-    done["logprobs"] = scores;
+    done["logprobs"] = scored_records_;
     if (!Emit(std::move(done)))
       return false;
     auto part = Part();
-    part["logprobs"] = scores;
+    part["logprobs"] = scored_records_;
     auto part_done = PartEvent("response.content_part.done");
     part_done["part"] = part;
     if (!Emit(std::move(part_done)))
@@ -2679,7 +2698,13 @@ public:
     item_done["item"] = item_;
     response_["output"].push_back(item_);
     ++output_index_;
+    active_ = false;
     return Emit(std::move(item_done));
+  }
+
+  bool AppendScored(std::string_view text, const json::Value& scores,
+                    const char* status) {
+    return AppendScoredToken(text, scores) && CloseScored(status);
   }
 
   bool Tool(const ParsedToolCall& call) {
@@ -2826,6 +2851,7 @@ private:
   std::map<std::string, std::string> namespaces_;
   json::Value response_;
   json::Value item_;
+  json::Value scored_records_;
   std::string text_;
   std::size_t sequence_{0};
   std::size_t output_index_{0};
@@ -2860,6 +2886,8 @@ HttpResponse NonStreamingResponse(
                                 TextGenerationBackend::FinishReason::kStop,
                             markers, closers, quotes);
 
+  if (request.sampling.logprobs >= 0)
+    ValidateGeneratedLogprobs(result);
   if (request.sampling.logprobs >= 0 && generated.text != decoded)
     throw std::invalid_argument("logprobs are not supported for filtered chat output");
 
@@ -3297,49 +3325,100 @@ HttpResponse CreateOpenAiResponse(const HttpRequest& request,
                    "Responses logprobs require thinking off, plain text, and no stop sequences",
                    "unsupported_logprobs_format");
     auto generation = backend.start_chat(chat, max_tokens, sampling,
-                                         request.is_cancelled, false);
+                                         request.is_cancelled, stream);
     auto stream_log = std::make_shared<HttpResponse::StreamLog>();
     auto timing = std::make_shared<std::string>();
     const auto run = [generation, chat, initial, &backend,
-                      model = backend.model_id(), stream_log, timing]
-        (const HttpResponse::BodyWriter& writer) {
-      const auto result = generation->Wait();
-      stream_log->details = GenerationLogDetails(result);
-      RecordServerMetrics(result);
-      if (result.cancelled)
-        return json::Value();
-      if (result.tokens.size() != result.logprobs.size())
-        throw std::invalid_argument("generated token and logprob counts differ");
-      std::string token_text;
-      for (std::size_t i = 0; i < result.tokens.size(); ++i) {
-        if (result.tokens[i] != result.logprobs[i].token)
-          throw std::invalid_argument("generated token and logprob IDs differ");
-        token_text += backend.token_piece(result.tokens[i]);
-      }
-      const auto decoded = core::Utf8Decoder{}.Push(result.text, true);
-      const auto generated = SplitGeneratedText(decoded, initial);
-      if (core::Utf8Decoder{}.Push(token_text, true) != decoded ||
-          generated.text != decoded || !generated.reasoning.empty())
-        throw std::invalid_argument("logprobs are not supported for filtered Responses output");
-      const auto records = ChatLogprobs(result.logprobs,
-          [&backend](gufo::sampling::TokenId id) { return backend.token_piece(id); });
+                      model = backend.model_id(), stream_log,
+                      timing](const HttpResponse::BodyWriter& writer) {
       ResponsesOutput output(model, writer, chat);
-      const bool limited = result.finish_reason == TextGenerationBackend::FinishReason::kLength;
-      if (!output.Begin() ||
-          !output.AppendScored(decoded, *records.find("content"),
-                               limited ? "incomplete" : "completed")) {
+      core::Utf8Decoder stream_decoder;
+      std::size_t published = 0;
+      bool started = false;
+      const auto begin = [&] {
+        if (started)
+          return true;
+        started = true;
+        return output.Begin();
+      };
+      try {
+        const auto result =
+            writer
+                ? generation->WaitScored(
+                      [&](std::string_view piece,
+                          const sampling::TokenLogprob& score) {
+                        if (piece != backend.token_piece(score.token))
+                          throw std::logic_error(
+                              "stream token text and logprob IDs differ");
+                        const auto records =
+                            ChatLogprobs(std::span(&score, 1),
+                                         [&backend](sampling::TokenId id) {
+                                           return backend.token_piece(id);
+                                         });
+                        ++published;
+                        return begin() && output.AppendScoredToken(
+                                              stream_decoder.Push(piece, false),
+                                              *records.find("content"));
+                      })
+                : generation->Wait();
+        stream_log->details = GenerationLogDetails(result);
+        RecordServerMetrics(result);
+        if (result.cancelled)
+          return json::Value();
+        if (result.tokens.size() != result.logprobs.size())
+          throw std::logic_error("generated token and logprob counts differ");
+        std::string token_text;
+        for (std::size_t i = 0; i < result.tokens.size(); ++i) {
+          if (result.tokens[i] != result.logprobs[i].token)
+            throw std::logic_error("generated token and logprob IDs differ");
+          token_text += backend.token_piece(result.tokens[i]);
+        }
+        const auto decoded = core::Utf8Decoder{}.Push(result.text, true);
+        const auto generated = SplitGeneratedText(decoded, initial);
+        if (core::Utf8Decoder{}.Push(token_text, true) != decoded ||
+            generated.text != decoded || !generated.reasoning.empty())
+          throw std::invalid_argument(
+              "logprobs are not supported for filtered Responses output");
+        const auto records = ChatLogprobs(
+            result.logprobs, [&backend](gufo::sampling::TokenId id) {
+              return backend.token_piece(id);
+            });
+        const bool limited = result.finish_reason ==
+                             TextGenerationBackend::FinishReason::kLength;
+        if (writer) {
+          if (published != result.tokens.size())
+            throw std::logic_error("stream token and logprob counts differ");
+          const auto trailing = stream_decoder.Push({}, true);
+          if (!begin() ||
+              (!trailing.empty() &&
+               !output.AppendScoredToken(trailing, json::Value::array())) ||
+              !output.CloseScored(limited ? "incomplete" : "completed")) {
+            generation->Cancel();
+            return json::Value();
+          }
+        } else if (!output.Begin() ||
+                   !output.AppendScored(decoded, *records.find("content"),
+                                        limited ? "incomplete" : "completed")) {
+          generation->Cancel();
+          return json::Value();
+        }
+        if (!writer) {
+          std::ostringstream value;
+          value << std::fixed << std::setprecision(3)
+                << "ttft;dur=" << result.ttft_ms
+                << ", inter_token;dur=" << result.mean_inter_token_ms
+                << ", max_inter_token;dur=" << result.max_inter_token_ms;
+          *timing = value.str();
+        }
+        return output.Complete(result);
+      } catch (const std::exception& error) {
         generation->Cancel();
+        if (!writer || !started)
+          throw;
+        stream_log->error_code = "generation_failed";
+        stream_log->error_event_sent = output.Fail(error.what());
         return json::Value();
       }
-      if (!writer) {
-        std::ostringstream value;
-        value << std::fixed << std::setprecision(3)
-              << "ttft;dur=" << result.ttft_ms
-              << ", inter_token;dur=" << result.mean_inter_token_ms
-              << ", max_inter_token;dur=" << result.max_inter_token_ms;
-        *timing = value.str();
-      }
-      return output.Complete(result);
     };
     if (stream)
       return {.status = 200,
@@ -3493,6 +3572,36 @@ HttpResponse CreateOpenAiResponse(const HttpRequest& request,
           .log_details = stream_log->details};
 }
 
+HttpResponse InspectDebugPrompt(const HttpRequest& request,
+                                TextGenerationBackend& backend) {
+  if (!request.debug_hooks || !request.debug_loopback)
+    return Error(404, "Not Found", "no route for this path", "not_found");
+  try {
+    const auto body = json::parse(request.body);
+    json::Value value;
+    if (const auto* text = body.find("text"); text && text->is_string()) {
+      value = backend.debug_prompt(nullptr, text->str());
+    } else {
+      ParsedChatRequest parsed;
+      parsed.max_tokens = backend.sampling_defaults().max_tokens;
+      if (auto error = ParseRequest(request, backend, &parsed))
+        return *error;
+      if (!parsed.chat.tools.empty() || parsed.chat.response_format ||
+          parsed.chat.constrained_tools ||
+          std::any_of(
+              parsed.chat.messages.begin(), parsed.chat.messages.end(),
+              [](const auto& message) { return !message.images.empty(); }))
+        return Error(400, "Bad Request",
+                     "prompt inspection requires plain text without tools",
+                     "invalid_prompt");
+      value = backend.debug_prompt(&parsed.chat, {});
+    }
+    return {.status = 200, .reason = "OK", .body = value.dump()};
+  } catch (const std::invalid_argument& error) {
+    return Error(400, "Bad Request", error.what(), "invalid_prompt");
+  }
+}
+
 HttpResponse HandleOpenAiChat(const HttpRequest& request,
                               TextGenerationBackend& backend) {
   ParsedChatRequest parsed;
@@ -3514,38 +3623,9 @@ HttpResponse HandleOpenAiChat(const HttpRequest& request,
     auto generation =
         backend.start_chat(parsed.chat, parsed.max_tokens, parsed.sampling,
                            request.is_cancelled, parsed.stream);
-    if (parsed.stream && parsed.sampling.logprobs >= 0) {
-      auto stream_log = std::make_shared<HttpResponse::StreamLog>();
-      return {.status = 200,
-              .reason = "OK",
-              .body = {},
-              .headers = {{"Content-Type", "text/event-stream"},
-                          {"Cache-Control", "no-cache"}},
-              .streaming_body = [parsed, &backend, generation, initial_output_state,
-                                 stream_log](const HttpResponse::BodyWriter& writer) {
-                // Token records are available with the completed request. Buffer
-                // only opted-in scoring streams to preserve text/score alignment.
-                const auto complete = NonStreamingResponse(parsed, backend, generation,
-                                                            initial_output_state);
-                auto chunk = json::parse(complete.body);
-                chunk["object"] = "chat.completion.chunk";
-                auto choices = json::Value::array();
-                for (const auto& complete_choice : chunk["choices"].items()) {
-                  auto choice = json::Value::object();
-                  choice["index"] = 0;
-                  choice["delta"] = *complete_choice.find("message");
-                  choice["finish_reason"] = *complete_choice.find("finish_reason");
-                  choice["logprobs"] = *complete_choice.find("logprobs");
-                  choices.push_back(std::move(choice));
-                }
-                chunk["choices"] = std::move(choices);
-                stream_log->details = complete.log_details;
-                if (writer(Sse(chunk)))
-                  (void)writer("data: [DONE]\n\n");
-              },
-              .stream_log = std::move(stream_log),
-              .defer_stream_headers = true};
-    }
+    if (parsed.stream && parsed.sampling.logprobs >= 0)
+      return ScoredOpenAiStream(generation, backend, RandomId("chatcmpl-"),
+                                Now(), true, parsed.include_usage, Usage);
     if (parsed.stream) {
       return StreamingResponse(parsed, backend, std::move(generation),
                                initial_output_state);

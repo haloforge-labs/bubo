@@ -124,6 +124,10 @@ struct ScheduledRequest {
   std::mutex output_mutex;
   std::condition_variable output_condition;
   std::deque<std::string> output_pieces;
+  // Allocated only for requested scored streams; OFF keeps the original deque
+  // element size, block allocation cadence and byte accounting.
+  std::unique_ptr<std::deque<std::shared_ptr<const sampling::TokenLogprob>>>
+      output_scores;
   std::optional<TextGenerationBackend::PromptProgress> pending_progress;
   // Set at admission for streams; the consumer reports its start at most once.
   bool admitted{false};
@@ -171,6 +175,8 @@ bool IsTerminal(const std::shared_ptr<ScheduledRequest>& request) noexcept {
 void ReleaseBufferedOutputLocked(
     const std::shared_ptr<ScheduledRequest>& request) noexcept {
   request->output_pieces.clear();
+  if (request->output_scores)
+    request->output_scores->clear();
   request->output_budget->Release(request->buffered_output_bytes);
   request->buffered_output_bytes = 0;
 }
@@ -203,8 +209,13 @@ void PublishTerminal(const std::shared_ptr<ScheduledRequest>& request,
 /// Queue cost of one streamed piece. A token whose decoded text is empty still
 /// occupies a queue slot, so it is charged one byte: a zero cost would let an
 /// unbounded number of them accumulate behind a slow consumer.
-[[nodiscard]] std::size_t QueuedPieceCost(std::string_view piece) noexcept {
-  return std::max<std::size_t>(piece.size(), 1);
+[[nodiscard]] std::size_t QueuedPieceCost(
+    std::string_view piece,
+    const sampling::TokenLogprob* score = nullptr) noexcept {
+  return std::max<std::size_t>(piece.size(), 1) +
+         (score ? sizeof(*score) + score->top_logprobs.size() *
+                                       sizeof(score->top_logprobs[0])
+                : 0);
 }
 
 // Debug-only backpressure line, extracted from the publish path: the fast
@@ -234,11 +245,12 @@ void LogBackpressure(const std::shared_ptr<ScheduledRequest>& request,
 }
 
 [[nodiscard]] bool PublishPiece(
-    const std::shared_ptr<ScheduledRequest>& request, std::string piece) {
+    const std::shared_ptr<ScheduledRequest>& request, std::string piece,
+    std::shared_ptr<const sampling::TokenLogprob> score = {}) {
   if (!request->publish_token_pieces) {
     return true;
   }
-  const std::size_t piece_bytes = QueuedPieceCost(piece);
+  const std::size_t piece_bytes = QueuedPieceCost(piece, score.get());
   std::string_view reason;
   std::size_t buffered = 0;
   {
@@ -257,7 +269,15 @@ void LogBackpressure(const std::shared_ptr<ScheduledRequest>& request,
         request->result.max_buffered_output_bytes =
             std::max(request->result.max_buffered_output_bytes,
                      request->buffered_output_bytes);
-        request->output_pieces.push_back(std::move(piece));
+        if (request->output_scores)
+          request->output_scores->push_back(std::move(score));
+        try {
+          request->output_pieces.push_back(std::move(piece));
+        } catch (...) {
+          if (request->output_scores)
+            request->output_scores->pop_back();
+          throw;
+        }
       } catch (...) {
         request->output_budget->Release(piece_bytes);
         request->buffered_output_bytes -= piece_bytes;
@@ -1030,6 +1050,18 @@ struct TextGenerationScheduler::Impl {
           continue;
         }
         if (request->prompt_score) {
+          if (!prefilling.empty() || !decoding.empty() || !capturing.empty()) {
+            // Park visibly queued; stop admitting newcomers until residents
+            // drain.
+            waiting.push_front(std::move(request));
+            return;
+          }
+          request->phase.store(TextRequestPhase::kScoring,
+                               std::memory_order_release);
+          request->result.execution_plan = "serial-prompt-score";
+          Logger::Diagnostic(
+              "score", "event=scoring id=" + std::to_string(request->id) +
+                           " tokens=" + std::to_string(request->prompt.size()));
           // This work executes on the generation owner without leasing or
           // publishing continuation state. Dedicated scoring can be slow.
           const auto score_start = Clock::now();
@@ -1284,8 +1316,13 @@ struct TextGenerationScheduler::Impl {
     }
     request->generated_output_bytes += selection.piece.size();
     request->result.tokens.push_back(selection.token);
-    if (request->logprobs_requested && selection.logprob)
+    if (request->logprobs_requested) {
+      if (!selection.logprob)
+        throw std::logic_error("runner omitted a requested token logprob");
+      if (selection.logprob->token != selection.token)
+        throw std::logic_error("generated token and logprob IDs differ");
       request->result.logprobs.push_back(*selection.logprob);
+    }
     request->live_generated_tokens.store(request->result.tokens.size(),
                                          std::memory_order_relaxed);
     detail::TotalGenTokens().fetch_add(1, std::memory_order_relaxed);
@@ -1293,7 +1330,7 @@ struct TextGenerationScheduler::Impl {
                            ? request->stop_filter.Push(selection.piece)
                            : selection.piece;
     if ((!piece.empty() || !request->stop_filter.enabled()) &&
-        !PublishPiece(request, piece)) {
+        !PublishPiece(request, piece, selection.logprob)) {
       CompleteFailure(request,
                       std::make_exception_ptr(TextGenerationError(
                           TextGenerationErrorCode::kOutputBackpressure,
@@ -2020,7 +2057,7 @@ TextRequestPhase TextGenerationScheduler::Request::phase() const noexcept {
 
 TextGenerationScheduler::Result TextGenerationScheduler::Request::Wait(
     const TokenCallback& on_token, const ProgressCallback& on_progress,
-    const StartCallback& on_start) {
+    const StartCallback& on_start, const ScoredTokenCallback& on_score) {
   if (!*this) {
     throw std::logic_error("text scheduler request is empty");
   }
@@ -2039,6 +2076,7 @@ TextGenerationScheduler::Result TextGenerationScheduler::Request::Wait(
 
   while (true) {
     std::string piece;
+    std::shared_ptr<const sampling::TokenLogprob> score;
     std::optional<TextGenerationBackend::PromptProgress> progress;
     bool start = false;
     bool has_piece = false;
@@ -2069,8 +2107,15 @@ TextGenerationScheduler::Result TextGenerationScheduler::Request::Wait(
       } else if (!impl_->request->output_pieces.empty()) {
         has_piece = true;
         const std::size_t piece_bytes =
-            QueuedPieceCost(impl_->request->output_pieces.front());
+            QueuedPieceCost(impl_->request->output_pieces.front(),
+                            impl_->request->output_scores
+                                ? impl_->request->output_scores->front().get()
+                                : nullptr);
         piece = std::move(impl_->request->output_pieces.front());
+        if (impl_->request->output_scores) {
+          score = std::move(impl_->request->output_scores->front());
+          impl_->request->output_scores->pop_front();
+        }
         impl_->request->output_pieces.pop_front();
         impl_->request->buffered_output_bytes -= piece_bytes;
         impl_->request->output_budget->Release(piece_bytes);
@@ -2103,8 +2148,15 @@ TextGenerationScheduler::Result TextGenerationScheduler::Request::Wait(
     if (progress.has_value() && deliver_pieces && on_progress) {
       deliver(on_progress, *progress);
     }
-    if (has_piece && deliver_pieces && on_token) {
-      deliver(on_token, piece);
+    if (has_piece && deliver_pieces) {
+      if (on_score) {
+        if (!score)
+          throw std::logic_error("runner omitted a requested token logprob");
+        deliver([&](std::string_view text) { return on_score(text, *score); },
+                piece);
+      } else if (on_token) {
+        deliver(on_token, piece);
+      }
     }
     if (terminal) {
       break;
@@ -2244,10 +2296,21 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
   request->logprobs_requested = sampling.logprobs >= 0;
   request->external_cancellation = is_cancelled;
   request->publish_token_pieces = publish_token_pieces;
+  if (publish_token_pieces && request->logprobs_requested)
+    request->output_scores = std::make_unique<
+        std::deque<std::shared_ptr<const sampling::TokenLogprob>>>();
   request->publish_prompt_progress =
       publish_token_pieces && metadata.return_progress;
   request->request_start = metadata.request_start;
   request->prompt_score = metadata.prompt_score;
+  if (request->prompt_score) {
+    request->phase.store(TextRequestPhase::kScoreQueued,
+                         std::memory_order_relaxed);
+    Logger::Diagnostic("score",
+                       "event=score_queued id=" + std::to_string(request->id) +
+                           " tokens=" + std::to_string(request->prompt.size()) +
+                           " policy=drain-residents");
+  }
   if (metadata.debug_timeline) {
     const bool has_render_timeline = bool(metadata.timeline);
     request->result.debug_timeline = metadata.timeline

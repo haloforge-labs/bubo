@@ -2,9 +2,9 @@
 
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdlib>
 #include <filesystem>
@@ -26,6 +26,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/cli/serve/debug_response.hpp"
 #include "src/cli/serve/generation_metrics.hpp"
 #include "src/cli/serve/http_server.hpp"
 #include "src/cli/serve/logging.hpp"
@@ -180,6 +181,7 @@ struct FakeControl {
   std::function<void()> snapshot_callback;
   bool in_pass_checkpoint{false};
   bool score_supported{false};
+  bool omit_score{false};
   std::atomic<std::size_t> score_calls{0};
   std::function<void()> score_callback;
 };
@@ -399,7 +401,7 @@ public:
         .token = *fake.frontier,
         .piece = std::to_string(*fake.frontier),
     };
-    if (sampler.config().logprobs >= 0) {
+    if (sampler.config().logprobs >= 0 && !control_->omit_score) {
       std::vector<float> row(selection.token + 1, 0.0F);
       row[selection.token] = 1.0F;
       selection.logprob = std::make_shared<const gufo::sampling::TokenLogprob>(
@@ -2967,14 +2969,23 @@ void TestPromptScoreSerializationAndCancellation() {
   auto control = std::make_shared<FakeControl>();
   control->score_supported = true;
   control->block_prefill_label = 1;
-  auto scheduler = MakeScheduler(control, 1);
-  auto generated = scheduler->Submit({1, 2}, 1, 0.0F);
+  auto scheduler = MakeScheduler(control, 2);
+  auto generated = scheduler->Submit({1, 2}, 4, 0.0F);
   control->WaitForPrefill(1);
   gufo::sampling::SamplingConfig config;
   config.logprobs = 0;
   auto scored = scheduler->ScorePrompt({0, 1}, config);
-  Expect(control->score_calls.load() == 0,
-         "scorer waits behind generation on the inference owner");
+  Expect(
+      control->score_calls.load() == 0 &&
+          scored.phase() == gufo::server::TextRequestPhase::kScoreQueued,
+      "scorer is explicitly queued behind generation on the inference owner");
+  control->score_callback = [&] {
+    Expect(generated.phase() == TextRequestPhase::kTerminal,
+           "scorer cannot pause a resident decoder: it starts only after "
+           "terminal publication");
+    Expect(scored.phase() == TextRequestPhase::kScoring,
+           "owner exposes the explicit scoring phase");
+  };
   control->ReleasePrefill();
   (void)generated.Wait();
   Expect(scored.Wait().prompt_logprobs.size() == 2 && control->score_calls.load() == 1,
@@ -2985,7 +2996,97 @@ void TestPromptScoreSerializationAndCancellation() {
          "cancelled scoring never invokes its dedicated runner");
 }
 
-int main() {
+void TestLiveScoredQueueAndMissingRecords() {
+  {
+    auto control = std::make_shared<FakeControl>();
+    control->block_advance_label = 1;
+    auto scheduler = MakeScheduler(control, 1);
+    gufo::sampling::SamplingConfig config;
+    config.logprobs = 0;
+    auto live = scheduler->Submit({1, 2}, 3, config, {}, true);
+    control->WaitForAdvance(1);
+    std::promise<void> first;
+    auto first_seen = first.get_future();
+    std::size_t count = 0;
+    auto consumed = std::async(std::launch::async, [&] {
+      return live.Wait(
+          {}, {}, {},
+          [&](std::string_view, const gufo::sampling::TokenLogprob&) {
+            if (++count == 1)
+              first.set_value();
+            return true;
+          });
+    });
+    Expect(first_seen.wait_for(kTestTimeout) == std::future_status::ready &&
+               live.phase() != TextRequestPhase::kTerminal,
+           "first scored token reaches consumer while next runner advance is "
+           "blocked");
+    control->ReleaseAdvance();
+    Expect(consumed.get().tokens.size() == 3 && count == 3,
+           "live scored stream completes with exactly three callbacks");
+  }
+
+  for (const bool multi_token : {false, true}) {
+    auto control = std::make_shared<FakeControl>();
+    control->multi_token_decode = multi_token;
+    auto scheduler = MakeScheduler(control, 1);
+    gufo::sampling::SamplingConfig config;
+    config.seed = 123;
+    config.logprobs = 2;
+    TextRequestMetadata metadata;
+    metadata.cache_prompt = false;
+    auto request = scheduler->Submit({1, 2}, 5, config, {}, true, metadata);
+    std::vector<gufo::sampling::TokenId> published;
+    const auto result = request.Wait(
+        {}, {}, {},
+        [&](std::string_view piece, const gufo::sampling::TokenLogprob& score) {
+          Expect(!piece.empty() && score.top_logprobs.size() == 2,
+                 "real queue publishes one scored token at a time");
+          published.push_back(score.token);
+          return true;
+        });
+    Expect(published == result.tokens && published.size() == 5,
+           "real streaming queue has exactly one scored callback per generated "
+           "token");
+    auto diagnostic = result;
+    diagnostic.debug_timeline = std::make_shared<gufo::server::DebugTimeline>(
+        gufo::server::TextGenerationScheduler::Clock::now());
+    auto value = gufo::json::Value::object();
+    gufo::server::AddDebugTimeline(value, diagnostic);
+    const auto& ids = value.find("gufo")->find("token_ids")->items();
+    Expect(ids.size() == result.tokens.size(),
+           "timeline transports actual published ID count");
+    for (std::size_t i = 0; i < ids.size(); ++i)
+      Expect(ids[i].as_size() == result.tokens[i],
+             "timeline IDs are not inferred from output text");
+    control->omit_score = true;
+    auto broken = scheduler->Submit({1, 2}, 3, config, {}, true, metadata);
+    bool failed = false;
+    try {
+      (void)broken.Wait();
+    } catch (const std::logic_error& error) {
+      failed = std::string(error.what()) ==
+               "runner omitted a requested token logprob";
+    }
+    Expect(failed,
+           "short/missing score vector fails explicitly on AR and MTP paths");
+  }
+}
+
+int main(int argc, char** argv) {
+  if (argc == 2 && std::string_view(argv[1]) == "--debug-hooks") {
+    TestLiveScoredQueueAndMissingRecords();
+    TestDebugTimelineOrderCountsAndOffPath();
+    TestDebugTimelineSnapshotsAndCycleCap();
+    TestDebugTimelineInPassCheckpoint();
+    TestDebugTimelineRequestTruncation();
+    TestScoredGenerationPreservesFakeOutputAndAlignment();
+    TestPromptScoreDedicatedPathAndCpuReference();
+    TestPromptScoreSerializationAndCancellation();
+    return 0;
+  }
+
+  TestLiveScoredQueueAndMissingRecords();
   TestDebugTimelineOrderCountsAndOffPath();
   TestDebugTimelineSnapshotsAndCycleCap();
   TestDebugTimelineRequestTruncation();

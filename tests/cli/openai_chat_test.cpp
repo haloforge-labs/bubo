@@ -5502,7 +5502,13 @@ void TestBracketDenseContent() {
   }
 }
 
-int main() {
+int main(int argc, char** argv) {
+  if (argc == 2 && std::string_view(argv[1]) == "--debug-hooks") {
+    DebugHooksSettingsTest();
+    DebugHooksSettingsEnvironmentTest();
+    return 0;
+  }
+
   DebugHooksSettingsTest();
   DebugHooksSettingsEnvironmentTest();
   TestHistoricalTypedArgumentsUseTojson();

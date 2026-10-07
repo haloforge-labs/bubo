@@ -18,7 +18,7 @@ at startup instead of returning incomplete settings. It does not enable
 request-content tracing; `--trace` remains a separate facility.
 
 When enabled, successful Chat Completions, legacy Completions and Responses
-responses include `gufo.settings`; SSE data objects also carry the settings.
+responses include `gufo.settings`; the first JSON SSE data object carries the settings once.
 The text model's `/v1/models` entry includes the same object. One startup
 `[settings] settings ...` line and `GET /debug/settings` expose that object.
 It includes release/revision, SHA-256 of the running executable, opened model
@@ -29,11 +29,15 @@ values are strings or JSON null when unset; parsed effective values live under
 `resolved`. `NO_COLOR` is explicitly documented as irrelevant to numerics and
 timing. Secrets such as the API key are not included.
 
-Debug GET routes are registered only when the listener address is an IPv4
-loopback literal (`127.0.0.0/8`). They return 404 on other listener addresses
-and when disabled; normal authentication still applies. Settings echoes and
-request diagnostics use the ordinary API routes, including on a non-loopback
-listener, so do not enable the capability on an untrusted listener.
+All debug exposure requires both the capability and a loopback listener:
+`127.0.0.0/8`, `::1`, or literal `localhost` (bound explicitly to 127.0.0.1).
+IPv6 literals bind as IPv6; `0.0.0.0` and `::` are wildcard listeners and are
+never loopback, even for a local peer. Debug routes return 404 on non-loopback
+listeners or when disabled. Settings are omitted from API/model responses there;
+a request containing `debug` with the capability ON returns an explicit 400.
+Normal authentication applies to all debug routes. With the capability OFF,
+`debug` is ignored in every shape, preserving the base unknown-field behavior.
+`GUFO_DEBUG_HOOKS=1` is ignored with one log line on non-text servers.
 
 Send `"debug":{"timeline":true}` on a chat, completion or response request to
 receive `gufo.timeline`. Events have `event` and `t_ms` relative to request
@@ -47,13 +51,21 @@ cycles. Each retained event also produces one structured `[timeline] req=...`
 diagnostic log line. Streaming returns the completed timeline in the terminal
 response/chunk. An unavailable hook raises an explicit error.
 
-With the capability off, a true timeline or cache-probe request returns HTTP
-400 with `debug hooks are disabled (start the server with --debug-hooks)`.
-Read-only cache inspection is **not implemented**: the current caches do not
-retain exact hit counts or last-hit time, and adding accounting to ordinary
-hits would violate the OFF-path constraint. `/debug/cache` returns 404;
-`"debug":{"cache_probe":true}` returns an explicit 400 unavailable error when
-enabled. No fabricated cache entries or partial probes are returned.
+Read-only cache inspection is **not implemented**. The caches do not retain
+exact successful-hit counts or distinct last-hit time. The existing logical LRU
+ordinals and disk access times include writes/misses and cannot substitute.
+`GET /debug/cache` and `"debug":{"cache_probe":true}` return HTTP 400 with
+`cache inspection is not implemented` when enabled on a loopback listener.
+No fabricated entries or partial probes are returned. `/v1/messages` and
+`/completion` reject any `debug` field explicitly with 400 when hooks are ON;
+non-Flash-Next timeline requests return 400 before inference.
+
+For numerical gates, requested timelines also include `gufo.token_ids`: the
+actual published token IDs (without retokenizing the output). The loopback-only
+`POST /debug/prompt` accepts a plain Chat Completions request or `{"text":"..."}`
+and returns the runner's prepared prompt text and token IDs without inference or
+cache access. Tools, structured output and unsupported runners are rejected.
+Prompt text may contain private input; the same loopback/authentication rule applies.
 
 Logprobs are independent of `--debug-hooks`. Flash-Next generation supports
 Chat Completions `"logprobs":true,"top_logprobs":N` (N in 0..20), legacy
@@ -79,17 +91,28 @@ decisions remain intact. Exact GPU output identity requires the operator gates.
 Scored chat/Responses currently require thinking off, plain text, no tools or
 response format, and no stop sequences; other combinations and unsupported
 runners return HTTP 400. Scored legacy generation also rejects stop sequences.
-Requested scoring streams buffer generation and then emit schema-shaped SSE
-with scores, so they do not provide incremental token latency.
+Requested generation streams emit one scored chunk per published token as it
+arrives, including empty UTF-8 fragments. Chat/legacy chunks have null
+`finish_reason` until a separate terminal chunk; usage is emitted only for
+`stream_options.include_usage`. Responses emits one scored output-text delta per
+token and retains all scores in done/final events. Missing/misaligned scores
+raise HTTP 500 before headers or a terminal stream error after headers.
 
 Legacy `"echo":true,"logprobs":N,"max_tokens":0` scores prompt tokens without
 generation. The first token's logprob/top-logprobs are null. This is a separate,
-potentially slow path: the scheduler serializes a dedicated private Flash-Next
+potentially slow path: the scheduler parks it in `kScoreQueued` until resident
+generation/capture sessions drain, then enters `kScoring` on the single owner.
+New generation admission waits for the scorer. This serializes a dedicated private Flash-Next
 session with generation and uses `Session::TeacherForce` decode/verify
 arithmetic in batches no wider than `MaxVerifyWidth`. It never acquires a live
 pool slot or reads/writes continuation caches. `--max-score-tokens` defaults to
-8192; longer prompts or prompts exceeding model context return 400. Unsupported
-runners return `prompt logprobs are not supported for this model`. Prompt
+8192; longer prompts or prompts exceeding model context return 400. The private
+session is sized to prompt length plus eight tokens (clamped to context); its
+`SessionBytes` resource claim plus deferred shared scratch must fit currently
+free device memory before allocation. The scheduler provides no independent GPU
+lane, so queued arrivals wait through scoring (up to 8192 teacher-forced tokens);
+existing live decoders finish first. Unsupported runners retain the original
+compatibility rejection bytes, including `'echo' must be false` for echo scoring. Prompt
 scoring cannot currently be combined with a timeline. `echo` with generated
 tokens remains unsupported and returns 400.
 

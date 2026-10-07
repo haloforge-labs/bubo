@@ -915,8 +915,9 @@ int RunServe(std::span<const char* const> args) {
       return false;
     }
     if (debug_hooks && subcommand != "llm") {
-      std::cerr << "Error: --debug-hooks requires the text server\n";
-      return false;
+      std::cerr
+          << "GUFO_DEBUG_HOOKS/--debug-hooks ignored for non-text server\n";
+      debug_hooks = false;
     }
     if (session_count == 0 || max_connections == 0 ||
         max_request_body_bytes == 0) {

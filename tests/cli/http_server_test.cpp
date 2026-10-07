@@ -5,8 +5,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include <atomic>
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <cmath>
@@ -26,9 +26,10 @@
 #include <utility>
 #include <vector>
 
+#include "src/cli/serve/debug_request.hpp"
 #include "src/cli/serve/logging.hpp"
-#include "src/core/platform/socket.hpp"
 #include "src/cli/serve/trace.hpp"
+#include "src/core/platform/socket.hpp"
 
 namespace {
 
@@ -93,6 +94,32 @@ private:
   std::atomic<bool> cancelled_{false};
 };
 
+class LiveScoredFakeRequest final
+    : public TextGenerationBackend::GenerationRequest {
+public:
+  using Run = std::function<TextGenerationBackend::Result(
+      const TextGenerationBackend::ScoredTokenCallback&)>;
+  explicit LiveScoredFakeRequest(Run run) : run_(std::move(run)) {}
+  TextGenerationBackend::Result Wait(
+      const TextGenerationBackend::TokenCallback&,
+      const TextGenerationBackend::ProgressCallback&,
+      const TextGenerationBackend::StartCallback&) override {
+    return run_({});
+  }
+  TextGenerationBackend::Result WaitScored(
+      const TextGenerationBackend::ScoredTokenCallback& callback) override {
+    return run_(
+        [&](std::string_view text, const gufo::sampling::TokenLogprob& score) {
+          return !cancelled_ && callback(text, score);
+        });
+  }
+  void Cancel() noexcept override { cancelled_ = true; }
+
+private:
+  Run run_;
+  bool cancelled_{false};
+};
+
 class FakeBackend final : public TextGenerationBackend {
 public:
   struct Call {
@@ -150,8 +177,20 @@ public:
       result.cancelled = true;
     return std::make_shared<DebugHooksScoreRequest>(std::move(result));
   }
+  gufo::json::Value debug_prompt(const gufo::server::ChatRequest* chat,
+                                 std::string_view text) const override {
+    if (chat)
+      text = chat->messages.front().content;
+    auto response = gufo::json::Value::object();
+    response["text"] = std::string(text);
+    response["token_ids"] = gufo::json::Value::array();
+    for (unsigned char c : text)
+      response["token_ids"].push_back(static_cast<std::size_t>(c));
+    return response;
+  }
   std::atomic<bool> image_support{false};
   std::atomic<bool> logprob_support{false};
+  bool short_scores{false};
   std::atomic<int> score_calls{0};
   std::uint32_t max_context() const override { return 65536; }
   std::vector<SessionState> session_states() const override { return sessions; }
@@ -165,6 +204,15 @@ public:
       bool return_progress, bool debug_timeline = false) override {
     if (debug_timeline)
       throw std::invalid_argument("timeline is not supported for this backend");
+    if (sampling.logprobs >= 0) {
+      return std::make_shared<LiveScoredFakeRequest>(
+          [this, prompt = std::string(prompt), max_tokens, sampling,
+           cancellation, client = std::string(client_id),
+           stop_sequences](const ScoredTokenCallback& score) {
+            return CompleteImpl(prompt, max_tokens, sampling, cancellation, {},
+                                client, stop_sequences, score);
+          });
+    }
     last_ignore_eos = ignore_eos;
     return std::make_shared<ProgressRequest>(
         TextGenerationBackend::start_complete(
@@ -176,6 +224,14 @@ public:
       const gufo::server::ChatRequest& request, std::size_t max_tokens,
       const gufo::sampling::SamplingConfig& sampling,
       const CancellationCheck& cancellation, bool stream) override {
+    if (sampling.logprobs >= 0) {
+      return std::make_shared<LiveScoredFakeRequest>(
+          [this, max_tokens, sampling,
+           cancellation](const ScoredTokenCallback& score) {
+            return CompleteImpl("x", max_tokens, sampling, cancellation, {},
+                                "anonymous", {}, score);
+          });
+    }
     return std::make_shared<ProgressRequest>(
         TextGenerationBackend::start_chat(request, max_tokens, sampling,
                                           cancellation, stream),
@@ -200,6 +256,15 @@ public:
       const CancellationCheck& cancel, const TokenCallback& token,
       std::string_view client_id = "anonymous",
       const std::vector<std::string>& stop_sequences = {}) override {
+    return CompleteImpl(prompt, limit, sampling, cancel, token, client_id,
+                        stop_sequences, {});
+  }
+  Result CompleteImpl(std::string_view prompt, std::size_t limit,
+                      const gufo::sampling::SamplingConfig& sampling,
+                      const CancellationCheck& cancel,
+                      const TokenCallback& token, std::string_view client_id,
+                      const std::vector<std::string>& stop_sequences,
+                      const ScoredTokenCallback& on_score) {
     ++calls;
     if (failure == 1)
       throw std::length_error("context exceeded");
@@ -263,10 +328,17 @@ public:
         if (sampling.logprobs >= 0)
           result.logprobs.push_back(scoring.RawLogprobs(
               row, selected, static_cast<std::size_t>(sampling.logprobs)));
+        if (on_score && !result.logprobs.empty() &&
+            !on_score(token_piece(selected), result.logprobs.back())) {
+          result.cancelled = true;
+          return result;
+        }
         sampler.Accept(selected);
       }
       result.completion_tokens = result.tokens.size();
     }
+    if (short_scores && !result.logprobs.empty())
+      result.logprobs.pop_back();
     if (!forced_stop_sequence.empty()) {
       result.finish_reason = FinishReason::kStopSequence;
       result.stop_sequence = forced_stop_sequence;
@@ -325,8 +397,8 @@ public:
                          bool handle_signals = false,
                          std::string host = "127.0.0.1")
       : backend(std::make_shared<FakeBackend>()),
-        server(std::move(host), 0, backend, nullptr, nullptr, nullptr,
-               std::move(options)) {
+        server(host, 0, backend, nullptr, nullptr, nullptr, std::move(options)),
+        ipv6_(host.find(':') != std::string::npos) {
     server.add("POST", "/echo", [](const auto& request, auto&) {
       return gufo::server::HttpResponse{.body = request.body};
     });
@@ -388,16 +460,25 @@ public:
   }
 
   int Connect() {
-    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    const int fd = ::socket(ipv6_ ? AF_INET6 : AF_INET, SOCK_STREAM, 0);
     assert(fd >= 0);
     assert(gufo::platform::SetSocketTimeout(fd, SO_RCVTIMEO,
                                             std::chrono::seconds{3}) == 0);
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_port = htons(server.port());
-    assert(::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) == 1);
-    assert(::connect(fd, reinterpret_cast<const sockaddr*>(&address),
-                     sizeof(address)) == 0);
+    if (ipv6_) {
+      sockaddr_in6 address{};
+      address.sin6_family = AF_INET6;
+      address.sin6_port = htons(server.port());
+      assert(::inet_pton(AF_INET6, "::1", &address.sin6_addr) == 1);
+      assert(::connect(fd, reinterpret_cast<const sockaddr*>(&address),
+                       sizeof(address)) == 0);
+    } else {
+      sockaddr_in address{};
+      address.sin_family = AF_INET;
+      address.sin_port = htons(server.port());
+      assert(::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) == 1);
+      assert(::connect(fd, reinterpret_cast<const sockaddr*>(&address),
+                       sizeof(address)) == 0);
+    }
     return fd;
   }
   std::string Send(std::string_view request, bool half_close = false) {
@@ -433,6 +514,7 @@ public:
 
   std::shared_ptr<FakeBackend> backend;
   HttpServer server;
+  bool ipv6_;
   std::binary_semaphore run_finished{0};
   std::jthread worker;
 };
@@ -2210,6 +2292,21 @@ void TestRawCompletionPromptProgress() {
                400);
 }
 
+std::vector<gufo::json::Value> DebugHooksAllSseData(
+    const std::string& response) {
+  std::vector<gufo::json::Value> frames;
+  for (std::size_t start = 0;
+       (start = response.find("data: ", start)) != std::string::npos;) {
+    start += 6;
+    const auto end = response.find('\n', start);
+    const auto payload = response.substr(start, end - start);
+    if (payload != "[DONE]")
+      frames.push_back(gufo::json::parse(payload));
+    start = end;
+  }
+  return frames;
+}
+
 gufo::json::Value DebugHooksHttpResponseBody(const std::string& response) {
   return gufo::json::parse(response.substr(response.find("\r\n\r\n") + 4));
 }
@@ -2249,10 +2346,13 @@ void DebugHooksHttpTestSettingsEcho() {
   ExpectStatus(models, 200);
   assert(DebugHooksHttpResponseBody(models).find("data")->items()[0]
              .find("gufo")->find("settings")->dump() == settings->dump());
-  for (const auto& [path, input] : {
-           std::pair{"/v1/completions", R"({"prompt":"x","max_tokens":2})"},
-           std::pair{"/v1/chat/completions", R"({"messages":[{"role":"user","content":"x"}],"max_tokens":2})"},
-           std::pair{"/v1/responses", R"({"input":"x","max_output_tokens":2})"}}) {
+  for (
+      const auto& [path, input] :
+      {std::pair{"/v1/completions", R"({"prompt":"x","max_tokens":2})"},
+       std::pair{
+           "/v1/chat/completions",
+           R"({"model":"test","messages":[{"role":"user","content":"x"}],"max_tokens":2})"},
+       std::pair{"/v1/responses", R"({"input":"x","max_output_tokens":2})"}}) {
     const auto response = enabled.Post(path, input);
     ExpectStatus(response, 200);
     assert(DebugHooksHttpResponseBody(response).find("gufo")->find("settings")->dump() ==
@@ -2305,7 +2405,25 @@ void DebugHooksHttpTestResponsesLogprobs() {
   const auto delta = DebugHooksHttpResponseEvent(streaming, "response.output_text.delta");
   const auto done = DebugHooksHttpResponseEvent(streaming, "response.output_text.done");
   const auto part_done = DebugHooksHttpResponseEvent(streaming, "response.content_part.done");
-  assert(delta.member_str("delta") == "\xC3\xA9x" && delta.find("logprobs")->dump() == part.find("logprobs")->dump());
+  assert(delta.member_str("delta") == "\xC3\xA9" &&
+         delta.find("logprobs")->size() == 1);
+  std::size_t deltas = 0;
+  std::string streamed_text;
+  auto streamed_scores = gufo::json::Value::array();
+  for (const auto& event : DebugHooksAllSseData(streaming)) {
+    if (event.member_str("type") != "response.output_text.delta")
+      continue;
+    if (event.find("logprobs")->empty()) {
+      assert(event.member_str("delta").empty());
+      continue;
+    }
+    ++deltas;
+    streamed_text += event.member_str("delta");
+    assert(event.find("logprobs")->size() == 1);
+    streamed_scores.push_back(event.find("logprobs")->items()[0]);
+  }
+  assert(deltas == 2 && streamed_text == part.member_str("text") &&
+         streamed_scores.dump() == part.find("logprobs")->dump());
   assert(done.member_str("text") == "\xC3\xA9x" && done.find("logprobs")->dump() == part.find("logprobs")->dump());
   assert(part_done.find("part")->find("logprobs")->dump() == part.find("logprobs")->dump());
   const auto completed = DebugHooksHttpResponseEvent(streaming,
@@ -2347,43 +2465,58 @@ void DebugHooksHttpTestNullableLegacyLimit() {
 
 void DebugHooksHttpTestDisabledAndProbeErrors() {
   RunningServer disabled;
-  for (const auto* field : {"timeline", "cache_probe"}) {
+  for (const auto* value :
+       {"null", "42", "true", "[]", "{}", R"({"unknown":true})",
+        R"({"timeline":true})", R"({"timeline":"bad","cache_probe":true})"}) {
+    // Base 35c386a ReadCompatibilityOptions ignores debug, then rejects suffix.
     const auto response = disabled.Post(
-        "/v1/completions", std::string("{\"prompt\":\"hello\",\"debug\":{\"") +
-                               field + "\":true}}");
+        "/v1/completions",
+        std::string("{\"prompt\":\"hello\",\"suffix\":\"x\",\"debug\":") +
+            value + "}");
     ExpectStatus(response, 400);
-    const auto body = DebugHooksHttpResponseBody(response);
-    assert(body.find("error")->member_str("message") ==
-           "debug hooks are disabled (start the server with --debug-hooks)");
+    const auto start = response.find("\r\n\r\n");
+    assert(
+        response.substr(start + 4) ==
+        R"({"error":{"message":"request field 'suffix' is not supported on this endpoint","type":"invalid_request_error","code":"invalid_request"}})");
   }
-  const auto chat = disabled.Post(
-      "/v1/chat/completions",
-      R"({"messages":[{"role":"user","content":"hello"}],"debug":{"timeline":true}})");
-  ExpectStatus(chat, 400);
-  assert(DebugHooksHttpResponseBody(chat).find("error")->member_str("message") ==
-         "debug hooks are disabled (start the server with --debug-hooks)");
+  for (const auto* path : {"/v1/responses", "/v1/messages", "/completion"}) {
+    for (const auto* value :
+         {"null", "17", "[]", R"({"timeline":true})", R"({"unknown":true})"}) {
+      const auto response = disabled.Post(
+          path, std::string("{\"suffix\":\"x\",\"debug\":") + value + "}");
+      ExpectStatus(response, 400);
+      assert(
+          response.substr(response.find("\r\n\r\n") + 4) ==
+          R"({"error":{"message":"request field 'suffix' is not supported on this endpoint","type":"invalid_request_error","code":"invalid_request"}})");
+    }
+  }
   assert(disabled.backend->calls == 0);
   RunningServer enabled({.debug_hooks = true});
-  const auto probe = enabled.Post(
-      "/v1/completions", R"({"prompt":"hello","debug":{"cache_probe":true}})");
-  ExpectStatus(probe, 400);
-  assert(DebugHooksHttpResponseBody(probe).find("error")->member_str("message") ==
-         "cache inspection is unavailable: exact hit accounting requires cache instrumentation");
+  for (const auto& response :
+       {enabled.Post("/v1/completions",
+                     R"({"prompt":"hello","debug":{"cache_probe":true}})"),
+        enabled.Send("GET /debug/cache HTTP/1.1\r\n\r\n")}) {
+    ExpectStatus(response, 400);
+    assert(DebugHooksHttpResponseBody(response).find("error")->member_str(
+               "message") == "cache inspection is not implemented");
+  }
   assert(enabled.backend->calls == 0);
 }
 
 void DebugHooksHttpTestLogprobValidation() {
   RunningServer server;
   ExpectStatus(server.Post("/v1/completions", R"({"prompt":"x","logprobs":2})"), 400);
-  ExpectStatus(server.Post(
-      "/v1/chat/completions",
-      R"({"messages":[{"role":"user","content":"x"}],"logprobs":true})"), 400);
+  ExpectStatus(
+      server.Post(
+          "/v1/chat/completions",
+          R"({"model":"test","messages":[{"role":"user","content":"x"}],"logprobs":true})"),
+      400);
   const auto unsupported_prompt = server.Post(
       "/v1/completions", R"({"prompt":"xx","echo":true,"max_tokens":0,"logprobs":2})");
   ExpectStatus(unsupported_prompt, 400);
-  assert(DebugHooksHttpResponseBody(unsupported_prompt).find("error")
-             ->member_str("message") ==
-         "prompt logprobs are not supported for this model");
+  assert(DebugHooksHttpResponseBody(unsupported_prompt)
+             .find("error")
+             ->member_str("message") == "'echo' must be false");
   assert(server.backend->calls == 0);
   server.backend->logprob_support = true;
   server.backend->initial_output_state_override = TextGenerationBackend::InitialOutputState::kContent;
@@ -2395,16 +2528,22 @@ void DebugHooksHttpTestLogprobValidation() {
         std::string("{\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],") +
             "\"logprobs\":true,\"top_logprobs\":" + count + "}"), 400);
   }
-  ExpectStatus(server.Post(
-      "/v1/chat/completions",
-      R"({"messages":[{"role":"user","content":"x"}],"top_logprobs":2})"), 400);
-  ExpectStatus(server.Post(
-      "/v1/chat/completions",
-      R"({"messages":[{"role":"user","content":"x"}],"logprobs":true,"stop":"END"})"), 400);
+  ExpectStatus(
+      server.Post(
+          "/v1/chat/completions",
+          R"({"model":"test","messages":[{"role":"user","content":"x"}],"top_logprobs":2})"),
+      400);
+  ExpectStatus(
+      server.Post(
+          "/v1/chat/completions",
+          R"({"model":"test","messages":[{"role":"user","content":"x"}],"logprobs":true,"stop":"END"})"),
+      400);
   server.backend->initial_output_state_override = TextGenerationBackend::InitialOutputState::kReasoning;
-  ExpectStatus(server.Post(
-      "/v1/chat/completions",
-      R"({"messages":[{"role":"user","content":"x"}],"logprobs":true})"), 400);
+  ExpectStatus(
+      server.Post(
+          "/v1/chat/completions",
+          R"({"model":"test","messages":[{"role":"user","content":"x"}],"logprobs":true})"),
+      400);
   assert(server.backend->calls == 0);
 }
 
@@ -2414,7 +2553,7 @@ void DebugHooksHttpTestGeneratedLogprobs() {
   server.backend->initial_output_state_override = TextGenerationBackend::InitialOutputState::kContent;
   const auto chat = server.Post(
       "/v1/chat/completions",
-      R"({"messages":[{"role":"user","content":"x"}],"temperature":0,"max_tokens":2,"logprobs":true,"top_logprobs":2})");
+      R"({"model":"test","messages":[{"role":"user","content":"x"}],"temperature":0,"max_tokens":2,"logprobs":true,"top_logprobs":2})");
   ExpectStatus(chat, 200);
   const auto body = DebugHooksHttpResponseBody(chat);
   const auto& choice = body.find("choices")->items()[0];
@@ -2427,13 +2566,25 @@ void DebugHooksHttpTestGeneratedLogprobs() {
   assert(records[0].find("top_logprobs")->items()[0].member_str("token") == "\xC3\xA9");
   const auto streamed = server.Post(
       "/v1/chat/completions",
-      R"({"messages":[{"role":"user","content":"x"}],"temperature":0,"max_tokens":2,"stream":true,"logprobs":true,"top_logprobs":0})");
+      R"({"model":"test","messages":[{"role":"user","content":"x"}],"temperature":0,"max_tokens":2,"stream":true,"logprobs":true,"top_logprobs":0})");
   ExpectStatus(streamed, 200);
   const auto chunk = DebugHooksHttpSseChunk(streamed);
   const auto& streamed_choice = chunk.find("choices")->items()[0];
   assert(chunk.member_str("object") == "chat.completion.chunk");
-  assert(streamed_choice.find("delta")->member_str("content") == "\xC3\xA9x");
-  assert(streamed_choice.find("logprobs")->find("content")->size() == 2);
+  assert(streamed_choice.find("delta")->member_str("content") == "\xC3\xA9");
+  assert(streamed_choice.find("logprobs")->find("content")->size() == 1);
+  const auto chat_frames = DebugHooksAllSseData(streamed);
+  assert(chat_frames.size() == 3);
+  std::string chat_text;
+  for (std::size_t i = 0; i < 2; ++i) {
+    const auto& c = chat_frames[i].find("choices")->items()[0];
+    assert(c.find("finish_reason")->is_null() &&
+           c.find("logprobs")->find("content")->size() == 1);
+    assert(!chat_frames[i].contains("usage") &&
+           !chat_frames[i].contains("timings"));
+    chat_text += c.find("delta")->member_str("content");
+  }
+  assert(chat_text == choice.find("message")->member_str("content"));
   assert(streamed_choice.find("logprobs")->find("content")->items()[0]
              .find("top_logprobs")->empty());
   assert(streamed.find("data: [DONE]") != std::string::npos);
@@ -2443,12 +2594,18 @@ void DebugHooksHttpTestGeneratedLogprobs() {
   ExpectStatus(legacy, 200);
   const auto legacy_chunk = DebugHooksHttpSseChunk(legacy);
   const auto& legacy_choice = legacy_chunk.find("choices")->items()[0];
-  assert(legacy_choice.member_str("text") == "\xC3\xA9x");
+  assert(legacy_choice.member_str("text") == "\xC3\xA9");
   const auto* legacy_scores = legacy_choice.find("logprobs");
-  assert(legacy_scores->find("tokens")->size() == 2);
-  assert(legacy_scores->find("token_logprobs")->size() == 2);
-  assert(legacy_scores->find("top_logprobs")->size() == 2);
-  assert(legacy_scores->find("text_offset")->items()[1].as_size() == 1);
+  assert(legacy_scores->find("tokens")->size() == 1);
+  assert(legacy_scores->find("token_logprobs")->size() == 1);
+  assert(legacy_scores->find("top_logprobs")->size() == 1);
+  const auto legacy_frames = DebugHooksAllSseData(legacy);
+  assert(legacy_frames.size() == 3);
+  const auto& second = legacy_frames[1].find("choices")->items()[0];
+  assert(second.member_str("text") == "x" &&
+         second.find("logprobs")->find("tokens")->size() == 1 &&
+         second.find("logprobs")->find("text_offset")->items()[0].as_size() ==
+             1);
   const auto ordinary = server.Post(
       "/v1/completions", R"({"prompt":"x","temperature":0.7,"seed":123,"max_tokens":2})");
   const auto scored = server.Post(
@@ -2489,7 +2646,158 @@ void DebugHooksHttpTestPromptScores() {
   assert(server.backend->calls == 0 && server.backend->score_calls == 2);
 }
 
-int main() {
+void DebugHooksBaseGoldenBytesAndExposure() {
+  RunningServer off;
+  // Golden bodies transcribed from git show 35c386a:openai_chat.cpp
+  // ParseRequest/Error and http_server.cpp
+  // ReadCompatibilityOptions/InvalidCompatibilityRequest/Err.
+  const std::string chat_input =
+      R"({"model":"test","messages":[{"role":"user","content":"x"}]})";
+  for (const auto* field : {"logprobs", "top_logprobs"}) {
+    auto body = gufo::json::parse(chat_input);
+    body[field] = field == std::string_view("logprobs")
+                      ? gufo::json::Value(true)
+                      : gufo::json::Value(2);
+    const auto response = off.Post("/v1/chat/completions", body.dump());
+    ExpectStatus(response, 400);
+    const auto expected =
+        std::string(R"({"error":{"message":"request field ')") + field +
+        R"(' is not implemented","type":"invalid_request_error","code":"unsupported_field"}})";
+    assert(response.substr(response.find("\r\n\r\n") + 4) == expected);
+  }
+  for (const auto* value :
+       {"null", "42", "true", "[]", "{}", R"({"unknown":true})",
+        R"({"timeline":true})", R"({"cache_probe":true})",
+        R"({"timeline":"bad"})"}) {
+    const auto response = off.Post("/v1/chat/completions",
+                                   std::string("{\"debug\":") + value + "}");
+    ExpectStatus(response, 400);
+    assert(
+        response.substr(response.find("\r\n\r\n") + 4) ==
+        R"({"error":{"message":"'model' is required","type":"invalid_request_error","code":"missing_model"}})");
+  }
+  for (const auto* path : {"/v1/completions", "/v1/responses"}) {
+    for (const auto* field : {"logprobs", "top_logprobs"}) {
+      const auto response =
+          off.Post(path, std::string("{\"prompt\":\"x\",\"input\":\"x\",\"") +
+                             field + "\":2}");
+      ExpectStatus(response, 400);
+      const auto expected =
+          std::string(R"({"error":{"message":"request field ')") + field +
+          R"(' is not supported on this endpoint","type":"invalid_request_error","code":"invalid_request"}})";
+      assert(response.substr(response.find("\r\n\r\n") + 4) == expected);
+    }
+  }
+  // Full generation body transcribed from 35c386a LlamaCompletion,
+  // UsageJson, GenerationTimings and the original FakeBackend fixed result.
+  const std::string completion_golden =
+      R"({"content":"ok","stop":true,"stopped_eos":true,"stopped_length":false,"stopped_word":false,"stopped_limit":false,"stopping_word":"","tokens_predicted":1,"tokens_evaluated":10,"tokens_cached":8,"timings":{"prompt_n":2,"prompt_ms":4,"prompt_per_token_ms":2,"prompt_per_second":500,"predicted_n":1,"predicted_ms":2,"predicted_per_token_ms":2,"predicted_per_second":500,"cache_n":8,"cache_restore_ms":0,"cache_snapshot_ms":0,"cache_disk_enqueue_ms":0,"draft_rounds":2,"draft_n":8,"draft_n_accepted":4},"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11,"prompt_tokens_details":{"cached_tokens":8},"cached_tokens":8,"prompt_tokens_per_second":500,"completion_tokens_per_second":500,"draft_tokens":8,"draft_tokens_accepted":4}})";
+  for (const auto* debug : {"null", "17", "false", "[]", "{}",
+                            R"({"timeline":true})", R"({"unknown":true})",
+                            R"({"cache_probe":true})", R"({"timeline":"bad"})"}) {
+    const auto success = off.Post("/completion",
+        std::string("{\"prompt\":\"hello\",\"n_predict\":2,\"debug\":") + debug + "}");
+    ExpectStatus(success, 200);
+    assert(success.substr(success.find("\r\n\r\n") + 4) == completion_golden);
+  }
+  const auto success = off.Post("/completion", R"({"prompt":"hello","n_predict":2})");
+  ExpectStatus(success, 200);
+  assert(success.substr(success.find("\r\n\r\n") + 4) == completion_golden);
+  // Deterministic successful response golden from base handle_request /health.
+  const auto health = off.Send("GET /health HTTP/1.1\r\n\r\n");
+  assert(health.substr(health.find("\r\n\r\n") + 4) == R"({"status":"ok"})");
+  for (const auto* host :
+       {"127.0.0.1", "127.7.8.9", "127.255.255.254", "::1", "localhost"})
+    assert(gufo::server::DebugLoopbackListener(host));
+  for (const auto* host : {"0.0.0.0", "::", "192.168.1.7", "128.0.0.1",
+                           "127.0.0.999", "localhost.example"})
+    assert(!gufo::server::DebugLoopbackListener(host));
+  auto settings = std::make_shared<const gufo::json::Value>(
+      gufo::json::parse(R"({"secret":"local"})"));
+  RunningServer remote({.debug_hooks = true, .debug_settings = settings}, false,
+                       "0.0.0.0");
+  for (const auto* path :
+       {"/v1/completions", "/v1/responses", "/v1/chat/completions",
+        "/v1/messages", "/completion"}) {
+    const auto response = remote.Post(path, R"({"debug":{"timeline":true}})");
+    ExpectStatus(response, 400);
+    assert(DebugHooksHttpResponseBody(response).find("error")->member_str(
+               "message") == "debug hooks require a loopback listener");
+  }
+  ExpectStatus(remote.Send("GET /debug/cache HTTP/1.1\r\n\r\n"), 404);
+  ExpectStatus(remote.Post("/debug/prompt", R"({"text":"x"})"), 404);
+  const auto models = DebugHooksHttpResponseBody(
+      remote.Send("GET /v1/models HTTP/1.1\r\n\r\n"));
+  assert(!models.find("data")->items()[0].contains("gufo"));
+  const auto completion = DebugHooksHttpResponseBody(
+      remote.Post("/v1/completions", R"({"prompt":"x"})"));
+  assert(!completion.contains("gufo"));
+  RunningServer local({.debug_hooks = true}, false, "localhost");
+  for (const auto* path : {"/v1/messages", "/completion"})
+    ExpectStatus(local.Post(path, R"({"debug":{}})"), 400);
+  ExpectStatus(local.Post("/v1/completions",
+                          R"({"prompt":"x","debug":{"timeline":true}})"),
+               400);
+  const auto before_inspection = local.backend->calls.load();
+  const auto inspected = DebugHooksHttpResponseBody(
+      local.Post("/debug/prompt", R"({"text":"xyz"})"));
+  assert(inspected.member_str("text") == "xyz" &&
+         inspected.find("token_ids")->size() == 3);
+  const auto chat_prompt = DebugHooksHttpResponseBody(local.Post(
+      "/debug/prompt",
+      R"({"model":"test","messages":[{"role":"user","content":"xyz"}]})"));
+  assert(chat_prompt.dump() == inspected.dump() &&
+         local.backend->calls.load() == before_inspection);
+  RunningServer ipv6_local({.debug_hooks = true, .debug_settings = settings},
+                           false, "::1");
+  ExpectStatus(ipv6_local.Send("GET /debug/settings HTTP/1.1\r\n\r\n"), 200);
+  RunningServer ipv6_remote({.debug_hooks = true, .debug_settings = settings},
+                            false, "::");
+  ExpectStatus(ipv6_remote.Send("GET /debug/settings HTTP/1.1\r\n\r\n"), 404);
+  ExpectStatus(ipv6_remote.Post("/v1/completions",
+                                R"({"prompt":"x","debug":{"timeline":true}})"),
+               400);
+  RunningServer broken;
+  broken.backend->logprob_support = true;
+  broken.backend->short_scores = true;
+  broken.backend->initial_output_state_override =
+      TextGenerationBackend::InitialOutputState::kContent;
+  for (const auto* path :
+       {"/v1/chat/completions", "/v1/completions", "/v1/responses"}) {
+    const auto response = broken.Post(
+        path,
+        path == std::string_view("/v1/chat/completions")
+            ? R"({"model":"test","messages":[{"role":"user","content":"x"}],"logprobs":true})"
+        : path == std::string_view("/v1/completions")
+            ? R"({"prompt":"x","logprobs":2})"
+            : R"({"input":"x","include":["message.output_text.logprobs"]})");
+    ExpectStatus(response, 500);
+    assert(DebugHooksHttpResponseBody(response).find("error")->member_str(
+               "message") == "generated token and logprob counts differ");
+  }
+  const auto late = broken.Post(
+      "/v1/chat/completions",
+      R"({"model":"test","messages":[{"role":"user","content":"x"}],"logprobs":true,"stream":true})");
+  ExpectStatus(late, 200);
+  assert(late.find("generated token and logprob counts differ") !=
+             std::string::npos &&
+         late.find("\"finish_reason\":\"error\"") != std::string::npos);
+}
+
+int main(int argc, char** argv) {
+  if (argc == 2 && std::string_view(argv[1]) == "--debug-hooks") {
+    DebugHooksBaseGoldenBytesAndExposure();
+    DebugHooksHttpTestSettingsEcho();
+    DebugHooksHttpTestResponsesLogprobs();
+    DebugHooksHttpTestNullableLegacyLimit();
+    DebugHooksHttpTestDisabledAndProbeErrors();
+    DebugHooksHttpTestLogprobValidation();
+    DebugHooksHttpTestGeneratedLogprobs();
+    DebugHooksHttpTestPromptScores();
+    return 0;
+  }
+
+  DebugHooksBaseGoldenBytesAndExposure();
   // The log assertions below match "[LEVEL] [component]" text written to a
   // redirected stderr sink, so the real stderr's TTY state must not add ANSI
   // tint around the level tag.

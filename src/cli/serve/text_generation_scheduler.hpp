@@ -17,6 +17,8 @@ namespace gufo::server {
 
 enum class TextRequestPhase : std::uint8_t {
   kQueued,
+  kScoreQueued,
+  kScoring,
   kAdmitted,
   kPrefilling,
   kDecodeReady,
@@ -63,6 +65,7 @@ public:
   using Result = TextGenerationBackend::Result;
   using CancellationCheck = TextGenerationBackend::CancellationCheck;
   using TokenCallback = TextGenerationBackend::TokenCallback;
+  using ScoredTokenCallback = TextGenerationBackend::ScoredTokenCallback;
   using ProgressCallback = TextGenerationBackend::ProgressCallback;
   using StartCallback = TextGenerationBackend::StartCallback;
   using SessionState = TextGenerationBackend::SessionState;
@@ -103,7 +106,8 @@ public:
     /// `stream_start_delay` in the queue, before progress and pieces.
     Result Wait(const TokenCallback& on_token = {},
                 const ProgressCallback& on_progress = {},
-                const StartCallback& on_start = {});
+                const StartCallback& on_start = {},
+                const ScoredTokenCallback& on_score = {});
     void Cancel() noexcept;
 
   private:

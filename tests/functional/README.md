@@ -265,3 +265,15 @@ benchmark and numerical quality tests; they do not establish upstream model
 parity. Sampled DSpark may differ across concurrency levels; fixed-path replay
 and greedy equality remain checked. API behavior and references are in
 [SERVER.md](../../docs/SERVER.md).
+
+Round-2 operator gate (never run during a build/timing exclusion window):
+`pwsh -NoProfile -File scripts/debug-hooks-gate.ps1 -RuntimeDir <candidate-runtime>
+-BaseRuntimeDir <35c386a-runtime> -ModelPath <target.gguf> -MtpModelPath <mtp.gguf>
+-OutputDirectory <evidence-directory>`.
+The Python helper uses only HTTP on 18101. It checks actual timeline token IDs,
+seeded MTP sampled/greedy chat (buffered/streaming), score recomputation by echo,
+and records capability-OFF/base response-body bytes. Dynamic IDs and measured
+durations make raw successful-response bytes differ across independent runs;
+raw comparisons remain printed/saved separately from deterministic-field checks.
+CPU diagnostic registrations accept `--debug-hooks`, avoiding duplicate full-suite
+execution. All round-2 tests are written and syntax-checked only in the repair job.

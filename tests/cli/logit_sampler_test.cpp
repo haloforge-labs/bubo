@@ -11,8 +11,9 @@
 #include <string_view>
 #include <vector>
 
-#include "src/core/sampling.hpp"
 #include "src/cli/serve/logprobs.hpp"
+#include "src/core/sampling.hpp"
+#include "src/models/qwen38_flash_next/mtp_sampling.hpp"
 #include "tests/models/qwen27b/sampling_cases.hpp"
 
 namespace {
@@ -779,17 +780,6 @@ void TestDebugHooksLogprobTransport() {
              content[1].find("top_logprobs")->empty() &&
              content[1].member_double("logprob") == -9999,
          "debug chat top0 shape and masked-token sentinel are explicit");
-  auto chunk = gufo::json::Value::object();
-  chunk["choices"] = gufo::json::Value::array();
-  auto choice = gufo::json::Value::object();
-  choice["index"] = 0;
-  choice["delta"] = gufo::json::Value::object();
-  choice["delta"]["content"] = text(0) + text(1);
-  choice["logprobs"] = chat;
-  chunk["choices"].push_back(std::move(choice));
-  Expect(chunk.find("choices")->items()[0].find("logprobs")->find("content")
-                 ->size() == 2,
-         "debug streaming chunk carries logprobs alongside delta content");
   const std::array<TokenId, 2> tokens{0, 1};
   const std::array<std::optional<TokenLogprob>, 2> prompt{std::nullopt, scores[1]};
   const auto legacy = gufo::server::LegacyLogprobs(tokens, prompt, text);
@@ -820,9 +810,72 @@ void TestDebugHooksLogprobTransport() {
              "debug legacy top logprob keys sanitize split codepoints");
 }
 
+void TestScoringPreservesMtpAcceptReject() {
+  using namespace gufo::sampling;
+  using namespace gufo::models::qwen38_flash_next;
+  bool accepted = false, rejected = false;
+  const std::array<float, 4> row{2.0F, 0.0F, -1.0F, -2.0F};
+  const std::array<float, 3> values{2.0F, 0.0F, -1.0F};
+  const std::array<TokenId, 3> ids{0, 1, 2};
+  for (float temperature : {0.0F, 1.0F}) {
+    for (std::uint64_t seed = 1; seed <= 128; ++seed) {
+      SamplingConfig off;
+      off.temperature = temperature;
+      off.top_k = 2;
+      off.seed = seed;
+      auto on = off;
+      on.logprobs = 2;
+      SamplerState plain(off), scored(on);
+      MtpProposal proposal;
+      proposal.token = 1;
+      proposal.size = 2;
+      proposal.ids[0] = 0;
+      proposal.ids[1] = 1;
+      proposal.probabilities[0] = .5F;
+      proposal.probabilities[1] = .5F;
+      proposal.probability = .5F;
+      for (int cycle = 0; cycle < 4; ++cycle) {
+        auto before = scored;
+        const auto candidates =
+            temperature > 0 ? plain.DistributionFromTop(values, ids, row.size())
+                            : std::optional<SamplingDistribution>{};
+        if (temperature > 0)
+          Expect(candidates.has_value(),
+                 "compact candidate support is proven exact");
+        const auto a = candidates ? VerifyMtpProposal(*candidates, row.size(),
+                                                      proposal, plain)
+                                  : VerifyMtpProposal(row, proposal, plain);
+        const auto b = VerifyMtpProposal(row, proposal, scored);
+        const auto record = before.RawLogprobs(row, b.token, 2);
+        Expect(a.token == b.token && a.accepted == b.accepted &&
+                   plain.rng_state() == scored.rng_state() &&
+                   record.token == b.token,
+               "scoring preserves production MTP acceptance, residual token "
+               "and RNG frontier");
+        accepted |= a.accepted;
+        rejected |= !a.accepted;
+        plain.Accept(a.token);
+        scored.Accept(b.token);
+      }
+    }
+  }
+  Expect(accepted && rejected,
+         "speculative proof exercises both accept and reject decisions");
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+  if (argc == 2 && std::string_view(argv[1]) == "--debug-hooks") {
+    TestDebugHooksRawLogprobs();
+    TestDebugHooksLogprobsPreserveSeededDraws();
+    TestScoringPreservesMtpAcceptReject();
+    TestDebugHooksBiasAndGrammarLogprobs();
+    TestDebugHooksTeacherForcedFirstTokenPhase();
+    TestDebugHooksLogprobTransport();
+    return 0;
+  }
+
   bool sub_float_resolution = false;
   for (std::uint64_t seed = 1; seed < 100; ++seed) {
     auto state = seed;
@@ -838,6 +891,7 @@ int main() {
   }
   Expect(sub_float_resolution, "uniform must exceed float resolution");
   TestCanonicalTargetDistribution();
+  TestScoringPreservesMtpAcceptReject();
   TestDebugHooksRawLogprobs();
   TestDebugHooksLogprobsPreserveSeededDraws();
   TestDebugHooksBiasAndGrammarLogprobs();

@@ -1,22 +1,50 @@
 #ifndef GUFO_SERVER_DEBUG_REQUEST_HPP_
 #define GUFO_SERVER_DEBUG_REQUEST_HPP_
 
+#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include "src/core/json.hpp"
 
 namespace gufo::server {
 
+inline bool DebugLoopbackListener(std::string_view host) {
+  if (host == "localhost" || host == "::1")
+    return true;
+  unsigned octets[4]{};
+  for (unsigned i = 0; i < 4; ++i) {
+    const auto end = host.find('.');
+    const auto part = host.substr(0, end);
+    const auto parsed =
+        std::from_chars(part.data(), part.data() + part.size(), octets[i]);
+    if (part.empty() || parsed.ec != std::errc{} ||
+        parsed.ptr != part.data() + part.size() || octets[i] > 255 ||
+        (i < 3) != (end != std::string_view::npos))
+      return false;
+    if (i < 3)
+      host.remove_prefix(end + 1);
+  }
+  return octets[0] == 127;
+}
+
 // Parse alongside the existing body, so an ordinary request needs no second
 // JSON parse and requested diagnostics cannot silently disappear.
 inline std::optional<std::string> ParseDebugRequest(const json::Value& body,
-                                                   bool enabled,
-                                                   bool* timeline) {
+                                                    bool enabled,
+                                                    bool* timeline,
+                                                    bool loopback = true) {
+  if (!enabled)
+    return std::nullopt;
   const auto* debug = body.find("debug");
-  if (!debug || debug->is_null())
+  if (!debug)
+    return std::nullopt;
+  if (!loopback)
+    return "debug hooks require a loopback listener";
+  if (debug->is_null())
     return std::nullopt;
   if (!debug->is_object())
     return "'debug' must be an object";
@@ -31,11 +59,8 @@ inline std::optional<std::string> ParseDebugRequest(const json::Value& body,
     else
       probe = value.as_bool();
   }
-  if ((*timeline || probe) && !enabled)
-    return "debug hooks are disabled (start the server with --debug-hooks)";
   if (probe)
-    return "cache inspection is unavailable: exact hit accounting requires "
-           "cache instrumentation";
+    return "cache inspection is not implemented";
   return std::nullopt;
 }
 

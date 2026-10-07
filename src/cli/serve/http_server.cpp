@@ -1,9 +1,5 @@
 #include "src/cli/serve/http_server.hpp"
 
-#include "src/cli/serve/debug_request.hpp"
-#include "src/cli/serve/debug_response.hpp"
-#include "src/cli/serve/logprobs.hpp"
-
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -40,10 +36,14 @@
 #include "src/cli/serve/audio_asr_api.hpp"
 #include "src/cli/serve/audio_tts_api.hpp"
 #include "src/cli/serve/audio_websocket.hpp"
+#include "src/cli/serve/debug_request.hpp"
+#include "src/cli/serve/debug_response.hpp"
 #include "src/cli/serve/image_api.hpp"
 #include "src/cli/serve/logging.hpp"
+#include "src/cli/serve/logprobs.hpp"
 #include "src/cli/serve/openai_chat.hpp"
 #include "src/cli/serve/sampling_request.hpp"
+#include "src/cli/serve/scored_stream.hpp"
 #include "src/cli/serve/stop_sequences.hpp"
 #include "src/cli/serve/trace.hpp"
 #include "src/cli/serve/tts_service.hpp"
@@ -702,7 +702,9 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
         !(allowances.response_controls &&
           (field == "text" || field == "reasoning" || field == "tools" ||
            field == "tool_choice" || field == "parallel_tool_calls" ||
-           field == "include" || field == "top_logprobs"))) {
+           // Unscored include retains the base Responses leniency.
+           field == "include" ||
+           (field == "top_logprobs" && backend.supports_logprobs())))) {
       return InvalidCompatibilityRequest("request field '" + field +
                                          "' is not supported on this endpoint");
     }
@@ -823,10 +825,15 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
   }
 
   bool debug_timeline = false;
-  if (const auto error = ParseDebugRequest(body, req.debug_hooks, &debug_timeline))
+  if (const auto error = ParseDebugRequest(body, req.debug_hooks,
+                                           &debug_timeline, req.debug_loopback))
     return InvalidCompatibilityRequest(*error);
+  if (debug_timeline && !b.supports_timeline())
+    return InvalidCompatibilityRequest(
+        "timeline is not supported for this model");
   std::int32_t requested_logprobs = -1;
-  if (const auto* value = body.find("logprobs"); value && !value->is_null()) {
+  if (const auto* value = body.find("logprobs");
+      value && !value->is_null() && b.supports_logprobs()) {
     if (!value->is_number() || !std::isfinite(value->as_double()) ||
         value->as_double() < 0 || value->as_double() > 20 ||
         value->as_double() != std::floor(value->as_double()))
@@ -913,6 +920,9 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
   const std::string id = "cmpl-" + RandomId();
   const long long created = Now();
   const std::string model = b.model_id();
+  if (stream && requested_logprobs >= 0 && !prompt_score)
+    return ScoredOpenAiStream(generation, b, id, created, false, include_usage,
+                              UsageJson);
   if (stream && requested_logprobs >= 0) {
     auto stream_log = std::make_shared<HttpResponse::StreamLog>();
     return {.status = 200,
@@ -1099,6 +1109,8 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
   c["index"] = 0;
   c["logprobs"] = json::Value();
   if (requested_logprobs >= 0) {
+    if (!prompt_score)
+      ValidateGeneratedLogprobs(res);
     const LogprobTokenText decode = [&b](sampling::TokenId token) {
       return b.token_piece(token);
     };
@@ -1135,7 +1147,8 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
   }
 
   ChatRequest chat;
-  if (const auto error = ParseDebugRequest(body, req.debug_hooks, &chat.debug_timeline))
+  if (const auto error = ParseDebugRequest(
+          body, req.debug_hooks, &chat.debug_timeline, req.debug_loopback))
     return InvalidCompatibilityRequest(*error);
   chat.reasoning = b.reasoning_defaults();
   if (auto error = ParseOpenAiResponseControls(body, &chat))
@@ -1150,6 +1163,9 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
   }
 
   const auto* include = body.find("include");
+  if (chat.debug_timeline && !b.supports_timeline())
+    return InvalidCompatibilityRequest(
+        "timeline is not supported for this model");
   const auto* top_logprobs = body.find("top_logprobs");
   bool output_logprobs = false;
   if (include && include->is_array()) {
@@ -1288,6 +1304,10 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
     return Err(400, "Bad Request", e.what(), "invalid_request_error",
                "parse_error");
   }
+  if (req.debug_hooks && body.contains("debug"))
+    return InvalidCompatibilityRequest(
+        req.debug_loopback ? "debug is not supported on this endpoint"
+                           : "debug hooks require a loopback listener");
 
   ChatRequest chat;
   chat.reasoning = b.reasoning_defaults();
@@ -1391,6 +1411,10 @@ HttpResponse LlamaCompletion(const HttpRequest& req,
     return Err(400, "Bad Request", e.what(), "invalid_request_error",
                "parse_error");
   }
+  if (req.debug_hooks && body.contains("debug"))
+    return InvalidCompatibilityRequest(
+        req.debug_loopback ? "debug is not supported on this endpoint"
+                           : "debug hooks require a loopback listener");
 
   std::size_t max_tokens = 0;
   sampling::SamplingConfig sampling_config;
@@ -1668,7 +1692,8 @@ void HttpServer::register_routes() {
   }
   // ---- OpenAI ----
   const auto add_text = [this](const std::string& path, Handler handler) {
-    if (!options_.debug_settings) {
+    if (!options_.debug_hooks || !DebugLoopbackListener(host_) ||
+        !options_.debug_settings) {
       add("POST", path, std::move(handler));
       return;
     }
@@ -1688,9 +1713,12 @@ void HttpServer::register_routes() {
         response.body = value.dump();
       } else {
         auto stream = std::move(response.streaming_body);
-        response.streaming_body = [stream = std::move(stream), echo]
-            (const HttpResponse::BodyWriter& writer) {
+        response.streaming_body = [stream = std::move(stream), echo](
+                                      const HttpResponse::BodyWriter& writer) {
+          bool echoed = false;
           stream([&](std::string_view frame) {
+            if (echoed)
+              return writer(frame);
             const auto begin = frame.find("data: ");
             if (begin == std::string_view::npos)
               return writer(frame);
@@ -1699,8 +1727,14 @@ void HttpServer::register_routes() {
             const auto payload = frame.substr(payload_start, end - payload_start);
             if (payload == "[DONE]" || payload.empty())
               return writer(frame);
-            auto value = json::parse(payload);
+            json::Value value;
+            try {
+              value = json::parse(payload);
+            } catch (const std::exception&) {
+              return writer(frame);
+            }
             echo(value);
+            echoed = true;
             std::string output(frame.substr(0, payload_start));
             output += value.dump();
             if (end != std::string_view::npos)
@@ -1715,10 +1749,14 @@ void HttpServer::register_routes() {
   add_text("/v1/completions", OpenAiCompletions);
   add_text("/v1/chat/completions", HandleOpenAiChat);
   add_text("/v1/responses", OpenAiResponses);
-  in_addr listener{};
+  if (options_.debug_hooks && DebugLoopbackListener(host_)) {
+    add("POST", "/debug/prompt", InspectDebugPrompt);
+    add("GET", "/debug/cache", [](const HttpRequest&, TextGenerationBackend&) {
+      return InvalidCompatibilityRequest("cache inspection is not implemented");
+    });
+  }
   if (options_.debug_hooks && options_.debug_settings &&
-      ::inet_pton(AF_INET, host_.c_str(), &listener) == 1 &&
-      (ntohl(listener.s_addr) >> 24) == 127) {
+      DebugLoopbackListener(host_)) {
     add("GET", "/debug/settings", [settings = options_.debug_settings]
         (const HttpRequest&, TextGenerationBackend&) { return Ok(*settings); });
   }
@@ -1753,19 +1791,33 @@ bool HttpServer::start(std::string* error) {
     }
     return false;
   }
-  sockaddr_in addr{};
-  addr.sin_family = AF_INET;
-  if (port_ < 0 || port_ > 65535 ||
-      ::inet_pton(AF_INET, host_.c_str(), &addr.sin_addr) != 1) {
-    if (error != nullptr) {
-      *error =
-          "host must be an IPv4 address and port must be between 0 and 65535";
-    }
+  sockaddr_storage addr{};
+  auto* ipv4 = reinterpret_cast<sockaddr_in*>(&addr);
+  auto* ipv6 = reinterpret_cast<sockaddr_in6*>(&addr);
+  const auto bind_host =
+      host_ == "localhost" ? std::string("127.0.0.1") : host_;
+  int family = AF_INET;
+  socklen_t address_size = sizeof(sockaddr_in);
+  if (::inet_pton(AF_INET, bind_host.c_str(), &ipv4->sin_addr) == 1) {
+    ipv4->sin_family = AF_INET;
+    ipv4->sin_port = htons(static_cast<unsigned short>(port_));
+  } else if (::inet_pton(AF_INET6, bind_host.c_str(), &ipv6->sin6_addr) == 1) {
+    family = AF_INET6;
+    address_size = sizeof(sockaddr_in6);
+    ipv6->sin6_family = AF_INET6;
+    ipv6->sin6_port = htons(static_cast<unsigned short>(port_));
+  } else {
+    if (error)
+      *error = "host must be an IPv4 address and port must be between 0 and 65535";
     return false;
   }
-  addr.sin_port = htons(static_cast<unsigned short>(port_));
+  if (port_ < 0 || port_ > 65535) {
+    if (error)
+      *error = "host must be an IPv4 address and port must be between 0 and 65535";
+    return false;
+  }
   (void)::signal(SIGPIPE, SIG_IGN);
-  listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+  listen_fd_ = ::socket(family, SOCK_STREAM, 0);
   if (listen_fd_ < 0) {
     if (error != nullptr)
       *error = "socket() failed";
@@ -1781,7 +1833,7 @@ bool HttpServer::start(std::string* error) {
   ::setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
 #endif
 
-  if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) <
+  if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), address_size) <
       0) {
     if (error != nullptr) {
       *error = "bind() failed on " + host_ + ":" + std::to_string(port_);
@@ -1798,7 +1850,7 @@ bool HttpServer::start(std::string* error) {
     return false;
   }
   if (port_ == 0) {
-    sockaddr_in bound{};
+    sockaddr_storage bound{};
     socklen_t length = sizeof(bound);
     if (::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&bound),
                       &length) != 0) {
@@ -1809,7 +1861,9 @@ bool HttpServer::start(std::string* error) {
       listen_fd_ = -1;
       return false;
     }
-    port_ = ntohs(bound.sin_port);
+    port_ = family == AF_INET
+                ? ntohs(reinterpret_cast<sockaddr_in*>(&bound)->sin_port)
+                : ntohs(reinterpret_cast<sockaddr_in6*>(&bound)->sin6_port);
   }
   return true;
 }
@@ -1988,7 +2042,10 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
   if (req.method == "GET" &&
       (req.path == "/v1/models" || req.path == "/models")) {
     return ListModels(backend_.get(), video_jobs_.get(), tts_.get(), asr_.get(),
-                      images_.get(), options_.debug_settings.get());
+                      images_.get(),
+                      options_.debug_hooks && DebugLoopbackListener(host_)
+                          ? options_.debug_settings.get()
+                          : nullptr);
   }
   if (req.path == "/v1/images/generations" || req.path == "/v1/images/edits") {
     if (!images_)
@@ -2066,15 +2123,24 @@ void HttpServer::handle_connection(int client_fd) {
   const auto start_time = std::chrono::steady_clock::now();
   HttpRequest req;
   static std::atomic<std::uint64_t> next_request{0};
-  sockaddr_in peer{};
+  sockaddr_storage peer{};
   socklen_t peer_size = sizeof(peer);
-  char peer_address[INET_ADDRSTRLEN]{};
+  char peer_address[INET6_ADDRSTRLEN]{};
   if (::getpeername(client_fd, reinterpret_cast<sockaddr*>(&peer),
-                    &peer_size) == 0 &&
-      ::inet_ntop(AF_INET, &peer.sin_addr, peer_address, sizeof(peer_address)))
-    req.client_id = peer_address;
+                    &peer_size) == 0) {
+    const void* address =
+        peer.ss_family == AF_INET
+            ? static_cast<const void*>(
+                  &reinterpret_cast<const sockaddr_in*>(&peer)->sin_addr)
+            : static_cast<const void*>(
+                  &reinterpret_cast<const sockaddr_in6*>(&peer)->sin6_addr);
+    if (::inet_ntop(peer.ss_family, address, peer_address,
+                    sizeof(peer_address)))
+      req.client_id = peer_address;
+  }
   req.request_id = "r" + std::to_string(next_request.fetch_add(1) + 1);
   req.debug_hooks = options_.debug_hooks;
+  req.debug_loopback = !options_.debug_hooks || DebugLoopbackListener(host_);
   req.max_score_tokens = options_.max_score_tokens;
   // Set for routes `--trace` records; `traced_stream` collects the body bytes
   // a streaming reply delivered.

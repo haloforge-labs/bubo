@@ -2502,11 +2502,30 @@ public:
     if (prompt.empty())
       return scores;
     std::string error;
+    // Charge a prompt-sized private session against currently available device
+    // memory, including the model's lazy scratch, before any allocation.
+    const auto mode = model_->HasMtp()
+                          ? gufo::core::SessionMode::kSpeculative
+                          : gufo::core::SessionMode::kAutoregressive;
+    const auto score_context = static_cast<std::uint32_t>(
+        std::min<std::size_t>(max_context_, prompt.size() + 8));
+    const TextRunnerResourceClaim score_claim{
+        .per_request_state_bytes = model_->SessionBytes(mode, score_context),
+        .temporary_scratch_bytes = model_->DeferredScratchBytes()};
+    std::size_t free_bytes = 0, total_bytes = 0;
+    if (gufo::platform::DeviceMemoryInfo(&free_bytes, &total_bytes) !=
+        hipSuccess)
+      throw std::runtime_error("cannot check prompt scoring session memory");
+    if (*score_claim.temporary_scratch_bytes > free_bytes ||
+        *score_claim.per_request_state_bytes >
+            free_bytes - *score_claim.temporary_scratch_bytes)
+      throw std::runtime_error(
+          "prompt scoring session resource claim exceeds free device memory");
     // This worker-owned session cannot mutate another request or cached state.
     auto session = model_->CreateSession(
         model_->HasMtp() ? gufo::core::SessionMode::kSpeculative
                          : gufo::core::SessionMode::kAutoregressive,
-        max_context_, &error);
+        score_context, &error);
     if (!session)
       throw std::runtime_error("prompt scoring session failed: " + error);
     session->SetCancellationCheck(cancelled);
@@ -3265,6 +3284,9 @@ struct InferenceBackend::Impl {
       return result;
     }
 
+    Result WaitScored(const ScoredTokenCallback& on_score) override {
+      return request_.Wait({}, {}, {}, on_score);
+    }
     void Cancel() noexcept override { request_.Cancel(); }
 
     std::optional<sampling::JsonConstraint::ToolFormat> ToolFormat()
@@ -3339,6 +3361,34 @@ bool InferenceBackend::supports_logprobs() const {
 #else
   return false;
 #endif
+}
+
+json::Value InferenceBackend::debug_prompt(const ChatRequest* chat,
+                                           std::string_view text) const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  if (state && state->scheduler->runner().SupportsLogprobs()) {
+    const auto& runner = state->scheduler->runner();
+    std::vector<TextRunnerToken> tokens;
+    if (chat) {
+      auto prompt = runner.PreparePrompt(*chat);
+      if (!prompt)
+        throw std::invalid_argument(
+            "prompt rendering is not supported for this model");
+      tokens = std::move(prompt->tokens);
+    } else {
+      tokens = runner.Tokenize(text);
+    }
+    auto value = json::Value::object();
+    value["text"] = runner.Decode(tokens);
+    value["token_ids"] = json::Value::array();
+    for (const auto token : tokens)
+      value["token_ids"].push_back(static_cast<std::size_t>(token));
+    return value;
+  }
+#endif
+  throw std::invalid_argument(
+      "prompt inspection is not supported for this model");
 }
 
 std::string InferenceBackend::token_piece(sampling::TokenId token) const {
