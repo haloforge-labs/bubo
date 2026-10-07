@@ -1426,7 +1426,7 @@ struct ContinuationDiskStore::Impl {
     // 4096, 4160 / 3500 not): a split at any other position changes the resulting state and so the later output. Round every learned boundary DOWN to a
     // multiple of the alignment (cost < 256 re-prefilled tokens per hit) so a disk-cache run stays bit-identical to a run without it.
     // GUFO_DISK_BOUNDARY_ALIGN=0 (or 1) disables the rounding (A/B), any other value N rounds down to a multiple of N.
-    static const std::size_t boundary_align = [] {
+    const std::size_t boundary_align = [] {   // read per call: tests switch GUFO_DISK_BOUNDARY_ALIGN
       const char* e = std::getenv("GUFO_DISK_BOUNDARY_ALIGN");
       if (e == nullptr || *e == '\0') return std::size_t{256};
       const auto v = std::strtoull(e, nullptr, 10);

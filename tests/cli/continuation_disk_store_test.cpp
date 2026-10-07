@@ -1115,6 +1115,39 @@ void TestImageIdentitySurvivesRestart() {
   Expect(!store.Touch(runner, prompt), "disk dedup respects image identity");
 }
 
+void TestLearnedBoundaryRoundsDownToTheAlignment() {
+  // Lead 1: a learned shared-prefix boundary is rounded DOWN to a multiple of 256 tokens by default (prefill splits at any other position change the
+  // resulting state), GUFO_DISK_BOUNDARY_ALIGN=0 or 1 disables it, any other N rounds down to a multiple of N; a boundary that rounds to 0 is dropped.
+  TemporaryDirectory directory;
+  FakeRunner runner("boundary-align");
+  ContinuationDiskStore store(StoreOptions(directory.path()));
+  const auto build = [](std::size_t shared, TextRunnerToken tail) {
+    std::vector<TextRunnerToken> tokens(shared);
+    for (std::size_t i = 0; i < shared; ++i) tokens[i] = static_cast<TextRunnerToken>(10 + i % 50);
+    for (TextRunnerToken k = 0; k < 4; ++k) tokens.push_back(tail + k);
+    return tokens;
+  };
+  const auto stored = build(600, 1000);
+  Expect(store.Save(runner, stored, *MakeSnapshot(runner, 1, stored.size())).stored, "long prompt stores");
+  const auto query = build(600, 2000);
+  const auto learned = [&](const char* align) {
+    ::setenv("GUFO_DISK_BOUNDARY_ALIGN", align, 1);
+    return store.SharedPrefixBoundaries(runner, query, 1, 4);
+  };
+  Expect(learned("") == std::vector<std::size_t>({512}), "default alignment rounds the 600-token boundary down to 512");
+  Expect(learned("0") == std::vector<std::size_t>({600}), "alignment 0 keeps the exact boundary");
+  Expect(learned("1") == std::vector<std::size_t>({600}), "alignment 1 keeps the exact boundary");
+  Expect(learned("64") == std::vector<std::size_t>({576}), "alignment 64 rounds down to a multiple of 64");
+  Expect(learned("250") == std::vector<std::size_t>({500}), "alignment 250 rounds the 600-token boundary down to 500");
+  const auto short_stored = build(200, 3000);
+  Expect(store.Save(runner, short_stored, *MakeSnapshot(runner, 2, short_stored.size())).stored, "short-prefix prompt stores");
+  const auto short_query = build(200, 4000);
+  ::setenv("GUFO_DISK_BOUNDARY_ALIGN", "", 1);
+  Expect(store.SharedPrefixBoundaries(runner, short_query, 1, 4).empty(), "a boundary that rounds down to 0 is dropped");
+  ::setenv("GUFO_DISK_BOUNDARY_ALIGN", "0", 1);
+  Expect(store.SharedPrefixBoundaries(runner, short_query, 1, 4) == std::vector<std::size_t>({200}), "alignment 0 keeps the short boundary");
+}
+
 void TestAppendedImagePrefixesSurviveRestart() {
   using gufo::server::ContinuationInputPrefix;
   TemporaryDirectory directory;
@@ -1220,6 +1253,7 @@ int main() {
   TestAppendedImagePrefixesSurviveRestart();
   TestBoundedAsyncPersistenceDoesNotBlockLookup();
   TestIndexedPrefixLookup();
+  TestLearnedBoundaryRoundsDownToTheAlignment();
   TestMinimumCheckpointStep();
   TestImageIdentitySurvivesRestart();
   TestSharedPrefixBoundariesAndExactDedup();
