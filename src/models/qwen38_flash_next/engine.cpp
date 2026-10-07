@@ -30,6 +30,18 @@ constexpr std::uint32_t kPrefillChunkTokens = 2048;
 // tail pass costs about as much as this many more chunk rows.
 constexpr std::uint32_t kPrefillTailTokens = 128;
 
+// Experiment hook (prefill session 2026-10-04, re-ported 2026-10-07): GUFO_PREFILL_FORWARD_TOKENS overrides the 2,048-token forward size.
+// Measured on gfx1151 at 28K-token cold prompts: 4,096 -> 0.88 ms/token, 2,048 -> 1.4-1.8, 8,192 -> 1.5. Scratch is sized from this value
+// (executor max_batch), so it is read once; unset or out of [64, 16384] keeps the default.
+std::uint32_t PrefillChunkTokens() {
+  static const std::uint32_t chunk = [] {
+    const char* e = std::getenv("GUFO_PREFILL_FORWARD_TOKENS");
+    const long v = e != nullptr ? std::strtol(e, nullptr, 10) : 0;
+    return (v >= 64 && v <= 16384) ? static_cast<std::uint32_t>(v) : kPrefillChunkTokens;
+  }();
+  return chunk;
+}
+
 void AssignError(std::string* error_msg, std::string_view message) {
   if (error_msg != nullptr) {
     *error_msg = message;
@@ -274,11 +286,11 @@ std::uint32_t Model::VocabSize() const noexcept {
 }
 
 std::uint32_t Model::PrefillCapacity() const noexcept {
-  return std::min(kPrefillChunkTokens, options_.max_context);
+  return std::min(PrefillChunkTokens(), options_.max_context);
 }
 
 std::uint32_t Model::PrefillThroughCapacity() const noexcept {
-  return std::min(kPrefillChunkTokens + kPrefillTailTokens,
+  return std::min(PrefillChunkTokens() + kPrefillTailTokens,
                   options_.max_context);
 }
 
