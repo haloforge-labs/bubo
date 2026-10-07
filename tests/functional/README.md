@@ -277,3 +277,10 @@ durations make raw successful-response bytes differ across independent runs;
 raw comparisons remain printed/saved separately from deterministic-field checks.
 CPU diagnostic registrations accept `--debug-hooks`, avoiding duplicate full-suite
 execution. All round-2 tests are written and syntax-checked only in the repair job.
+
+Round 3 debug timeline schema and unavailable counter limits are documented in
+[SERVER.md](../../docs/SERVER.md#optional-debug-hooks-and-logprobs). The CPU alias
+`debug_hooks_timeline_test` includes mixed-source/policy, RAM/disk/live restore,
+in-pass capture/restore, reconciliation, OFF omission, and cycle-cap cases.
+These cases are written and syntax-checked only; run them in the operator build
+window before treating the enriched timeline as runtime-validated.

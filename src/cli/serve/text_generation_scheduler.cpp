@@ -22,6 +22,7 @@
 #include <thread>
 #include <utility>
 
+#include "src/cli/serve/debug_settings.hpp"
 #include "src/cli/serve/generation_metrics.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/stop_sequences.hpp"
@@ -1143,7 +1144,7 @@ struct TextGenerationScheduler::Impl {
           lookup_fields["cached_tokens"] = request->result.cached_prompt_tokens;
           lookup_fields["source"] = !request->result.cache_hit ? "none"
               : request->result.cache_disk_hit ? "disk"
-              : request->result.cache_restore_bytes != 0 ? "RAM" : "live";
+              : request->result.cache_restore_bytes != 0 ? "RAM" : "live_slot";
           lookup_fields["ms"] = request->result.queue_ms -
               std::chrono::duration<double, std::milli>(
                   request->debug_admit_start - request->request_start).count();
@@ -1429,7 +1430,8 @@ struct TextGenerationScheduler::Impl {
       request->result.decode_ms += elapsed;
       if (request->result.debug_timeline)
         request->result.debug_timeline->Cycle(decode_start, elapsed,
-            step.draft_tokens + 1, step.draft_tokens, step.draft_accepted_tokens);
+            step.draft_tokens + 1, step.draft_tokens, step.draft_accepted_tokens,
+            step.lookup_tokens, false, request->sampling.uses_random_sampling());
       LogDecodeProgress(request);
       if (request->stop_filter.stopped()) {
         CompleteSuccess(request,
@@ -1758,7 +1760,8 @@ struct TextGenerationScheduler::Impl {
       item.request->result.decode_ms += elapsed;
       if (item.request->result.debug_timeline)
         item.request->result.debug_timeline->Cycle(item.decode_start, elapsed,
-            step.draft_tokens + 1, step.draft_tokens, step.draft_accepted_tokens);
+            step.draft_tokens + 1, step.draft_tokens, step.draft_accepted_tokens,
+            std::nullopt, std::nullopt, item.request->sampling.uses_random_sampling());
       LogDecodeProgress(item.request);
       if (!published || IsTerminal(item.request)) {
         continue;
@@ -2318,6 +2321,8 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
         : std::make_shared<DebugTimeline>(request->request_start);
     if (!has_render_timeline)
       request->result.debug_timeline->Add("admission", request->request_start);
+    request->result.debug_timeline->Header(
+        BuildTimelineBundle(DebugSettings(), sampling, metadata.cache_prompt));
     request->result.debug_timeline->Bind(request->id);
   }
   request->stream_start_deadline =

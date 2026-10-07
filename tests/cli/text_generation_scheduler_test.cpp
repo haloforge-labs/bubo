@@ -25,6 +25,7 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include <unistd.h>
 
 #include "src/cli/serve/debug_response.hpp"
 #include "src/cli/serve/generation_metrics.hpp"
@@ -170,6 +171,7 @@ struct FakeControl {
   bool final_token_advance_required{true};
   bool incremental_text_is_exact{false};
   bool multi_token_decode{false};
+  bool timeline_mixed_drafts{false};
   bool batched_multi_token_decode{false};
   std::size_t actual_batch_width{4};
   bool prefix_reuse{true};
@@ -180,6 +182,7 @@ struct FakeControl {
   std::optional<std::size_t> eos_after;
   std::function<void()> snapshot_callback;
   bool in_pass_checkpoint{false};
+  bool persistent_snapshots{false};
   bool score_supported{false};
   bool omit_score{false};
   std::atomic<std::size_t> score_calls{0};
@@ -248,7 +251,10 @@ public:
                 .prefix_reuse = control_->prefix_reuse,
                 .in_pass_checkpoint = control_->in_pass_checkpoint,
             },
-        .persistence = std::nullopt,
+        .persistence = control_->persistent_snapshots
+            ? std::optional<gufo::server::TextRunnerPersistenceDescriptor>(
+                  {{1, 2, 3}, 1})
+            : std::nullopt,
     };
   }
 
@@ -477,6 +483,46 @@ public:
     restored.frontier = saved.frontier;
   }
 
+  [[nodiscard]] std::size_t PersistentSnapshotPayloadBytes(
+      const gufo::server::TextRunnerSnapshot&) const override {
+    return 5 * sizeof(std::uint64_t);
+  }
+
+  [[nodiscard]] std::size_t SerializePersistentSnapshot(
+      const gufo::server::TextRunnerSnapshot& snapshot,
+      std::span<std::uint8_t> destination) const override {
+    const auto& saved = dynamic_cast<const SnapshotState&>(snapshot);
+    if (destination.size() != 5 * sizeof(std::uint64_t))
+      throw std::invalid_argument("scheduler snapshot payload size mismatch");
+    const std::array<std::uint64_t, 5> fields = {
+        saved.label, saved.position, saved.decode_count,
+        saved.frontier.has_value() ? 1U : 0U, saved.frontier.value_or(0)};
+    for (std::size_t field = 0; field < fields.size(); ++field) {
+      for (std::size_t byte = 0; byte < sizeof(std::uint64_t); ++byte)
+        destination[field * sizeof(std::uint64_t) + byte] =
+            static_cast<std::uint8_t>(fields[field] >> (byte * 8U));
+    }
+    return destination.size();
+  }
+
+  void RestorePersistentSnapshot(TextRunnerState& state,
+      std::span<const std::uint8_t> payload) const override {
+    if (payload.size() != 5 * sizeof(std::uint64_t))
+      throw std::invalid_argument("scheduler snapshot payload size mismatch");
+    std::array<std::uint64_t, 5> fields{};
+    for (std::size_t field = 0; field < fields.size(); ++field) {
+      for (std::size_t byte = 0; byte < sizeof(std::uint64_t); ++byte)
+        fields[field] |= static_cast<std::uint64_t>(
+            payload[field * sizeof(std::uint64_t) + byte]) << (byte * 8U);
+    }
+    auto& restored = RequireFakeState(state);
+    restored.label = fields[0];
+    restored.position = fields[1];
+    restored.decode_count = fields[2];
+    restored.frontier = fields[3] ? std::optional<TextRunnerToken>(fields[4])
+                                  : std::nullopt;
+  }
+
   void Advance(TextRunnerState& state, TextRunnerToken token) const override {
     const auto started = std::chrono::steady_clock::now();
     auto& fake = RequireFakeState(state);
@@ -519,6 +565,18 @@ public:
           std::memory_order_relaxed);
   }
 
+  [[nodiscard]] gufo::json::Value DebugSettings() const override {
+    auto settings = gufo::json::Value::object();
+    if (control_->timeline_mixed_drafts) {
+      auto policy = gufo::json::Value::object();
+      policy["survival"] = true;
+      policy["runner_max_draft_tokens"] = 4;
+      policy["draft_vocabulary"] = "latin_text";
+      settings["mtp_policy"] = std::move(policy);
+    }
+    return settings;
+  }
+
   [[nodiscard]] TextDecodeStep DecodeStep(
       TextRunnerState& state, std::size_t max_tokens,
       gufo::sampling::SamplerState& sampler) const override {
@@ -546,6 +604,10 @@ public:
     step.draft_rounds = 1;
     step.draft_tokens = count + 1;
     step.draft_accepted_tokens = count;
+    if (control_->timeline_mixed_drafts) {
+      step.lookup_tokens = fake.decode_count <= 3 ? 2 : 0;
+      step.draft_accepted_tokens = count - 1;
+    }
     return step;
   }
 
@@ -2776,18 +2838,21 @@ void TestDebugTimelineOrderCountsAndOffPath() {
          "timeline ends at finish");
   std::size_t passes = 0, cycles = 0, first = 0, lookup = 0, queue = 0;
   double previous = -1;
+  double cycle_ms = 0, prefill_ms = 0, restore_ms = 0, queue_ms = 0;
   for (const auto& event : events.items()) {
     Expect(event.member_double("t_ms") >= previous,
            "timeline is chronological");
     previous = event.member_double("t_ms");
     const auto name = event.member_str("event");
     if (name == "prefill") {
+      prefill_ms += event.member_double("ms");
       Expect(event.member_size("index") == passes &&
                  event.member_size("start_depth") == passes * 2 &&
                  event.member_size("tokens") == 2,
              "scripted prefill pass index, tokens and depth");
       ++passes;
     } else if (name == "decode_cycle") {
+      cycle_ms += event.member_double("ms");
       Expect(event.member_size("verify_width") == 1 &&
                  event.member_size("drafts") == 0,
              "AR cycles report width one");
@@ -2795,16 +2860,31 @@ void TestDebugTimelineOrderCountsAndOffPath() {
     } else if (name == "first_token") {
       ++first;
     } else if (name == "cache_lookup") {
+      restore_ms += event.member_double("restore_ms");
       ++lookup;
       Expect(event.member_str("source") == "none",
              "cold lookup reports its source");
     } else if (name == "queue") {
+      queue_ms += event.member_double("wait_ms");
       ++queue;
     }
   }
   Expect(passes == result.prefill_chunks && passes == 3 && cycles == 4 &&
              first == 1 && lookup == 1 && queue == 1,
          "timeline captures every scripted work unit once");
+  const auto* summary = events.items().back().find("summary");
+  Expect(summary && summary->find("prefill_passes")->size() == passes,
+         "summary lists all actual prefill passes");
+  Expect(summary->member_double("cycle_ms") == cycle_ms &&
+             summary->member_double("prefill_ms") == prefill_ms &&
+             summary->member_double("restore_ms") == restore_ms &&
+             summary->member_double("queue_ms") == queue_ms,
+         "summary totals reconcile against independently accumulated event measurements");
+  const double accounted = summary->member_double("cycle_ms") +
+      summary->member_double("prefill_ms") + summary->member_double("restore_ms") +
+      summary->member_double("queue_ms") + summary->member_double("unattributed_ms");
+  Expect(std::abs(accounted - summary->member_double("wall_ms")) < 1e-8,
+         "cycle + prefill + restore + queue + unattributed equals wall");
   Expect(!result.debug_timeline->truncated(), "short request is untruncated");
   metadata.debug_timeline = false;
   const auto off = scheduler->Submit({1, 2, 3, 4, 5, 6}, 4, 0.0F, {}, false,
@@ -2812,6 +2892,172 @@ void TestDebugTimelineOrderCountsAndOffPath() {
   Expect(!off.debug_timeline && off.tokens == result.tokens &&
              off.text == result.text,
          "timeline OFF has no event storage and identical outputs");
+  auto response = gufo::json::Value::object();
+  gufo::server::AddDebugTimeline(response, off);
+  Expect(!response.find("gufo"), "OFF response contains no timeline or summary");
+}
+
+void TestDebugTimelineMixedSourcesAndPolicy() {
+  auto control = std::make_shared<FakeControl>();
+  control->multi_token_decode = true;
+  control->timeline_mixed_drafts = true;
+  auto scheduler = MakeScheduler(control, 1);
+  TextRequestMetadata metadata;
+  metadata.debug_timeline = true;
+  metadata.cache_prompt = false;
+  gufo::sampling::SamplingConfig config;
+  config.temperature = 1.0F;
+  auto behaviour = std::make_shared<gufo::sampling::BehaviourConfig>();
+  behaviour->think_eog_guard = true;
+  behaviour->spec_eog_stop = true;
+  behaviour->eog_min_prob = 0.25;
+  config.behaviour = behaviour;
+  const auto result = scheduler->Submit({1, 2, 3}, 6, config, {}, false,
+                                        metadata).Wait();
+  const auto events = result.debug_timeline->Serialize();
+  const auto* bundle = events.items().front().find("bundle");
+  Expect(bundle && bundle->find("mtp_policy")->member_str("name") == "survival" &&
+             bundle->find("mtp_policy")->member_size("cap") == 4 &&
+             bundle->find("behaviour")->find("think_eog_guard")->as_bool() &&
+             bundle->find("behaviour")->member_double("eog_min_prob") == 0.25,
+         "header projects configured policy and actual request switches");
+  std::size_t cycles = 0;
+  for (const auto& event : events.items()) {
+    if (event.member_str("event") != "decode_cycle")
+      continue;
+    const auto* sources = event.find("draft_sources");
+    Expect(sources && sources->member_size("prompt_lookup") == (cycles == 0 ? 2 : 0) &&
+               sources->member_size("mtp_head") == (cycles == 0 ? 2 : 4) &&
+               event.member_str("draft_source") == (cycles == 0 ? "mixed" : "mtp_head") &&
+               event.member_size("drafts") == 4 && event.member_size("accepted_length") == 2 &&
+               event.find("partial_accept")->as_bool() &&
+               event.find("policy")->member_size("cap") == 4 &&
+               event.find("policy")->member_str("name") == "survival" &&
+               event.member_size("accepted_length") + 1 == 3,
+           "scripted mixed and head-only cycles retain exact source and verify counts");
+    Expect(!event.find("proposed_length") && !event.find("policy_chosen_length") &&
+               !event.find("filter_changed") && !event.find("filter_rejected") &&
+               !event.find("rollback"),
+           "unavailable pre-policy, filter and rollback counters are omitted even with latin vocabulary");
+    ++cycles;
+  }
+  Expect(cycles == 2, "scripted multi-token request has two cycles");
+}
+
+void TestDebugTimelineRamAndLiveRestoreKinds() {
+  auto control = std::make_shared<FakeControl>();
+  control->snapshot_callback = [] {};
+  control->in_pass_checkpoint = true;
+  auto scheduler = MakeScheduler(control, 1);
+  TextRequestMetadata metadata;
+  metadata.debug_timeline = true;
+  metadata.cache_prefix_tokens = 2;
+  const auto first = scheduler->Submit({1, 2, 3, 4, 5, 6}, 1, 0.0F, {}, false,
+                                       metadata).Wait();
+  // Diverge immediately after the in-pass stable checkpoint: the live frontier
+  // does not match, so Acquire must restore the retained RAM snapshot.
+  const auto restored = scheduler->Submit({1, 2, 9, 10}, 1, 0.0F, {}, false,
+                                          metadata).Wait();
+  Expect(restored.cache_hit && restored.cached_prompt_tokens == 2 &&
+             restored.cache_restore_bytes > 0 && !restored.cache_disk_hit,
+         "divergent suffix forces restoration of the in-pass RAM checkpoint");
+  const auto events = restored.debug_timeline->Serialize();
+  const auto* summary = events.items().back().find("summary");
+  const auto& restore = summary->find("restores")->items().front();
+  Expect(restore.member_str("kind") == "RAM" &&
+             restore.member_size("bytes") == restored.cache_restore_bytes &&
+             restore.member_double("ms") == restored.cache_restore_ms &&
+             !restore.find("capture_origin"),
+         "RAM restore uses measured bytes/ms without fabricating lost capture provenance");
+  // Extend the current live token prefix, including its generated token.
+  metadata.cache_prefix_tokens = 0;
+  const auto live = scheduler->Submit({1, 2, 9, 10, 100, 11}, 1, 0.0F, {}, false,
+                                      metadata).Wait();
+  const auto live_events = live.debug_timeline->Serialize();
+  const auto* live_summary = live_events.items().back().find("summary");
+  Expect(live.cache_hit && live.cache_restore_bytes == 0 &&
+             live_summary->find("restores")->items().front().member_str("kind") == "live_slot",
+         "live slot reuse is distinguished from snapshot restoration");
+}
+
+void TestDebugTimelineBatchOmissionsAndAccounting() {
+  const auto start = TextGenerationScheduler::Clock::now();
+  gufo::server::DebugTimeline timeline(start);
+  timeline.Add("admission", start);
+  auto bundle = gufo::json::Value::object();
+  bundle["mtp_policy"] = gufo::json::Value::object();
+  bundle["mtp_policy"]["name"] = "survival";
+  bundle["mtp_policy"]["cap"] = 4;
+  timeline.Header(std::move(bundle));
+  auto queue = gufo::json::Value::object();
+  queue["wait_ms"] = 4.0;
+  queue["queue_ms"] = 20.0;
+  timeline.Add("queue", start, queue);
+  auto lookup = gufo::json::Value::object();
+  lookup["source"] = "RAM";
+  lookup["restore_ms"] = 3.0;
+  lookup["bytes"] = 100;
+  timeline.Add("cache_lookup", start, lookup);
+  auto pass = gufo::json::Value::object();
+  pass["tokens"] = 2;
+  pass["ms"] = 2.0;
+  pass["start_depth"] = 3;
+  pass["end_reason"] = "cap";
+  timeline.Add("prefill", start, pass);
+  timeline.Cycle(start, 5, 5, 4, 2, std::nullopt, std::nullopt, true);
+  timeline.Add("finish", start + std::chrono::milliseconds(20));
+  const auto events = timeline.Serialize();
+  const auto& cycle = events.items()[4];
+  Expect(!cycle.find("draft_sources") && !cycle.find("draft_source") &&
+             !cycle.find("policy")->find("name") &&
+             cycle.find("policy")->member_size("cap") == 4,
+         "batch path omits unavailable source and effective-policy names while retaining the configured cap");
+  const auto* summary = events.items().back().find("summary");
+  Expect(summary->member_double("cycle_ms") == 5 &&
+             summary->member_double("prefill_ms") == 2 &&
+             summary->member_double("restore_ms") == 3 &&
+             summary->member_double("queue_ms") == 4 &&
+             summary->member_double("unattributed_ms") == 6 &&
+             summary->member_double("wall_ms") == 20,
+         "accounting uses queue wait rather than admission duration, excluding duplicate restore/render time");
+}
+
+void TestDebugTimelineDiskRestoreKind() {
+  std::string pattern = (std::filesystem::temp_directory_path() /
+                         "gufo-timeline-disk-XXXXXX").string();
+  const char* created = ::mkdtemp(pattern.data());
+  Expect(created != nullptr, "fake disk timeline test creates a private directory");
+  const std::filesystem::path directory(created);
+  const gufo::server::TextRunnerDiskCacheOptions disk{
+      .directory = directory, .capacity_bytes = 4096, .staging_capacity_bytes = 4096};
+  auto control = std::make_shared<FakeControl>();
+  control->snapshot_callback = [] {};
+  control->persistent_snapshots = true;
+  TextRequestMetadata metadata;
+  metadata.debug_timeline = true;
+  {
+    auto pool = std::make_shared<TextRunnerPool>(
+        std::make_shared<FakeRunner>(control), 1, disk);
+    TextGenerationScheduler writer(pool);
+    const auto written = writer.Submit({1, 2, 3}, 1, 0.0F, {}, false, metadata).Wait();
+    Expect(written.cache_disk_queued_bytes > 0, "first turn queues a real disk checkpoint");
+  }
+  {
+    auto pool = std::make_shared<TextRunnerPool>(
+        std::make_shared<FakeRunner>(control), 1, disk);
+    TextGenerationScheduler reader(pool);
+    const auto restored = reader.Submit({1, 2, 3, 9}, 1, 0.0F, {}, false,
+                                        metadata).Wait();
+    const auto events = restored.debug_timeline->Serialize();
+    const auto& restore = events.items().back().find("summary")
+        ->find("restores")->items().front();
+    Expect(restored.cache_disk_hit && restore.member_str("kind") == "disk" &&
+               restore.member_size("bytes") == restored.cache_restore_bytes &&
+               restore.member_double("ms") == restored.cache_restore_ms,
+           "restarted fake runner reports a measured disk restore in the timeline");
+  }
+  std::error_code error;
+  std::filesystem::remove_all(directory, error);
 }
 
 void TestDebugTimelineSnapshotsAndCycleCap() {
@@ -2851,6 +3097,12 @@ void TestDebugTimelineSnapshotsAndCycleCap() {
   Expect(capped.truncated() && capped.Serialize().items().size() ==
              gufo::server::DebugTimeline::kMaxDecodeCycles + 1,
          "decode cap truncates cycles while retaining finish");
+  const auto capped_events = capped.Serialize();
+  const auto* totals = capped_events.items().back().find("summary");
+  Expect(totals && totals->member_size("cycle_count") == 4097 &&
+             totals->member_double("cycle_ms") == 4097 &&
+             totals->member_double("unattributed_ms") == 903,
+         "summary includes cycle time and count beyond the retained cap");
 }
 
 void TestDebugTimelineRequestTruncation() {
@@ -3077,6 +3329,10 @@ int main(int argc, char** argv) {
   if (argc == 2 && std::string_view(argv[1]) == "--debug-hooks") {
     TestLiveScoredQueueAndMissingRecords();
     TestDebugTimelineOrderCountsAndOffPath();
+    TestDebugTimelineMixedSourcesAndPolicy();
+    TestDebugTimelineRamAndLiveRestoreKinds();
+    TestDebugTimelineDiskRestoreKind();
+    TestDebugTimelineBatchOmissionsAndAccounting();
     TestDebugTimelineSnapshotsAndCycleCap();
     TestDebugTimelineInPassCheckpoint();
     TestDebugTimelineRequestTruncation();
@@ -3088,6 +3344,10 @@ int main(int argc, char** argv) {
 
   TestLiveScoredQueueAndMissingRecords();
   TestDebugTimelineOrderCountsAndOffPath();
+  TestDebugTimelineMixedSourcesAndPolicy();
+  TestDebugTimelineRamAndLiveRestoreKinds();
+  TestDebugTimelineDiskRestoreKind();
+  TestDebugTimelineBatchOmissionsAndAccounting();
   TestDebugTimelineSnapshotsAndCycleCap();
   TestDebugTimelineRequestTruncation();
   TestDebugTimelineInPassCheckpoint();

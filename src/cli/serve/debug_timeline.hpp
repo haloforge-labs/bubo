@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -23,6 +24,17 @@ public:
   static constexpr std::size_t kMaxDecodeCycles = 4096;
 
   explicit DebugTimeline(Clock::time_point start) : start_(start) {}
+
+  // Supplied by the same settings builder as hook 1, after request resolution.
+  void Header(json::Value bundle) {
+    bundle_ = std::move(bundle);
+    for (auto& event : events_) {
+      if (event.member_str("event") == "admission") {
+        event["bundle"] = bundle_;
+        return;
+      }
+    }
+  }
 
   void Failed(std::exception_ptr failure) noexcept {
     if (!failure_)
@@ -44,6 +56,35 @@ public:
     if (failure_)
       return;
     try {
+      // Aggregate before applying the cycle cap so totals include omitted work.
+      if (name == "prefill") {
+        prefill_ms_ += fields.member_double("ms");
+        prefill_passes_.push_back(fields);
+      } else if (name == "queue") {
+        queue_ms_ += fields.member_double("wait_ms");
+      } else if (name == "cache_lookup") {
+        auto restore = json::Value::object();
+        restore["kind"] = fields.member_str("source");
+        restore["ms"] = fields.member_double("restore_ms");
+        restore["bytes"] = fields.member_size("bytes");
+        restore_ms_ += fields.member_double("restore_ms");
+        restores_.push_back(std::move(restore));
+      } else if (name == "finish") {
+        const double wall = std::chrono::duration<double, std::milli>(
+            when - start_).count();
+        auto summary = json::Value::object();
+        summary["cycle_count"] = cycles_;
+        summary["cycle_ms"] = cycle_ms_;
+        summary["prefill_ms"] = prefill_ms_;
+        summary["restore_ms"] = restore_ms_;
+        summary["queue_ms"] = queue_ms_;
+        summary["wall_ms"] = wall;
+        summary["unattributed_ms"] =
+            wall - (cycle_ms_ + prefill_ms_ + restore_ms_ + queue_ms_);
+        summary["prefill_passes"] = prefill_passes_;
+        summary["restores"] = restores_;
+        fields["summary"] = std::move(summary);
+      }
       fields["event"] = std::string(name);
       fields["t_ms"] =
           std::chrono::duration<double, std::milli>(when - start_).count();
@@ -56,7 +97,10 @@ public:
   }
 
   void Cycle(Clock::time_point when, double ms, std::size_t verify_width,
-             std::size_t drafts, std::size_t accepted) noexcept {
+             std::size_t drafts, std::size_t accepted,
+             std::optional<std::size_t> lookup = std::size_t{0},
+             std::optional<bool> batched = false, bool sampled = false) noexcept {
+    cycle_ms_ += ms;
     if (cycles_++ >= kMaxDecodeCycles) {
       truncated_ = true;
       return;
@@ -68,6 +112,33 @@ public:
       fields["drafts"] = drafts;
       fields["accepted"] = accepted;
       fields["ms"] = ms;
+      fields["accepted_length"] = accepted;
+      fields["partial_accept"] = accepted < drafts;
+      if (drafts == 0)
+        lookup = 0;
+      if (lookup && *lookup <= drafts) {
+        auto sources = json::Value::object();
+        sources["mtp_head"] = drafts - *lookup;
+        sources["prompt_lookup"] = *lookup;
+        fields["draft_sources"] = std::move(sources);
+        fields["draft_source"] = drafts == 0 ? "none"
+            : *lookup == 0 ? "mtp_head"
+            : *lookup == drafts ? "prompt_lookup" : "mixed";
+      }
+      if (const auto* policy = bundle_.find("mtp_policy")) {
+        auto cycle_policy = json::Value::object();
+        for (const auto& [key, value] : policy->members()) {
+          if (key != "name")
+            cycle_policy[key] = value;
+        }
+        // The batch adapter can retry a peer serially without reporting it.
+        // Omit the effective name when that engine decision is unavailable.
+        if (batched)
+          cycle_policy["name"] = policy->member_str("name") == "survival" &&
+                                         sampled && !*batched
+                                     ? "survival" : "length";
+        fields["policy"] = std::move(cycle_policy);
+      }
       Add("decode_cycle", when, std::move(fields));
     } catch (...) {
       Failed(std::current_exception());
@@ -102,6 +173,10 @@ private:
   std::uint64_t request_id_{0};
   std::size_t cycles_{0};
   bool truncated_{false};
+  double cycle_ms_{0}, prefill_ms_{0}, restore_ms_{0}, queue_ms_{0};
+  json::Value bundle_ = json::Value::object();
+  json::Value prefill_passes_ = json::Value::array();
+  json::Value restores_ = json::Value::array();
   std::vector<json::Value> events_;
   std::exception_ptr failure_;
 };

@@ -51,6 +51,80 @@ cycles. Each retained event also produces one structured `[timeline] req=...`
 diagnostic log line. Streaming returns the completed timeline in the terminal
 response/chunk. An unavailable hook raises an explicit error.
 
+The timeline remains the existing `gufo.timeline` event array; `debug.timeline`
+is the request opt-in. The `admission` event is its header and now has `bundle`.
+The last `finish` event has `summary`. No timeline storage, bundle parsing,
+aggregation, allocation, or logging runs when the request opt-in is absent.
+
+The additional cycle fields are:
+
+| Field | Meaning |
+| --- | --- |
+| `draft_source` | `mtp_head`, `prompt_lookup`, `mixed`, or `none`. Omitted for speculative batch cycles because the current batch adapter does not forward lookup counters. |
+| `draft_sources.mtp_head`, `draft_sources.prompt_lookup` | Draft tokens actually sent to verification from each source, excluding the anchor. Their sum equals `drafts`. Omitted with `draft_source`; AR cycles have two measured zero counts. |
+| `accepted_length` | Alias of the existing `accepted`: draft tokens kept by verification, excluding the anchor. |
+| `partial_accept` | Whether `accepted < drafts`. A stop can also shorten the chain; this does not assert a rejection or a physical rollback. |
+| `policy.name`, `policy.cap` | Effective `length` or `survival` policy and configured runner draft-token cap. Survival applies only to sampled, single-session cycles; deterministic serial cycles report `length`. `name` is omitted on the batch adapter path because its serial retries are not reported. These are not the actual chosen width. |
+
+`index`, `verify_width`, `drafts`, `accepted`, and `ms` retain their existing
+meaning. `policy` also carries hook 1's `mtp_policy` fields: `model_has_mtp`,
+`enabled`, `runner_max_draft_tokens`, `model_max_draft_tokens`, `survival`,
+`prompt_lookup`, and `draft_vocabulary`. `survival` describes configuration;
+`name` describes the policy used by that work unit.
+
+`bundle` is projected from hook 1's `BuildEffectiveSettings` builder after
+request sampling resolution. Its exact members are:
+
+- `behaviour`: `enabled`, `think_eog_guard`, `eog_boundary`, `eog_min_prob_exact`,
+  `eog_min_prob`, `eog_defer_p`, `spec_eog_stop`, `loop_breaker`, `loop_eog_close`,
+  `loop_transition`, `reasoning_budget_enabled`, `logit_bias_enabled`,
+  `model_suppress_tokens`, `production_sampling`, `marker_bias`, and
+  `marker_bias_by_effort` (`minimal`, `low`, `medium`, `high`, `xhigh`, `max`).
+  Values come from this request's configured behaviour, including overrides.
+- `lenient`: resolved `enabled`, `lambda`, and `think_only`.
+- `mtp_policy`: the fields listed above, with configured `name` and `cap`.
+- `cache_prompt`: whether this request allows cache prefix reuse.
+- `ram_cache`: resolved `enabled`, `capacity_bytes`, `automatic_bytes`,
+  `ceiling_bytes`, `entry_capacity`, `automatic_max_bytes`, `host_headroom_bytes`,
+  `max_intermediate_checkpoints`, `shared_checkpoint_slack`, and
+  `shared_prefix_min_tokens`.
+- `disk_cache`: `enabled`; when enabled, `directory`, `capacity_bytes`,
+  `staging_capacity_bytes`, `min_checkpoint_step_tokens`,
+  `shared_prefix_min_tokens`, and `shared_prefix_max_boundaries`.
+- `disk_boundary_align`: resolved boundary rounding multiple (0/1 disables).
+
+Tier enablement is configured capacity; `cache_prompt` separately controls
+whether the turn can read a cached prefix. Lenient enablement and `think_only`
+describe the configured gate, not a claim that every token used relaxation.
+
+The `finish.summary` fields are:
+
+| Field | Meaning |
+| --- | --- |
+| `cycle_count`, `cycle_ms` | All measured decode work units and their milliseconds, including cycles omitted after the 4096-event cap. |
+| `prefill_ms`, `prefill_passes` | Sum and complete list of recorded passes. Each pass has `index`, `tokens`, `start_depth`, `ms`, `end_reason`, and `in_pass_checkpoint`. End reasons are `checkpoint`, `stable_boundary`, `cap`, or `prompt_end`; an in-pass checkpoint can occur within a pass ending at `prompt_end`. |
+| `restore_ms`, `restores` | Measured restore duration and records with `kind`, `ms`, `bytes`. Kinds are `RAM`, `disk`, `live_slot`, or `none`; the latter two do no snapshot restore and report measured zero restore cost/bytes. No record is fabricated if admission did not complete. |
+| `queue_ms` | Sum of queue events' `wait_ms`, excluding render and cache-admission work. The older event `queue_ms` includes admission and must not be added again. |
+| `wall_ms` | Existing timeline origin through the finish event timestamp, not HTTP transport completion. |
+| `unattributed_ms` | `wall_ms - (cycle_ms + prefill_ms + restore_ms + queue_ms)`. Includes render, lookup overhead, snapshots, scheduling, and other unassigned work. Signed: overlapping work or elapsed batch measurements can produce a negative residual. |
+
+The identity `cycle_ms + prefill_ms + restore_ms + queue_ms + unattributed_ms =
+wall_ms` holds apart from floating-point rounding. These are elapsed serving
+measurements, not an exclusive device utilization profile.
+
+Not available and omitted: `proposed_length` before the policy,
+`policy_chosen_length`, `filter_changed`, `filter_rejected`, physical `rollback`,
+effective `policy.name` on the batch adapter path, and restore
+`capture_origin`/a distinct `in_pass_checkpoint` restore kind.
+The current cache retains the tier but loses how a snapshot was captured;
+`RAM` therefore also covers restoration of an in-pass checkpoint. Its earlier
+capture still reports `snapshot.in_pass=true`, and its prefill pass reports
+`in_pass_checkpoint=true`. Latin vocabulary selects from an already restricted
+GPU candidate set; no unrestricted proposal exists for a cheap before/after
+comparison. Lenient acceptance statistics are global atomics, not attributable
+to an interleaved request. Missing fields must not be interpreted as zero.
+No counter was added to engine loops or per-cycle bookkeeping in this round.
+
 Read-only cache inspection is **not implemented**. The caches do not retain
 exact successful-hit counts or distinct last-hit time. The existing logical LRU
 ordinals and disk access times include writes/misses and cannot substitute.

@@ -144,6 +144,66 @@ inline constexpr DebugSettingsIrrelevantEnvironment
   return settings;
 }
 
+// Resolve per-request switches in the hook 1 builder, using the sampler's
+// configured values rather than reparsing request fields or environment text.
+[[nodiscard]] inline json::Value BuildEffectiveSettings(
+    json::Value resolved, std::string_view version, std::string_view revision,
+    std::string_view build_id, const sampling::SamplingConfig& request_sampling,
+    bool cache_prompt) {
+  auto settings = BuildEffectiveSettings(std::move(resolved), version, revision,
+                                         build_id);
+  settings["resolved"]["cache_prompt"] = cache_prompt;
+  auto& behaviour = settings["resolved"]["behaviour"];
+  sampling::BehaviourConfig inactive;
+  const auto& policy = request_sampling.behaviour ? *request_sampling.behaviour : inactive;
+  behaviour["enabled"] = request_sampling.behaviour != nullptr;
+  behaviour["think_eog_guard"] = policy.think_eog_guard;
+  behaviour["eog_boundary"] = policy.eog_boundary;
+  behaviour["eog_min_prob_exact"] = policy.eog_min_prob_exact;
+  behaviour["eog_min_prob"] = policy.eog_min_prob;
+  behaviour["eog_defer_p"] = policy.eog_defer_p;
+  behaviour["spec_eog_stop"] = policy.spec_eog_stop;
+  behaviour["loop_breaker"] = policy.loop_breaker;
+  behaviour["loop_eog_close"] = policy.loop_eog_close;
+  behaviour["loop_transition"] = policy.loop_transition;
+  behaviour["reasoning_budget_enabled"] = policy.reasoning_budget_enabled;
+  behaviour["logit_bias_enabled"] = policy.logit_bias_enabled;
+  behaviour["model_suppress_tokens"] = policy.model_suppress_tokens;
+  behaviour["production_sampling"] = policy.production_sampling;
+  behaviour["marker_bias"] = policy.marker_bias;
+  auto efforts = json::Value::object();
+  for (const char* effort : {"minimal", "low", "medium", "high", "xhigh", "max"})
+    efforts[effort] = ResolveMarkerBias(policy, effort);
+  behaviour["marker_bias_by_effort"] = std::move(efforts);
+  if (auto* ram = settings["resolved"].find("ram_cache"))
+    settings["resolved"]["ram_cache"]["enabled"] =
+        ram->member_size("capacity_bytes") != 0;
+  return settings;
+}
+
+// This is a projection of hook 1's builder, never a second environment parser.
+[[nodiscard]] inline json::Value BuildTimelineBundle(
+    json::Value resolved, const sampling::SamplingConfig& sampling, bool cache_prompt) {
+  const auto settings = BuildEffectiveSettings(std::move(resolved), "", "", "",
+                                               sampling, cache_prompt);
+  const auto& effective = *settings.find("resolved");
+  auto bundle = json::Value::object();
+  for (const char* name : {"behaviour", "lenient", "mtp_policy", "cache_prompt", "ram_cache",
+                           "disk_cache", "disk_boundary_align"}) {
+    if (const auto* value = effective.find(name))
+      bundle[name] = *value;
+  }
+  if (bundle.contains("mtp_policy")) {
+    auto* policy = &bundle["mtp_policy"];
+    (*policy)["name"] =
+        policy->find("survival") && policy->find("survival")->as_bool()
+            ? "survival" : "length";
+    if (const auto* cap = policy->find("runner_max_draft_tokens"))
+      (*policy)["cap"] = *cap;
+  }
+  return bundle;
+}
+
 }  // namespace gufo::server
 
 #endif  // GUFO_SERVER_DEBUG_SETTINGS_HPP_
