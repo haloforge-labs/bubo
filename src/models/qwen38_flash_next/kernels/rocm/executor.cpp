@@ -176,6 +176,7 @@ bool CopyFloats(const float* src, float* dst, std::size_t count,
   return Check(hipMemcpyAsync(dst, src, count * sizeof(float),
                               hipMemcpyDeviceToDevice, stream),
                what, error_msg);
+}
 
 void PopulateSnapshotPrefix(std::uint8_t* data, std::uint64_t bytes,
                             std::uint64_t worker_limit = 4) {

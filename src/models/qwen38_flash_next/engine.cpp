@@ -1362,7 +1362,7 @@ bool Session::DecodeStep(std::size_t max_tokens,
           *session_, pending.chain, pending.chain.size(), logits,
           pending.speculative ? rocm::Executor::ForwardMode::kVerify
                               : rocm::Executor::ForwardMode::kDecode,
-          error_msg, pending.rows_on_device)) {
+          error_msg, /*checkpoint=*/nullptr, pending.rows_on_device)) {
     return false;
   }
   const bool ok = FinishDecode(request, pending, error_msg);
