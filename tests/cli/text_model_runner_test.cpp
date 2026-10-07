@@ -5,8 +5,10 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <semaphore>
@@ -19,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/cli/serve/continuation_disk_store.hpp"
 #include "src/core/json.hpp"
 #include "src/models/qwen/vision/prompt.hpp"
 
@@ -587,7 +590,7 @@ void TestInPassFailureRetainsOnlyCompletedCheckpoints() {
   new_branch.Invalidate();
 }
 
-class PersistentSnapshotRunner final : public SnapshotRunner {
+class PersistentSnapshotRunner : public SnapshotRunner {
 public:
   std::function<void()> before_serialize;
   PersistentSnapshotRunner(std::shared_ptr<FakeStats> stats,
@@ -702,6 +705,250 @@ public:
 private:
   std::filesystem::path path_;
 };
+
+class PersistentInPassRunner final : public PersistentSnapshotRunner {
+public:
+  using PersistentSnapshotRunner::PersistentSnapshotRunner;
+  bool capable{true};
+  bool refuse_claim{false};
+  mutable std::size_t in_pass_calls{0};
+  mutable std::size_t copying_calls{0};
+
+  TextRunnerDescriptor Descriptor() const override {
+    auto descriptor = PersistentSnapshotRunner::Descriptor();
+    descriptor.capabilities.in_pass_checkpoint = capable;
+    return descriptor;
+  }
+
+  std::optional<std::size_t> PrefillCheckpointBytes(
+      const TextRunnerState&, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t budget,
+      std::size_t boundary) const override {
+    const auto end = std::min(prompt.size(), offset + budget);
+    if (refuse_claim || boundary <= offset + 1 || boundary >= end ||
+        end - boundary > 8)
+      return std::nullopt;
+    return sizeof(FakeSnapshot);
+  }
+
+  TextPrefillStep PrefillThrough(
+      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t budget, std::size_t boundary,
+      std::unique_ptr<TextRunnerSnapshot>* checkpoint) const override {
+    ++in_pass_calls;
+    *checkpoint = std::make_unique<FakeSnapshot>(boundary, 0, 90);
+    auto step = FakeRunner::Prefill(state, prompt, offset, budget);
+    step.checkpoint_ms = 2;
+    return step;
+  }
+
+  std::unique_ptr<TextRunnerSnapshot> SnapshotForPersistence(
+      const TextRunnerState& state) const override {
+    ++copying_calls;
+    return SnapshotRunner::Snapshot(state);
+  }
+};
+
+bool DiskInPassExpected() {
+  const char* value = std::getenv("GUFO_DISK_INPASS");
+  return value == nullptr || std::string_view(value) != "0";
+}
+
+std::vector<std::vector<std::uint8_t>> DiskImages(
+    const std::filesystem::path& directory) {
+  std::vector<std::vector<std::uint8_t>> images;
+  for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+    if (entry.path().extension() != ".kvc")
+      continue;
+    std::ifstream input(entry.path(), std::ios::binary);
+    Expect(input.good(), "persisted checkpoint is readable");
+    images.emplace_back(std::istreambuf_iterator<char>(input),
+                        std::istreambuf_iterator<char>());
+  }
+  std::ranges::sort(images);
+  return images;
+}
+
+void TestDiskInPassPayloadAndFallbacks() {
+  const bool enabled = DiskInPassExpected();
+  const auto replay = [&](bool capable, bool refuse_claim, bool refuse_ram,
+                          bool delayed, bool spaced = false) {
+    TemporaryDirectory directory;
+    auto stats = std::make_shared<FakeStats>();
+    auto runner = std::make_shared<PersistentInPassRunner>(
+        stats, "disk-inpass", refuse_ram ? sizeof(FakeSnapshot) - 1 : 256);
+    runner->capable = capable;
+    runner->refuse_claim = refuse_claim;
+    std::binary_semaphore entered(0), release(0);
+    bool first_write = true;  // Accessed only by the single disk worker.
+    if (delayed) {
+      runner->before_serialize = [&] {
+        if (std::exchange(first_write, false)) {
+          entered.release();
+          release.acquire();
+        }
+      };
+    }
+    {
+      TextRunnerPool pool(
+          runner, 1,
+          TextRunnerDiskCacheOptions{
+              .directory = directory.path(),
+              .capacity_bytes = 4096,
+              .staging_capacity_bytes = 4096,
+              .min_checkpoint_step_tokens = spaced ? 2048U : 0U});
+      auto request = pool.Acquire({1, 2, 3, 40, 41}, {}, {}, {}, true, 3);
+      while (!request.Prefill(64).decode_ready) {
+      }
+      if (delayed)
+        Expect(entered.try_acquire_for(std::chrono::seconds(2)),
+               "captured boundary reaches disk worker before live append");
+      (void)request.SelectNext();
+      request.Advance();
+      const auto commit = request.Commit();
+      Expect(commit.disk_queued_bytes != 0,
+             "every admitted capture still queues disk persistence");
+      const bool in_pass = enabled && capable && !refuse_claim && !refuse_ram;
+      Expect(runner->in_pass_calls == (in_pass ? 1U : 0U),
+             "disk capture honors capability, switch and reservation");
+      Expect(stats->prefill_spans == (in_pass ? std::vector<std::size_t>{5}
+                                              : std::vector<std::size_t>{3, 2}),
+             "refusal/off uses the old split; admission uses one pass");
+      Expect(runner->copying_calls == (in_pass ? 0U : 2U),
+             "in-pass and its complete prompt use ordinary RAM snapshots");
+      if (in_pass)
+        Expect(commit.snapshot_ms >= 2, "in-pass capture timing is reported");
+      if (delayed) {
+        auto rewound = pool.Acquire({1, 2, 3, 50, 51}, {}, {}, {}, true, 3);
+        Expect(rewound.cached_prompt_tokens() == 3 &&
+                   stats->snapshot_restores != 0,
+               "live session rewinds after appending while disk write waits");
+        rewound.Invalidate();
+        release.release();
+      }
+    }  // Drain disk work before comparing bytes.
+    const auto images = DiskImages(directory.path());
+    Expect(
+        images.size() == (spaced ? 1U : 2U),
+        "stable persists and complete prompt obeys the existing spacing gate");
+    // A fresh runner reads the unchanged store and the stable boundary.
+    auto reader_stats = std::make_shared<FakeStats>();
+    TextRunnerPool restarted(
+        std::make_shared<PersistentSnapshotRunner>(reader_stats, "disk-inpass"),
+        1,
+        TextRunnerDiskCacheOptions{.directory = directory.path(),
+                                   .capacity_bytes = 4096,
+                                   .staging_capacity_bytes = 4096});
+    auto restored = restarted.Acquire({1, 2, 3, 50, 51}, {}, {}, {}, true, 3);
+    Expect(restored.cache_disk_hit() && restored.cached_prompt_tokens() == 3,
+           "persisted in-pass boundary restores after restart");
+    Expect(
+        restored.Prefill(64).decode_ready && restored.SelectNext().token == 90,
+        "persisted fake frontier reproduces its first token");
+    restored.Invalidate();
+    return images;
+  };
+  const auto copying = replay(false, false, false, false);
+  Expect(replay(true, false, false, false) == copying,
+         "in-pass and copying persist byte-identical store images");
+  Expect(replay(true, true, false, false) == copying,
+         "engine claim refusal preserves persisted bytes");
+  Expect(replay(true, false, true, false) == copying,
+         "RAM reservation failure falls back with identical persisted bytes");
+  Expect(replay(true, false, false, true) == copying,
+         "disk worker retains exact capture through live append and rewind");
+  Expect(replay(true, false, false, false, true) ==
+             replay(false, false, false, false, true),
+         "in-pass capture preserves default min-step persistence policy");
+}
+
+void TestDiskInPassCoincidentAlignedLearnedBoundary() {
+  TemporaryDirectory directory;
+  auto stats = std::make_shared<FakeStats>();
+  auto runner = std::make_shared<PersistentInPassRunner>(
+      stats, "aligned-inpass", 256, 1024);
+  std::vector<TextRunnerToken> stored(264, 7), prompt(stored);
+  stored[260] = 80;
+  prompt[260] = 81;
+  ::setenv("GUFO_DISK_BOUNDARY_ALIGN", "", 1);
+  {
+    gufo::server::ContinuationDiskStore seed({.directory = directory.path(),
+                                              .capacity_bytes = 8192,
+                                              .staging_capacity_bytes = 8192});
+    auto state = runner->CreateState();
+    (void)runner->Prefill(*state, stored, 0, 1024);
+    Expect(seed.Save(*runner, stored, *runner->Snapshot(*state)).stored,
+           "seed provides a learned disk divergence");
+    Expect(seed.SharedPrefixBoundaries(*runner, prompt, 128, 4) ==
+               std::vector<std::size_t>{256},
+           "260-token divergence still rounds DOWN to 256");
+  }
+  stats->prefill_spans.clear();
+  {
+    TextRunnerPool pool(
+        runner, 1,
+        TextRunnerDiskCacheOptions{.directory = directory.path(),
+                                   .capacity_bytes = 8192,
+                                   .staging_capacity_bytes = 8192,
+                                   .min_checkpoint_step_tokens = 0});
+    auto request = pool.Acquire(prompt, {}, {}, {}, true, 256);
+    while (!request.Prefill(1024).decode_ready) {
+    }
+    Expect(runner->in_pass_calls == (DiskInPassExpected() ? 1U : 0U),
+           "coincident aligned learned/stable boundary shares in-pass capture");
+    request.Commit();
+  }
+  gufo::server::ContinuationDiskStore reader({.directory = directory.path(),
+                                              .capacity_bytes = 8192,
+                                              .staging_capacity_bytes = 8192});
+  prompt[256] = 99;
+  auto state = runner->CreateState();
+  const auto restored = reader.RestoreLongestPrefix(*runner, *state, prompt);
+  Expect(restored.restored && restored.token_count == 256,
+         "aligned learned boundary persists at exactly 256 tokens");
+  ::setenv("GUFO_DISK_BOUNDARY_ALIGN", "0", 1);
+}
+
+void TestDiskInPassKeepsDistinctLearnedBoundaries() {
+  TemporaryDirectory directory;
+  auto stats = std::make_shared<FakeStats>();
+  auto runner = std::make_shared<PersistentInPassRunner>(stats, "two-boundaries");
+  const std::vector<TextRunnerToken> prompt{1, 2, 3, 40, 41};
+  {
+    gufo::server::ContinuationDiskStore seed({.directory = directory.path(),
+                                              .capacity_bytes = 8192,
+                                              .staging_capacity_bytes = 8192});
+    for (const auto& tokens : {std::vector<TextRunnerToken>{1, 2, 3, 50, 51},
+                               std::vector<TextRunnerToken>{1, 2, 3, 40, 60}}) {
+      auto state = runner->CreateState();
+      (void)runner->Prefill(*state, tokens, 0, 64);
+      Expect(seed.Save(*runner, tokens, *runner->Snapshot(*state)).stored,
+             "seed stores both divergence histories");
+    }
+    Expect(seed.SharedPrefixBoundaries(*runner, prompt, 1, 4) ==
+               std::vector<std::size_t>({3, 4}),
+           "two learned boundaries include a coincident stable target");
+  }
+  stats->prefill_spans.clear();
+  {
+    TextRunnerPool pool(
+        runner, 1,
+        TextRunnerDiskCacheOptions{.directory = directory.path(),
+                                   .capacity_bytes = 8192,
+                                   .staging_capacity_bytes = 8192,
+                                   .min_checkpoint_step_tokens = 0,
+                                   .shared_prefix_min_tokens = 1});
+    auto request = pool.Acquire(prompt, {}, {}, {}, true, 3);
+    while (!request.Prefill(64).decode_ready) {
+    }
+    Expect(runner->in_pass_calls == 0 &&
+               stats->prefill_spans == std::vector<std::size_t>({3, 1, 1}),
+           "multiple required boundaries keep every original split");
+    request.Commit();
+  }
+  Expect(DiskImages(directory.path()).size() == 5,
+         "stable, distinct learned and complete prompt all still persist");
+}
 
 void TestSnapshotForkAndUnsupportedCapabilities() {
   auto stats = std::make_shared<FakeStats>();
@@ -2288,6 +2535,11 @@ int main() {
   ::setenv("NO_COLOR", "1", 1);
   TestInPassStableCheckpoint();
   TestInPassFailureRetainsOnlyCompletedCheckpoints();
+  // Run this binary in separate GUFO_DISK_INPASS=0 and =1/unset processes.
+  // The production switch is deliberately read once, never toggled for tests.
+  TestDiskInPassPayloadAndFallbacks();
+  TestDiskInPassCoincidentAlignedLearnedBoundary();
+  TestDiskInPassKeepsDistinctLearnedBoundaries();
   TestBehaviourBudgetAndPhaseDoNotLeakThroughPromptSnapshot();
   TestNewImageGetsAStableCheckpoint();
   TestGeneratedFrontierForksBeforeMutation();

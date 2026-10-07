@@ -22,8 +22,15 @@ below; none is averaged away or hidden.
   kept hidden rows, boundary logits and token/position metadata. The final
   prefill pass takes up to 128 tokens beyond the normal 2,048-token chunk,
   which absorbs a short assistant suffix and any short prompt tail. Attention queries keep the boundary's grouping. Other
-  models, image prompts, disk captures and intermediate/shared checkpoints keep
-  the split path.
+  models, image prompts and intermediate/shared checkpoints keep the split
+  path. Disk-enabled text prompts now use the same admitted in-pass capture;
+  a learned disk boundary coincident with the stable target shares it at the
+  unchanged position. Distinct learned boundaries still split: the engine
+  supports one checkpoint with at most eight suffix tokens per chunk. The
+  128-token final-pass allowance does not extend that checkpoint suffix limit.
+  `GUFO_DISK_INPASS=0` restores the previous disk copying path (read once;
+  unset enables the new path). This disk extension needs operator qualification;
+  the measurements below predate it.
 - Snapshots copy mutable recurrent, convolution and PLE state (about 111 MB in
   AR, 119 MB with MTP) into private device storage. Committed K/V and pooled
   rows stay borrowed from the live session while it appends; only rows that a
@@ -147,7 +154,7 @@ order. Every MTP job executed real drafts; AR jobs executed none.
 
 Summed over each job's requests, candidate wall time is 0.8–8.4% lower than
 main in every job. Capture time is 62–87% lower, except 16–20% in the `cache`
-suite, whose disk captures keep the copying path. For example,
+suite, whose disk captures used the copying path in these measurements. For example,
 cache-concurrency falls from 261.1 s to 246.6 s and its captures from 26.7 s
 to 7.1 s.
 

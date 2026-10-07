@@ -128,9 +128,22 @@ void CheckPrefillCheckpoint(const std::shared_ptr<qfn::Model>& model,
                       source->Logits().size_bytes()) == 0,
           "in-pass sampled continuation changed logits");
   Require(split->Sync(prompt.first(boundary), &error), error);
-  const auto expected = Payload(*split);
+  const auto copying =
+      split->SaveSnapshot(&error, qfn::Session::SnapshotMode::kMaterialized);
+  Require(copying != nullptr, error);
+  const auto expected = Payload(*copying);
+  // Model the disk worker owning a checkpoint while its live session has
+  // appended (Decode above) and rewinds. Byte materialization happens later
+  // on the worker, through the same reader used by persistent serialization.
+  std::promise<void> release_reader;
+  auto reader_ready = release_reader.get_future();
+  auto disk_payload = std::async(std::launch::async, [&] {
+    reader_ready.wait();
+    return Payload(*checkpoint);
+  });
   source->Reset();
-  const auto actual = Payload(*checkpoint);
+  release_reader.set_value();
+  const auto actual = disk_payload.get();
   Require(source->RestoreSnapshot(*checkpoint, &error), error);
   Require(Payload(*source) == actual,
           "in-pass checkpoint did not survive source reset");
@@ -343,6 +356,10 @@ int main(int argc, char** argv) {
     warm_prompt.insert(warm_prompt.end(), prompt.begin(), prompt.begin() + 33);
     for (const auto mode : {gufo::core::SessionMode::kAutoregressive,
                             gufo::core::SessionMode::kSpeculative}) {
+      for (const std::size_t boundary : {256U, 512U, 2048U})
+        CheckPrefillCheckpoint(
+            model, std::span<const std::int32_t>(prompt).first(boundary + 8),
+            mode, 0, 8);
       CheckPrefillCheckpoint(model, warm_prompt, mode, prompt.size());
       CheckPrefillCheckpoint(model, overflow_prompt, mode, prompt.size());
       CheckPrefillCheckpoint(
