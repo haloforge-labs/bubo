@@ -5,11 +5,16 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <regex>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -20,6 +25,7 @@
 #include "src/core/json.hpp"
 #include "src/core/json_constraint.hpp"
 #include "src/cli/serve/behaviour_options.hpp"
+#include "src/cli/serve/debug_settings.hpp"
 
 namespace {
 
@@ -1866,6 +1872,146 @@ void TestBehaviourRequestOptions() {
     Expect(rejected,
            "production effort map rejects duplicate, empty, malformed and nonfinite entries");
   }
+}
+
+void DebugHooksSettingsTest() {
+  struct EnvironmentScope {
+    std::vector<std::pair<std::string, std::optional<std::string>>> previous;
+    static void Set(const char* name, const char* value) {
+#ifdef _WIN32
+      _putenv_s(name, value ? value : "");
+#else
+      if (value)
+        setenv(name, value, 1);
+      else
+        unsetenv(name);
+#endif
+    }
+    EnvironmentScope() {
+      for (const auto* name : gufo::server::kDebugSettingsEnvironment) {
+        const auto* value = std::getenv(name);
+        previous.emplace_back(name, value ? std::optional<std::string>(value)
+                                          : std::nullopt);
+        Set(name, nullptr);
+      }
+    }
+    ~EnvironmentScope() {
+      for (const auto& [name, value] : previous)
+        Set(name.c_str(), value ? value->c_str() : nullptr);
+    }
+  } environment;
+  using gufo::server::BuildEffectiveSettings;
+  auto resolved = gufo::json::Value::object();
+  resolved["ram_bytes"] = 1234;
+  const auto unset = BuildEffectiveSettings(resolved, "test-version", "revision", "build-id");
+  Expect(unset.member_str("version") == "test-version" &&
+             unset.member_str("revision") == "revision" &&
+             unset.member_str("exe_build_id") == "build-id",
+         "debug settings identify the exact executable");
+  const auto* raw = unset.find("environment");
+  Expect(raw && raw->is_object(), "settings contain an explicit environment catalog");
+  for (const auto* name : gufo::server::kDebugSettingsEnvironment)
+    Expect(raw->find(name) && raw->find(name)->is_null(),
+           std::string("unset environment is visible: ") + name);
+  const auto* values = unset.find("resolved");
+  Expect(values && values->member_size("ram_bytes") == 1234,
+         "settings retain the owning component's resolved auto budget");
+  const auto* behaviour = values->find("behaviour");
+  Expect(behaviour && !behaviour->find("enabled")->as_bool() &&
+             behaviour->member_double("eog_min_prob") == -1.0,
+         "disabled behaviour uses its parser's actual minimum default");
+  const auto* tuning = values->find("platform_tuning");
+  for (const auto& field : gufo::platform::detail::kTuningFields) {
+    const auto* value = tuning->find(std::string(field.name));
+    Expect(value && value->is_bool() &&
+               value->as_bool() == gufo::platform::PlatformTuning().*field.member,
+           "settings echo each resolved platform tuning switch");
+  }
+  const auto* lenient = values->find("lenient");
+  const auto& config = gufo::models::qwen38_flash_next::MtpLenient();
+  Expect(lenient && lenient->find("enabled")->as_bool() == config.enabled &&
+             lenient->member_double("lambda") == config.lambda &&
+             lenient->find("think_only")->as_bool() == config.think_only,
+         "settings use the shared lenient parser");
+  EnvironmentScope::Set("GUFO_THINK_EOG_GUARD", "1");
+  EnvironmentScope::Set("GUFO_EOG_MIN_PROB", "0.25");
+  EnvironmentScope::Set("GUFO_THINK_MARKER_BIAS_BY_EFFORT", "low:0.5,xhigh:2");
+  EnvironmentScope::Set("GUFO_MTP_TRACE", "01");
+  EnvironmentScope::Set("GUFO_DISK_BOUNDARY_ALIGN", "128");
+  const auto configured = BuildEffectiveSettings(resolved, "v", "r", "b");
+  const auto* effective = configured.find("resolved");
+  behaviour = effective->find("behaviour");
+  Expect(behaviour->find("think_eog_guard")->as_bool() &&
+             behaviour->member_double("eog_min_prob") == 0.25 &&
+             behaviour->find("marker_bias_by_effort")->member_double("high") == 2.0 &&
+             behaviour->find("marker_bias_by_effort")->member_double("minimal") == 0.5,
+         "settings return parsed numeric values and resolved effort aliases");
+  Expect(!effective->find("mtp_trace")->as_bool(),
+         "MTP trace accepts only the literal one");
+  Expect(effective->member_size("disk_boundary_align") == 128,
+         "settings echo parsed disk boundary alignment");
+  EnvironmentScope::Set("GUFO_MTP_TRACE", "1");
+  Expect(BuildEffectiveSettings(resolved, "v", "r", "b")
+             .find("resolved")->find("mtp_trace")->as_bool(),
+         "MTP trace literal one is enabled");
+  Expect(gufo::server::DebugSettingsListsEnvironment("NO_COLOR"),
+         "irrelevant environment has an explicit documented allowance");
+}
+
+void DebugHooksSettingsEnvironmentTest() {
+  namespace fs = std::filesystem;
+  const fs::path root = fs::absolute(fs::path(__FILE__)).parent_path()
+                            .parent_path().parent_path();
+  const std::regex calls(
+      R"debug((std::getenv|BehaviourSwitch|BehaviourNumber)\s*\(\s*([^)]*)\))debug");
+  const std::regex literal(R"debug(^"([A-Za-z_][A-Za-z_0-9]*)")debug");
+  std::map<std::string, std::size_t> dynamic_reads;
+  std::size_t literal_reads = 0;
+  for (const char* directory : {
+           "src/core", "src/cli/serve", "src/models/qwen38_flash_next"}) {
+    const auto source = root / directory;
+    Expect(fs::is_directory(source), "environment completeness source root exists");
+    for (const auto& entry : fs::recursive_directory_iterator(source)) {
+      if (!entry.is_regular_file())
+        continue;
+      const auto extension = entry.path().extension().string();
+      if (extension != ".cpp" && extension != ".hpp" && extension != ".hip" &&
+          extension != ".h" && extension != ".cc" && extension != ".c")
+        continue;
+      std::ifstream input(entry.path(), std::ios::binary);
+      Expect(input.good(), "environment completeness can read each source file");
+      const std::string text((std::istreambuf_iterator<char>(input)), {});
+      const std::string path = fs::relative(entry.path(), root).generic_string();
+      for (std::sregex_iterator match(text.begin(), text.end(), calls), end;
+           match != end; ++match) {
+        const std::string function = (*match)[1].str();
+        const std::string argument = (*match)[2].str();
+        std::smatch name;
+        if (std::regex_search(argument, name, literal)) {
+          ++literal_reads;
+          Expect(gufo::server::DebugSettingsListsEnvironment(name[1].str()),
+                 path + ": environment missing from echo/allow-list: " + name[1].str());
+        } else if (function == "std::getenv") {
+          Expect(argument == "name" &&
+                     (path == "src/cli/serve/behaviour_options.hpp" ||
+                      path == "src/cli/serve/debug_settings.hpp"),
+                 path + ": unreviewed dynamic environment read: " + argument);
+          ++dynamic_reads[path];
+        } else {
+          Expect(path == "src/cli/serve/behaviour_options.hpp" &&
+                     (argument == "const char* name" ||
+                      argument == "const char* name, double disabled"),
+                 path + ": unreviewed dynamic behaviour wrapper call: " + argument);
+        }
+      }
+    }
+  }
+  Expect(literal_reads > 20, "environment completeness actually scanned the sources");
+  Expect(dynamic_reads["src/cli/serve/behaviour_options.hpp"] == 2 &&
+             dynamic_reads["src/cli/serve/debug_settings.hpp"] == 1,
+         "only the reviewed environment wrappers use dynamic names");
+  Expect(!gufo::server::DebugSettingsListsEnvironment("GUFO_NEW_UNREVIEWED_SWITCH"),
+         "a newly added environment read fails until explicitly listed");
 }
 
 void TestNullReasoningHistory() {
@@ -5357,6 +5503,8 @@ void TestBracketDenseContent() {
 }
 
 int main() {
+  DebugHooksSettingsTest();
+  DebugHooksSettingsEnvironmentTest();
   TestHistoricalTypedArgumentsUseTojson();
   TestBehaviourRequestOptions();
   TestNullReasoningHistory();

@@ -58,6 +58,7 @@
 #include <string>
 #include <typeinfo>
 #include <unordered_map>
+#include <vector>
 
 #include "gufo_socket.h"
 
@@ -662,6 +663,53 @@ std::mutex g_child_mutex;
 std::unordered_map<pid_t, HANDLE> g_children;
 
 }  // namespace
+
+extern "C" ssize_t gufo_descriptor_path(int fd, char* buffer, size_t size) {
+  const HANDLE handle = HandleOf(fd);
+  if (handle == INVALID_HANDLE_VALUE) {
+    errno = EBADF;
+    return -1;
+  }
+  const DWORD flags = FILE_NAME_NORMALIZED | VOLUME_NAME_DOS;
+  const DWORD capacity = GetFinalPathNameByHandleW(handle, nullptr, 0, flags);
+  if (capacity == 0)
+    return Fail(GetLastError());
+  std::vector<wchar_t> wide(static_cast<size_t>(capacity) + 1);
+  const DWORD length = GetFinalPathNameByHandleW(
+      handle, wide.data(), static_cast<DWORD>(wide.size()), flags);
+  if (length == 0)
+    return Fail(GetLastError());
+  if (length >= wide.size()) {
+    errno = ERANGE;
+    return -1;
+  }
+  const std::string path = Narrow(wide.data());
+  if (path.size() >= size) {
+    errno = ERANGE;
+    return -1;
+  }
+  memcpy(buffer, path.data(), path.size());
+  return static_cast<ssize_t>(path.size());
+}
+
+extern "C" ssize_t gufo_executable_path(char* buffer, size_t size) {
+  std::vector<wchar_t> wide(size);
+  const DWORD length = GetModuleFileNameW(nullptr, wide.data(),
+                                          static_cast<DWORD>(wide.size()));
+  if (length == 0)
+    return Fail(GetLastError());
+  if (length >= wide.size()) {
+    errno = ERANGE;
+    return -1;
+  }
+  const std::string path = Narrow(wide.data());
+  if (path.size() >= size) {
+    errno = ERANGE;
+    return -1;
+  }
+  memcpy(buffer, path.data(), path.size());
+  return static_cast<ssize_t>(path.size());
+}
 
 extern "C" {
 

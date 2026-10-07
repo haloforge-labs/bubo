@@ -1,6 +1,7 @@
 #ifndef GUFO_MODELS_QWEN38_FLASH_NEXT_ENGINE_HPP_
 #define GUFO_MODELS_QWEN38_FLASH_NEXT_ENGINE_HPP_
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -97,6 +98,10 @@ public:
   [[nodiscard]] std::uint32_t VocabSize() const noexcept;
   [[nodiscard]] std::uint32_t PrefillCapacity() const noexcept;
   [[nodiscard]] std::uint32_t PrefillThroughCapacity() const noexcept;
+  [[nodiscard]] std::uint32_t ExecutorMaxBatch() const noexcept;
+  [[nodiscard]] std::uint32_t PrefillCheckpointSlack() const noexcept;
+  [[nodiscard]] std::vector<platform::LoadedFile> LoadedFiles() const;
+  [[nodiscard]] const ModelOptions& options() const noexcept { return options_; }
   [[nodiscard]] std::uint32_t MaxContext() const noexcept {
     return options_.max_context;
   }
@@ -157,7 +162,9 @@ public:
                                  std::uint32_t boundary,
                                  std::unique_ptr<SessionSnapshot>* checkpoint,
                                  std::string* error_msg = nullptr,
-                                 double* capture_ms = nullptr);
+                                 double* capture_ms = nullptr,
+                                 std::chrono::steady_clock::time_point*
+                                     capture_started = nullptr);
   [[nodiscard]] bool Evaluate(std::int32_t token,
                               std::string* error_msg = nullptr);
   /// Appends `tokens` through the decode arithmetic: one token as a decode
@@ -174,6 +181,7 @@ public:
   struct DecodeResult {
     std::vector<std::int32_t> tokens;
     bool stop{false};
+    std::vector<sampling::TokenLogprob> logprobs;
   };
   /// Greedy decoding verifies deterministic drafts. Sampled decoding draws
   /// compact MTP proposals and uses target/draft rejection with a residual
@@ -269,14 +277,17 @@ private:
   friend class Model;
   Session(std::shared_ptr<Model> model, std::unique_ptr<rocm::Session> session);
 
+  template <bool CaptureStarted = false>
   bool Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
             bool prefill = false, std::uint32_t boundary = 0,
             std::unique_ptr<SessionSnapshot>* checkpoint = nullptr,
-            double* capture_ms = nullptr);
+            double* capture_ms = nullptr,
+            std::chrono::steady_clock::time_point* capture_started = nullptr);
   bool SyncImpl(std::span<const std::int32_t> prompt, std::string* error_msg,
                 std::uint32_t boundary,
                 std::unique_ptr<SessionSnapshot>* checkpoint,
-                double* capture_ms = nullptr);
+                double* capture_ms = nullptr,
+                std::chrono::steady_clock::time_point* capture_started = nullptr);
   std::unique_ptr<SessionSnapshot> SaveSnapshotImpl(
       const rocm::Session& state, std::span<const std::int32_t> tokens,
       std::span<const float> logits, std::uint32_t hidden_rows,

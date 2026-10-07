@@ -196,6 +196,7 @@ public:
   [[nodiscard]] std::size_t retained_bytes() const noexcept;
   [[nodiscard]] std::size_t capacity_bytes() const noexcept;
   [[nodiscard]] std::size_t staging_capacity_bytes() const noexcept;
+  [[nodiscard]] const ContinuationDiskStoreOptions& options() const noexcept;
 
 private:
   struct Impl;

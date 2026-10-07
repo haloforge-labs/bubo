@@ -442,6 +442,7 @@ if (BUILD_TESTING)
   )
   target_link_libraries(openai_chat_test PRIVATE gufo_core)
   add_test(NAME openai_chat_test COMMAND openai_chat_test)
+  add_test(NAME debug_hooks_settings_test COMMAND openai_chat_test)
   set_tests_properties(openai_chat_test PROPERTIES
     LABELS "cpu;server;api;openai;streaming;tools")
 
@@ -458,6 +459,7 @@ if (BUILD_TESTING)
   add_executable(http_server_test tests/cli/http_server_test.cpp)
   target_link_libraries(http_server_test PRIVATE gufo_http)
   add_test(NAME http_server_test COMMAND http_server_test)
+  add_test(NAME debug_hooks_http_test COMMAND http_server_test)
   set_tests_properties(http_server_test PROPERTIES LABELS "cpu;server;http" TIMEOUT 30)
   add_executable(audio_websocket_test tests/cli/audio_websocket_test.cpp)
   target_link_libraries(audio_websocket_test PRIVATE gufo_http)
@@ -517,6 +519,7 @@ if (BUILD_TESTING)
   add_executable(logit_sampler_test tests/cli/logit_sampler_test.cpp)
   target_link_libraries(logit_sampler_test PRIVATE gufo_core)
   add_test(NAME logit_sampler_test COMMAND logit_sampler_test)
+  add_test(NAME debug_hooks_logprobs_test COMMAND logit_sampler_test)
   set_tests_properties(logit_sampler_test PROPERTIES
     LABELS "cpu;server;sampling")
 
@@ -529,6 +532,7 @@ if (BUILD_TESTING)
   target_link_libraries(text_generation_scheduler_test PRIVATE gufo_logging gufo_core)
   add_test(NAME text_generation_scheduler_test
     COMMAND text_generation_scheduler_test)
+  add_test(NAME debug_hooks_timeline_test COMMAND text_generation_scheduler_test)
   set_tests_properties(text_generation_scheduler_test PROPERTIES
     LABELS "cpu;server;scheduler;queue;state;lifecycle;cancellation")
 

@@ -143,6 +143,14 @@ void Logger::Log(LogLevel level, std::string_view component,
   std::clog << output.str() << std::flush;
 }
 
+void Logger::Diagnostic(std::string_view component, std::string_view message) {
+  std::ostringstream output;
+  output << CurrentTimestamp() << " [INFO] [" << SafeLine(component, 64)
+         << "] " << SafeLine(message, message.size()) << '\n';
+  const std::lock_guard lock(LogMutex());
+  std::clog << output.str() << std::flush;
+}
+
 void Logger::LogFormatted(LogLevel level, std::string_view component,
                           const char* format, ...) {
   if (!Enabled(level)) {

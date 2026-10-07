@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "src/core/image.hpp"
+#include "src/core/platform/loaded_files.hpp"
 
 namespace gufo::models::qwen::vision {
 
@@ -48,6 +49,7 @@ public:
   Encoder& operator=(const Encoder&) = delete;
   [[nodiscard]] const std::string& identity() const;
   [[nodiscard]] std::size_t ResidentBytes() const noexcept;
+  [[nodiscard]] std::vector<platform::LoadedFile> LoadedFiles() const;
   /// Serialized by the owning model scheduler. Pixel grid is already resized.
   /// Weights upload on the first image; scratch is bounded by image dimensions.
   [[nodiscard]] std::shared_ptr<const Embedding> Encode(

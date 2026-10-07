@@ -46,6 +46,8 @@ public:
   /// YYYY-MM-DD HH:MM:SS [LEVEL] [component] message
   static void Log(LogLevel level, std::string_view component,
                   std::string_view message);
+  // Requested diagnostics remain visible under a quiet normal log threshold.
+  static void Diagnostic(std::string_view component, std::string_view message);
 
   /// Logs a printf-formatted message through `Log()`, dropping it before any
   /// formatting when the threshold filters the level. The imported C-style

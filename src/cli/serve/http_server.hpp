@@ -34,6 +34,8 @@ struct HttpRequest {
   std::string request_id{};
   /// Transport-derived peer address, never read from client headers.
   std::string client_id{"anonymous"};
+  bool debug_hooks{false};
+  std::size_t max_score_tokens{8192};
 
   /// URL-decoded value of a query param, or "" if absent.
   std::string query_param(const std::string& key) const;
@@ -89,6 +91,9 @@ using Handler =
     std::function<HttpResponse(const HttpRequest&, TextGenerationBackend&)>;
 
 struct HttpServerOptions {
+  bool debug_hooks{false};
+  std::size_t max_score_tokens{8192};
+  std::shared_ptr<const json::Value> debug_settings;
   std::size_t max_request_body_bytes{static_cast<std::size_t>(8) * 1024 * 1024};
   std::size_t max_connections{16};
   std::string api_key;

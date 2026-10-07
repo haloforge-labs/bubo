@@ -1667,4 +1667,8 @@ std::size_t ContinuationDiskStore::staging_capacity_bytes() const noexcept {
   return impl_->options.staging_capacity_bytes;
 }
 
+const ContinuationDiskStoreOptions& ContinuationDiskStore::options() const noexcept {
+  return impl_->options;
+}
+
 }  // namespace gufo::server

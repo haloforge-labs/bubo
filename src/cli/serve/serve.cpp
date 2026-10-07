@@ -31,11 +31,14 @@
 #include "src/cli/sampling_options.hpp"
 #include "src/cli/serve/asr_service.hpp"
 #include "src/cli/serve/http_server.hpp"
+#include "src/cli/serve/debug_settings.hpp"
 #include "src/cli/serve/image_api.hpp"
 #include "src/cli/serve/inference_backend.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/sampling_request.hpp"
 #include "src/core/diagnostics/gpu_queues.h"
+#include "src/core/crypto/sha256.hpp"
+#include "src/core/platform/loaded_files.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime_api.h>
@@ -246,7 +249,8 @@ void AddServerOptions(gufo::cli::ArgParser& parser, std::string* host,
                       int* port, std::size_t* session_count,
                       std::size_t* max_connections,
                       std::size_t* max_request_body_bytes, std::string* api_key,
-                      ServerLogOptions* log) {
+                      ServerLogOptions* log, bool* debug_hooks,
+                      std::size_t* max_score_tokens) {
   parser.AddOption("-i", "--host", "IP", "Bind address", "Server", host);
   parser.AddOption("-p", "--port", "N", "Port to listen on", "Server", port);
   if (session_count != nullptr)
@@ -272,6 +276,11 @@ void AddServerOptions(gufo::cli::ArgParser& parser, std::string* host,
         return true;
       });
   parser.AddFlag("-v", "--verbose", kVerboseHelp, "Logging", &log->verbose);
+  parser.AddFlag("", "--debug-hooks", "Enable loopback debug diagnostics (default: off)",
+                 "Debug", debug_hooks);
+  parser.AddOption("", "--max-score-tokens", "N",
+                   "Maximum teacher-forced prompt tokens (default: 8192)",
+                   "Debug", max_score_tokens);
 }
 
 // Help-only sinks for AddServerOptions, so subcommand help can list the
@@ -285,6 +294,8 @@ struct ServerOptionHelpTargets {
       static_cast<std::size_t>(8) * 1024 * 1024;
   std::string api_key;
   ServerLogOptions log;
+  bool debug_hooks{false};
+  std::size_t max_score_tokens{8192};
 };
 
 void AddServerOptionsForHelp(gufo::cli::ArgParser& parser,
@@ -293,7 +304,8 @@ void AddServerOptionsForHelp(gufo::cli::ArgParser& parser,
   AddServerOptions(parser, &targets->host, &targets->port,
                    include_sessions ? &targets->session_count : nullptr,
                    &targets->max_connections, &targets->max_request_body_bytes,
-                   &targets->api_key, &targets->log);
+                   &targets->api_key, &targets->log,
+                   &targets->debug_hooks, &targets->max_score_tokens);
 }
 
 // Split a `NAME=VALUE` CLI spec. Returns false when either side is empty.
@@ -835,6 +847,10 @@ int RunServe(std::span<const char* const> args) {
       static_cast<std::size_t>(8) * 1024 * 1024;
   std::string api_key;
   ServerLogOptions log_options;
+  const char* debug_environment = std::getenv("GUFO_DEBUG_HOOKS");
+  bool debug_hooks = debug_environment && std::string_view(debug_environment) == "1";
+  std::size_t max_score_tokens = 8192;
+  std::shared_ptr<const json::Value> debug_settings;
 
   // Identify the modality only after leading server options. The selected
   // parser consumes every option together, so --served-model-name -v and
@@ -844,7 +860,8 @@ int RunServe(std::span<const char* const> args) {
                                       bool include_sessions = true) {
     AddServerOptions(
         parser, &host, &port, include_sessions ? &session_count : nullptr,
-        &max_connections, &max_request_body_bytes, &api_key, &log_options);
+        &max_connections, &max_request_body_bytes, &api_key, &log_options,
+        &debug_hooks, &max_score_tokens);
   };
   add_server_options(server_parser);
   std::string subcommand = "llm";
@@ -891,6 +908,14 @@ int RunServe(std::span<const char* const> args) {
     }
     if (port < 0 || port > 65535) {
       std::cerr << "Error: --port must be between 0 and 65535\n";
+      return false;
+    }
+    if (max_score_tokens == 0) {
+      std::cerr << "Error: --max-score-tokens must be positive\n";
+      return false;
+    }
+    if (debug_hooks && subcommand != "llm") {
+      std::cerr << "Error: --debug-hooks requires the text server\n";
       return false;
     }
     if (session_count == 0 || max_connections == 0 ||
@@ -1490,6 +1515,68 @@ int RunServe(std::span<const char* const> args) {
         << " frequency_penalty=" << effective_sampling.frequency_penalty
         << " presence_penalty=" << effective_sampling.presence_penalty;
     server::Logger::Info("sampling", sampling_log.str());
+    if (debug_hooks) {
+      try {
+        auto resolved = backend->debug_settings();
+        resolved["served_model_name"] = backend->model_id();
+        auto transport = json::Value::object();
+        transport["host"] = host;
+        transport["port"] = port;
+        transport["max_connections"] = max_connections;
+        transport["max_request_body_bytes"] = max_request_body_bytes;
+        transport["authenticated"] = !api_key.empty();
+        transport["debug_hooks"] = true;
+        transport["max_score_tokens"] = max_score_tokens;
+        resolved["transport"] = std::move(transport);
+        auto sampling = json::Value::object();
+        sampling["max_tokens"] = max_tokens;
+        sampling["temperature"] = effective_sampling.temperature;
+        sampling["top_k"] = effective_sampling.top_k;
+        sampling["top_p"] = effective_sampling.top_p;
+        sampling["min_p"] = effective_sampling.min_p;
+        sampling["min_keep"] = effective_sampling.min_keep;
+        sampling["seed"] = effective_sampling.seed;
+        sampling["repeat_penalty"] = effective_sampling.repeat_penalty;
+        sampling["repeat_last_n"] = effective_sampling.repeat_last_n;
+        sampling["frequency_penalty"] = effective_sampling.frequency_penalty;
+        sampling["presence_penalty"] = effective_sampling.presence_penalty;
+        sampling["preset"] = static_cast<int>(backend->sampling_defaults().model);
+        resolved["sampling_defaults"] = std::move(sampling);
+        auto reasoning = json::Value::object();
+        reasoning["think"] = reasoning_mode;
+        reasoning["effort"] = reasoning_effort;
+        reasoning["preserve_thinking"] = preserve_thinking;
+        reasoning["initial_output"] = static_cast<int>(initial_output);
+        reasoning["enabled"] = reasoning_defaults->enabled
+            ? json::Value(*reasoning_defaults->enabled) : json::Value();
+        resolved["reasoning_defaults"] = std::move(reasoning);
+        resolved["trace_path"] = trace_path.empty() ? json::Value() : json::Value(trace_path);
+        resolved["log_progress"] = log_progress;
+        resolved["log_level"] = std::string(server::LogLevelName(server::Logger::Level()));
+#if defined(ENGINE_ENABLE_HIP)
+        int device = 0;
+        hipDeviceProp_t properties{};
+        int driver = 0;
+        if (hipGetDevice(&device) != hipSuccess ||
+            hipGetDeviceProperties(&properties, device) != hipSuccess ||
+            hipDriverGetVersion(&driver) != hipSuccess)
+          throw std::runtime_error("cannot inspect the loaded GPU and driver");
+        auto gpu = json::Value::object();
+        gpu["device"] = device;
+        gpu["name"] = properties.name;
+        gpu["architecture"] = properties.gcnArchName;
+        gpu["driver_version"] = driver;
+        resolved["gpu"] = std::move(gpu);
+#endif
+        debug_settings = std::make_shared<const json::Value>(server::BuildEffectiveSettings(
+            std::move(resolved), GUFO_RELEASE_VERSION, GUFO_REVISION,
+            crypto::Sha256FileHex(platform::LoadedExecutablePath())));
+        server::Logger::Diagnostic("settings", "settings " + debug_settings->dump());
+      } catch (const std::exception& error) {
+        std::cerr << "Error enabling debug hooks: " << error.what() << '\n';
+        return 2;
+      }
+    }
     const char* speculation =
         speculative_config.backend == server::TextSpeculativeBackend::kDFlash
             ? "dflash2"
@@ -1511,6 +1598,9 @@ int RunServe(std::span<const char* const> args) {
   server::HttpServer server(
       host, port, backend, video_jobs, tts, asr,
       server::HttpServerOptions{
+          .debug_hooks = debug_hooks,
+          .max_score_tokens = max_score_tokens,
+          .debug_settings = std::move(debug_settings),
           .max_request_body_bytes = max_request_body_bytes,
           .max_connections = max_connections,
           .api_key = std::move(api_key),

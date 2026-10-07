@@ -1,6 +1,7 @@
 #ifndef GUFO_SERVER_TEXT_MODEL_RUNNER_HPP_
 #define GUFO_SERVER_TEXT_MODEL_RUNNER_HPP_
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -163,16 +164,19 @@ struct TextPrefillStep {
   std::size_t consumed_tokens{0};
   bool decode_ready{false};
   double checkpoint_ms{0};
+  std::optional<std::chrono::steady_clock::time_point> capture_started;
 };
 
 struct TextDecodeSelection {
   bool stop{false};
   TextRunnerToken token{0};
   std::string piece;
+  std::shared_ptr<const sampling::TokenLogprob> logprob;
 };
 
 struct TextDecodeStep {
   std::vector<TextDecodeSelection> selections;
+  std::vector<sampling::TokenLogprob> logprobs;
   /// Number of speculative verification rounds actually executed.
   std::size_t draft_rounds{0};
   std::size_t draft_tokens{0};
@@ -193,6 +197,8 @@ public:
   using CancellationCheck = std::function<bool()>;
 
   void SetStopAtEos(bool value) noexcept { stop_at_eos_ = value; }
+  void SetDebugTimeline(bool value) noexcept { debug_timeline_ = value; }
+  [[nodiscard]] bool debug_timeline() const noexcept { return debug_timeline_; }
   [[nodiscard]] bool stop_at_eos() const noexcept { return stop_at_eos_; }
 
   /// Installs a request-scoped cancellation check for model calls that can
@@ -208,6 +214,7 @@ public:
 
 private:
   bool stop_at_eos_{true};
+  bool debug_timeline_{false};
 };
 
 /// Immutable model-owned continuation payload.
@@ -253,6 +260,10 @@ public:
   TextModelRunner& operator=(TextModelRunner&&) = delete;
 
   [[nodiscard]] virtual TextRunnerDescriptor Descriptor() const = 0;
+  [[nodiscard]] virtual json::Value DebugSettings() const {
+    throw std::invalid_argument("debug settings are not supported for this model");
+  }
+  [[nodiscard]] virtual bool SupportsLogprobs() const noexcept { return false; }
   [[nodiscard]] virtual TextRunnerResourceClaim ResourceClaim() const = 0;
   [[nodiscard]] virtual std::vector<TextExecutionPlan> SupportedPlans()
       const = 0;
@@ -308,6 +319,12 @@ public:
   InitialOutputState(const ChatRequest&) const {
     return TextGenerationBackend::InitialOutputState::kAuto;
   }
+  [[nodiscard]] virtual std::vector<std::optional<sampling::TokenLogprob>>
+  ScorePrompt(std::span<const TextRunnerToken>, const sampling::SamplingConfig&,
+              const TextRunnerState::CancellationCheck&) const {
+    throw std::invalid_argument("prompt logprobs are not supported for this model");
+  }
+
   [[nodiscard]] virtual std::string Decode(
       std::span<const TextRunnerToken> tokens) const = 0;
 
@@ -491,6 +508,9 @@ public:
 
     void PrepareBatchExecution();
     [[nodiscard]] TextPrefillStep Prefill(std::size_t max_input_tokens);
+    void RecordPrefill(std::chrono::steady_clock::time_point start, double ms,
+                       std::size_t index, std::size_t tokens,
+                       std::size_t start_depth);
     [[nodiscard]] TextDecodeSelection SelectNext();
     void Advance();
     [[nodiscard]] TextDecodeStep DecodeStep(std::size_t max_tokens);
@@ -532,6 +552,7 @@ public:
 
   [[nodiscard]] const TextModelRunner& runner() const noexcept;
   [[nodiscard]] std::size_t capacity() const noexcept;
+  [[nodiscard]] json::Value DebugSettings() const;
   [[nodiscard]] TextExecutionPlan SelectDecodePlan(
       std::size_t ready_requests) const;
   [[nodiscard]] std::vector<TextDecodeStep> DecodeBatch(
@@ -545,7 +566,7 @@ public:
       const CancellationCheck& is_cancelled = {},
       std::shared_ptr<const TextPromptContext> context = {},
       bool reuse_prompt = true, std::size_t cache_prefix_tokens = 0,
-      bool stop_at_eos = true);
+      bool stop_at_eos = true, std::shared_ptr<DebugTimeline> timeline = {});
   [[nodiscard]] Request Acquire(std::vector<TextRunnerToken> prompt,
                                 const CancellationCheck& is_cancelled = {});
   /// Longest RAM-retained prefix of prompt that Acquire could reuse, without

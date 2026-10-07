@@ -33,6 +33,8 @@ struct SamplingConfig {
   float presence_penalty{0.0F};
   std::shared_ptr<const TokenConstraint> constraint;
   std::shared_ptr<const BehaviourConfig> behaviour;
+  // Negative leaves scoring off; otherwise collect the requested top 0..20.
+  std::int32_t logprobs{-1};
 
   void Validate() const;
 
@@ -51,6 +53,12 @@ struct TokenPenalty {
 struct Probability {
   TokenId token{0};
   double value{0.0};
+};
+
+struct TokenLogprob {
+  TokenId token{0};
+  double logprob{0};
+  std::vector<Probability> top_logprobs;
 };
 
 struct BehaviourDistribution;
@@ -111,6 +119,9 @@ public:
   SamplerState& operator=(SamplerState&&) noexcept = default;
 
   [[nodiscard]] const SamplingConfig& config() const noexcept;
+  [[nodiscard]] bool LogprobsRequested() const noexcept {
+    return logprobs_requested_;
+  }
   /// Draft q may remain unconstrained; target p always uses this request's
   /// grammar.
   [[nodiscard]] SamplerState WithoutConstraint() const;
@@ -162,6 +173,10 @@ public:
 
   [[nodiscard]] SamplingDistribution Distribution(
       std::span<const float> logits) const;
+  /// Raw log-softmax after deterministic bias/masks and history penalties,
+  /// before temperature or truncation. Does not draw or accept a token.
+  [[nodiscard]] TokenLogprob RawLogprobs(std::span<const float> logits,
+                                       TokenId token, std::size_t top_n) const;
   /// Compact logits use token_ids for penalties; returned IDs index logits.
   [[nodiscard]] SamplingDistribution Distribution(
       std::span<const float> logits, std::span<const TokenId> token_ids) const;
@@ -215,6 +230,8 @@ private:
   void FinishSelected(double full_softmax_sum, bool has_full_softmax_sum);
 
   SamplingConfig config_;
+  // Resolve request opt-in once; speculative sampler copies retain it.
+  bool logprobs_requested_{false};
   JsonConstraint::State constraint_state_;
   mutable std::shared_ptr<const std::vector<std::uint8_t>> constraint_mask_;
   mutable bool constraint_restricts_{false};

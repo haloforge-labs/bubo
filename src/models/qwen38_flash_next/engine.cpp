@@ -303,6 +303,26 @@ std::string Model::ModelName() const {
                          .value_or("Qwen3.8-Flash-Next"));
 }
 
+std::uint32_t Model::ExecutorMaxBatch() const noexcept {
+  return executor_->max_batch();
+}
+
+std::uint32_t Model::PrefillCheckpointSlack() const noexcept {
+  return kPrefillTailTokens;
+}
+
+std::vector<platform::LoadedFile> Model::LoadedFiles() const {
+  std::vector<platform::LoadedFile> files;
+  platform::AppendLoadedFiles(reader_->GetMappedRegions(), "target", &files);
+  if (mtp_reader_)
+    platform::AppendLoadedFiles(mtp_reader_->GetMappedRegions(), "draft", &files);
+  if (vision_) {
+    const auto vision_files = vision_->LoadedFiles();
+    files.insert(files.end(), vision_files.begin(), vision_files.end());
+  }
+  return files;
+}
+
 const Config& Model::config() const noexcept {
   return weights_->config;
 }
@@ -707,10 +727,12 @@ bool Session::DraftCatchUpBatch(std::span<const AdvanceRequest> requests,
   return items.empty() || exec.MtpForwardBatch(items, error_msg);
 }
 
+template <bool CaptureStarted>
 bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
                    bool prefill, std::uint32_t boundary,
                    std::unique_ptr<SessionSnapshot>* checkpoint,
-                   double* capture_ms) {
+                   double* capture_ms,
+                   std::chrono::steady_clock::time_point* capture_started) {
   if (!EnsureFrontier(error_msg)) {
     return false;
   }
@@ -749,6 +771,8 @@ bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
     tokens_.insert(tokens_.end(), chunk.begin(), chunk.end());
     if (capture) {
       const auto started = std::chrono::steady_clock::now();
+      if constexpr (CaptureStarted)
+        *capture_started = started;
       *checkpoint = SaveSnapshotImpl(
           *capture->state,
           std::span<const std::int32_t>(tokens_).first(boundary),
@@ -774,7 +798,8 @@ bool Session::Sync(std::span<const std::int32_t> prompt,
 bool Session::SyncThrough(std::span<const std::int32_t> prompt,
                           std::uint32_t boundary,
                           std::unique_ptr<SessionSnapshot>* checkpoint,
-                          std::string* error_msg, double* capture_ms) {
+                          std::string* error_msg, double* capture_ms,
+                          std::chrono::steady_clock::time_point* capture_started) {
   if (!checkpoint || boundary == 0 || boundary > prompt.size() ||
       prompt.size() - boundary > 8 || boundary <= tokens_.size()) {
     AssignError(error_msg,
@@ -784,13 +809,15 @@ bool Session::SyncThrough(std::span<const std::int32_t> prompt,
   checkpoint->reset();
   if (capture_ms)
     *capture_ms = 0;
-  return SyncImpl(prompt, error_msg, boundary, checkpoint, capture_ms);
+  return SyncImpl(prompt, error_msg, boundary, checkpoint, capture_ms,
+                  capture_started);
 }
 
 bool Session::SyncImpl(std::span<const std::int32_t> prompt,
                        std::string* error_msg, std::uint32_t boundary,
                        std::unique_ptr<SessionSnapshot>* checkpoint,
-                       double* capture_ms) {
+                       double* capture_ms,
+                       std::chrono::steady_clock::time_point* capture_started) {
   if (prompt.empty()) {
     AssignError(error_msg, "prompt is empty");
     return false;
@@ -816,8 +843,12 @@ bool Session::SyncImpl(std::span<const std::int32_t> prompt,
     common = 0;
   }
   valid_ = false;
-  const bool ok = Feed(prompt.subspan(common), error_msg, true, boundary,
-                       checkpoint, capture_ms);
+  const bool ok = capture_started
+                      ? Feed<true>(prompt.subspan(common), error_msg, true,
+                                   boundary, checkpoint, capture_ms,
+                                   capture_started)
+                      : Feed<false>(prompt.subspan(common), error_msg, true,
+                                    boundary, checkpoint, capture_ms);
   valid_ = ok;
   return ok;
 }
@@ -889,6 +920,8 @@ struct Session::PendingDecode {
   bool sampled{false};
   bool gpu_greedy{false};
   bool gpu_verification{false};
+  bool collect_logprobs{false};
+  std::optional<sampling::TokenLogprob> anchor_logprob;
   // Sampled verification reads candidate lists, so the verified rows stay on
   // the GPU; FinishDecode fetches them only for a fallback.
   bool rows_on_device{false};
@@ -1046,11 +1079,13 @@ bool Session::PrepareDecode(const DecodeRequest& request,
   // After a sampled MTP cycle logits_ is the kept verification row, whose
   // candidate list FinishDecode left behind: sample it without a full scan.
   std::optional<sampling::TokenId> fast_anchor;
+  pending->collect_logprobs = sampler.LogprobsRequested();
   if (anchor_candidates_valid_) {
     anchor_candidates_valid_ = false;
     // A frontier row still in flight is the very row the verify graph
     // selected these candidates from (FinishDecode).
-    if (frontier_pending_ || CandidatesMatch(anchor_candidates_, logits_)) {
+    if (!pending->collect_logprobs &&
+        (frontier_pending_ || CandidatesMatch(anchor_candidates_, logits_))) {
       fast_anchor = sampler.SampleFromTop(
           std::span(anchor_candidates_.logits).first(anchor_candidates_.size),
           std::span(anchor_candidates_.ids).first(anchor_candidates_.size),
@@ -1060,11 +1095,20 @@ bool Session::PrepareDecode(const DecodeRequest& request,
   if (!fast_anchor && !EnsureFrontier(error_msg)) {
     return false;
   }
+  std::optional<sampling::SamplerState> scoring_state;
+  if (pending->collect_logprobs)
+    scoring_state = sampler;
   const auto anchor = static_cast<std::int32_t>(
       fast_anchor ? *fast_anchor : sampler.Sample(logits_));
   if (is_stop(anchor)) {
     result->stop = true;
     return true;
+  }
+  if (scoring_state) {
+    // Sampling can journal deferred behaviour; score the state before that draw.
+    pending->anchor_logprob = scoring_state->RawLogprobs(
+        logits_, static_cast<sampling::TokenId>(anchor),
+        static_cast<std::size_t>(sampler.config().logprobs));
   }
   if (!MtpEnabled() || width < 2) {
     if (MtpEnabled() && !defer_head &&
@@ -1098,7 +1142,7 @@ bool Session::PrepareDecode(const DecodeRequest& request,
   pending->sampled = sampled;
   pending->gpu_greedy = gpu_greedy;
   pending->gpu_verification = gpu_verification;
-  if (!gpu_verification &&
+  if ((!gpu_verification || pending->collect_logprobs) &&
       verify_logits_.size() < exec.max_speculative() * model_->VocabSize()) {
     verify_logits_.resize(exec.max_speculative() * model_->VocabSize());
   }
@@ -1153,6 +1197,7 @@ bool Session::FinishDecode(const DecodeRequest& request,
   const bool sampled = pending.sampled;
   const bool gpu_greedy = pending.gpu_greedy;
   const bool gpu_verification = pending.gpu_verification;
+  const bool collect_logprobs = pending.collect_logprobs;
   const auto anchor = chain.front();
   const auto k = static_cast<std::uint32_t>(chain.size());
   const auto vocab = model_->VocabSize();
@@ -1166,8 +1211,12 @@ bool Session::FinishDecode(const DecodeRequest& request,
     tokens_.push_back(anchor);
     sampler.Accept(static_cast<sampling::TokenId>(anchor));
     result->tokens.push_back(anchor);
+    if (collect_logprobs)
+      result->logprobs.push_back(*pending.anchor_logprob);
     return true;
   }
+  if (collect_logprobs)
+    result->logprobs.push_back(*pending.anchor_logprob);
   sampler.Accept(static_cast<sampling::TokenId>(anchor));
   std::array<rocm::ArgmaxCandidate, kMaxMtpDraftTokens> greedy{};
   if (gpu_greedy &&
@@ -1181,12 +1230,13 @@ bool Session::FinishDecode(const DecodeRequest& request,
   std::array<MtpCandidateLogits, kMaxMtpDraftTokens + 1> candidates{};
   std::string candidate_error;
   const bool have_candidates =
-      sampled && platform::PlatformTuning().fast_sampling &&
+      !collect_logprobs && sampled && platform::PlatformTuning().fast_sampling &&
       k <= candidates.size() && sampler.config().top_k > 0 &&
       !sampler.config().penalties_enabled() &&
       exec.VerifyCandidates(std::span(candidates).first(k), &candidate_error);
   // Full rows kept on the GPU are fetched once, only when a row is needed.
-  bool rows_ready = !pending.rows_on_device;
+  // Scoring downloads greedy rows too, while retaining the existing GPU winner.
+  bool rows_ready = !pending.rows_on_device && !gpu_verification;
   const auto ensure_rows = [&] {
     if (!rows_ready) {
       rows_ready =
@@ -1194,7 +1244,7 @@ bool Session::FinishDecode(const DecodeRequest& request,
     }
     return rows_ready;
   };
-  if (sampled && !have_candidates && !ensure_rows()) {
+  if (((sampled && !have_candidates) || collect_logprobs) && !ensure_rows()) {
     return false;
   }
   std::uint32_t keep = 1;
@@ -1229,6 +1279,13 @@ bool Session::FinishDecode(const DecodeRequest& request,
       if (prediction.index != chain[keep]) {
         break;
       }
+      if (collect_logprobs) {
+        result->logprobs.push_back(sampler.RawLogprobs(
+            std::span<const float>(verify_logits_).subspan((keep - 1) * vocab,
+                                                         vocab),
+            prediction.index,
+            static_cast<std::size_t>(sampler.config().logprobs)));
+      }
       sampler.Accept(static_cast<sampling::TokenId>(prediction.index));
       ++keep;
       continue;
@@ -1236,6 +1293,9 @@ bool Session::FinishDecode(const DecodeRequest& request,
     if (sampled) {
       const auto row = std::span<const float>(verify_logits_)
                            .subspan((keep - 1) * vocab, vocab);
+      std::optional<sampling::SamplerState> scoring_state;
+      if (collect_logprobs)
+        scoring_state = sampler;
       std::optional<sampling::SamplingDistribution> target;
       if (have_candidates) {
         target = FastDistribution(sampler, candidates[keep - 1], row);
@@ -1267,10 +1327,17 @@ bool Session::FinishDecode(const DecodeRequest& request,
         correction = token;
         break;
       }
+      if (scoring_state)
+        result->logprobs.push_back(scoring_state->RawLogprobs(
+            row, verified.token,
+            static_cast<std::size_t>(sampler.config().logprobs)));
       sampler.Accept(static_cast<sampling::TokenId>(token));
       ++keep;
       continue;
     }
+    std::optional<sampling::SamplerState> scoring_state;
+    if (collect_logprobs)
+      scoring_state = sampler;
     const auto decision = VerifyDraft(std::span<const float>(verify_logits_)
                                           .subspan((keep - 1) * vocab, vocab),
                                       chain[keep], sampler, is_stop);
@@ -1278,6 +1345,11 @@ bool Session::FinishDecode(const DecodeRequest& request,
       result->stop = decision == DraftDecision::kStop;
       break;
     }
+    if (scoring_state)
+      result->logprobs.push_back(scoring_state->RawLogprobs(
+          std::span<const float>(verify_logits_).subspan((keep - 1) * vocab, vocab),
+          static_cast<sampling::TokenId>(chain[keep]),
+          static_cast<std::size_t>(sampler.config().logprobs)));
     ++keep;
   }
   // Sampled cycles with candidate lists sample the next anchor from those
@@ -1361,7 +1433,8 @@ bool Session::DecodeStep(std::size_t max_tokens,
   // candidate lists replace them unless a row is needed (DownloadVerification).
   pending.rows_on_device =
       pending.speculative && !pending.gpu_verification && pending.sampled &&
-      platform::PlatformTuning().fast_sampling && sampler.config().top_k > 0 &&
+      !pending.collect_logprobs && platform::PlatformTuning().fast_sampling &&
+      sampler.config().top_k > 0 &&
       !sampler.config().penalties_enabled();
   float* logits = !pending.speculative ? logits_.data()
                   : pending.gpu_verification || pending.rows_on_device

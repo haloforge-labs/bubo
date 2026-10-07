@@ -684,10 +684,12 @@ struct TextRunnerPool::Request::Impl {
        std::vector<std::size_t> shared_prefix_boundaries,
        const sampling::SamplingConfig& sampling_config,
        std::shared_ptr<const TextPromptContext> prompt_context,
-       std::size_t cache_prefix_tokens, bool overlap_snapshots)
+       std::size_t cache_prefix_tokens, bool overlap_snapshots,
+       std::shared_ptr<DebugTimeline> request_timeline)
       : runner(std::move(model_runner)),
         disk_store(std::move(persistent_store)),
         lease(std::move(state_lease)),
+        timeline(std::move(request_timeline)),
         prompt(std::move(prompt_tokens)),
         boundaries(std::move(shared_prefix_boundaries)),
         prefill_offset(lease.cached_tokens()),
@@ -922,10 +924,25 @@ struct TextRunnerPool::Request::Impl {
     } catch (...) {
       prompt_snapshot.reset();
     }
-    snapshot_metrics.snapshot_ms +=
-        std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - snapshot_start)
-            .count();
+    const auto snapshot_finished = std::chrono::steady_clock::now();
+    const auto snapshot_ms = std::chrono::duration<double, std::milli>(
+                                 snapshot_finished - snapshot_start).count();
+    snapshot_metrics.snapshot_ms += snapshot_ms;
+    if (timeline) {
+      try {
+        auto fields = json::Value::object();
+        fields["kind"] = snapshot_tokens.size() == prompt.size() ? "continuation"
+            : fallback_position == 0 ? "branch_point" : "stable_boundary";
+        fields["tokens"] = snapshot_tokens.size();
+        fields["bytes"] = prompt_snapshot ? prompt_snapshot->PayloadBytes() : 0;
+        fields["ms"] = snapshot_ms;
+        fields["in_pass"] = false;
+        fields["success"] = bool(prompt_snapshot);
+        timeline->Add("snapshot", snapshot_start, std::move(fields));
+      } catch (...) {
+        timeline->Failed(std::current_exception());
+      }
+    }
     if (prompt_snapshot == nullptr) {
       disk_capture.reset();
       if (retain_snapshot) {
@@ -976,6 +993,15 @@ struct TextRunnerPool::Request::Impl {
     } catch (...) {
       // The boundary worker handles failed capture/admission internally.
     }
+    if (timeline && debug_boundary_failure) {
+      timeline->Failed(std::move(debug_boundary_failure));
+      debug_boundary_failure = {};
+    }
+    if (timeline && debug_boundary_capture) {
+      timeline->Add("snapshot", debug_boundary_start,
+                    std::move(*debug_boundary_capture));
+      debug_boundary_capture.reset();
+    }
     boundary_capture = false;
   }
 
@@ -985,6 +1011,15 @@ struct TextRunnerPool::Request::Impl {
     if (!overlap_snapshots) {
       // A single execution slot has no peer work to overlap with the copy.
       CaptureBoundarySnapshotNow(position, history, shared, purpose);
+      if (timeline && debug_boundary_failure) {
+        timeline->Failed(std::move(debug_boundary_failure));
+        debug_boundary_failure = {};
+      }
+      if (timeline && debug_boundary_capture) {
+        timeline->Add("snapshot", debug_boundary_start,
+                      std::move(*debug_boundary_capture));
+        debug_boundary_capture.reset();
+      }
       return;
     }
     // The scheduler already parks leases with a pending snapshot. Reuse that
@@ -1062,6 +1097,24 @@ struct TextRunnerPool::Request::Impl {
     const auto elapsed = std::chrono::duration<double, std::milli>(
                              std::chrono::steady_clock::now() - started)
                              .count();
+    if (timeline) {
+      try {
+        auto fields = json::Value::object();
+        fields["kind"] = purpose == SnapshotPurpose::kBranchPoint ? "branch_point"
+                                                                 : "history";
+        fields["tokens"] = position;
+        fields["bytes"] = bytes;
+        fields["ms"] = elapsed;
+        fields["in_pass"] = false;
+        fields["success"] = !failed;
+        // The capture worker never mutates the timeline. Joining its existing
+        // future hands this event back to the request owner without a new lock.
+        debug_boundary_start = started;
+        debug_boundary_capture = std::move(fields);
+      } catch (...) {
+        debug_boundary_failure = std::current_exception();
+      }
+    }
     if (history)
       snapshot_metrics.snapshot_ms += elapsed;
     if (shared) {
@@ -1073,6 +1126,14 @@ struct TextRunnerPool::Request::Impl {
   std::shared_ptr<TextModelRunner> runner;
   std::shared_ptr<ContinuationDiskStore> disk_store;
   ContinuationCache::Lease lease;
+  std::shared_ptr<DebugTimeline> timeline;
+  std::string debug_prefill_boundary;
+  bool debug_prefill_in_pass{false};
+  std::optional<json::Value> debug_boundary_capture;
+  std::exception_ptr debug_boundary_failure;
+  std::optional<json::Value> debug_inpass_capture;
+  std::chrono::steady_clock::time_point debug_inpass_start;
+  std::chrono::steady_clock::time_point debug_boundary_start;
   std::vector<TextRunnerToken> prompt;
   std::vector<TextRunnerToken> snapshot_tokens;
   /// Ascending prefill positions to persist, all inside (cached, prompt size).
@@ -1363,6 +1424,19 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
     } else {
       impl_->prompt_snapshot = std::move(captured);
     }
+    if (impl_->timeline) {
+      if (!step.capture_started)
+        throw std::logic_error("runner did not report its in-pass capture timestamp");
+      auto fields = json::Value::object();
+      fields["kind"] = "stable_boundary";
+      fields["tokens"] = snapshot_position;
+      fields["bytes"] = impl_->prompt_snapshot ? impl_->prompt_snapshot->PayloadBytes() : 0;
+      fields["ms"] = step.checkpoint_ms;
+      fields["in_pass"] = true;
+      fields["success"] = bool(impl_->prompt_snapshot);
+      impl_->debug_inpass_start = *step.capture_started;
+      impl_->debug_inpass_capture = std::move(fields);
+    }
     impl_->AdvancePromptTarget();
   }
   if (!reached_frontier && impl_->prefill_offset == snapshot_position)
@@ -1371,6 +1445,12 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
                        impl_->checkpoints.front() == impl_->prefill_offset;
   const bool shared = !impl_->boundaries.empty() &&
                       impl_->boundaries.front() == impl_->prefill_offset;
+  if (impl_->timeline) {
+    impl_->debug_prefill_in_pass = in_pass;
+    impl_->debug_prefill_boundary = reached_frontier ? "prompt_end"
+        : impl_->prefill_offset == snapshot_position ? "stable_boundary"
+        : history || shared ? "checkpoint" : "cap";
+  }
   if (history)
     impl_->checkpoints.erase(impl_->checkpoints.begin());
   if (shared)
@@ -1387,6 +1467,24 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
                                        ? SnapshotPurpose::kBranchPoint
                                        : SnapshotPurpose::kHistory);
   return step;
+}
+
+void TextRunnerPool::Request::RecordPrefill(
+    std::chrono::steady_clock::time_point start, double ms, std::size_t index,
+    std::size_t tokens, std::size_t start_depth) {
+  auto fields = json::Value::object();
+  fields["index"] = index;
+  fields["tokens"] = tokens;
+  fields["start_depth"] = start_depth;
+  fields["ms"] = ms;
+  fields["end_reason"] = impl_->debug_prefill_boundary;
+  fields["in_pass_checkpoint"] = impl_->debug_prefill_in_pass;
+  impl_->timeline->Add("prefill", start, std::move(fields));
+  if (impl_->debug_inpass_capture) {
+    impl_->timeline->Add("snapshot", impl_->debug_inpass_start,
+                         std::move(*impl_->debug_inpass_capture));
+    impl_->debug_inpass_capture.reset();
+  }
 }
 
 TextDecodeSelection TextRunnerPool::Request::SelectNext() {
@@ -1613,6 +1711,43 @@ std::size_t TextRunnerPool::capacity() const noexcept {
   return impl_->cache.capacity();
 }
 
+json::Value TextRunnerPool::DebugSettings() const {
+  auto settings = impl_->validated.runner->DebugSettings();
+  settings["sessions"] = impl_->cache.capacity();
+  auto ram = json::Value::object();
+  ram["capacity_bytes"] = impl_->cache.snapshot_capacity_bytes();
+  ram["automatic_bytes"] = impl_->validated.snapshot_automatic_bytes;
+  ram["ceiling_bytes"] = impl_->validated.snapshot_max_bytes;
+  ram["entry_capacity"] = impl_->cache.entry_capacity();
+  ram["automatic_max_bytes"] = TextRunnerRamCacheOptions::kAutomaticMaxBytes;
+  ram["host_headroom_bytes"] = kHostSnapshotHeadroomBytes;
+  ram["max_intermediate_checkpoints"] = Impl::kIntermediateCheckpoints;
+  ram["shared_checkpoint_slack"] = Request::kSharedCheckpointSlack;
+  ram["shared_prefix_min_tokens"] = Request::kSharedPrefixMinTokens;
+  settings["ram_cache"] = std::move(ram);
+  auto disk = json::Value::object();
+  disk["enabled"] = impl_->disk_store != nullptr;
+  if (impl_->disk_store) {
+    const auto& options = impl_->disk_store->options();
+    disk["directory"] = std::filesystem::absolute(options.directory).string();
+    disk["capacity_bytes"] = impl_->disk_store->capacity_bytes();
+    disk["staging_capacity_bytes"] = impl_->disk_store->staging_capacity_bytes();
+    disk["min_checkpoint_step_tokens"] = options.min_checkpoint_step_tokens;
+    disk["shared_prefix_min_tokens"] = impl_->shared_prefix_min_tokens;
+    disk["shared_prefix_max_boundaries"] = impl_->shared_prefix_max_boundaries;
+  }
+  settings["disk_cache"] = std::move(disk);
+  auto plans = json::Value::array();
+  for (const auto& plan : impl_->validated.plans) {
+    auto entry = json::Value::object();
+    entry["kind"] = plan.kind == TextExecutionPlanKind::kBatched ? "batched" : "serial";
+    entry["physical_width"] = plan.physical_width;
+    plans.push_back(std::move(entry));
+  }
+  settings["execution_plans"] = std::move(plans);
+  return settings;
+}
+
 TextExecutionPlan TextRunnerPool::SelectDecodePlan(
     std::size_t ready_requests) const {
   if (ready_requests == 0) {
@@ -1787,7 +1922,8 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
     const sampling::SamplingConfig& sampling_config,
     const CancellationCheck& is_cancelled,
     std::shared_ptr<const TextPromptContext> context, bool reuse_prompt,
-    std::size_t cache_prefix_tokens, bool stop_at_eos) {
+    std::size_t cache_prefix_tokens, bool stop_at_eos,
+    std::shared_ptr<DebugTimeline> timeline) {
   sampling_config.Validate();
   if (prompt.empty()) {
     throw std::invalid_argument("text runner prompt must not be empty");
@@ -1819,6 +1955,7 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
         auto& text_state = dynamic_cast<TextRunnerState&>(state);
         text_state.SetCancellationCheck(is_cancelled);
         text_state.SetStopAtEos(stop_at_eos);
+        text_state.SetDebugTimeline(bool(timeline));
         impl_->validated.runner->SetPromptContext(text_state, context);
       },
       reuse_prompt, cache_prefix_tokens, input_prefixes);
@@ -1859,6 +1996,17 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
                            prefix.size());
       }
       if (snapshot) {
+        if (timeline) {
+          auto fields = json::Value::object();
+          fields["kind"] = "branch_point";
+          fields["tokens"] = prefix.size();
+          fields["bytes"] = bytes;
+          fields["ms"] = std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - started).count();
+          fields["in_pass"] = false;
+          fields["success"] = true;
+          timeline->Add("snapshot", started, std::move(fields));
+        }
         if (impl_->disk_store) {
           try {
             const auto prefix_identity =
@@ -1926,7 +2074,8 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
   Request request(std::make_unique<Request::Impl>(
       impl_->validated.runner, impl_->disk_store, std::move(lease),
       std::move(prompt), std::move(boundaries), sampling_config,
-      std::move(context), cache_prefix_tokens, impl_->cache.capacity() > 1));
+      std::move(context), cache_prefix_tokens, impl_->cache.capacity() > 1,
+      std::move(timeline)));
   // Prompts that diverge from a retained one after a long common prefix,
   // such as new conversations under one system prompt, publish a checkpoint
   // at the divergence point. Later prompts sharing it restore it exactly

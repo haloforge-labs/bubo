@@ -513,6 +513,12 @@ struct Encoder::Impl {
 
 Encoder::Encoder(const std::filesystem::path& path, std::uint32_t width)
     : impl_(std::make_unique<Impl>(path, width)) {}
+
+std::vector<platform::LoadedFile> Encoder::LoadedFiles() const {
+  std::vector<platform::LoadedFile> files;
+  platform::AppendLoadedFiles(impl_->reader->GetMappedRegions(), "vision", &files);
+  return files;
+}
 Encoder::~Encoder() = default;
 std::shared_ptr<Encoder> Encoder::Open(const std::filesystem::path& target,
                                        const std::filesystem::path& sidecar,

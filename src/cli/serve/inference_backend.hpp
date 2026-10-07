@@ -130,6 +130,13 @@ public:
   [[nodiscard]] std::uint32_t max_context() const override;
   [[nodiscard]] std::vector<SessionState> session_states() const override;
   [[nodiscard]] ReasoningOptions reasoning_defaults() const override;
+  [[nodiscard]] bool supports_logprobs() const override;
+  [[nodiscard]] std::string token_piece(sampling::TokenId token) const override;
+  std::shared_ptr<GenerationRequest> start_score(
+      std::string_view prompt, const sampling::SamplingConfig& sampling,
+      std::size_t max_score_tokens,
+      const CancellationCheck& is_cancelled = {}) override;
+  [[nodiscard]] json::Value debug_settings() const;
   [[nodiscard]] InitialOutputState initial_output_state(
       const ChatRequest& request) const override;
   void set_model_id(const std::string& model_id);
@@ -165,7 +172,7 @@ public:
       const CancellationCheck& is_cancelled = {}, bool stream_output = false,
       bool ignore_eos = false, std::string_view client_id = "anonymous",
       const std::vector<std::string>& stop_sequences = {},
-      bool return_progress = false) override;
+      bool return_progress = false, bool debug_timeline = false) override;
 
   Result chat(const std::vector<tokenization::ChatMessage>& messages,
               std::size_t max_tokens, const sampling::SamplingConfig& sampling,

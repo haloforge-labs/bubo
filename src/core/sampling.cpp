@@ -471,6 +471,7 @@ SamplingDistribution BuildDistribution(
 SamplerState::SamplerState(SamplingConfig config,
                            std::span<const TokenId> initial_history)
     : config_(config),
+      logprobs_requested_(config.logprobs >= 0),
       history_(initial_history.begin(), initial_history.end()),
       rng_state_(InitialRngState(config.seed)) {
   config_.Validate();
@@ -485,6 +486,7 @@ SamplerState::SamplerState(const SamplerState& other)
     : behaviour_state_(other.behaviour_state_),
       observe_behaviour_(other.observe_behaviour_),
       config_(other.config_),
+      logprobs_requested_(other.logprobs_requested_),
       constraint_state_(other.constraint_state_),
       constraint_mask_(other.constraint_mask_),
       constraint_restricts_(other.constraint_restricts_),
@@ -500,6 +502,7 @@ SamplerState& SamplerState::operator=(const SamplerState& other) {
   behaviour_state_ = other.behaviour_state_;
   observe_behaviour_ = other.observe_behaviour_;
   config_ = other.config_;
+  logprobs_requested_ = other.logprobs_requested_;
   constraint_state_ = other.constraint_state_;
   constraint_mask_ = other.constraint_mask_;
   constraint_restricts_ = other.constraint_restricts_;
@@ -1294,6 +1297,60 @@ BehaviourLogits TransformBehaviour(std::span<const float> raw,
   return result;
 }
 }
+TokenLogprob SamplerState::RawLogprobs(std::span<const float> logits,
+                                     TokenId token, std::size_t top_n) const {
+  if (logits.empty() || token >= logits.size() || top_n > 20)
+    throw std::invalid_argument("invalid logprob vocabulary or top_logprobs");
+  auto native = WithoutBehaviour();
+  std::vector<float> transformed;
+  if (BehaviourEnabled()) {
+    if (behaviour_state_.thinking)
+      native.config_.constraint.reset();
+    transformed = TransformBehaviour(logits, {}, config_, behaviour_state_,
+                                    NeedsConstraintMask()).logits;
+    logits = transformed;
+  }
+  const auto mask = native.config_.constraint
+                        ? native.config_.constraint->Allowed(constraint_state_)
+                        : nullptr;
+  if (mask && mask->size() != logits.size())
+    throw std::invalid_argument("JSON constraint vocabulary differs from logits");
+  std::vector<Probability> scores;
+  scores.reserve(logits.size());
+  double maximum = -std::numeric_limits<double>::infinity();
+  double selected = -std::numeric_limits<double>::infinity();
+  for (std::size_t i = 0; i < logits.size(); ++i) {
+    if (!std::isfinite(logits[i]) || (mask && !(*mask)[i]))
+      continue;
+    const auto id = static_cast<TokenId>(i);
+    const double value = native.AdjustedLogit(id, logits[i]);
+    if (!std::isfinite(value))
+      throw std::runtime_error("sampling penalties produced a non-finite logit");
+    maximum = std::max(maximum, value);
+    if (id == token)
+      selected = value;
+    scores.push_back({id, value});
+  }
+  if (scores.empty())
+    throw std::runtime_error("logit distribution contains no finite values");
+  double sum = 0;
+  for (const auto& score : scores)
+    sum += std::exp(score.value - maximum);
+  // Subtract the peak first to preserve small logprobs on large logit rows.
+  const double normalization = std::log(sum);
+  TokenLogprob result{token, selected - maximum - normalization, {}};
+  if (top_n != 0) {
+    const auto keep = std::min(top_n, scores.size());
+    std::partial_sort(scores.begin(), scores.begin() + keep, scores.end(),
+                      IsBetterProbability);
+    scores.resize(keep);
+    for (auto& score : scores)
+      score.value = score.value - maximum - normalization;
+    result.top_logprobs = std::move(scores);
+  }
+  return result;
+}
+
 SamplerState SamplerState::BehaviourWithoutIntervention(std::string_view name) const {
   const auto& b=*config_.behaviour;
   auto variant=*this;variant.observe_behaviour_=false;

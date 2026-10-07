@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/cli/serve/debug_timeline.hpp"
 #include "src/core/reasoning.hpp"
 #include "src/core/sampling.hpp"
 #include "src/core/text_sampling_defaults.hpp"
@@ -118,6 +119,7 @@ struct ChatRequest {
   /// Optional streaming prompt progress; never changes prompt or cache
   /// identity.
   bool return_progress{false};
+  bool debug_timeline{false};
   std::vector<std::string> stop_sequences;
   std::shared_ptr<const sampling::JsonConstraint> response_format;
   std::string response_format_description;
@@ -188,6 +190,9 @@ public:
   struct Result {
     std::string text;
     std::vector<tokenization::TokenId> tokens;
+    std::vector<sampling::TokenLogprob> logprobs;
+    std::vector<std::optional<sampling::TokenLogprob>> prompt_logprobs;
+    std::shared_ptr<DebugTimeline> debug_timeline;
     std::size_t prompt_tokens{0};
     std::size_t cached_prompt_tokens{0};
     std::size_t cache_restore_bytes{0};
@@ -295,6 +300,15 @@ public:
   }
   /// Whether the loaded backend accepts image inputs in chat requests.
   [[nodiscard]] virtual bool supports_images() const { return false; }
+  [[nodiscard]] virtual bool supports_logprobs() const { return false; }
+  [[nodiscard]] virtual std::string token_piece(tokenization::TokenId) const {
+    throw std::invalid_argument("logprobs are not supported for this model");
+  }
+  virtual std::shared_ptr<GenerationRequest> start_score(
+      std::string_view, const sampling::SamplingConfig&, std::size_t,
+      const CancellationCheck& = {}) {
+    throw std::invalid_argument("prompt logprobs are not supported for this model");
+  }
   [[nodiscard]] virtual SamplingDefaults sampling_defaults() const {
     return {};
   }
@@ -356,7 +370,7 @@ public:
       const CancellationCheck& is_cancelled = {}, bool stream_output = false,
       bool ignore_eos = false, std::string_view client_id = "anonymous",
       const std::vector<std::string>& stop_sequences = {},
-      bool return_progress = false);
+      bool return_progress = false, bool debug_timeline = false);
 
   std::shared_ptr<GenerationRequest> start_chat(
       const ChatRequest& request, std::size_t max_tokens, float temperature,
@@ -370,15 +384,24 @@ public:
       std::string_view text) const = 0;
 };
 
+inline json::Value SerializeDebugTimeline(
+    const TextGenerationBackend::Result& result) {
+  if (!result.debug_timeline)
+    throw std::invalid_argument("timeline was not requested");
+  return result.debug_timeline->Serialize();
+}
+
 inline std::shared_ptr<TextGenerationBackend::GenerationRequest>
 TextGenerationBackend::start_complete(
     std::string_view prompt, std::size_t max_tokens,
     const sampling::SamplingConfig& sampling,
     const CancellationCheck& is_cancelled, bool stream_output, bool ignore_eos,
     std::string_view client_id, const std::vector<std::string>& stop_sequences,
-    bool return_progress) {
+    bool return_progress, bool debug_timeline) {
   (void)stream_output;
   (void)return_progress;
+  if (debug_timeline)
+    throw std::invalid_argument("timeline is not supported by this backend");
   if (ignore_eos)
     throw std::invalid_argument("backend does not support ignore_eos");
   class DeferredGenerationRequest final : public GenerationRequest {
@@ -436,6 +459,8 @@ TextGenerationBackend::start_chat(const ChatRequest& request,
                                   const CancellationCheck& is_cancelled,
                                   bool stream_output) {
   (void)stream_output;
+  if (request.debug_timeline)
+    throw std::invalid_argument("timeline is not supported by this backend");
   class DeferredGenerationRequest final : public GenerationRequest {
   public:
     DeferredGenerationRequest(TextGenerationBackend& backend,

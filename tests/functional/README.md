@@ -1,5 +1,14 @@
 # Text API functional tests
 
+See [server debug hooks and logprobs](../../docs/SERVER.md#optional-debug-hooks-and-logprobs)
+for capability flags, timeline fields, scoring semantics and current limits.
+The CPU regression registrations are `debug_hooks_settings_test`,
+`debug_hooks_timeline_test`, `debug_hooks_logprobs_test` and
+`debug_hooks_http_test`. Operator validation must additionally compare OFF
+response/token dumps and run short GPU timing ABBA arms; syntax checking alone
+does not establish byte identity or performance. Cache inspection remains
+stopped rather than reporting incomplete hit history.
+
 The runner starts an isolated local server and checks real responses with the
 OpenAI SDK. Use production binaries and local weights; no models are downloaded.
 

@@ -2419,6 +2419,127 @@ const QwenFlashNextTextRunnerState& RequireQwenFlashNextState(
 
 class QwenFlashNextTextRunner final : public HipTextModelRunner {
 public:
+  [[nodiscard]] json::Value DebugSettings() const override {
+    auto settings = json::Value::object();
+    auto files = json::Value::array();
+    for (const auto& file : model_->LoadedFiles()) {
+      auto entry = json::Value::object();
+      entry["path"] = file.path;
+      entry["bytes"] = file.bytes;
+      entry["purpose"] = file.purpose;
+      files.push_back(std::move(entry));
+    }
+    settings["model_files"] = std::move(files);
+    settings["model_name"] = model_->ModelName();
+    settings["model_context"] = static_cast<std::size_t>(model_->MaxContext());
+    settings["context"] = static_cast<std::size_t>(max_context_);
+    settings["executor_max_batch"] = static_cast<std::size_t>(model_->ExecutorMaxBatch());
+    settings["prefill_capacity"] = static_cast<std::size_t>(model_->PrefillCapacity());
+    settings["prefill_through_capacity"] = static_cast<std::size_t>(model_->PrefillThroughCapacity());
+    settings["in_pass_checkpoint_slack"] = static_cast<std::size_t>(model_->PrefillCheckpointSlack());
+    settings["decode_concurrency"] = static_cast<std::size_t>(model_->DecodeConcurrency());
+    settings["speculative_mode"] = use_mtp_ ? "mtp" : "off";
+    settings["vision_enabled"] = model_->VisionEncoder() != nullptr;
+    const auto& options = model_->options();
+    auto mtp = json::Value::object();
+    mtp["model_has_mtp"] = model_->HasMtp();
+    mtp["enabled"] = use_mtp_;
+    mtp["runner_max_draft_tokens"] = static_cast<std::size_t>(max_draft_tokens_);
+    mtp["model_max_draft_tokens"] = static_cast<std::size_t>(options.max_draft_tokens);
+    mtp["survival"] = options.mtp_survival;
+    mtp["prompt_lookup"] = options.prompt_lookup;
+    mtp["draft_vocabulary"] =
+        options.draft_vocabulary == models::qwen38_flash_next::DraftVocabulary::kLatinText
+            ? "latin_text" : "full";
+    settings["mtp_policy"] = std::move(mtp);
+    auto suppressed = json::Value::array();
+    for (const auto token : suppress_tokens_)
+      suppressed.push_back(static_cast<std::size_t>(token));
+    settings["suppressed_token_ids"] = std::move(suppressed);
+    sampling::SamplingConfig sampling;
+    sampling.behaviour = ParseBehaviourOptions(json::Value::object());
+    const auto configured = ConfigureSampling(sampling, nullptr, {});
+    auto behaviour = json::Value::object();
+    behaviour["enabled"] = configured.behaviour != nullptr;
+    if (configured.behaviour) {
+      const auto& policy = *configured.behaviour;
+      const auto tokens = [](const auto& ids) {
+        auto result = json::Value::array();
+        for (const auto id : ids)
+          result.push_back(static_cast<std::size_t>(id));
+        return result;
+      };
+      behaviour["eog_ids"] = tokens(policy.eog_ids);
+      behaviour["think_start"] = tokens(policy.think_start);
+      behaviour["think_end"] = tokens(policy.think_end);
+      behaviour["budget_forced"] = tokens(policy.budget_forced);
+      behaviour["loop_prefix"] = tokens(policy.loop_prefix);
+      behaviour["marker_ids"] = tokens(policy.marker_ids);
+      behaviour["marker_bias_unspecified_effort"] = policy.marker_bias;
+      behaviour["initial_thinking_raw_completion"] = policy.initial_thinking;
+      behaviour["suppressed_token_ids"] = tokens(policy.suppress_ids);
+      behaviour["reasoning_budget"] = static_cast<long long>(policy.reasoning_budget);
+      behaviour["reasoning_start_tag"] = policy.reasoning_start_tag;
+      auto tags = json::Value::array();
+      for (const auto& tag : policy.reasoning_end_tags)
+        tags.push_back(tag);
+      behaviour["reasoning_end_tags"] = std::move(tags);
+    }
+    settings["model_behaviour_defaults"] = std::move(behaviour);
+    return settings;
+  }
+  [[nodiscard]] bool SupportsLogprobs() const noexcept override { return true; }
+
+  [[nodiscard]] std::vector<std::optional<sampling::TokenLogprob>> ScorePrompt(
+      std::span<const TextRunnerToken> prompt,
+      const sampling::SamplingConfig& config,
+      const TextRunnerState::CancellationCheck& cancelled) const override {
+    if (config.logprobs < 0 || config.logprobs > 20)
+      throw std::invalid_argument("prompt scoring requires logprobs in 0..20");
+    if (prompt.size() > max_context_)
+      throw std::invalid_argument("prompt scoring exceeds the model context");
+    std::vector<std::optional<sampling::TokenLogprob>> scores(prompt.size());
+    if (prompt.empty())
+      return scores;
+    std::string error;
+    // This worker-owned session cannot mutate another request or cached state.
+    auto session = model_->CreateSession(
+        model_->HasMtp() ? gufo::core::SessionMode::kSpeculative
+                         : gufo::core::SessionMode::kAutoregressive,
+        max_context_, &error);
+    if (!session)
+      throw std::runtime_error("prompt scoring session failed: " + error);
+    session->SetCancellationCheck(cancelled);
+    const auto tokens = QwenFlashNextEngineTokens(prompt);
+    if (!session->Sync(std::span(tokens).first(1), &error))
+      throw std::runtime_error("prompt scoring first token failed: " + error);
+    sampling::SamplerState sampler(config);
+    // Seed behaviour tags as well as penalty history before the second row.
+    sampler.Accept(prompt.front());
+    std::vector<float> rows;
+    const std::size_t vocab = model_->VocabSize();
+    for (std::size_t p = 1; p < prompt.size();) {
+      if (cancelled && cancelled())
+        throw std::runtime_error("generation cancelled");
+      const auto width = std::min<std::size_t>(session->MaxVerifyWidth(),
+                                               prompt.size() - p);
+      scores[p] = sampler.RawLogprobs(session->Logits(), prompt[p],
+                                      static_cast<std::size_t>(config.logprobs));
+      sampler.Accept(prompt[p]);
+      if (!session->TeacherForce(std::span(tokens).subspan(p, width), &rows,
+                                 &error))
+        throw std::runtime_error("prompt teacher forcing failed: " + error);
+      for (std::size_t j = 1; j < width; ++j) {
+        scores[p + j] = sampler.RawLogprobs(
+            std::span<const float>(rows).subspan((j - 1) * vocab, vocab),
+            prompt[p + j], static_cast<std::size_t>(config.logprobs));
+        sampler.Accept(prompt[p + j]);
+      }
+      p += width;
+    }
+    return scores;
+  }
+
   sampling::JsonConstraint::ToolFormat ToolFormat() const override {
     return sampling::JsonConstraint::ToolFormat::kQwen;
   }
@@ -2631,8 +2752,11 @@ public:
     std::unique_ptr<models::qwen38_flash_next::SessionSnapshot> captured;
     std::string error;
     double capture_ms = 0;
+    std::chrono::steady_clock::time_point capture_started;
     if (!qfn.session().SyncThrough(prefix, static_cast<std::uint32_t>(boundary),
-                                   &captured, &error, &capture_ms)) {
+                                   &captured, &error, &capture_ms,
+                                   qfn.debug_timeline() ? &capture_started
+                                                        : nullptr)) {
       qfn.set_position(0);
       throw std::runtime_error("in-pass checkpoint failed: " + error);
     }
@@ -2641,7 +2765,10 @@ public:
         model_, std::move(captured), boundary);
     return {.consumed_tokens = consumed,
             .decode_ready = next_position == prompt.size(),
-            .checkpoint_ms = capture_ms};
+            .checkpoint_ms = capture_ms,
+            .capture_started = qfn.debug_timeline()
+                                   ? std::optional(capture_started)
+                                   : std::nullopt};
   }
 
   // The engine stops before committing EOS when the request enables it.
@@ -2671,14 +2798,23 @@ public:
       throw std::runtime_error(
           "Qwen3.8-Flash-Next token selection has no logits");
     }
+    std::optional<sampling::SamplerState> scoring_state;
+    if (sampler.LogprobsRequested())
+      scoring_state = sampler;
     const auto token = static_cast<std::int32_t>(sampler.Sample(logits));
     if (EndsTurn(qfn, *model_, token)) {
       return {.stop = true, .token = 0, .piece = {}};
     }
+    std::shared_ptr<const sampling::TokenLogprob> logprob;
+    if (scoring_state)
+      logprob = std::make_shared<const sampling::TokenLogprob>(scoring_state->RawLogprobs(
+          logits, static_cast<sampling::TokenId>(token),
+          static_cast<std::size_t>(sampler.config().logprobs)));
     return {
         .stop = false,
         .token = static_cast<TextRunnerToken>(token),
         .piece = model_->TokenText(token),
+        .logprob = std::move(logprob),
     };
   }
 
@@ -2698,6 +2834,8 @@ public:
 
   [[nodiscard]] std::optional<TextDecodeSelection> PreviewFirstToken(
       TextRunnerState& state, sampling::SamplerState& sampler) const override {
+    if (sampler.LogprobsRequested())
+      return std::nullopt;
     return SelectNext(state, sampler);
   }
 
@@ -2733,6 +2871,8 @@ public:
     sampler.CopyDrawStateFrom(working_sampler);
     TextDecodeStep step;
     ResolveStepTokens(qfn, decoded.stop, decoded.tokens, &step);
+    if (sampler.LogprobsRequested())
+      step.logprobs = std::move(decoded.logprobs);
     qfn.set_position(qfn.session().Position());
     const auto stats_after = qfn.session().Statistics();
     step.draft_rounds = stats_after.cycles - stats_before.cycles;
@@ -2820,6 +2960,8 @@ public:
       state.set_position(state.session().Position());
       auto& step = steps[i];
       ResolveStepTokens(state, results[i].stop, results[i].tokens, &step);
+      if (decodes[i].sampler.get().LogprobsRequested())
+        step.logprobs = std::move(results[i].logprobs);
       if (active_count > 1 && !results[i].tokens.empty()) {
         step.execution_plan = {.kind = TextExecutionPlanKind::kBatched,
                                .physical_width = active_count};
@@ -3189,6 +3331,58 @@ struct InferenceBackend::Impl {
 InferenceBackend::InferenceBackend() : impl_(std::make_unique<Impl>()) {}
 
 InferenceBackend::~InferenceBackend() = default;
+
+bool InferenceBackend::supports_logprobs() const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  return state && state->scheduler->runner().SupportsLogprobs();
+#else
+  return false;
+#endif
+}
+
+std::string InferenceBackend::token_piece(sampling::TokenId token) const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  if (state)
+    return state->scheduler->runner().Decode(std::span(&token, 1));
+#endif
+  throw std::invalid_argument("token logprobs are not supported for this model");
+}
+
+std::shared_ptr<InferenceBackend::GenerationRequest> InferenceBackend::start_score(
+    std::string_view prompt, const sampling::SamplingConfig& sampling,
+    std::size_t max_score_tokens, const CancellationCheck& is_cancelled) {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto request_start = Clock::now();
+  const auto state = impl_->Snapshot();
+  if (!state || !state->scheduler->runner().SupportsLogprobs())
+    throw std::invalid_argument("prompt logprobs are not supported for this model");
+  auto tokens = state->scheduler->runner().Tokenize(prompt);
+  if (tokens.size() > max_score_tokens)
+    throw std::invalid_argument("prompt exceeds --max-score-tokens");
+  auto configured = state->scheduler->runner().ConfigureSampling(
+      sampling, nullptr, {});
+  TextRequestMetadata metadata;
+  metadata.request_start = request_start;
+  auto request = state->scheduler->ScorePrompt(
+      std::move(tokens), configured, is_cancelled, std::move(metadata));
+  return std::make_shared<Impl::ScheduledGenerationRequest>(state,
+                                                           std::move(request));
+#else
+  return TextGenerationBackend::start_score(prompt, sampling, max_score_tokens,
+                                            is_cancelled);
+#endif
+}
+
+json::Value InferenceBackend::debug_settings() const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  if (state)
+    return state->scheduler->DebugSettings();
+#endif
+  throw std::invalid_argument("debug settings require a loaded text model");
+}
 
 bool InferenceBackend::load(const std::string& model_path, std::string* error,
                             std::uint32_t max_context,
@@ -3999,16 +4193,30 @@ InferenceBackend::start_complete(
     const sampling::SamplingConfig& sampling_config,
     const CancellationCheck& is_cancelled, bool stream_output, bool ignore_eos,
     std::string_view client_id, const std::vector<std::string>& stop_sequences,
-    bool return_progress) {
+    bool return_progress, bool debug_timeline) {
 #if defined(ENGINE_ENABLE_HIP)
   const auto request_start = Clock::now();
   const auto state = impl_->Snapshot();
   if (state == nullptr) {
     return TextGenerationBackend::start_complete(
         prompt, max_tokens, sampling_config, is_cancelled, stream_output,
-        ignore_eos, client_id, stop_sequences, return_progress);
+        ignore_eos, client_id, stop_sequences, return_progress, debug_timeline);
+  }
+
+  std::shared_ptr<DebugTimeline> timeline;
+  const auto render_start = debug_timeline ? Clock::now() : request_start;
+  if (debug_timeline) {
+    timeline = std::make_shared<DebugTimeline>(request_start);
+    timeline->Add("admission", request_start);
   }
   auto prompt_tokens = state->scheduler->runner().Tokenize(prompt);
+  if (timeline) {
+    auto event = json::Value::object();
+    event["template_ms"] = std::chrono::duration<double, std::milli>(
+                               Clock::now() - render_start).count();
+    event["token_count"] = prompt_tokens.size();
+    timeline->Add("render", render_start, std::move(event));
+  }
   const auto effective_sampling = state->scheduler->runner().ConfigureSampling(
       sampling_config,nullptr,prompt_tokens);
   auto scheduled_request = state->scheduler->Submit(
@@ -4024,13 +4232,15 @@ InferenceBackend::start_complete(
           .stop_at_eos = !ignore_eos,
           .stop_sequences = stop_sequences,
           .return_progress = return_progress,
+          .debug_timeline = debug_timeline,
+          .timeline = std::move(timeline),
       });
   return std::make_shared<Impl::ScheduledGenerationRequest>(
       state, std::move(scheduled_request));
 #else
   return TextGenerationBackend::start_complete(
       prompt, max_tokens, sampling_config, is_cancelled, stream_output,
-      ignore_eos, client_id, stop_sequences, return_progress);
+      ignore_eos, client_id, stop_sequences, return_progress, debug_timeline);
 #endif
 }
 
@@ -4052,10 +4262,24 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
   auto constrained = ConstrainChatRequest(request, state->scheduler->runner(),
                                           &effective_sampling, &tool_format);
   const auto& effective_request = constrained ? *constrained : request;
+  std::shared_ptr<DebugTimeline> timeline;
+  const auto render_start = request.debug_timeline ? Clock::now() : request_start;
+  if (request.debug_timeline) {
+    timeline = std::make_shared<DebugTimeline>(request_start);
+    timeline->Add("admission", request_start);
+  }
   auto prompt = state->scheduler->runner().PreparePrompt(effective_request);
   if (!prompt.has_value() || prompt->tokens.empty()) {
     return TextGenerationBackend::start_chat(
         request, max_tokens, sampling_config, is_cancelled, stream_output);
+  }
+
+  if (timeline) {
+    auto event = json::Value::object();
+    event["template_ms"] = std::chrono::duration<double, std::milli>(
+                               Clock::now() - render_start).count();
+    event["token_count"] = prompt->tokens.size();
+    timeline->Add("render", render_start, std::move(event));
   }
 
   const std::string client_id =
@@ -4074,6 +4298,8 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
           .cache_prefix_tokens = prompt->cache_prefix_tokens,
           .stop_sequences = request.stop_sequences,
           .return_progress = request.return_progress,
+          .debug_timeline = request.debug_timeline,
+          .timeline = std::move(timeline),
       });
   return std::make_shared<Impl::ScheduledGenerationRequest>(
       state, std::move(scheduled_request),

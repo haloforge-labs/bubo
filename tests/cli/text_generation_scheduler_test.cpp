@@ -1,6 +1,8 @@
 #include "src/cli/serve/text_generation_scheduler.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -176,6 +178,10 @@ struct FakeControl {
   std::optional<std::size_t> stop_after;
   std::optional<std::size_t> eos_after;
   std::function<void()> snapshot_callback;
+  bool in_pass_checkpoint{false};
+  bool score_supported{false};
+  std::atomic<std::size_t> score_calls{0};
+  std::function<void()> score_callback;
 };
 
 class FakeState final : public TextRunnerState {
@@ -238,6 +244,7 @@ public:
                     control_->batched_multi_token_decode,
                 .batched_multi_token_decode_max_width = 4,
                 .prefix_reuse = control_->prefix_reuse,
+                .in_pass_checkpoint = control_->in_pass_checkpoint,
             },
         .persistence = std::nullopt,
     };
@@ -281,6 +288,26 @@ public:
   [[nodiscard]] std::optional<std::vector<TextRunnerToken>> RenderAndTokenize(
       const ChatRequest&) const override {
     return std::nullopt;
+  }
+
+  [[nodiscard]] std::vector<std::optional<gufo::sampling::TokenLogprob>>
+  ScorePrompt(std::span<const TextRunnerToken> tokens,
+              const gufo::sampling::SamplingConfig& config,
+              const TextRunnerState::CancellationCheck& cancelled) const override {
+    if (!control_->score_supported)
+      return TextModelRunner::ScorePrompt(tokens, config, cancelled);
+    control_->score_calls.fetch_add(1, std::memory_order_relaxed);
+    if (control_->score_callback)
+      control_->score_callback();
+    gufo::sampling::SamplerState sampler(config, {});
+    const std::array<float, 3> row{0.0F, 1.0F, -1.0F};
+    std::vector<std::optional<gufo::sampling::TokenLogprob>> scores(tokens.size());
+    for (std::size_t i = 1; i < tokens.size(); ++i) {
+      if (cancelled && cancelled())
+        throw std::runtime_error("scoring cancelled");
+      scores[i] = sampler.RawLogprobs(row, tokens[i], static_cast<std::size_t>(config.logprobs));
+    }
+    return scores;
   }
 
   [[nodiscard]] std::string Decode(
@@ -350,7 +377,7 @@ public:
   }
 
   [[nodiscard]] TextDecodeSelection SelectNext(
-      TextRunnerState& state, gufo::sampling::SamplerState&) const override {
+      TextRunnerState& state, gufo::sampling::SamplerState& sampler) const override {
     const auto& fake = RequireFakeState(state);
     if (!fake.frontier.has_value()) {
       throw std::logic_error("scheduler fake has no frontier");
@@ -367,11 +394,19 @@ public:
         return {.stop = true};
       return {.token = *fake.frontier, .piece = control_->output_pieces[index]};
     }
-    return {
+    TextDecodeSelection selection{
         .stop = false,
         .token = *fake.frontier,
         .piece = std::to_string(*fake.frontier),
     };
+    if (sampler.config().logprobs >= 0) {
+      std::vector<float> row(selection.token + 1, 0.0F);
+      row[selection.token] = 1.0F;
+      selection.logprob = std::make_shared<const gufo::sampling::TokenLogprob>(
+          sampler.RawLogprobs(row, selection.token,
+                             static_cast<std::size_t>(sampler.config().logprobs)));
+    }
+    return selection;
   }
 
   [[nodiscard]] std::optional<TextDecodeSelection> PreviewFirstToken(
@@ -395,6 +430,31 @@ public:
       return sizeof(SnapshotState);
     }
   };
+  std::optional<std::size_t> PrefillCheckpointBytes(
+      const TextRunnerState&, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t budget, std::size_t boundary) const override {
+    if (!control_->in_pass_checkpoint || boundary <= offset ||
+        boundary >= offset + std::min(budget, prompt.size() - offset))
+      return std::nullopt;
+    return sizeof(SnapshotState);
+  }
+
+  TextPrefillStep PrefillThrough(
+      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t budget, std::size_t boundary,
+      std::unique_ptr<gufo::server::TextRunnerSnapshot>* checkpoint) const override {
+    auto step = Prefill(state, prompt, offset, budget);
+    const auto started = std::chrono::steady_clock::now();
+    auto saved = std::make_unique<SnapshotState>(RequireFakeState(state));
+    saved->position = boundary;
+    *checkpoint = std::move(saved);
+    step.checkpoint_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    if (state.debug_timeline())
+      step.capture_started = started;
+    return step;
+  }
+
   std::size_t SnapshotPayloadBytes(const TextRunnerState&) const override {
     return sizeof(SnapshotState);
   }
@@ -477,6 +537,8 @@ public:
         break;
       }
       Advance(state, selection.token);
+      if (selection.logprob)
+        step.logprobs.push_back(*selection.logprob);
       step.selections.push_back(std::move(selection));
     }
     step.draft_rounds = 1;
@@ -2695,7 +2757,242 @@ void TestEmptyTokenIsPublished() {
          "an empty streamed piece still charges the output budget");
 }
 
+void TestDebugTimelineOrderCountsAndOffPath() {
+  auto control = std::make_shared<FakeControl>();
+  control->prefill_capacity = 2;
+  auto scheduler = MakeScheduler(control, 1);
+  TextRequestMetadata metadata;
+  metadata.cache_prompt = false;
+  metadata.debug_timeline = true;
+  const auto result = scheduler->Submit({1, 2, 3, 4, 5, 6}, 4, 0.0F, {}, false,
+                                        metadata).Wait();
+  Expect(bool(result.debug_timeline), "opt-in creates a timeline");
+  const auto events = gufo::server::SerializeDebugTimeline(result);
+  Expect(events.items().front().member_str("event") == "admission",
+         "timeline begins at admission");
+  Expect(events.items().back().member_str("event") == "finish",
+         "timeline ends at finish");
+  std::size_t passes = 0, cycles = 0, first = 0, lookup = 0, queue = 0;
+  double previous = -1;
+  for (const auto& event : events.items()) {
+    Expect(event.member_double("t_ms") >= previous,
+           "timeline is chronological");
+    previous = event.member_double("t_ms");
+    const auto name = event.member_str("event");
+    if (name == "prefill") {
+      Expect(event.member_size("index") == passes &&
+                 event.member_size("start_depth") == passes * 2 &&
+                 event.member_size("tokens") == 2,
+             "scripted prefill pass index, tokens and depth");
+      ++passes;
+    } else if (name == "decode_cycle") {
+      Expect(event.member_size("verify_width") == 1 &&
+                 event.member_size("drafts") == 0,
+             "AR cycles report width one");
+      ++cycles;
+    } else if (name == "first_token") {
+      ++first;
+    } else if (name == "cache_lookup") {
+      ++lookup;
+      Expect(event.member_str("source") == "none",
+             "cold lookup reports its source");
+    } else if (name == "queue") {
+      ++queue;
+    }
+  }
+  Expect(passes == result.prefill_chunks && passes == 3 && cycles == 4 &&
+             first == 1 && lookup == 1 && queue == 1,
+         "timeline captures every scripted work unit once");
+  Expect(!result.debug_timeline->truncated(), "short request is untruncated");
+  metadata.debug_timeline = false;
+  const auto off = scheduler->Submit({1, 2, 3, 4, 5, 6}, 4, 0.0F, {}, false,
+                                     metadata).Wait();
+  Expect(!off.debug_timeline && off.tokens == result.tokens &&
+             off.text == result.text,
+         "timeline OFF has no event storage and identical outputs");
+}
+
+void TestDebugTimelineSnapshotsAndCycleCap() {
+  auto control = std::make_shared<FakeControl>();
+  control->snapshot_callback = [] {};
+  auto scheduler = MakeScheduler(control, 1);
+  TextRequestMetadata metadata;
+  metadata.debug_timeline = true;
+  const auto result = scheduler->Submit({1, 2, 3}, 2, 0.0F, {}, false,
+                                        metadata).Wait();
+  bool snapshot = false;
+  const auto events = gufo::server::SerializeDebugTimeline(result);
+  for (const auto& event : events.items()) {
+    if (event.member_str("event") == "snapshot") {
+      snapshot = true;
+      Expect(event.member_size("tokens") == 3 &&
+                 event.member_size("bytes") > 0 && event.contains("ms") &&
+                 event.contains("in_pass") && event.member_str("kind") == "continuation",
+             "snapshot timeline has the measured payload and purpose");
+    }
+  }
+  Expect(snapshot, "prompt snapshot capture is included");
+  const auto start = TextGenerationScheduler::Clock::now();
+  gufo::server::DebugTimeline capped(start);
+  for (std::size_t i = 0; i <= gufo::server::DebugTimeline::kMaxDecodeCycles; ++i)
+    capped.Cycle(start + std::chrono::milliseconds(i), 1, 3, 2, 1);
+  capped.Add("finish", start + std::chrono::seconds(5));
+  gufo::server::DebugTimeline failed(start);
+  failed.Failed(std::make_exception_ptr(std::runtime_error("diagnostic failed")));
+  bool surfaced = false;
+  try {
+    (void)failed.Serialize();
+  } catch (const std::runtime_error& error) {
+    surfaced = std::string(error.what()) == "diagnostic failed";
+  }
+  Expect(surfaced, "diagnostic allocation/log failure cannot return a partial success");
+  Expect(capped.truncated() && capped.Serialize().items().size() ==
+             gufo::server::DebugTimeline::kMaxDecodeCycles + 1,
+         "decode cap truncates cycles while retaining finish");
+}
+
+void TestDebugTimelineRequestTruncation() {
+  auto control = std::make_shared<FakeControl>();
+  control->max_context = 5000;
+  auto scheduler = MakeScheduler(control, 1);
+  TextRequestMetadata metadata;
+  metadata.debug_timeline = true;
+  std::ostringstream lines;
+  auto* old_buffer = std::clog.rdbuf(lines.rdbuf());
+  const auto result = scheduler->Submit({1, 2},
+      gufo::server::DebugTimeline::kMaxDecodeCycles + 1, 0.0F, {}, false,
+      metadata).Wait();
+  std::clog.rdbuf(old_buffer);
+  std::size_t cycles = 0;
+  const auto events = gufo::server::SerializeDebugTimeline(result);
+  for (const auto& event : events.items())
+    cycles += event.member_str("event") == "decode_cycle";
+  Expect(result.debug_timeline->truncated() &&
+             cycles == gufo::server::DebugTimeline::kMaxDecodeCycles &&
+             events.items().back().member_str("event") == "finish" &&
+             events.items().back().find("truncated")->as_bool(),
+         "fake request caps cycle events and reports truncation at finish");
+}
+
+void TestDebugTimelineInPassCheckpoint() {
+  auto control = std::make_shared<FakeControl>();
+  control->snapshot_callback = [] {};
+  control->in_pass_checkpoint = true;
+  auto scheduler = MakeScheduler(control, 1);
+  TextRequestMetadata metadata;
+  metadata.debug_timeline = true;
+  metadata.cache_prefix_tokens = 2;
+  const auto result = scheduler->Submit({1, 2, 3, 4, 5, 6}, 1, 0.0F, {}, false,
+                                        metadata).Wait();
+  bool in_pass = false, pass_boundary = false;
+  const auto events = gufo::server::SerializeDebugTimeline(result);
+  for (const auto& event : events.items()) {
+    if (event.member_str("event") == "snapshot" &&
+        event.find("in_pass") && event.find("in_pass")->as_bool()) {
+      in_pass = true;
+      Expect(event.member_size("tokens") == 2 && event.member_size("bytes") > 0 &&
+                 event.member_double("ms") >= 0,
+             "in-pass snapshot exposes its measured stable boundary");
+    }
+    if (event.member_str("event") == "prefill")
+      pass_boundary = event.member_str("end_reason") == "prompt_end" &&
+                      event.find("in_pass_checkpoint") &&
+                      event.find("in_pass_checkpoint")->as_bool();
+  }
+  Expect(in_pass && pass_boundary && result.prefill_chunks == 1,
+         "in-pass capture appears without splitting the prefill pass");
+}
+
+void TestPromptScoreDedicatedPathAndCpuReference() {
+  auto control = std::make_shared<FakeControl>();
+  control->score_supported = true;
+  auto scheduler = MakeScheduler(control, 1);
+  gufo::sampling::SamplingConfig config;
+  config.logprobs = 2;
+  const auto states = control->states_created.load();
+  const auto scored = scheduler->ScorePrompt({0, 1, 2}, config).Wait();
+  Expect(scored.prompt_tokens == 3 && scored.completion_tokens == 0 &&
+             scored.tokens == std::vector<TextRunnerToken>({0, 1, 2}) &&
+             scored.text.empty() &&
+             scored.prompt_logprobs.size() == 3 && !scored.prompt_logprobs[0],
+         "teacher-forced scoring generates no tokens and first score is null");
+  const double normalizer = std::log(1.0 + std::exp(1.0) + std::exp(-1.0));
+  Expect(std::abs(scored.prompt_logprobs[1]->logprob - (1.0 - normalizer)) < 1e-12 &&
+             std::abs(scored.prompt_logprobs[2]->logprob - (-1.0 - normalizer)) < 1e-12,
+         "teacher-forced prompt scores equal independent CPU reference");
+  Expect(control->events.empty() && control->states_created.load() == states,
+         "scoring never acquires a continuation state or performs generation");
+  const auto warm = scheduler->Submit({1, 2}, 1, 0.0F).Wait();
+  (void)scheduler->ScorePrompt({0, 1}, config).Wait();
+  const auto hit = scheduler->Submit({1, 2, 100}, 1, 0.0F).Wait();
+  Expect(!warm.cache_hit && hit.cache_hit && hit.cached_prompt_tokens == 3,
+         "scoring preserves the retained continuation");
+  control->score_supported = false;
+  bool unsupported = false;
+  try {
+    (void)scheduler->ScorePrompt({0, 1}, config).Wait();
+  } catch (const std::invalid_argument& error) {
+    unsupported = std::string(error.what()) ==
+                  "prompt logprobs are not supported for this model";
+  }
+  Expect(unsupported, "unsupported scorer produces the explicit error");
+}
+
+void TestScoredGenerationPreservesFakeOutputAndAlignment() {
+  for (const bool multi_token : {false, true}) {
+    auto control = std::make_shared<FakeControl>();
+    control->multi_token_decode = multi_token;
+    auto scheduler = MakeScheduler(control, 1);
+    TextRequestMetadata metadata;
+    metadata.cache_prompt = false;
+    gufo::sampling::SamplingConfig config;
+    config.seed = 123;
+    const auto plain = scheduler->Submit({1, 2}, 5, config, {}, false, metadata).Wait();
+    config.logprobs = 2;
+    const auto scored = scheduler->Submit({1, 2}, 5, config, {}, false, metadata).Wait();
+    Expect(scored.tokens == plain.tokens && scored.text == plain.text &&
+               scored.logprobs.size() == scored.tokens.size(),
+           "fixed-seed fake output and per-token score alignment survive opt-in");
+    for (std::size_t i = 0; i < scored.tokens.size(); ++i) {
+      const auto token = scored.tokens[i];
+      const double reference = 1.0 - std::log(double(token) + std::exp(1.0));
+      Expect(scored.logprobs[i].token == token &&
+                 std::abs(scored.logprobs[i].logprob - reference) < 1e-12,
+             "emitted fake token scores match independent raw-row reference");
+    }
+  }
+}
+
+void TestPromptScoreSerializationAndCancellation() {
+  auto control = std::make_shared<FakeControl>();
+  control->score_supported = true;
+  control->block_prefill_label = 1;
+  auto scheduler = MakeScheduler(control, 1);
+  auto generated = scheduler->Submit({1, 2}, 1, 0.0F);
+  control->WaitForPrefill(1);
+  gufo::sampling::SamplingConfig config;
+  config.logprobs = 0;
+  auto scored = scheduler->ScorePrompt({0, 1}, config);
+  Expect(control->score_calls.load() == 0,
+         "scorer waits behind generation on the inference owner");
+  control->ReleasePrefill();
+  (void)generated.Wait();
+  Expect(scored.Wait().prompt_logprobs.size() == 2 && control->score_calls.load() == 1,
+         "queued scorer executes after generation");
+  const auto calls = control->score_calls.load();
+  auto cancelled = scheduler->ScorePrompt({0, 1}, config, [] { return true; });
+  Expect(cancelled.Wait().cancelled && control->score_calls.load() == calls,
+         "cancelled scoring never invokes its dedicated runner");
+}
+
 int main() {
+  TestDebugTimelineOrderCountsAndOffPath();
+  TestDebugTimelineSnapshotsAndCycleCap();
+  TestDebugTimelineRequestTruncation();
+  TestDebugTimelineInPassCheckpoint();
+  TestPromptScoreDedicatedPathAndCpuReference();
+  TestPromptScoreSerializationAndCancellation();
+  TestScoredGenerationPreservesFakeOutputAndAlignment();
   // Log assertions in this binary match the plain "[LEVEL] [component]" text
   // captured from a redirected sink; a TTY stderr would tint the level tag.
   ::setenv("NO_COLOR", "1", 1);

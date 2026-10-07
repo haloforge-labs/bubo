@@ -9,6 +9,90 @@ scheduling, and device execution in the C++ process. Compatibility is a
 versioned contract: supported fields behave as documented, and unsupported
 fields return explicit errors.
 
+## Optional debug hooks and logprobs
+
+`gufo serve llm --debug-hooks` or `GUFO_DEBUG_HOOKS=1` enables settings and
+request timeline diagnostics. The capability defaults off. This implementation
+currently requires the Flash-Next runner; enabling it for another runner fails
+at startup instead of returning incomplete settings. It does not enable
+request-content tracing; `--trace` remains a separate facility.
+
+When enabled, successful Chat Completions, legacy Completions and Responses
+responses include `gufo.settings`; SSE data objects also carry the settings.
+The text model's `/v1/models` entry includes the same object. One startup
+`[settings] settings ...` line and `GET /debug/settings` expose that object.
+It includes release/revision, SHA-256 of the running executable, opened model
+shards and vision sidecars with mapped byte sizes, resolved runner/prefill/MTP
+policy, automatic RAM budget, disk/staging settings, sampling/reasoning and
+transport defaults, platform tuning and GPU/driver identification. Environment
+values are strings or JSON null when unset; parsed effective values live under
+`resolved`. `NO_COLOR` is explicitly documented as irrelevant to numerics and
+timing. Secrets such as the API key are not included.
+
+Debug GET routes are registered only when the listener address is an IPv4
+loopback literal (`127.0.0.0/8`). They return 404 on other listener addresses
+and when disabled; normal authentication still applies. Settings echoes and
+request diagnostics use the ordinary API routes, including on a non-loopback
+listener, so do not enable the capability on an untrusted listener.
+
+Send `"debug":{"timeline":true}` on a chat, completion or response request to
+receive `gufo.timeline`. Events have `event` and `t_ms` relative to request
+admission, plus event-specific fields: render/template token count, queue wait,
+cache match/source/restore, prefill pass depth/count/reason, snapshot kind/bytes
+and duration, first token, decode verification width/drafts/accepted count, and
+finish. Existing serving clocks and measurements supply these events; extra
+timestamps are read only for requested missing boundaries. Decode cycles are
+capped at 4096; `gufo.timeline_truncated` and the finish event indicate omitted
+cycles. Each retained event also produces one structured `[timeline] req=...`
+diagnostic log line. Streaming returns the completed timeline in the terminal
+response/chunk. An unavailable hook raises an explicit error.
+
+With the capability off, a true timeline or cache-probe request returns HTTP
+400 with `debug hooks are disabled (start the server with --debug-hooks)`.
+Read-only cache inspection is **not implemented**: the current caches do not
+retain exact hit counts or last-hit time, and adding accounting to ordinary
+hits would violate the OFF-path constraint. `/debug/cache` returns 404;
+`"debug":{"cache_probe":true}` returns an explicit 400 unavailable error when
+enabled. No fabricated cache entries or partial probes are returned.
+
+Logprobs are independent of `--debug-hooks`. Flash-Next generation supports
+Chat Completions `"logprobs":true,"top_logprobs":N` (N in 0..20), legacy
+Completions `"logprobs":N`, and Responses
+`"include":["message.output_text.logprobs"],"top_logprobs":N`. Chat records are
+in `choices[].logprobs.content`; legacy records use `tokens`, `token_logprobs`,
+`top_logprobs` and `text_offset`; Responses records accompany output-text parts
+and events. Token records include original unsigned UTF-8 bytes and descending
+top candidates. Token strings use the existing replacement decoding for
+incomplete UTF-8 token pieces; byte arrays preserve those pieces exactly.
+
+Scores are log-softmax of the **full raw model row after deterministic logit
+bias, grammar/behaviour masks and repetition/frequency/presence penalties, but
+before temperature, top-k, top-p and min-p**. The optional post-filter
+`loop_eog_close` probability-mass redirection is also excluded. A selected
+token excluded by this raw mask is represented by the API sentinel `-9999`
+instead of nonfinite JSON. The scorer copies pre-draw sampler state only for
+requested scoring and never draws or accepts tokens. With MTP, accepted drafts
+use the corresponding target verification rows; target candidate-list shortcuts
+are bypassed for scoring, while draft proposals and existing greedy acceptance
+decisions remain intact. Exact GPU output identity requires the operator gates.
+
+Scored chat/Responses currently require thinking off, plain text, no tools or
+response format, and no stop sequences; other combinations and unsupported
+runners return HTTP 400. Scored legacy generation also rejects stop sequences.
+Requested scoring streams buffer generation and then emit schema-shaped SSE
+with scores, so they do not provide incremental token latency.
+
+Legacy `"echo":true,"logprobs":N,"max_tokens":0` scores prompt tokens without
+generation. The first token's logprob/top-logprobs are null. This is a separate,
+potentially slow path: the scheduler serializes a dedicated private Flash-Next
+session with generation and uses `Session::TeacherForce` decode/verify
+arithmetic in batches no wider than `MaxVerifyWidth`. It never acquires a live
+pool slot or reads/writes continuation caches. `--max-score-tokens` defaults to
+8192; longer prompts or prompts exceeding model context return 400. Unsupported
+runners return `prompt logprobs are not supported for this model`. Prompt
+scoring cannot currently be combined with a timeline. `echo` with generated
+tokens remains unsupported and returns 400.
+
 Chat Completions is the main API, including streaming, images and tools.
 Responses supports text, images and function tools with optional streaming.
 Anthropic Messages exposes a synchronous text subset.

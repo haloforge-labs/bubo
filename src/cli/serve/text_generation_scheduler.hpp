@@ -77,6 +77,9 @@ public:
     bool stop_at_eos{true};
     std::vector<std::string> stop_sequences;
     bool return_progress{false};
+    bool debug_timeline{false};
+    std::shared_ptr<DebugTimeline> timeline;
+    bool prompt_score{false};
   };
 
   class Request {
@@ -123,6 +126,7 @@ public:
 
   [[nodiscard]] const TextModelRunner& runner() const noexcept;
   [[nodiscard]] std::size_t capacity() const noexcept;
+  [[nodiscard]] json::Value DebugSettings() const;
   /// Set once a failed work unit finds the runner's device unusable; later
   /// submissions and failures report TextGenerationErrorCode::kDeviceLost.
   [[nodiscard]] bool device_lost() const noexcept;
@@ -154,6 +158,16 @@ public:
                                const CancellationCheck& is_cancelled,
                                bool publish_token_pieces,
                                RequestMetadata metadata);
+
+  // Runs the model's dedicated scorer on the inference owner, bypassing cache.
+  [[nodiscard]] Request ScorePrompt(
+      std::vector<TextRunnerToken> prompt,
+      const sampling::SamplingConfig& sampling,
+      const CancellationCheck& is_cancelled = {});
+  [[nodiscard]] Request ScorePrompt(
+      std::vector<TextRunnerToken> prompt,
+      const sampling::SamplingConfig& sampling,
+      const CancellationCheck& is_cancelled, RequestMetadata metadata);
 
 private:
   struct Impl;
