@@ -954,7 +954,7 @@ void TestAutomaticTools() {
         std::vector<float> after_call(259, -INFINITY);
         after_call['a'] = 1;
         after_call[256] = 0;
-        assert(auto(sampler).Sample(after_call) == 256);
+        assert(SamplerState(sampler).Sample(after_call) == 256);  // was auto(sampler): C++23 decay-copy, this tree builds as C++20
         sampler.Accept(257);  // Empty pieces preserve the ordinary path.
         sampler.Accept(256);  // Natural EOS is allowed without another call.
         sampler = before_call;

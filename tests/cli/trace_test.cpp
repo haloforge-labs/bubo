@@ -36,6 +36,11 @@ std::vector<std::string> Lines(const fs::path& path) {
 // A record cut short by a full disk or file-size limit is removed, so the next
 // record still starts its own line and the file stays valid JSON Lines.
 void TestPartialWriteIsRolledBack() {
+#ifdef _WIN32
+  // Windows port: RLIMIT_FSIZE / SIGXFSZ are POSIX-only, so the torn write cannot be provoked here.
+  std::cout << "Trace partial-write check skipped (no RLIMIT_FSIZE on Windows).\n";
+  return;
+#else
   const auto path =
       fs::temp_directory_path() /
       ("gufo-trace-partial-" + std::to_string(::getpid()) + ".jsonl");
@@ -65,6 +70,7 @@ void TestPartialWriteIsRolledBack() {
   assert(lines.size() == 2);
   assert(gufo::json::parse(lines[0]).member_str("event") == "before");
   assert(gufo::json::parse(lines[1]).member_str("event") == "after");
+#endif
 }
 
 }  // namespace

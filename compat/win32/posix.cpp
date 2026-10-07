@@ -1126,11 +1126,75 @@ int msync(void* addr, size_t length, int) {
   return 0;
 }
 
+// Directory advisory locks (see flock below): fd -> handle of the sidecar lock file.
+static std::mutex g_dir_lock_mutex;
+static std::unordered_map<int, HANDLE> g_dir_locks;
+
+static int FlockDirectory(int fd, HANDLE directory, int operation) {
+  OVERLAPPED overlapped{};
+  std::lock_guard<std::mutex> guard(g_dir_lock_mutex);
+  auto found = g_dir_locks.find(fd);
+  if (operation & LOCK_UN) {
+    if (found == g_dir_locks.end()) {
+      return 0;
+    }
+    UnlockFileEx(found->second, 0, 1, 0, &overlapped);
+    CloseHandle(found->second);
+    g_dir_locks.erase(found);
+    return 0;
+  }
+  if (found != g_dir_locks.end()) {  // flock() on a held lock converts it
+    UnlockFileEx(found->second, 0, 1, 0, &overlapped);
+    CloseHandle(found->second);
+    g_dir_locks.erase(found);
+  }
+  wchar_t path[MAX_PATH * 2];
+  const DWORD n = GetFinalPathNameByHandleW(directory, path, static_cast<DWORD>(std::size(path)), FILE_NAME_NORMALIZED);
+  if (n == 0 || n >= std::size(path) - 32) {
+    return Fail(GetLastError());
+  }
+  std::wstring lock_path(path, n);
+  lock_path += L"\\.gufo-dir-lock";
+  const HANDLE lock = CreateFileW(lock_path.c_str(), GENERIC_READ | GENERIC_WRITE,
+                                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                  OPEN_ALWAYS, FILE_ATTRIBUTE_HIDDEN, nullptr);
+  if (lock == INVALID_HANDLE_VALUE) {
+    return Fail(GetLastError());
+  }
+  DWORD flags = 0;
+  if (operation & LOCK_EX) flags |= LOCKFILE_EXCLUSIVE_LOCK;
+  if (operation & LOCK_NB) flags |= LOCKFILE_FAIL_IMMEDIATELY;
+  if (!LockFileEx(lock, flags, 0, 1, 0, &overlapped)) {
+    const DWORD error = GetLastError();
+    CloseHandle(lock);
+    if (error == ERROR_LOCK_VIOLATION) {
+      errno = EWOULDBLOCK;
+      return -1;
+    }
+    return Fail(error);
+  }
+  g_dir_locks[fd] = lock;
+  return 0;
+}
+
 int flock(int fd, int operation) {
   const HANDLE handle = HandleOf(fd);
   if (handle == INVALID_HANDLE_VALUE) {
     errno = EBADF;
     return -1;
+  }
+  // Windows cannot byte-range lock a directory handle (LockFileEx fails), but
+  // upstream takes advisory directory locks (disk cache publication, #392).
+  // A directory fd is therefore locked through a sidecar file in that
+  // directory: every directory fd gets its own handle of it, so shared /
+  // exclusive / non-blocking semantics hold between store instances in one
+  // process and between processes, as flock() does on Linux.
+  {
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (GetFileInformationByHandle(handle, &info) &&
+        (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+      return FlockDirectory(fd, handle, operation);
+    }
   }
   // One byte at the top of the offset range: advisory in practice, because
   // no real read or write ever touches it.

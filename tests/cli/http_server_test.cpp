@@ -566,8 +566,10 @@ void TestContentTrace() {
   }
   Trace::Close();
 
+#ifndef _WIN32  // POSIX file modes do not exist on Windows (fs::status reports all permissions)
   assert((fs::status(path).permissions() & fs::perms::all) ==
          (fs::perms::owner_read | fs::perms::owner_write));
+#endif
   std::vector<gufo::json::Value> records;
   {
     std::ifstream input(path);
