@@ -2788,9 +2788,6 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
     AssignError(error_msg, "n-gram table is not open");
     return false;
   }
-  const auto ple_fetch = [&] {
-    return c.ple_layer < 0 || PleFetch(session, tokens, speculative, error_msg);
-  };
   // Submits queued launches (HIP on Windows batches them until a flush);
   // illegal while a graph is being captured.
   const auto flush = [&] {
@@ -2844,12 +2841,10 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
     if (!Run(session, key | kPrefixKey, graph, prefix, error_msg, false)) {
       return false;
     }
-    // The prefix reads no n-gram rows: start it before hashing them, so the
-    // host's row hashing and read submission overlap its GPU time.
+    // Upstream (#445) now starts the n-gram read BEFORE the forward (PleFetch above); calling it
+    // again here, as the Windows port did, advanced the n-gram window twice and corrupted the PLE rows.
+    // The Windows flush still submits the queued prefix launches (HIP on Windows batches them).
     flush();
-  }
-  if (!ple_fetch()) {
-    return false;
   }
   if (traced) {
     Tl().Gpu(stream_, Timeline::kPrefixEnd, n);
