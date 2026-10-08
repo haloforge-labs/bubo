@@ -19,6 +19,7 @@
 #include "src/models/qwen38_flash_next/config.hpp"
 #include "src/models/qwen38_flash_next/mtp_policy.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
+#include "src/models/qwen38_flash_next/prefill_diag.hpp"
 #include "src/models/qwen38_flash_next/prompt_lookup.hpp"
 
 namespace gufo::core {
@@ -148,6 +149,7 @@ private:
 /// runs a draft-verify cycle. The logits of the last token are kept.
 class Session final {
 public:
+  std::vector<PrefillDiagPass> TakePrefillDiagnostics();
   ~Session();
   Session(const Session&) = delete;
   Session& operator=(const Session&) = delete;

@@ -67,6 +67,101 @@ void Expect(bool condition, std::string_view message) {
   }
 }
 
+void TestPrefillDiagnosticsHost() {
+  using namespace gufo::models::qwen38_flash_next;
+  Expect(!PrefillDiagValueEnabled(nullptr) && !PrefillDiagValueEnabled("0") &&
+             !PrefillDiagValueEnabled("") && !PrefillDiagValueEnabled("yes") &&
+             !PrefillDiagValueEnabled("01") && PrefillDiagValueEnabled("1"),
+         "only exactly 1 enables prefill diagnostics");
+  PrefillDiagPass pass;
+  pass.pass = 3;
+  pass.start = 4096;
+  pass.totals.passes = 1;
+  pass.totals.tokens = 2048;
+  TableReadCounters reads;
+  reads.table_read_us = 12.25;
+  reads.table_reads = 3;
+  reads.table_bytes = 72;
+  pass.totals.TableReadCounters::Add(reads);
+  pass.totals.fetch_elapsed_us = 20;
+  pass.totals.fetch_hidden_us = 18;
+  pass.totals.fetch_exposed_us = 2;
+  pass.totals.fetch_wait_us = 2.5;
+  const std::array<std::uint32_t, 4> first{4, 0, 1, 0};
+  const std::array<std::uint32_t, 4> last{0, 0, 7, 0};
+  pass.RecordLayer(0, 2048, first, 100);
+  pass.RecordLayer(1, 128, last, 200);
+  Expect(pass.totals.expert_bytes == 400 && pass.totals.layer_samples == 2 &&
+             pass.totals.experts_distinct_min == 1 &&
+             pass.totals.Mean() == 1.5 && pass.totals.experts_distinct_max == 2,
+         "diversity counts nonzero expert buckets, with tail coverage");
+  const std::string expected =
+      "pass=3 tokens=2048 start=4096 table_read_us=12.250 table_reads=3 "
+      "table_bytes=72 fetch_elapsed_us=20.000 fetch_hidden_us=18.000 "
+      "fetch_exposed_us=2.000 fetch_wait_us=2.500 "
+      "experts_distinct_min=1 experts_distinct_mean=1.500 "
+      "experts_distinct_max=2 expert_bytes=400 layers=0:2048:2:100,1:128:1:200";
+  Expect(PrefillDiagLine(pass) == expected, "structured pass line is exact");
+  int takes = 0, emits = 0;
+  const auto take = [&] {
+    ++takes;
+    return std::vector{pass};
+  };
+  const auto emit = [&](const std::string& line) {
+    ++emits;
+    Expect(line == expected, "collector emits the pass line");
+  };
+  const auto off = CollectPrefillDiag(false, take, emit);
+  Expect(!off && takes == 0 && emits == 0 && pass.totals.table_reads == 3,
+         "flag off never accesses pass counters or emits diagnostics");
+  const auto on = CollectPrefillDiag(true, take, emit);
+  Expect(on && takes == 1 && emits == 1, "flag on publishes measured passes");
+  std::optional<PrefillDiagTotals> totals;
+  AddPrefillDiag(totals, off);
+  Expect(!totals, "off does not construct request counters");
+  AddPrefillDiag(totals, on);
+  AddPrefillDiag(totals, on);
+  Expect(totals && totals->passes == 2 && totals->tokens == 4096 &&
+             totals->table_read_us == 24.5 && totals->table_reads == 6 &&
+             totals->table_bytes == 144 && totals->fetch_elapsed_us == 40 &&
+             totals->fetch_hidden_us == 36 && totals->fetch_exposed_us == 4 &&
+             totals->fetch_wait_us == 5 && totals->expert_bytes == 800 &&
+             totals->layer_samples == 4 && totals->experts_distinct_sum == 6 &&
+             totals->experts_distinct_min == 1 && totals->Mean() == 1.5 &&
+             totals->experts_distinct_max == 2,
+         "request totals add every counter and weight mean by layer samples");
+  auto metrics = gufo::json::Value::object();
+  gufo::server::AddPrefillDiagUsage(metrics, off);
+  Expect(metrics.empty(), "off serialization adds no usage fields");
+  gufo::server::AddPrefillDiagUsage(metrics, totals);
+  const auto* json = metrics.find("prefill_diag");
+  Expect(json && json->member_size("passes") == 2 &&
+             json->member_size("expert_bytes") == 800 &&
+             json->member_double("table_read_us") == 24.5 &&
+             json->member_double("experts_distinct_mean") == 1.5 &&
+             json->member_size("table_reads") == 6 &&
+             json->member_size("table_bytes") == 144 &&
+             json->member_double("fetch_elapsed_us") == 40 &&
+             json->member_double("fetch_hidden_us") == 36 &&
+             json->member_double("fetch_exposed_us") == 4 &&
+             json->member_double("fetch_wait_us") == 5,
+         "on usage contains measured request totals");
+  gufo::server::TextGenerationBackend::Result result;
+  Expect(gufo::server::GenerationLogDetails(result).find("table_reads=") ==
+             std::string::npos,
+         "off completion log has no diagnostic fields");
+  result.prefill_diag = totals;
+  Expect(gufo::server::GenerationLogDetails(result).find("table_reads=6") !=
+             std::string::npos,
+         "completion log includes diagnostic totals");
+  PrefillDiagTotals unequal;
+  unequal.AddLayer(4, 10);
+  totals->Add(unequal);
+  Expect(totals->layer_samples == 5 && totals->Mean() == 2.0 &&
+             totals->experts_distinct_max == 4 && totals->expert_bytes == 840,
+         "aggregation weights unequal layer counts correctly");
+}
+
 enum class EventKind : std::uint8_t {
   kPrefill,
   kAdvance,
@@ -167,6 +262,7 @@ struct FakeControl {
   std::atomic<std::int64_t> first_request_advance_ns{0};
   bool incremental_prefill{true};
   std::size_t prefill_capacity{std::numeric_limits<std::size_t>::max()};
+  std::optional<gufo::models::qwen38_flash_next::PrefillDiagTotals> prefill_diag;
   bool supports_batched_advance{false};
   bool final_token_advance_required{true};
   bool incremental_text_is_exact{false};
@@ -382,6 +478,7 @@ public:
     return {
         .consumed_tokens = consumed,
         .decode_ready = ready,
+        .prefill_diag = control_->prefill_diag,
     };
   }
 
@@ -950,6 +1047,30 @@ void TestAwaitedCheckpointSurvivesCachePressure() {
              result.cached_prompt_tokens == 1200 &&
              result.prefill_tokens == 100,
          "a checkpoint peers wait for is retained under cache pressure");
+}
+
+void TestPrefillDiagnosticSchedulerTotals() {
+  for (const bool enabled : {false, true}) {
+    auto control = std::make_shared<FakeControl>();
+    control->prefill_capacity = 2;
+    if (enabled) {
+      control->prefill_diag.emplace();
+      control->prefill_diag->passes = 1;
+      control->prefill_diag->table_reads = 3;
+      control->prefill_diag->AddLayer(2, 100);
+    }
+    auto scheduler = MakeScheduler(control, 1, {.decode_active_tokens = 2});
+    const auto result = scheduler->Submit({7, 70, 71, 72, 73}, 2, 0.0F).Wait();
+    Expect(result.prefill_chunks == 3 && bool(result.prefill_diag) == enabled,
+           "scheduler carries opt-in diagnostics over multiple fake chunks");
+    if (result.prefill_diag) {
+      Expect(result.prefill_diag->passes == 3 &&
+                 result.prefill_diag->table_reads == 9 &&
+                 result.prefill_diag->expert_bytes == 600 &&
+                 result.prefill_diag->layer_samples == 3,
+             "scheduler request totals include every prefill step");
+    }
+  }
 }
 
 void TestIdlePrefillUsesBulkWorkUnit() {
@@ -3401,6 +3522,7 @@ void TestLiveScoredQueueAndMissingRecords() {
 }
 
 int main(int argc, char** argv) {
+  TestPrefillDiagnosticsHost();
   if (argc == 2 && std::string_view(argv[1]) == "--debug-hooks") {
     TestLiveScoredQueueAndMissingRecords();
     TestDebugTimelineOrderCountsAndOffPath();
@@ -3492,6 +3614,7 @@ int main(int argc, char** argv) {
   TestShutdownCancelsRunnerAcquisition();
   TestSnapshotDoesNotBlockOtherRequests();
   TestFirstTokenPrecedesSnapshotAndPreservesBudget();
+  TestPrefillDiagnosticSchedulerTotals();
   TestIdlePrefillUsesBulkWorkUnit();
   TestConcurrentSharedPrefixesPrefillOnce();
   TestLeaderCancelledBeforeFollowerIsAdmitted();

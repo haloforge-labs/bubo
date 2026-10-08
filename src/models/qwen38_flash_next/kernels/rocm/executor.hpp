@@ -98,6 +98,11 @@ private:
 class Session {
 public:
   ~Session();
+  std::vector<PrefillDiagPass> TakePrefillDiagnostics() {
+    auto result = std::move(prefill_diagnostics_);
+    prefill_diagnostics_.clear();
+    return result;
+  }
   Session(const Session&) = delete;
   Session& operator=(const Session&) = delete;
 
@@ -132,6 +137,8 @@ private:
   friend class Executor;
   friend struct PrefillCheckpoint;
   Session() = default;
+  std::vector<PrefillDiagPass> prefill_diagnostics_;
+  std::uint64_t diagnostic_pass_{0};
 
   struct LinearState {
     float* conv_state{nullptr};    ///< [kernel-1][channels]
@@ -510,6 +517,7 @@ private:
   bool MtpHead(const DeviceMixer& head, const float* res, bool token,
                bool candidates, std::string* error_msg) const;
   /// Enqueues one trunk batch (control and token upload through logits).
+  template<bool Diagnostic>
   bool ForwardBody(Session& session, std::uint32_t n, std::uint32_t n_logits,
                    bool download_logits, bool speculative, bool sparse,
                    std::uint32_t start_pos, std::uint32_t pool_grid,
@@ -671,6 +679,8 @@ private:
   float* host_emb_{nullptr};
   mutable std::vector<std::uint32_t> host_rows_;
   mutable bool ple_pending_{false};
+  mutable std::optional<PrefillDiagPass> active_diag_;
+  mutable bool diagnostic_prefill_{false};
   // Pinned host staging the launched (or captured) work reads and writes.
   Session::Control* control_host_{nullptr};
   std::int32_t* tokens_host_{nullptr};

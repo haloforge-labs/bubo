@@ -20,6 +20,7 @@
 #include "src/core/text_sampling_defaults.hpp"
 #include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen/tokenizer.hpp"
+#include "src/models/qwen38_flash_next/prefill_diag.hpp"
 
 namespace gufo::server {
 
@@ -253,6 +254,7 @@ public:
     bool cancelled{false};
     /// Internal: the scheduler recorded this request's `/metrics` counters.
     bool token_metrics_recorded{false};
+    std::optional<models::qwen38_flash_next::PrefillDiagTotals> prefill_diag;
   };
 
   class GenerationRequest {

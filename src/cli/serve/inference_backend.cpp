@@ -2315,6 +2315,16 @@ constexpr std::string_view kQwenFlashNextStateAbi =
 using QwenFlashNextModel = models::qwen38_flash_next::Model;
 using QwenFlashNextSession = models::qwen38_flash_next::Session;
 
+std::optional<models::qwen38_flash_next::PrefillDiagTotals>
+CollectPrefillDiagnostics(QwenFlashNextSession& session) {
+  return models::qwen38_flash_next::CollectPrefillDiag(
+      models::qwen38_flash_next::PrefillDiagEnabled(),
+      [&] { return session.TakePrefillDiagnostics(); },
+      [](const std::string& line) {
+        Logger::Diagnostic("prefill-diag", line);
+      });
+}
+
 std::vector<std::int32_t> QwenFlashNextEngineTokens(
     std::span<const TextRunnerToken> tokens) {
   std::vector<std::int32_t> converted;
@@ -2739,6 +2749,7 @@ public:
     return {
         .consumed_tokens = consumed,
         .decode_ready = next_position == prompt.size(),
+        .prefill_diag = CollectPrefillDiagnostics(qfn.session()),
     };
   }
 
@@ -2787,7 +2798,8 @@ public:
             .checkpoint_ms = capture_ms,
             .capture_started = qfn.debug_timeline()
                                    ? std::optional(capture_started)
-                                   : std::nullopt};
+                                   : std::nullopt,
+            .prefill_diag = CollectPrefillDiagnostics(qfn.session())};
   }
 
   // The engine stops before committing EOS when the request enables it.

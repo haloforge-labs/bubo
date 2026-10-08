@@ -7,6 +7,7 @@
 #include <bit>
 #include <cerrno>
 #include <cstring>
+#include <type_traits>
 #include <unordered_map>
 
 #include "src/core/quant/ggml_dequant.hpp"
@@ -127,7 +128,11 @@ std::unique_ptr<NgramTable> NgramTable::Open(
       kWorkers, static_cast<std::size_t>(std::thread::hardware_concurrency()));
 #endif
   for (std::size_t i = 0; i < std::max<std::size_t>(1, workers); ++i) {
-    t->workers_.emplace_back([raw = t.get()] { raw->Worker(); });
+    if (PrefillDiagEnabled()) {
+      t->workers_.emplace_back([raw = t.get()] { raw->Worker<true>(); });
+    } else {
+      t->workers_.emplace_back([raw = t.get()] { raw->Worker<false>(); });
+    }
   }
   return t;
 }
@@ -162,8 +167,10 @@ bool NgramTable::ReadCached(std::uint32_t row, float* dst) {
   return hit;
 }
 
+template<bool Diagnostic>
 bool NgramTable::ReadOne(std::uint32_t row, float* dst,
-                         std::vector<std::uint8_t>& buf) {
+                         std::vector<std::uint8_t>& buf,
+                         TableReadCounters* counters) {
   if (row >= rows_) {
     return false;
   }
@@ -194,16 +201,38 @@ bool NgramTable::ReadOne(std::uint32_t row, float* dst,
   std::uint8_t* cached =
       entry != nullptr ? cache_rows_.data() + slot * row_bytes_ : nullptr;
   std::size_t got = 0;
+  // Compile-time specialization keeps the flag-off read loop unchanged.
+  struct NoTimer {};
+  std::conditional_t<Diagnostic, DiagClock::time_point, NoTimer> started;
+  if constexpr (Diagnostic) {
+    if (counters)
+      started = DiagClock::now();
+  }
+  const auto finish = [&] {
+    if constexpr (Diagnostic) {
+      if (counters)
+        counters->table_read_us += DiagMicroseconds(DiagClock::now() - started);
+    }
+  };
   while (got < needed) {
     const ssize_t n = ::pread(fd_, base + got, length - got, begin + got);
+    if constexpr (Diagnostic) {
+      if (counters) {
+        ++counters->table_reads;
+        if (n > 0)
+          counters->table_bytes += static_cast<std::uint64_t>(n);
+      }
+    }
     if (n <= 0) {
       if (n < 0 && errno == EINTR) {
         continue;
       }
+      finish();
       return false;
     }
     got += static_cast<std::size_t>(n);
   }
+  finish();
   // Cache only a complete row, still in its original quantized format.
   // A busy slot is skipped; readers never wait for another row's I/O.
   if (entry != nullptr &&
@@ -217,6 +246,7 @@ bool NgramTable::ReadOne(std::uint32_t row, float* dst,
   return true;
 }
 
+template<bool Diagnostic>
 void NgramTable::Worker() {
   std::vector<std::uint8_t> buf;
   std::unique_lock<std::mutex> lock(mutex_);
@@ -233,15 +263,31 @@ void NgramTable::Worker() {
         jobs_.size() >= kBatchJobs ? kReadBatch : 1, jobs_.size() - next_job_);
     std::copy_n(jobs_.data() + next_job_, count, batch.data());
     next_job_ += count;
+    struct NoCounters {};
+    std::conditional_t<Diagnostic, TableReadCounters, NoCounters>
+        batch_counters;
+    TableReadCounters* counters = nullptr;
+    if constexpr (Diagnostic) {
+      if (diagnostic_)
+        counters = &batch_counters;
+    }
     lock.unlock();
     bool ok = true;
     for (std::size_t i = 0; i < count; ++i) {
-      ok = ReadOne(batch[i].row, batch[i].dst, buf) && ok;
+      ok = ReadOne<Diagnostic>(batch[i].row, batch[i].dst, buf, counters) && ok;
     }
     lock.lock();
+    if constexpr (Diagnostic) {
+      if (diagnostic_)
+        diagnostic_->Add(batch_counters);
+    }
     failed_ = failed_ || !ok;
     pending_ -= count;
     if (pending_ == 0) {
+      if constexpr (Diagnostic) {
+        if (diagnostic_)
+          read_finished_ = DiagClock::now();
+      }
       done_.notify_all();
     }
   }
@@ -253,13 +299,19 @@ bool NgramTable::Read(std::span<const std::uint32_t> rows,
 }
 
 bool NgramTable::StartRead(std::span<const std::uint32_t> rows,
-                           std::span<float> out) {
+                           std::span<float> out,
+                           TableReadCounters* diagnostic) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (active_ || rows.size() > out.size() / row_dim_ ||
       std::any_of(rows.begin(), rows.end(),
                   [this](std::uint32_t row) { return row >= rows_; })) {
     return false;
   }
+  if (diagnostic) {
+    *diagnostic = {};
+    read_started_ = DiagClock::now();
+  }
+  diagnostic_ = diagnostic;
   // Read each distinct row once, then copy it to its other slots.
   std::unordered_map<std::uint32_t, std::size_t> first;
   first.reserve(rows.size());
@@ -288,6 +340,8 @@ bool NgramTable::StartRead(std::span<const std::uint32_t> rows,
   pending_ = jobs_.size();
   failed_ = false;
   active_ = true;
+  if (diagnostic && pending_ == 0)
+    read_finished_ = DiagClock::now();
   if (pending_ != 0) {
     wake_.notify_all();
   }
