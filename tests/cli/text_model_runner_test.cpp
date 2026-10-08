@@ -2638,8 +2638,9 @@ void TestDiskWriterPoolEvictionShutdownAndRestore() {
            "RAM refusal leaves serving functional");
     request.Commit();
   }
-  Expect(rejected_stats->snapshot_captures == 0 && rejected_writes == 0,
-         "evict_idle avoids disk-only captures when RAM cannot retain them");
+  Expect(rejected_stats->snapshot_captures > 0 && rejected_writes == 1 &&
+             DiskImages(rejected_directory.path()).size() == 1,
+         "RAM refusal falls back to disk-only capture and persistence");
 }
 
 }  // namespace

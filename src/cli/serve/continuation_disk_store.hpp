@@ -23,6 +23,9 @@ enum class ContinuationDiskEventAction : std::uint8_t {
   kMiss,
   kRemoved,
   kSkipped,
+  kDroppedEvict,
+  kAlreadyPersisted,
+  kSuperseded,
 };
 
 enum class ContinuationDiskEventReason : std::uint8_t {
@@ -45,6 +48,10 @@ enum class ContinuationDiskEventReason : std::uint8_t {
   kBusy,
   kRamNotRetained,
   kShutdownDeadline,
+  kEvictBacklogCapacity,
+  kWriterStopped,
+  kAlreadyPersisted,
+  kSuperseded,
 };
 
 /// Sanitized disk-cache event. Prompt contents, token values, paths, model
@@ -82,6 +89,9 @@ struct ContinuationDiskStoreOptions {
   std::optional<bool> persist_evict_idle;
   std::optional<bool> slice;
   std::optional<std::chrono::milliseconds> idle_wait;
+  /// Additional pinned evicted storage, independent of the staging budget.
+  std::optional<std::size_t> evict_backlog_bytes;
+  std::size_t evict_backlog_count{2};
   std::chrono::milliseconds shutdown_wait{std::chrono::seconds(30)};
   std::chrono::milliseconds slice_max_wait{std::chrono::seconds(10)};
 };

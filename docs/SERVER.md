@@ -460,27 +460,56 @@ unchanged, and RAM caching and serving without `--cache-disk` are unaffected.
 Restart to change this setting; qualify payload identity and decode timing.
 `GUFO_DISK_PERSIST=evict_idle` opts into persistence on RAM eviction, idle,
 and graceful shutdown. Unset or any other value retains capture write-through.
-The setting is read once when the first store is created. Captures remain in
-`ContinuationCache`; an evicted eligible snapshot is offered to the same bounded
-writer before its last reference is released. While no request is generating
-or waiting for runner admission, `GUFO_DISK_IDLE_MS` (0..600000, default 30000,
-read once) starts newest-first persistence, one entry at a time. A newly
-admitted request stops further idle entries; a started gather/write completes.
-Exact restored entries are already persisted and are not rewritten. Optional
-history-only checkpoints stay RAM-only; shared disk boundaries obtain a normal
-RAM reservation in this mode. RAM refusal skips disk-only capture with
-`reason=ram_not_retained`, and every rejected/failed persist logs a reason.
-Failed entries retry on eviction or shutdown. Existing staging, disk byte/LRU,
-minimum checkpoint step and learned-boundary alignment rules still apply.
+The setting is read once when the first store is created. Captures normally remain in
+`ContinuationCache`. Real drops (LRU/pressure, discarded diverged branches,
+and rewound history) offer eligible snapshots before their last reference is
+released. An identical-token replacement is not offered; its replacement
+inherits an already-persisted status. A growing conversation's superseded
+strict prefixes are not offered when a longer tagged entry survives in RAM.
+The latest conversation entry persists at idle/shutdown. Learned shared/system
+prompt boundaries remain independently eligible even when a longer entry
+survives; optional history-only checkpoints stay RAM-only. If replacement
+capture/publication fails, the displaced original is offered instead.
+
+An eviction during a write waits in a separate bounded backlog:
+`GUFO_DISK_EVICT_BACKLOG_BYTES` (read once, default 2147483648 = 2 GiB,
+nonnegative integer bytes; invalid values use the default), at most two
+snapshots. The charge includes the greater of device/host snapshot size and
+serialized payload, plus file metadata. This allocates nothing upfront, but
+pins the snapshot's device/host storage until drained; it is additional to the
+unchanged active-plus-queued staging budget. Zero disables this extra backlog.
+Overflow or a snapshot larger than staging/disk capacity logs
+`action=dropped_evict` with its reason and increments `dropped_evict` in the
+shutdown summary. Reduce the bound on memory-constrained hosts. A reservation
+can also temporarily hold a removed candidate until replacement publication
+(one reservation's removed snapshots, per active lease); failed captures offer
+it rather than silently losing persistence.
+
+While no request is generating or waiting for runner admission,
+`GUFO_DISK_IDLE_MS` (0..600000, default 30000, read once) starts newest-first
+persistence, one entry at a time. A newly admitted request stops further idle
+entries; a started gather/write completes. The worker uses condition-variable
+notifications and a bounded 250 ms wake, so idle timing can include that delay.
+Exact restored entries are already persisted. Exact-file dedup logs
+`action=already_persisted` and has a shutdown counter; intentional prefix
+supersession logs `action=superseded` and has its own counter. RAM refusal after
+tagging immediately offers the snapshot; pre-capture RAM refusal falls back to
+the existing bounded disk capture reservation, including learned system-prompt
+boundaries. Every rejected/failed persist logs a reason. Failed RAM entries
+retry on eviction or shutdown. Existing staging, disk byte/LRU, minimum
+checkpoint step and learned-boundary alignment rules still apply.
 
 Graceful shutdown offers the remaining eligible RAM entries newest-first for
 up to 30 seconds, then logs `reason=shutdown_deadline` for leftovers. One
 already-started provider gather or filesystem operation must finish before
-joining the writer; the deadline bounds additional work, not an uninterruptible
+joining the writer; racing eviction offers are either drained or explicitly
+logged as dropped, including offers after worker exit. The deadline bounds
+additional work, not an uninterruptible
 transfer or `fsync`. A forced termination before eviction/idle/shutdown loses
 RAM-only entries. Allow idle persistence before relying on restart recovery.
 
-`GUFO_DISK_SLICE=1` independently enables pause-aware hash/write slices. Unset or
+For decode-sensitive traffic, use `GUFO_DISK_SLICE=1` with `evict_idle` and
+measure the remaining gather/fsync overlap. `GUFO_DISK_SLICE=1` independently enables pause-aware hash/write slices. Unset or
 any other value keeps the existing writer. After each approximately 16 MiB of
 byte processing, the writer sleeps in 2 ms increments while generation is
 active, with a 10-second total pause budget per publication. No new lock is

@@ -376,6 +376,12 @@ std::string_view DiskEventActionName(
       return "removed";
     case ContinuationDiskEventAction::kSkipped:
       return "skipped";
+    case ContinuationDiskEventAction::kDroppedEvict:
+      return "dropped_evict";
+    case ContinuationDiskEventAction::kSuperseded:
+      return "superseded";
+    case ContinuationDiskEventAction::kAlreadyPersisted:
+      return "already_persisted";
   }
   return "unknown";
 }
@@ -415,6 +421,14 @@ std::string_view DiskEventReasonName(
       return "restore_failure";
     case ContinuationDiskEventReason::kBusy:
       return "busy";
+    case ContinuationDiskEventReason::kEvictBacklogCapacity:
+      return "evict_backlog_capacity";
+    case ContinuationDiskEventReason::kWriterStopped:
+      return "writer_stopped";
+    case ContinuationDiskEventReason::kSuperseded:
+      return "superseded";
+    case ContinuationDiskEventReason::kAlreadyPersisted:
+      return "already_persisted";
     case ContinuationDiskEventReason::kRamNotRetained:
       return "ram_not_retained";
     case ContinuationDiskEventReason::kShutdownDeadline:
@@ -916,11 +930,6 @@ struct TextRunnerPool::Request::Impl {
       try {
         if (!disk_store)
           return;
-        if (disk_store->persist_on_evict_idle()) {
-          (void)disk_store->Capture(runner, snapshot_tokens, nullptr, {}, {},
-                                    false, false, false);
-          return;
-        }
         // Copying device state only for disk is costly on the request path.
         // Skip it when the disk store would discard the checkpoint anyway.
         if (disk_store->WithinCheckpointStep(
@@ -1139,8 +1148,8 @@ struct TextRunnerPool::Request::Impl {
           if (!reserved)
             reserved = lease.TryReserveSnapshot(bytes, position, true, purpose);
           if (!reserved)
-            (void)disk_store->Capture(runner, {prefix.begin(), prefix.end()},
-                                      nullptr, {}, {}, true, false, false);
+            persistence =
+                disk_store->ReserveCapture(*runner, position, bytes, identity);
         } else {
           persistence =
               disk_store->ReserveCapture(*runner, position, bytes, identity);
@@ -1152,7 +1161,7 @@ struct TextRunnerPool::Request::Impl {
           persistence ? runner->SnapshotForPersistence(state)
                       : runner->Snapshot(state);
       failed = !snapshot;
-      if (snapshot && needs_disk && evict_idle) {
+      if (snapshot && needs_disk && evict_idle && reserved) {
         (void)disk_store->Capture(runner, {prefix.begin(), prefix.end()},
                                   snapshot, {identity.begin(), identity.end()},
                                   {}, true);
@@ -1168,7 +1177,7 @@ struct TextRunnerPool::Request::Impl {
         const auto saved = disk_store->Capture(
             runner, {prefix.begin(), prefix.end()}, std::move(snapshot),
             {identity.begin(), identity.end()}, std::move(persistence),
-            /*shared_prefix=*/true);
+            /*shared_prefix=*/true, false, !evict_idle);
         if (saved != 0) {
           ++snapshot_metrics.shared_prefix_snapshots;
           snapshot_metrics.shared_prefix_bytes += saved;

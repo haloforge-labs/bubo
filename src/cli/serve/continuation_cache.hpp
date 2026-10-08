@@ -53,12 +53,15 @@ public:
 /// Optional persistence bookkeeping, installed before RAM publication.
 /// Failed entries retry on eviction/shutdown; abandoned entries are logged.
 struct SnapshotPersistence {
-  enum State : unsigned { kDirty, kQueued, kPersisted, kFailed, kAbandoned };
+  enum State : unsigned {
+    kDirty, kQueued, kPersisted, kFailed, kAbandoned, kSuperseded
+  };
   std::vector<ContinuationToken> tokens;
   std::vector<std::uint8_t> input_identity;
   bool shared_prefix{false};
   std::atomic<unsigned> state{kDirty};
   std::function<void()> on_discard;
+  std::function<void()> on_superseded;
   ~SnapshotPersistence() noexcept {
     if (state.load() == kDirty && on_discard) {
       try {
@@ -241,6 +244,7 @@ public:
     double restore_ms_{0.0};
     bool restored_from_disk_{false};
     std::size_t reserved_snapshot_bytes_{0};
+    std::vector<std::shared_ptr<const ContinuationSnapshot>> superseded_;
     SnapshotPurpose snapshot_purpose_{SnapshotPurpose::kContinuation};
     std::size_t prompt_tokens_{0};
     std::size_t stable_prefix_tokens_{0};
@@ -316,7 +320,11 @@ private:
       std::size_t source_index, std::size_t snapshot_bytes,
       std::size_t token_count, bool preserve_source, SnapshotPurpose& purpose,
       std::span<const ContinuationToken> replacement_prefix,
-      std::span<const std::uint8_t> input_identity);
+      std::span<const std::uint8_t> input_identity,
+      std::vector<std::shared_ptr<const ContinuationSnapshot>>& superseded);
+  void ResolveRemoved(
+      std::vector<std::shared_ptr<const ContinuationSnapshot>>& removed,
+      const std::shared_ptr<const ContinuationSnapshot>& survivor = {}) noexcept;
   void SkipSnapshot(std::size_t reservation_bytes, SnapshotEventReason reason,
                     std::size_t snapshot_bytes,
                     std::size_t token_count) noexcept;

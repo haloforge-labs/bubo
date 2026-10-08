@@ -194,6 +194,7 @@ ContinuationCache::Lease::Lease(Lease&& other) noexcept
       restored_from_disk_(std::exchange(other.restored_from_disk_, false)),
       reserved_snapshot_bytes_(
           std::exchange(other.reserved_snapshot_bytes_, 0)),
+      superseded_(std::move(other.superseded_)),
       snapshot_purpose_(other.snapshot_purpose_),
       prompt_tokens_(std::exchange(other.prompt_tokens_, 0)),
       stable_prefix_tokens_(std::exchange(other.stable_prefix_tokens_, 0)),
@@ -214,6 +215,7 @@ ContinuationCache::Lease& ContinuationCache::Lease::operator=(
     restore_ms_ = std::exchange(other.restore_ms_, 0.0);
     restored_from_disk_ = std::exchange(other.restored_from_disk_, false);
     reserved_snapshot_bytes_ = std::exchange(other.reserved_snapshot_bytes_, 0);
+    superseded_ = std::move(other.superseded_);
     snapshot_purpose_ = other.snapshot_purpose_;
     prompt_tokens_ = std::exchange(other.prompt_tokens_, 0);
     stable_prefix_tokens_ = std::exchange(other.stable_prefix_tokens_, 0);
@@ -263,7 +265,8 @@ bool ContinuationCache::Lease::TryReserveSnapshot(
   }
   if (!cache_->ReserveSnapshot(source_index_, snapshot_bytes, token_count,
                                preserve_source, purpose, replacement_prefix,
-                               InputIdentity(token_count))) {
+                               InputIdentity(token_count), superseded_)) {
+    cache_->ResolveRemoved(superseded_);
     return false;
   }
   reserved_snapshot_bytes_ = snapshot_bytes;
@@ -280,6 +283,7 @@ void ContinuationCache::Lease::SkipSnapshot(SnapshotEventReason reason,
   cache_->SkipSnapshot(reserved_snapshot_bytes_, reason, snapshot_bytes,
                        token_count);
   reserved_snapshot_bytes_ = 0;
+  cache_->ResolveRemoved(superseded_);
 }
 
 std::size_t ContinuationCache::Lease::Commit(
@@ -293,11 +297,13 @@ std::size_t ContinuationCache::Lease::Commit(
       tokens.size() == prompt_tokens_ ? stable_prefix_tokens_ : 0;
   const auto identity = InputIdentity(tokens.size());
   const auto live_identity = InputIdentity(live_tokens.size());
+  const auto survivor = superseded_.empty() ? nullptr : snapshot;
   const std::size_t retained = cache_->Commit(
       index_, source_index_, reserved_snapshot_bytes_, std::move(tokens),
       std::move(snapshot), {identity.begin(), identity.end()},
       std::move(live_tokens), {live_identity.begin(), live_identity.end()},
       true, nullptr, stable_prefix, snapshot_purpose_);
+  cache_->ResolveRemoved(superseded_, retained ? survivor : nullptr);
   cache_ = nullptr;
   reserved_snapshot_bytes_ = 0;
   return retained;
@@ -310,17 +316,20 @@ std::size_t ContinuationCache::Lease::PublishSnapshot(
   if (cache_ == nullptr)
     throw std::logic_error("continuation cache lease is empty");
   const auto identity = InputIdentity(tokens.size());
+  const auto survivor = superseded_.empty() ? nullptr : snapshot;
   const auto retained = cache_->Commit(
       index_, source_index_, reserved_snapshot_bytes_, std::move(tokens),
       std::move(snapshot), {identity.begin(), identity.end()}, {}, {}, false,
       preserve_source ? nullptr : &source_index_, 0, snapshot_purpose_);
   reserved_snapshot_bytes_ = 0;
+  cache_->ResolveRemoved(superseded_, retained ? survivor : nullptr);
   return retained;
 }
 
 void ContinuationCache::Lease::Invalidate() noexcept {
   if (cache_ != nullptr) {
     cache_->Invalidate(index_, reserved_snapshot_bytes_);
+    cache_->ResolveRemoved(superseded_);
     cache_ = nullptr;
     reserved_snapshot_bytes_ = 0;
   }
@@ -752,7 +761,8 @@ bool ContinuationCache::ReserveSnapshot(
     std::size_t source_index, std::size_t snapshot_bytes,
     std::size_t token_count, bool preserve_source, SnapshotPurpose& purpose,
     std::span<const ContinuationToken> replacement_prefix,
-    std::span<const std::uint8_t> input_identity) {
+    std::span<const std::uint8_t> input_identity,
+    std::vector<std::shared_ptr<const ContinuationSnapshot>>& superseded) {
   std::vector<std::shared_ptr<const ContinuationSnapshot>> removed_snapshots;
   std::vector<SnapshotEvent> events;
   bool admitted = false;
@@ -860,7 +870,17 @@ bool ContinuationCache::ReserveSnapshot(
         auto& entry = *impl_->entries[target];
         const std::size_t removed_bytes = entry.snapshot_bytes;
         const std::size_t removed_tokens = entry.tokens.size();
-        removed_snapshots.push_back(std::move(entry.snapshot));
+        // Defer only tagged candidates the incoming checkpoint may supersede.
+        // Failed captures must still persist these real drops.
+        const auto record = impl_->snapshot_support.on_evict
+                                ? entry.snapshot->persistence : nullptr;
+        if (impl_->snapshot_support.on_evict && record &&
+            std::ranges::equal(entry.input_identity, input_identity) &&
+            IsPrefix(entry.tokens, replacement_prefix) &&
+            (!record->shared_prefix || entry.tokens.size() == token_count))
+          superseded.push_back(std::move(entry.snapshot));
+        else
+          removed_snapshots.push_back(std::move(entry.snapshot));
         entry.tokens.clear();
         entry.snapshot_bytes = 0;
         entry.valid = false;
@@ -901,16 +921,7 @@ bool ContinuationCache::ReserveSnapshot(
       }
     }
   }
-  if (impl_->snapshot_support.on_evict) {
-    for (const auto& removed : removed_snapshots) {
-      try {
-        impl_->snapshot_support.on_evict(removed);
-      } catch (...) {
-        // A dirty tag logs abandonment when its last reference is released.
-      }
-    }
-  }
-  removed_snapshots.clear();
+  ResolveRemoved(removed_snapshots);
   EmitSnapshotEvents(impl_->snapshot_support.on_event, events);
   return admitted;
 }
@@ -973,7 +984,8 @@ std::size_t ContinuationCache::Commit(
 
   std::shared_ptr<const ContinuationSnapshot> retained_snapshot;
   if (retain_snapshot) {
-    retained_snapshot = std::move(snapshot);
+    retained_snapshot = impl_->snapshot_support.on_evict
+                            ? snapshot : std::move(snapshot);
   }
 
   std::vector<std::shared_ptr<const ContinuationSnapshot>> removed_snapshots;
@@ -1160,19 +1172,52 @@ std::size_t ContinuationCache::Commit(
       state_entry.state_last_used = ++impl_->clock;
     }
   }
-  if (impl_->snapshot_support.on_evict) {
-    for (const auto& removed : removed_snapshots) {
-      try {
-        impl_->snapshot_support.on_evict(removed);
-      } catch (...) {
-        // A dirty tag logs abandonment when its last reference is released.
-      }
-    }
+  ResolveRemoved(removed_snapshots, retained_bytes ? snapshot : nullptr);
+  // Tagged before publication, but refused by byte/entry admission.
+  if (!retained_bytes && snapshot && impl_->snapshot_support.on_evict) {
+    std::vector<std::shared_ptr<const ContinuationSnapshot>> refused{snapshot};
+    ResolveRemoved(refused);
   }
-  removed_snapshots.clear();
   EmitSnapshotEvents(impl_->snapshot_support.on_event, events);
   impl_->condition.notify_all();
   return retained_bytes;
+}
+
+void ContinuationCache::ResolveRemoved(
+    std::vector<std::shared_ptr<const ContinuationSnapshot>>& removed,
+    const std::shared_ptr<const ContinuationSnapshot>& survivor) noexcept {
+  if (impl_->snapshot_support.on_evict) {
+    for (const auto& old : removed) {
+      try {
+        const auto record = old->persistence;
+        const auto next = survivor ? survivor->persistence : nullptr;
+        if (record && record == next)
+          continue;  // Republishing the very same immutable snapshot.
+        const bool exact = record && next && record->tokens == next->tokens;
+        if (record && next && record->input_identity == next->input_identity &&
+            IsPrefix(record->tokens, next->tokens) &&
+            (exact || !record->shared_prefix)) {
+          if (exact && record->state.load() == SnapshotPersistence::kPersisted) {
+            unsigned dirty = SnapshotPersistence::kDirty;
+            next->state.compare_exchange_strong(dirty,
+                                                SnapshotPersistence::kPersisted);
+          }
+          auto state = record->state.load();
+          if ((state == SnapshotPersistence::kDirty ||
+               state == SnapshotPersistence::kFailed) &&
+              record->state.compare_exchange_strong(
+                  state, SnapshotPersistence::kSuperseded) &&
+              record->on_superseded)
+            record->on_superseded();
+        } else {
+          impl_->snapshot_support.on_evict(old);
+        }
+      } catch (...) {
+        // An unclaimed dirty record reports abandonment on destruction.
+      }
+    }
+  }
+  removed.clear();
 }
 
 void ContinuationCache::SetPersistenceEvictionHook(

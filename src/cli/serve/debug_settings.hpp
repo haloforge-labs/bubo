@@ -46,6 +46,7 @@ inline constexpr const char* kDebugSettingsEnvironment[] = {
     "GUFO_DISK_DEFER_MS",
     "GUFO_DISK_PERSIST",
     "GUFO_DISK_IDLE_MS",
+    "GUFO_DISK_EVICT_BACKLOG_BYTES",
     "GUFO_DISK_SLICE",
     "GUFO_PREFILL_DIAG",
     "GUFO_MOE_BENCH",

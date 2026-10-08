@@ -45,6 +45,7 @@ struct WriterSettings {
   bool evict_idle{false};
   bool slice{false};
   std::chrono::milliseconds idle{30000};
+  std::size_t evict_backlog_bytes{2ULL * 1024 * 1024 * 1024};
 };
 const WriterSettings& DiskWriterSettings() {
   static const WriterSettings settings = [] {
@@ -59,6 +60,14 @@ const WriterSettings& DiskWriterSettings() {
       const auto value = std::strtol(idle, &end, 10);
       if (end && !*end && value >= 0 && value <= 600000)
         result.idle = std::chrono::milliseconds(value);
+    }
+    const auto* backlog = std::getenv("GUFO_DISK_EVICT_BACKLOG_BYTES");
+    if (backlog && *backlog && *backlog != '-') {
+      char* end = nullptr;
+      errno = 0;
+      const auto value = std::strtoull(backlog, &end, 10);
+      if (!errno && end && !*end && value <= SIZE_MAX)
+        result.evict_backlog_bytes = static_cast<std::size_t>(value);
     }
     return result;
   }();
@@ -637,6 +646,10 @@ struct ContinuationDiskStore::Impl {
         options.persist_evict_idle.value_or(DiskWriterSettings().evict_idle);
     options.slice = options.slice.value_or(DiskWriterSettings().slice);
     options.idle_wait = options.idle_wait.value_or(DiskWriterSettings().idle);
+    options.evict_backlog_bytes = options.evict_backlog_bytes.value_or(
+        DiskWriterSettings().evict_backlog_bytes);
+    if (options.persist_evict_idle.value())
+      superseded = std::make_shared<std::atomic<std::size_t>>(0);
     ValidateOptions();
     InitializeDirectory();
     IndexExistingFiles();
@@ -659,6 +672,9 @@ struct ContinuationDiskStore::Impl {
            << " persisted_evict=" << persisted[1].load()
            << " persisted_idle=" << persisted[2].load()
            << " persisted_shutdown=" << persisted[3].load()
+           << " superseded=" << (superseded ? superseded->load() : 0)
+           << " already_persisted=" << already_persisted.load()
+           << " dropped_evict=" << dropped_evict.load()
            << " skipped=" << skipped->load()
            << " bytes_written=" << bytes_written.load();
       Logger::Info("cache", line.str());
@@ -681,6 +697,22 @@ struct ContinuationDiskStore::Impl {
     queue_changed.notify_all();
     if (writer.joinable())
       writer.join();
+    // Defensive drain: every accepted offer must leave Queued at shutdown.
+    std::lock_guard lock(queue_mutex);
+    for (auto& job : pending) {
+      SkipPersistence(job.snapshot,
+                      ContinuationDiskEventReason::kShutdownDeadline,
+                      job.trigger);
+      if (job.snapshot->persistence)
+        job.snapshot->persistence->state.store(SnapshotPersistence::kAbandoned);
+    }
+    pending.clear();
+    for (auto& job : evict_backlog) {
+      DropEvict(job.snapshot, ContinuationDiskEventReason::kShutdownDeadline);
+    }
+    evict_backlog.clear();
+    backlog_bytes = queued_bytes = 0;
+    queue_changed.notify_all();
   }
 
   void SkipPersistence(
@@ -694,11 +726,51 @@ struct ContinuationDiskStore::Impl {
          snapshot->PayloadBytes(), record.tokens.size(), 0, 0, trigger);
   }
 
+  void DropEvict(const std::shared_ptr<const ContinuationSnapshot>& snapshot,
+                 ContinuationDiskEventReason reason) {
+    if (snapshot->persistence)
+      snapshot->persistence->state.store(SnapshotPersistence::kAbandoned);
+    Emit(ContinuationDiskEventAction::kDroppedEvict, reason, 0,
+         snapshot->PayloadBytes(),
+         snapshot->persistence ? snapshot->persistence->tokens.size() : 0, 0, 0,
+         "evict");
+  }
+
+  // queue_mutex held. Transfer the charge; never exceed active+queued staging.
+  void PromoteBacklog() {
+    if (stopping && std::chrono::steady_clock::now() >= shutdown_deadline) {
+      for (auto& job : evict_backlog)
+        DropEvict(job.snapshot, ContinuationDiskEventReason::kShutdownDeadline);
+      evict_backlog.clear();
+      backlog_bytes = 0;
+      return;
+    }
+    const auto limit =
+        std::min(options.capacity_bytes, options.staging_capacity_bytes);
+    while (!evict_backlog.empty()) {
+      auto& job = evict_backlog.front();
+      const auto used = queued_bytes + capture_bytes->load();
+      if (used > limit - job.retained_bytes)
+        break;
+      const auto charge = job.retained_bytes;
+      try {
+        pending.push_back(std::move(job));
+        queued_bytes += charge;
+      } catch (...) {
+        DropEvict(job.snapshot,
+                  ContinuationDiskEventReason::kSerializationFailure);
+      }
+      evict_backlog.pop_front();
+      backlog_bytes -= charge;
+    }
+  }
+
   void PersistQueued() noexcept {
     for (;;) {
       PendingSave job;
       {
         std::unique_lock lock(queue_mutex);
+        PromoteBacklog();
         while (pending.empty()) {
           if (options.persist_evict_idle.value() && persistence_source) {
             const auto now = std::chrono::steady_clock::now();
@@ -738,21 +810,28 @@ struct ContinuationDiskStore::Impl {
               lock.lock();
               if (!pending.empty())
                 break;
-              if (shutdown && !snapshot)
+              if (shutdown && !snapshot && evict_backlog.empty()) {
+                writer_exited = true;
+                queue_changed.notify_all();
                 return;
+              }
               if (stopping && !shutdown)
                 continue;  // Re-query with failed entries included at shutdown.
               if (snapshot)
                 continue;
             }
           }
-          if (stopping)
+          if (stopping && evict_backlog.empty()) {
+            writer_exited = true;
+            queue_changed.notify_all();
             return;
+          }
           if (options.persist_evict_idle.value())
-            queue_changed.wait_for(lock, std::chrono::milliseconds(5));
+            queue_changed.wait_for(lock, std::chrono::milliseconds(250));
           else
             queue_changed.wait(lock,
                                [this] { return stopping || !pending.empty(); });
+          PromoteBacklog();
         }
         if (defer_enabled && !stopping) {
           const auto deadline = pending.front().enqueued +
@@ -776,7 +855,7 @@ struct ContinuationDiskStore::Impl {
                      std::chrono::nanoseconds(
                          last_activity.load(std::memory_order_acquire)) <
                  options.idle_wait.value())) {
-          queue_changed.wait_for(lock, std::chrono::milliseconds(5));
+          queue_changed.wait_for(lock, std::chrono::milliseconds(250));
           continue;
         }
         job = std::move(pending.front());
@@ -798,17 +877,28 @@ struct ContinuationDiskStore::Impl {
                  job.trigger);
         } else {
           // Existing exact files count as persisted without serializing again.
-          const bool exists =
-              record && Touch(*job.runner, job.tokens, job.identity);
+          bool exists = false;
+          if (record) {
+            const ScopedOperationPermit permit(operation_gate);
+            exists = Touch(*job.runner, job.tokens, job.identity);
+          }
           if (exists) {
             stored = true;
           } else {
             stored = Save(*job.runner, job.tokens, *job.snapshot, job.identity,
                           job.shared_prefix, job.trigger)
                          .stored;
-            if (!stored && record)
-              stored = Touch(*job.runner, job.tokens, job.identity);
+            if (!stored && record) {
+              const ScopedOperationPermit permit(operation_gate);
+              exists = Touch(*job.runner, job.tokens, job.identity);
+              stored = exists;
+            }
           }
+          if (exists)
+            Emit(ContinuationDiskEventAction::kAlreadyPersisted,
+                 ContinuationDiskEventReason::kAlreadyPersisted, 0,
+                 job.snapshot->PayloadBytes(), job.tokens.size(), 0, 0,
+                 job.trigger);
         }
       } catch (...) {
         Emit(ContinuationDiskEventAction::kSkipped,
@@ -898,6 +988,13 @@ struct ContinuationDiskStore::Impl {
             std::size_t payload_bytes, std::size_t token_count,
             double elapsed_ms = 0.0, std::size_t staging_used_bytes = 0,
             std::string_view trigger = "write_through") const noexcept {
+    if (action == ContinuationDiskEventAction::kSkipped && trigger == "evict" &&
+        reason != ContinuationDiskEventReason::kExactReplacement)
+      action = ContinuationDiskEventAction::kDroppedEvict;
+    if (action == ContinuationDiskEventAction::kDroppedEvict)
+      dropped_evict.fetch_add(1, std::memory_order_relaxed);
+    if (action == ContinuationDiskEventAction::kAlreadyPersisted)
+      already_persisted.fetch_add(1, std::memory_order_relaxed);
     if (action == ContinuationDiskEventAction::kSkipped)
       skipped->fetch_add(1, std::memory_order_relaxed);
     if (action == ContinuationDiskEventAction::kStored) {
@@ -952,8 +1049,9 @@ struct ContinuationDiskStore::Impl {
   /// or enqueue, where it would otherwise look like a successful cache capture.
   [[nodiscard]] bool CanStage(std::size_t bytes, std::size_t payload_bytes,
                               std::size_t token_count) const {
-    if (stopping && (!options.persist_evict_idle.value() ||
-                     std::chrono::steady_clock::now() >= shutdown_deadline)) {
+    if (writer_exited ||
+        (stopping && (!options.persist_evict_idle.value() ||
+                      std::chrono::steady_clock::now() >= shutdown_deadline))) {
       Emit(ContinuationDiskEventAction::kSkipped,
            ContinuationDiskEventReason::kShutdownDeadline, bytes, payload_bytes,
            token_count);
@@ -1411,12 +1509,13 @@ struct ContinuationDiskStore::Impl {
     if (!descriptor.persistence.has_value()) {
       Emit(ContinuationDiskEventAction::kSkipped,
            ContinuationDiskEventReason::kUnsupported, 0, 0,
-           checkpoint_tokens.size());
+           checkpoint_tokens.size(), 0, 0, trigger);
       return {};
     }
     if (checkpoint_tokens.empty()) {
       Emit(ContinuationDiskEventAction::kSkipped,
-           ContinuationDiskEventReason::kSerializationFailure, 0, 0, 0);
+           ContinuationDiskEventReason::kSerializationFailure, 0, 0, 0, 0, 0,
+           trigger);
       return {};
     }
     // The same prefix is offered again whenever a restored continuation is
@@ -1431,7 +1530,7 @@ struct ContinuationDiskStore::Impl {
       TouchEntry(existing);
       Emit(ContinuationDiskEventAction::kSkipped,
            ContinuationDiskEventReason::kExactReplacement, existing->file_bytes,
-           existing->payload_bytes, checkpoint_tokens.size());
+           existing->payload_bytes, checkpoint_tokens.size(), 0, 0, trigger);
       return {};
     }
 
@@ -1447,7 +1546,7 @@ struct ContinuationDiskStore::Impl {
         WithinCheckpointStep(runner, checkpoint_tokens, input_identity)) {
       Emit(ContinuationDiskEventAction::kSkipped,
            ContinuationDiskEventReason::kMinStep, 0, 0,
-           checkpoint_tokens.size());
+           checkpoint_tokens.size(), 0, 0, trigger);
       return {};
     }
 
@@ -1466,13 +1565,13 @@ struct ContinuationDiskStore::Impl {
       if (file_bytes > options.staging_capacity_bytes) {
         Emit(ContinuationDiskEventAction::kSkipped,
              ContinuationDiskEventReason::kStagingCapacity, file_bytes,
-             payload_bytes, checkpoint_tokens.size());
+             payload_bytes, checkpoint_tokens.size(), 0, 0, trigger);
         return {};
       }
       if (file_bytes > options.capacity_bytes) {
         Emit(ContinuationDiskEventAction::kSkipped,
              ContinuationDiskEventReason::kByteCapacity, file_bytes,
-             payload_bytes, checkpoint_tokens.size());
+             payload_bytes, checkpoint_tokens.size(), 0, 0, trigger);
         return {};
       }
       header = BuildHeader(*descriptor.persistence, checkpoint_tokens,
@@ -1480,7 +1579,7 @@ struct ContinuationDiskStore::Impl {
     } catch (...) {
       Emit(ContinuationDiskEventAction::kSkipped,
            ContinuationDiskEventReason::kSerializationFailure, file_bytes,
-           payload_bytes, checkpoint_tokens.size());
+           payload_bytes, checkpoint_tokens.size(), 0, 0, trigger);
       return {};
     }
 
@@ -1492,7 +1591,7 @@ struct ContinuationDiskStore::Impl {
     if (!published) {
       Emit(ContinuationDiskEventAction::kSkipped,
            ContinuationDiskEventReason::kIoFailure, file_bytes, payload_bytes,
-           checkpoint_tokens.size());
+           checkpoint_tokens.size(), 0, 0, trigger);
       return {};
     }
     // No visible entry is evicted until its replacement is fully durable.
@@ -1500,7 +1599,7 @@ struct ContinuationDiskStore::Impl {
       RemoveFileOnly(filename);
       Emit(ContinuationDiskEventAction::kSkipped,
            ContinuationDiskEventReason::kByteCapacity, file_bytes,
-           payload_bytes, checkpoint_tokens.size());
+           payload_bytes, checkpoint_tokens.size(), 0, 0, trigger);
       return {};
     }
 
@@ -1764,6 +1863,9 @@ struct ContinuationDiskStore::Impl {
   mutable std::mutex queue_mutex;
   std::condition_variable queue_changed;
   std::deque<PendingSave> pending;
+  std::list<PendingSave> evict_backlog;
+  std::size_t backlog_bytes{0};
+  bool writer_exited{false};  // queue_mutex serializes exit against offers.
   std::size_t queued_bytes{0};
   std::shared_ptr<std::atomic<std::size_t>> capture_bytes =
       std::make_shared<std::atomic<std::size_t>>(0);
@@ -1780,6 +1882,8 @@ struct ContinuationDiskStore::Impl {
       std::make_shared<std::atomic<std::size_t>>(0);
   mutable std::array<std::atomic<std::size_t>, 4> persisted{};
   mutable std::atomic<std::size_t> bytes_written{0};
+  std::shared_ptr<std::atomic<std::size_t>> superseded;
+  mutable std::atomic<std::size_t> dropped_evict{0}, already_persisted{0};
   mutable std::size_t phase_slice_yields{0};
   mutable double phase_slice_wait_ms{0};
   std::size_t SaveAsync(std::shared_ptr<const TextModelRunner> runner,
@@ -1927,8 +2031,42 @@ std::size_t ContinuationDiskStore::Impl::SaveAsync(
       }
       reservation.reset();
     }
-    if (!CanStage(charge, snapshot->PayloadBytes(), checkpoint_tokens.size()))
+    if (options.persist_evict_idle.value() && trigger == "evict") {
+      const auto limit =
+          std::min(options.capacity_bytes, options.staging_capacity_bytes);
+      if (writer_exited ||
+          (stopping && std::chrono::steady_clock::now() >= shutdown_deadline)) {
+        DropEvict(snapshot, writer_exited
+                                ? ContinuationDiskEventReason::kWriterStopped
+                                : ContinuationDiskEventReason::kShutdownDeadline);
+        return 0;
+      }
+      if (charge > limit) {
+        DropEvict(snapshot, charge > options.capacity_bytes
+                                ? ContinuationDiskEventReason::kByteCapacity
+                                : ContinuationDiskEventReason::kStagingCapacity);
+        return 0;
+      }
+      const auto used = queued_bytes + capture_bytes->load();
+      if (!evict_backlog.empty() || used > limit - charge) {
+        const auto bound = options.evict_backlog_bytes.value();
+        if (evict_backlog.size() >= options.evict_backlog_count ||
+            charge > bound || backlog_bytes > bound - charge) {
+          DropEvict(snapshot, ContinuationDiskEventReason::kEvictBacklogCapacity);
+          return 0;
+        }
+        evict_backlog.push_back({std::move(runner), std::move(checkpoint_tokens),
+                                std::move(snapshot), std::move(input_identity),
+                                charge, shared_prefix,
+                                std::chrono::steady_clock::now(), trigger});
+        backlog_bytes += charge;
+        queue_changed.notify_all();
+        return file_bytes;
+      }
+    } else if (!CanStage(charge, snapshot->PayloadBytes(),
+                         checkpoint_tokens.size())) {
       return 0;
+    }
     pending.push_back({std::move(runner), std::move(checkpoint_tokens),
                        std::move(snapshot), std::move(input_identity), charge,
                        shared_prefix,
@@ -1978,7 +2116,7 @@ std::size_t ContinuationDiskStore::Capture(
                              std::move(snapshot), std::move(identity),
                              std::move(reservation), shared_prefix);
     reservation.reset();
-    if (!snapshot || !retained_in_ram) {
+    if (!snapshot) {
       impl_->Emit(ContinuationDiskEventAction::kSkipped,
                   ContinuationDiskEventReason::kRamNotRetained, 0,
                   snapshot ? snapshot->PayloadBytes() : 0, tokens.size());
@@ -2001,7 +2139,18 @@ std::size_t ContinuationDiskStore::Capture(
               .payload_bytes = bytes,
               .token_count = count});
     };
+    auto superseded = impl_->superseded;
+    record->on_superseded = [sink, superseded, count, bytes] {
+      superseded->fetch_add(1, std::memory_order_relaxed);
+      if (sink)
+        sink({.action = ContinuationDiskEventAction::kSuperseded,
+              .reason = ContinuationDiskEventReason::kSuperseded,
+              .payload_bytes = bytes, .token_count = count, .trigger = "evict"});
+    };
     snapshot->persistence = std::move(record);
+    impl_->queue_changed.notify_all();
+    if (!retained_in_ram && !already_persisted)
+      impl_->EnqueuePersistence(snapshot, "evict");
     return 0;
   } catch (...) {
     impl_->Emit(ContinuationDiskEventAction::kSkipped,
@@ -2036,7 +2185,7 @@ void ContinuationDiskStore::Impl::EnqueuePersistence(
          ContinuationDiskEventReason::kSerializationFailure, 0,
          snapshot->PayloadBytes(), record->tokens.size(), 0, 0, trigger);
   }
-  if (!accepted && record->state.load() != SnapshotPersistence::kDirty)
+  if (!accepted && record->state.load() == SnapshotPersistence::kQueued)
     record->state.store(stopping ? SnapshotPersistence::kAbandoned
                                  : SnapshotPersistence::kFailed);
   queue_changed.notify_all();
@@ -2048,7 +2197,9 @@ void ContinuationDiskStore::Flush() {
     ++impl_->flush_waiters;
     impl_->queue_changed.notify_all();
   }
-  impl_->queue_changed.wait(lock, [this] { return impl_->queued_bytes == 0; });
+  impl_->queue_changed.wait(lock, [this] {
+    return impl_->queued_bytes == 0 && impl_->evict_backlog.empty();
+  });
   if (impl_->defer_enabled || impl_->options.persist_evict_idle.value())
     --impl_->flush_waiters;
 }
