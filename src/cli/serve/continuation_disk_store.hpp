@@ -57,6 +57,9 @@ struct ContinuationDiskEvent {
   std::size_t staging_capacity_bytes{0};
   std::size_t staging_used_bytes{0};
   double elapsed_ms{0.0};
+  // Phase split of a completed write (prefill thread 2026-10-08, writer-fix diagnostics): serialize = device->host gather inside StreamPersistentSnapshot,
+  // write = ::write time, hash = SHA-256 Update time, fsync = file fsync + rename + directory fsync. Zero for other events.
+  double phase_gather_ms{0.0}, phase_write_ms{0.0}, phase_hash_ms{0.0}, phase_fsync_ms{0.0};
 };
 
 struct ContinuationDiskStoreOptions {

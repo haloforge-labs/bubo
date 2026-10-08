@@ -734,6 +734,9 @@ struct ContinuationDiskStore::Impl {
     }
   }
 
+  // Phase timings of the publish that is currently being reported (Save holds write_mutex across PublishImage and its Emit).
+  mutable double phase_gather_ms_{0.0}, phase_write_ms_{0.0}, phase_hash_ms_{0.0}, phase_fsync_ms_{0.0};
+
   void Emit(ContinuationDiskEventAction action,
             ContinuationDiskEventReason reason, std::size_t file_bytes,
             std::size_t payload_bytes, std::size_t token_count,
@@ -754,6 +757,10 @@ struct ContinuationDiskStore::Impl {
           .staging_capacity_bytes = options.staging_capacity_bytes,
           .staging_used_bytes = staging_used_bytes,
           .elapsed_ms = elapsed_ms,
+          .phase_gather_ms = phase_gather_ms_,
+          .phase_write_ms = phase_write_ms_,
+          .phase_hash_ms = phase_hash_ms_,
+          .phase_fsync_ms = phase_fsync_ms_,
       });
     } catch (...) {
       return;
@@ -1116,19 +1123,28 @@ struct ContinuationDiskStore::Impl {
     try {
       crypto::Sha256Hasher hasher;
       std::size_t written = 0;
+      using Clock = std::chrono::steady_clock;
+      const auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
+      double write_ms = 0.0, hash_ms = 0.0;
+      phase_gather_ms_ = phase_write_ms_ = phase_hash_ms_ = phase_fsync_ms_ = 0.0;
       const auto sink = [&](std::span<const std::uint8_t> bytes) {
         // Keep write sizes bounded and checksum each byte exactly once.
         while (!bytes.empty()) {
           const auto chunk =
               bytes.first(std::min(bytes.size(), std::size_t{1024 * 1024}));
+          const auto t0 = Clock::now();
           if (!WriteAll(temporary.get(), chunk)) {
             throw std::runtime_error("continuation disk write failed");
           }
+          const auto t1 = Clock::now();
           hasher.Update(chunk);
+          write_ms += ms(t1 - t0);
+          hash_ms += ms(Clock::now() - t1);
           bytes = bytes.subspan(chunk.size());
         }
       };
       sink(header);
+      const auto stream_start = Clock::now();
       runner.StreamPersistentSnapshot(snapshot, [&](auto bytes) {
         if (bytes.size() > payload_bytes - written) {
           throw std::runtime_error("snapshot serialization overflow");
@@ -1139,6 +1155,9 @@ struct ContinuationDiskStore::Impl {
       if (written != payload_bytes) {
         throw std::runtime_error("snapshot serialization truncated");
       }
+      phase_write_ms_ = write_ms;
+      phase_hash_ms_ = hash_ms;
+      phase_gather_ms_ = std::max(0.0, ms(Clock::now() - stream_start) - write_ms - hash_ms);
       const auto checksum = hasher.FinishHex();
       if (::lseek(temporary.get(), kChecksumOffset, SEEK_SET) < 0 ||
           !WriteAll(temporary.get(),
@@ -1149,6 +1168,7 @@ struct ContinuationDiskStore::Impl {
     } catch (...) {
       valid = false;
     }
+    const auto fsync_start = std::chrono::steady_clock::now();
     valid = valid && ::fsync(temporary.get()) == 0;
     const int raw_descriptor = temporary.release();
     if (::close(raw_descriptor) != 0) {
@@ -1168,6 +1188,7 @@ struct ContinuationDiskStore::Impl {
       (void)::fsync(directory_fd);
       return false;
     }
+    phase_fsync_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fsync_start).count();
     return true;
   }
 

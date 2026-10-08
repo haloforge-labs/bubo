@@ -446,6 +446,7 @@ void EmitDiskEvent(const ContinuationDiskEvent& event) noexcept {
          << " staging_used_bytes=" << event.staging_used_bytes;
     if (event.reason == ContinuationDiskEventReason::kSaved) {
       line << " write_ms=" << event.elapsed_ms;
+      line << " gather_ms=" << event.phase_gather_ms << " file_write_ms=" << event.phase_write_ms << " hash_ms=" << event.phase_hash_ms << " fsync_ms=" << event.phase_fsync_ms;
       Logger::Info("cache", line.str());
     } else if (event.reason == ContinuationDiskEventReason::kLru ||
                event.reason == ContinuationDiskEventReason::kMinStep) {
