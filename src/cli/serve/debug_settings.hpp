@@ -199,6 +199,8 @@ inline constexpr DebugSettingsIrrelevantEnvironment
             ? "none"
             : policy->find("survival") && policy->find("survival")->as_bool()
                   ? "survival" : "length";
+    if (const auto* vocab = policy->find("draft_vocabulary"))
+      (*policy)["latin_vocab"] = vocab->str() == "latin_text" ? "latin" : "full";
     if (const auto* cap = policy->find("runner_max_draft_tokens"))
       (*policy)["cap"] = *cap;
   }

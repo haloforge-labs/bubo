@@ -1161,6 +1161,7 @@ bool Session::PrepareDecode(const DecodeRequest& request,
     float alive = 1.0F;
     while (pending->chain.size() < width) {
       AppendDraft(*pending);
+      stats_.mtp_offered += 1;
       if (survival && !pending->proposals.empty()) {
         const std::size_t depth = pending->proposals.size() - 1;
         alive *= MtpAcceptEstimate(depth, pending->proposals.back());
@@ -1168,6 +1169,7 @@ bool Session::PrepareDecode(const DecodeRequest& request,
         if (depth > 0 && alive < kMtpSurvivalFloor) {
           pending->chain.pop_back();
           pending->proposals.pop_back();
+          stats_.survival_cut += 1;
           pending->width = pending->chain.size();
           break;
         }

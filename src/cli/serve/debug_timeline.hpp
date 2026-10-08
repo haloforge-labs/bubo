@@ -69,6 +69,12 @@ public:
         restore["bytes"] = fields.member_size("bytes");
         restore_ms_ += fields.member_double("restore_ms");
         restores_.push_back(std::move(restore));
+      } else if (name == "snapshot") {
+        // Preserve measured capture flags; cache tiers do not imply origin.
+        auto capture = fields;
+        capture["capture_kind"] = fields.find("in_pass") &&
+            fields.find("in_pass")->as_bool() ? "in_pass_checkpoint" : "separate";
+        captures_.push_back(std::move(capture));
       } else if (name == "finish") {
         const double wall = std::chrono::duration<double, std::milli>(
             when - start_).count();
@@ -86,6 +92,7 @@ public:
         summary["overlap_ms"] = std::max(0.0, -residual);
         summary["prefill_passes"] = prefill_passes_;
         summary["restores"] = restores_;
+        summary["captures"] = captures_;
         fields["summary"] = std::move(summary);
       }
       fields["event"] = std::string(name);
@@ -103,7 +110,10 @@ public:
              std::size_t drafts, std::size_t accepted,
              std::optional<std::size_t> lookup = std::size_t{0},
              std::optional<std::size_t> chosen = std::nullopt,
-             std::optional<bool> survival = std::nullopt) noexcept {
+             std::optional<bool> survival = std::nullopt,
+             std::size_t n_cycles = 0,
+             std::optional<std::size_t> mtp_offered = std::nullopt,
+             std::optional<std::size_t> cut = std::nullopt) noexcept {
     cycle_ms_ += ms;
     if (cycles_++ >= kMaxDecodeCycles) {
       truncated_ = true;
@@ -112,6 +122,13 @@ public:
     try {
       auto fields = json::Value::object();
       fields["index"] = cycles_ - 1;
+      fields["n_cycles"] = n_cycles;
+      if (mtp_offered && lookup && cut) {
+        fields["mtp_offered"] = *mtp_offered;
+        fields["lookup_offered"] = *lookup;
+        fields["proposed"] = *mtp_offered + *lookup;
+        fields["cut"] = *cut;
+      }
       fields["verify_width"] = verify_width;
       fields["drafts"] = drafts;
       fields["accepted"] = accepted;
@@ -130,12 +147,14 @@ public:
             : *lookup == drafts ? "prompt_lookup" : "mixed";
       }
       if (chosen)
-        fields["policy_chosen_length"] = *chosen;
+        fields["policy_chosen_length_sum"] = *chosen;
+      if (survival)
+        fields["survival_any"] = *survival;
       // Configuration lives once in the admission bundle. Do not infer the
       // engine's decision from random sampling: defer_head also disables it.
       if (drafts == 0)
         fields["policy_effective"] = "none";
-      else if (survival)
+      else if (survival && n_cycles == 1)
         fields["policy_effective"] = *survival ? "survival" : "length";
       Add("decode_cycle", when, std::move(fields));
     } catch (...) {
@@ -175,6 +194,7 @@ private:
   json::Value bundle_ = json::Value::object();
   json::Value prefill_passes_ = json::Value::array();
   json::Value restores_ = json::Value::array();
+  json::Value captures_ = json::Value::array();
   std::vector<json::Value> events_;
   std::exception_ptr failure_;
 };

@@ -2897,8 +2897,12 @@ public:
     step.draft_rounds = stats_after.cycles - stats_before.cycles;
     step.draft_tokens = stats_after.drafted - stats_before.drafted;
     step.draft_accepted_tokens = stats_after.accepted - stats_before.accepted;
-    step.policy_chosen_length = stats_after.policy_width - stats_before.policy_width;
-    step.policy_survival = stats_after.survival_cycles != stats_before.survival_cycles;
+    // One serial engine call prepares/finishes at most one speculative cycle.
+    // Other runners may aggregate cycles; TextDecodeStep uses sum/any semantics.
+    step.policy_chosen_length_sum = stats_after.policy_width - stats_before.policy_width;
+    step.mtp_offered = stats_after.mtp_offered - stats_before.mtp_offered;
+    step.cut = stats_after.survival_cut - stats_before.survival_cut;
+    step.survival_any = stats_after.survival_cycles != stats_before.survival_cycles;
     step.lookup_tokens = stats_after.lookup - stats_before.lookup;
     step.lookup_accepted_tokens =
         stats_after.lookup_accepted - stats_before.lookup_accepted;

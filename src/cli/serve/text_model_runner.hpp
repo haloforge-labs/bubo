@@ -189,9 +189,13 @@ struct TextDecodeStep {
   /// Of draft_tokens: proposals copied from the context (prompt lookup).
   std::size_t lookup_tokens{0};
   std::size_t lookup_accepted_tokens{0};
+  /// Per-step sum/any, not a claim that every runner executes one cycle.
   /// Absent when the adapter cannot attribute the engine policy decision.
-  std::optional<std::size_t> policy_chosen_length;
-  std::optional<bool> policy_survival;
+  std::optional<std::size_t> policy_chosen_length_sum;
+  std::optional<bool> survival_any;
+  /// Per-step offers before survival cuts; absent on unattributed adapters.
+  std::optional<std::size_t> mtp_offered;
+  std::optional<std::size_t> cut;
 };
 
 /// Model-private state driven only through TextModelRunner work units.

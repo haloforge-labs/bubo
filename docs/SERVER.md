@@ -56,7 +56,13 @@ is the request opt-in. The `admission` event is its header and now has `bundle`.
 The last `finish` event has `summary`. No timeline storage, bundle parsing,
 aggregation, allocation, or logging runs when the request opt-in is absent.
 
-The additional cycle fields are:
+`decode_cycle` is the legacy event name for one serving decode work unit.
+`n_cycles` reports speculative verification rounds in that step (zero for AR).
+The serial Flash-Next adapter calls Session::DecodeStep once; that call prepares
+and finishes at most one speculative cycle. Other adapters may aggregate rounds.
+All offer, draft, accepted and budget counts below are **per-step totals**.
+
+The additional decode fields are:
 
 | Field | Meaning |
 | --- | --- |
@@ -64,18 +70,25 @@ The additional cycle fields are:
 | `draft_sources.mtp_head`, `draft_sources.prompt_lookup` | Draft tokens actually sent to verification from each source, excluding the anchor. Their sum equals `drafts`. Omitted with `draft_source`; AR cycles have two measured zero counts. |
 | `accepted_length` | Alias of the existing `accepted`: draft tokens kept by verification, excluding the anchor. |
 | `partial_accept` | Whether `accepted < drafts`. A stop can also shorten the chain; this does not assert a rejection or a physical rollback. |
-| `policy_effective` | Actual serial engine decision: `length`, `survival`, or `none` for a cycle without drafts. Omitted for speculative batch cycles, whose serial retries are not attributed. |
-| `policy_chosen_length` | Initial serial draft budget, excluding the anchor, before survival cuts or prompt lookup rewrites the chain width. Comes from the session policy-width counter delta. Zero for an AR step on the serial Flash-Next adapter; omitted on adapters that do not expose the counter. The configured cap is `admission.bundle.mtp_policy.cap`. |
+| `n_cycles` | Number of speculative verification rounds reported by this decode step; independent of event count. |
+| `mtp_offered`, `lookup_offered`, `proposed`, `cut` | MTP head proposals built (including a subsequently cut proposal), lookup tokens appended, their sum before survival cuts, and proposals removed by survival. Exclude the anchor. Unattempted budget slots are not offers. On successful serial Flash-Next steps, `proposed - cut == drafts`. Omitted on unattributed adapters, including batch. |
+| `survival_any` | Whether any policy decision in the step used survival. False does not imply that a policy ran on an AR step. Omitted when unavailable. |
+| `policy_effective` | `length` or `survival` only when attributed and `n_cycles == 1`; `none` when there are no drafts. Omitted for multiple speculative cycles rather than assigning them one policy. |
+| `policy_chosen_length_sum` | Sum of initial draft budgets in this step, excluding anchors, before survival cuts or prompt lookup rewrites chain widths. Comes from the session policy-width counter delta; never a single-cycle length when `n_cycles > 1`. Zero for an AR step on the serial Flash-Next adapter; omitted on adapters that do not expose the counter. The configured cap is `admission.bundle.mtp_policy.cap`. |
 
 `index`, `verify_width`, `drafts`, `accepted`, and `ms` retain their existing
-meaning. Only `admission.bundle.mtp_policy` carries hook 1's policy fields: `model_has_mtp`,
+meaning for one-cycle steps. For aggregated steps, `verify_width` is the legacy
+`drafts + 1` proxy, not an individual verification launch width; `ms` is step elapsed time.
+`summary.cycle_count` and the 4096-event cap count decode work units, not `n_cycles`.
+Only `admission.bundle.mtp_policy` carries hook 1's policy fields: `model_has_mtp`,
 `enabled`, `runner_max_draft_tokens`, `model_max_draft_tokens`, `survival`,
 `prompt_lookup`, and `draft_vocabulary`. `survival` describes configuration;
 `name` describes configured policy (`none` when MTP is disabled);
 `policy_effective` describes the work unit. The full policy object is not copied
 into each cycle. Resolved `prompt_lookup` and `draft_vocabulary` (`full` or
 `latin_text`) expose `--prompt-lookup` and `--mtp-draft-vocab`; `survival`
-and `name` expose `--mtp-policy survival`.
+and `name` expose `--mtp-policy survival`. `admission.bundle.mtp_policy.latin_vocab`
+is `"latin"` or `"full"`, a configuration property only, never a measured filter effect.
 
 `bundle` is projected from hook 1's `BuildEffectiveSettings` builder after
 request sampling resolution. Its exact members are:
@@ -120,9 +133,14 @@ a clamped gap alone must not be used as proof that phases reconcile. Restore
 can be nested in admission, and batch cycle elapsed intervals can overlap.
 These are elapsed serving measurements, not an exclusive device utilization profile.
 
-Not available and omitted: `proposed_length` before the policy,
+`summary.captures` lists each snapshot capture with the existing `kind`, `tokens`,
+`bytes`, `ms`, `success`, and `in_pass` true/false fields. `capture_kind` is
+`in_pass_checkpoint` when that measured flag is true, otherwise `separate`.
+This describes captures of the current request, not the origin of a restored entry.
+
+Not available and omitted: `latin_filtered`, `latin_rejected`,
 `filter_changed`, `filter_rejected`, physical `rollback`,
-effective `policy_effective` and `policy_chosen_length` on the batch adapter path, and restore
+effective `policy_effective` and `policy_chosen_length_sum` on the batch adapter path, and restore
 `capture_origin`/a distinct `in_pass_checkpoint` restore kind.
 The current cache retains the tier but loses how a snapshot was captured;
 `RAM` therefore also covers restoration of an in-pass checkpoint. Its earlier

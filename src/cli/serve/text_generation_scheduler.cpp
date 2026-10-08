@@ -1432,7 +1432,8 @@ struct TextGenerationScheduler::Impl {
         request->result.debug_timeline->Cycle(decode_start, elapsed,
             step.draft_tokens + 1, step.draft_tokens, step.draft_accepted_tokens,
             step.lookup_tokens,
-            step.policy_chosen_length, step.policy_survival);
+            step.policy_chosen_length_sum, step.survival_any, step.draft_rounds,
+            step.mtp_offered, step.cut);
       LogDecodeProgress(request);
       if (request->stop_filter.stopped()) {
         CompleteSuccess(request,
@@ -1762,7 +1763,7 @@ struct TextGenerationScheduler::Impl {
       if (item.request->result.debug_timeline)
         item.request->result.debug_timeline->Cycle(item.decode_start, elapsed,
             step.draft_tokens + 1, step.draft_tokens, step.draft_accepted_tokens,
-            std::nullopt);
+            std::nullopt, std::nullopt, std::nullopt, step.draft_rounds);
       LogDecodeProgress(item.request);
       if (!published || IsTerminal(item.request)) {
         continue;

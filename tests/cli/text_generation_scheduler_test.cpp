@@ -172,6 +172,7 @@ struct FakeControl {
   bool incremental_text_is_exact{false};
   bool multi_token_decode{false};
   bool timeline_mixed_drafts{false};
+  bool timeline_multi_cycle_step{false};
   std::atomic<std::size_t> debug_settings_calls{0};
   bool batched_multi_token_decode{false};
   std::size_t actual_batch_width{4};
@@ -609,12 +610,21 @@ public:
     step.draft_tokens = count + 1;
     step.draft_accepted_tokens = count;
     if (control_->timeline_mixed_drafts) {
-      step.policy_chosen_length = 4;
-      step.policy_survival = sampler.config().uses_random_sampling();
+      step.policy_chosen_length_sum = 4;
+      step.survival_any = sampler.config().uses_random_sampling();
       step.lookup_tokens = fake.decode_count <= 3 ? 2 : 0;
       step.draft_accepted_tokens = count - 1;
       // The second scripted survival cycle stops drafting below its budget.
       step.draft_tokens = fake.decode_count <= 3 ? count + 1 : count;
+      step.mtp_offered = fake.decode_count <= 3 ? 2 : 4;
+      step.cut = fake.decode_count <= 3 ? 0 : 1;
+      if (control_->timeline_multi_cycle_step && fake.decode_count > 3) {
+        step.draft_rounds = 3;
+        step.policy_chosen_length_sum = 12;
+        step.survival_any = true;
+        step.mtp_offered = 10;
+        step.draft_tokens = 9;
+      }
     }
     return step;
   }
@@ -2906,7 +2916,12 @@ void TestDebugTimelineOrderCountsAndOffPath() {
              off.text == result.text,
          "timeline OFF has no event storage and identical outputs");
   auto response = gufo::json::Value::object();
+  response["text"] = off.text;
+  const auto off_bytes = response.dump();
   gufo::server::AddDebugTimeline(response, off);
+  // Base fake frontier is prompt label * 100, then increments per token.
+  Expect(off_bytes == "{\"text\":\"100101102103\"}" && response.dump() == off_bytes,
+         "OFF response keeps base fake-output bytes and emits no attribution fields");
   Expect(!response.find("gufo"), "OFF response contains no timeline or summary");
 }
 
@@ -2950,20 +2965,29 @@ void TestDebugTimelineMixedSourcesAndPolicy() {
                event.member_size("verify_width") == (cycles == 0 ? 5 : 4) &&
                event.member_size("accepted_length") == 2 &&
                event.find("partial_accept")->as_bool() &&
-               event.member_size("policy_chosen_length") == 4 &&
+               event.member_size("policy_chosen_length_sum") == 4 &&
                !event.contains("policy") &&
                event.member_str("policy_effective") == "survival" &&
                event.member_size("accepted_length") + 1 == 3,
            "scripted mixed and survival-shortened head cycles retain exact budget/source/verify counts");
-    Expect(!event.find("proposed_length") &&
+    Expect(event.member_size("n_cycles") == 1 &&
+               event.member_size("mtp_offered") == (cycles == 0 ? 2 : 4) &&
+               event.member_size("lookup_offered") == (cycles == 0 ? 2 : 0) &&
+               event.member_size("proposed") == 4 &&
+               event.member_size("cut") == (cycles == 0 ? 0 : 1) &&
+               event.find("survival_any")->as_bool(),
+           "offers include the cut proposal and reconcile with verified drafts");
+    Expect(!event.find("latin_filtered") && !event.find("latin_rejected") &&
+               !event.find("proposed_length") &&
                !event.find("filter_changed") && !event.find("filter_rejected") &&
                !event.find("rollback"),
-           "unavailable pre-policy, filter and rollback counters are omitted even with latin vocabulary");
+           "obsolete name and unavailable counterfactual filter/rollback fields are omitted");
     ++cycles;
   }
   Expect(cycles == 2, "scripted multi-token request has two cycles");
   Expect(bundle->find("mtp_policy")->find("prompt_lookup")->as_bool() &&
-             bundle->find("mtp_policy")->member_str("draft_vocabulary") == "latin_text",
+             bundle->find("mtp_policy")->member_str("draft_vocabulary") == "latin_text" &&
+             bundle->find("mtp_policy")->member_str("latin_vocab") == "latin",
          "default stack settings are resolved in the bundle");
   config.temperature = 0.0F;
   const auto deterministic = scheduler->Submit({1, 2, 3}, 3, config, {}, false,
@@ -2972,15 +2996,55 @@ void TestDebugTimelineMixedSourcesAndPolicy() {
   for (const auto& event : deterministic_events.items()) {
     if (event.member_str("event") == "decode_cycle")
       Expect(event.member_str("policy_effective") == "length" &&
-                 event.member_size("policy_chosen_length") == 4,
+                 event.member_size("policy_chosen_length_sum") == 4,
              "scripted deterministic policy decision reports length and initial budget");
   }
   metadata.debug_timeline = false;
   const auto off = scheduler->Submit({1, 2, 3}, 3, config, {}, false, metadata).Wait();
   auto response = gufo::json::Value::object();
+  response["text"] = off.text;
+  const auto off_bytes = response.dump();
   gufo::server::AddDebugTimeline(response, off);
+  // Base fake frontier is prompt label * 100, then increments per token.
+  Expect(off_bytes == "{\"text\":\"100101102\"}" && response.dump() == off_bytes,
+         "OFF response keeps base fake-output bytes and emits no attribution fields");
   Expect(!response.contains("gufo") && control->debug_settings_calls == 1,
          "settings are built once and all diagnostic fields are absent OFF");
+}
+
+void TestDebugTimelineStepCycleSemantics() {
+  auto control = std::make_shared<FakeControl>();
+  control->multi_token_decode = true;
+  control->timeline_mixed_drafts = true;
+  control->timeline_multi_cycle_step = true;
+  auto scheduler = MakeScheduler(control, 1);
+  TextRequestMetadata metadata;
+  metadata.cache_prompt = false;
+  metadata.debug_timeline = true;
+  const auto result = scheduler->Submit({1, 2, 3}, 6, 1.0F, {}, false,
+                                        metadata).Wait();
+  const auto events = result.debug_timeline->Serialize();
+  std::size_t steps = 0;
+  for (const auto& event : events.items()) {
+    if (event.member_str("event") != "decode_cycle")
+      continue;
+    Expect(event.contains("n_cycles") &&
+               event.member_size("n_cycles") == (steps == 0 ? 1 : 3) &&
+               event.member_size("policy_chosen_length_sum") == (steps == 0 ? 4 : 12) &&
+               !event.contains("policy_chosen_length") &&
+               event.find("survival_any") && event.find("survival_any")->as_bool() &&
+               event.contains("policy_effective") == (steps == 0),
+           "one- and three-cycle steps cannot silently label a budget sum as one cycle");
+    Expect(event.member_size("mtp_offered") == (steps == 0 ? 2 : 10) &&
+               event.member_size("lookup_offered") == (steps == 0 ? 2 : 0) &&
+               event.member_size("proposed") == (steps == 0 ? 4 : 10) &&
+               event.member_size("cut") == (steps == 0 ? 0 : 1) &&
+               event.member_size("drafts") == (steps == 0 ? 4 : 9),
+           "scripted step totals preserve offers and cuts across multiple cycles");
+    ++steps;
+  }
+  Expect(steps == 2 && result.draft_rounds == 4,
+         "two work units report four speculative cycles");
 }
 
 void TestDebugTimelineRamAndLiveRestoreKinds() {
@@ -3050,7 +3114,7 @@ void TestDebugTimelineBatchOmissionsAndAccounting() {
   const auto& cycle = events.items()[4];
   Expect(!cycle.find("draft_sources") && !cycle.find("draft_source") &&
              !cycle.contains("policy_effective") && !cycle.contains("policy") &&
-             !cycle.contains("policy_chosen_length") &&
+             !cycle.contains("policy_chosen_length_sum") &&
              events.items()[0].find("bundle")->find("mtp_policy")->member_size("cap") == 4,
          "batch path omits unavailable source and effective-policy names while retaining the configured cap");
   Expect(events.items()[5].member_str("policy_effective") == "none",
@@ -3155,6 +3219,14 @@ void TestDebugTimelineSnapshotsAndCycleCap() {
     }
   }
   Expect(snapshot, "prompt snapshot capture is included");
+  const auto& captures = events.items().back().find("summary")->find("captures")->items();
+  Expect(!captures.empty(), "separate capture appears in summary");
+  for (const auto& capture : captures)
+    Expect(capture.find("in_pass") && !capture.find("in_pass")->as_bool() &&
+               capture.member_str("capture_kind") == "separate" &&
+               capture.member_size("tokens") == 3 &&
+               capture.member_size("bytes") == sizeof(FakeRunner::SnapshotState),
+           "summary preserves each separate capture's measured false flag");
   const auto start = TextGenerationScheduler::Clock::now();
   gufo::server::DebugTimeline capped(start);
   for (std::size_t i = 0; i <= gufo::server::DebugTimeline::kMaxDecodeCycles; ++i)
@@ -3228,7 +3300,23 @@ void TestDebugTimelineInPassCheckpoint() {
                       event.find("in_pass_checkpoint") &&
                       event.find("in_pass_checkpoint")->as_bool();
   }
-  Expect(in_pass && pass_boundary && result.prefill_chunks == 1,
+  const auto* summary = events.items().back().find("summary");
+  const auto* captures = summary ? summary->find("captures") : nullptr;
+  bool summary_in_pass = false;
+  Expect(captures && !captures->items().empty(), "summary retains capture records");
+  for (const auto& capture : captures->items()) {
+    if (capture.find("in_pass")->as_bool()) {
+      summary_in_pass = true;
+      Expect(capture.member_str("capture_kind") == "in_pass_checkpoint" &&
+                 capture.member_size("tokens") == 2 &&
+                 capture.member_size("bytes") == sizeof(FakeRunner::SnapshotState),
+             "summary exposes the actual in-pass capture flag and kind");
+    } else {
+      Expect(capture.member_str("capture_kind") == "separate",
+             "separate captures preserve false in-pass flag");
+    }
+  }
+  Expect(summary_in_pass && in_pass && pass_boundary && result.prefill_chunks == 1,
          "in-pass capture appears without splitting the prefill pass");
 }
 
@@ -3405,6 +3493,7 @@ int main(int argc, char** argv) {
     TestLiveScoredQueueAndMissingRecords();
     TestDebugTimelineOrderCountsAndOffPath();
     TestDebugTimelineMixedSourcesAndPolicy();
+    TestDebugTimelineStepCycleSemantics();
     TestDebugTimelineRamAndLiveRestoreKinds();
     TestDebugTimelineDiskRestoreKind();
     TestDebugTimelineBatchOmissionsAndAccounting();
@@ -3421,6 +3510,7 @@ int main(int argc, char** argv) {
   TestLiveScoredQueueAndMissingRecords();
   TestDebugTimelineOrderCountsAndOffPath();
   TestDebugTimelineMixedSourcesAndPolicy();
+  TestDebugTimelineStepCycleSemantics();
   TestDebugTimelineRamAndLiveRestoreKinds();
   TestDebugTimelineDiskRestoreKind();
   TestDebugTimelineBatchOmissionsAndAccounting();
