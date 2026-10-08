@@ -421,6 +421,8 @@ json::Value UsageJson(const TextGenerationBackend::Result& result) {
   usage["completion_tokens_per_second"] = predicted_per_second;
   usage["draft_tokens"] = result.draft_tokens;
   usage["draft_tokens_accepted"] = result.draft_accepted_tokens;
+  if (result.prefill_diag)
+    AddPrefillDiagUsage(usage["gufo"], result.prefill_diag);
   return usage;
 }
 

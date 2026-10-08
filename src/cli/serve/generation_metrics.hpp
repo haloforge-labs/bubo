@@ -128,6 +128,32 @@ inline void RecordRequestMetrics(const TextGenerationBackend::Result& result) {
   }
 }
 
+inline void AddPrefillDiagUsage(
+    json::Value& metrics,
+    const std::optional<models::qwen38_flash_next::PrefillDiagTotals>&
+        diagnostic) {
+  if (!diagnostic)
+    return;
+  const auto& t = *diagnostic;
+  auto value = json::Value::object();
+  value["passes"] = t.passes;
+  value["tokens"] = t.tokens;
+  value["table_read_us"] = t.table_read_us;
+  value["table_reads"] = t.table_reads;
+  value["table_bytes"] = t.table_bytes;
+  value["fetch_elapsed_us"] = t.fetch_elapsed_us;
+  value["fetch_hidden_us"] = t.fetch_hidden_us;
+  value["fetch_exposed_us"] = t.fetch_exposed_us;
+  value["fetch_wait_us"] = t.fetch_wait_us;
+  value["experts_distinct_min"] = static_cast<std::size_t>(t.experts_distinct_min);
+  value["experts_distinct_mean"] = t.Mean();
+  value["experts_distinct_max"] = static_cast<std::size_t>(t.experts_distinct_max);
+  value["experts_distinct_sum"] = t.experts_distinct_sum;
+  value["layer_samples"] = t.layer_samples;
+  value["expert_bytes"] = t.expert_bytes;
+  metrics["prefill_diag"] = std::move(value);
+}
+
 inline std::string GenerationLogDetails(
     const TextGenerationBackend::Result& result) {
   std::ostringstream out;
@@ -176,6 +202,9 @@ inline std::string GenerationLogDetails(
     out << " cache_miss_reason=" << result.cache_miss_reason
         << " common_prefix_tokens=" << result.cache_common_prefix_tokens
         << " nearest_checkpoint_tokens=" << result.cache_checkpoint_tokens;
+  if (result.prefill_diag)
+    out << " prefill_diag_passes=" << result.prefill_diag->passes << ' '
+        << models::qwen38_flash_next::PrefillDiagFields(*result.prefill_diag);
   return out.str();
 }
 

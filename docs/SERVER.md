@@ -1432,3 +1432,47 @@ DSpark's short boundary check is available without the complete serving suite:
 # Set GUFO_DEEPSEEK_V4_FLASH_MODEL and GUFO_DEEPSEEK_V4_FLASH_DSPARK_MODEL first.
 nix develop -c build/gpu-test/tests/models/deepseek_v4_flash/ds4_serving_test --dspark-eos
 ```
+
+## Flash-Next prefill diagnostics
+
+Set `GUFO_PREFILL_DIAG=1` before starting the process to enable diagnostics;
+unset, `0`, and all other values disable them. The value is read once.
+Each successfully executed trunk prefill pass logs `[prefill-diag]` with its
+pass number (session-local), tokens, start position, PLE reads and expert
+diversity. Request totals appear in `usage.gufo.prefill_diag` and completion
+log details only when measured passes are available. Streaming OpenAI usage
+still requires `stream_options.include_usage=true`. Other models do not emit
+these fields.
+
+`table_read_us` sums steady-clock wall microseconds around each existing
+worker's pread loop, including retries; worker times overlap and are not an
+end-to-end duration. `table_reads` counts calls including retries;
+`table_bytes` counts positive bytes returned (including direct-I/O alignment).
+`fetch_elapsed_us` is the gather wall span from before row deduplication until
+the last worker finishes, including cache/dequantization work.
+`fetch_hidden_us` is the part of that span completed before entering the join;
+`fetch_exposed_us` is its remaining part after entering the join, before the
+last worker finishes. Their sum equals `fetch_elapsed_us`. Hidden time denotes
+opportunity for overlap with the preceding work, not proven GPU busy time.
+`fetch_wait_us` is wall time inside the existing PLE join, including duplicate
+row copies. It is the exposed host wait, not a GPU stall measurement.
+Compare gather spans with join waits to assess overlap; do not subtract the
+worker-time sum from a wall span. Cached gathers can correctly have no reads.
+
+Expert diversity reuses the existing device `ExpertCounts` result downloaded
+and synchronized for prefill dispatch. No new kernel, copy, or synchronization
+is needed. `layers` tuples are `layer:routed_tokens:distinct:bytes_per_expert`.
+B4b skips unused final-layer FFN rows: the final layer's routed-token count can
+be smaller than the pass token count. The diagnostic counts actual selections
+and actual touched matrices; it does not compute hypothetical routes for
+skipped rows. The min/mean/max include all executed trunk MoE layers, exclude
+the shared expert and MTP draft, and request means weight layer-pass samples.
+`expert_bytes` sums distinct times the encoded gate, up and down matrix bytes
+per expert, using each uploaded tensor's rows, columns and quantization via
+`TensorRef::RowBytes()`. This is a unique-weight footprint, not measured DRAM,
+page-cache or disk traffic, and excludes activation traffic and tiled rereads.
+
+Read clocks, host aggregation and logging perturb execution. Diagnostic runs
+are for attribution; compare elapsed time on the same text with the flag off.
+No diagnostic allocations, clocks, device work or output occur with the flag
+off; the host path retains opt-in predicate checks.

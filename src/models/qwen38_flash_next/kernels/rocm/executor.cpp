@@ -2004,7 +2004,8 @@ bool Executor::PleFetch(Session& session, std::span<const std::int32_t> tokens,
   ple_pending_ = ngram_->StartRead(
       std::span<const std::uint32_t>(host_rows_.data(), n * c.ple_heads),
       std::span<float>(host_emb_,
-                       static_cast<std::size_t>(n) * c.PleEmbeddingDim()));
+                       static_cast<std::size_t>(n) * c.PleEmbeddingDim()),
+      diagnostic_prefill_ ? &active_diag_->totals : nullptr);
   if (!ple_pending_) {
     AssignError(error_msg, "n-gram table read could not start");
   }
@@ -2069,7 +2070,19 @@ bool Executor::WaitPle(std::string* error_msg) const {
       capture == hipStreamCaptureStatusNone) {
     (void)hipStreamQuery(stream_);
   }
+  DiagClock::time_point wait_started;
+  if (diagnostic_prefill_)
+    wait_started = DiagClock::now();
   const bool ok = ple_pending_ && ngram_->WaitRead();
+  if (diagnostic_prefill_) {
+    active_diag_->totals.fetch_wait_us +=
+        DiagMicroseconds(DiagClock::now() - wait_started);
+    active_diag_->totals.fetch_elapsed_us = ngram_->DiagnosticFetchElapsedUs();
+    active_diag_->totals.fetch_hidden_us =
+        ngram_->DiagnosticFetchHiddenUs(wait_started);
+    active_diag_->totals.fetch_exposed_us =
+        active_diag_->totals.fetch_elapsed_us - active_diag_->totals.fetch_hidden_us;
+  }
   ple_pending_ = false;
   if (!ok) {
     AssignError(error_msg, "n-gram table read failed");
@@ -2752,6 +2765,22 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   }
   if (speculative && !EnsureRollback(session, n - 1, error_msg))
     return false;
+  const bool diagnostic = PrefillDiagEnabled() && mode == ForwardMode::kPrefill;
+  if (diagnostic) {
+    if (ple_pending_ && !WaitPle(error_msg))
+      return false;
+    active_diag_.emplace();
+    active_diag_->pass = ++session.diagnostic_pass_;
+    active_diag_->start = start_pos;
+    active_diag_->totals.passes = 1;
+    active_diag_->totals.tokens = n;
+    active_diag_->layers.reserve(c.num_layers);
+  }
+  if (diagnostic) diagnostic_prefill_ = true;
+  struct EndDiagnostic {
+    bool& active;
+    ~EndDiagnostic() { if (active) active = false; }
+  } end_diagnostic{diagnostic_prefill_};
   // Start the disk rows before protecting checkpoint rows, which can commit
   // device pages: layer 0 alone cannot hide the whole read.
   const auto ngram = session.ngram_;
@@ -2834,7 +2863,7 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   }
   if (first_layer > 0) {
     const auto prefix = [&] {
-      return ForwardBody(session, n, 0, false, speculative, sparse, start_pos,
+      return ForwardBody<false>(session, n, 0, false, speculative, sparse, start_pos,
                          graph_pool_grid, 0, first_layer, error_msg);
     };
     constexpr std::uint64_t kPrefixKey = std::uint64_t{1} << 35;
@@ -2850,9 +2879,14 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
     Tl().Gpu(stream_, Timeline::kPrefixEnd, n);
   }
   const auto body = [&] {
-    return ForwardBody(session, n, n_logits, logits != nullptr, speculative,
-                       sparse, start_pos, graph ? graph_pool_grid : pool_grid,
-                       first_layer, c.num_layers, error_msg, checkpoint);
+    if (diagnostic)
+      return ForwardBody<true>(session, n, n_logits, logits != nullptr,
+                               speculative, sparse, start_pos, pool_grid,
+                               first_layer, c.num_layers, error_msg, checkpoint);
+    return ForwardBody<false>(session, n, n_logits, logits != nullptr,
+                              speculative, sparse, start_pos,
+                              graph ? graph_pool_grid : pool_grid,
+                              first_layer, c.num_layers, error_msg, checkpoint);
   };
   // Only the suffix waits for its pinned n-gram rows. During eager
   // execution and capture, Ple performs this wait at the same boundary.
@@ -2888,6 +2922,10 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
                 logits);
   }
 
+  if (diagnostic) {
+    session.prefill_diagnostics_.push_back(std::move(*active_diag_));
+    diagnostic_prefill_ = false;
+  }
   session.position_ += n;
   if (sparse) {
     session.blocks_ = complete;
@@ -2904,6 +2942,7 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   return true;
 }
 
+template<bool Diagnostic>
 bool Executor::ForwardBody(Session& session, std::uint32_t n,
                            std::uint32_t n_logits, bool download_logits,
                            bool speculative, bool sparse,
@@ -2983,6 +3022,21 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
                  error_msg) ||
           !Moe(l, s_.mixed, s_.block_out, rows, error_msg))
         return false;
+      if constexpr (Diagnostic) {
+        // RouteHints already synchronized this existing device count download.
+        const auto matrix_bytes = [](const DeviceTensor& t) {
+          TensorRef ref;
+          ref.type = t.type;
+          ref.cols = t.cols;
+          return static_cast<std::uint64_t>(ref.RowBytes()) * t.rows;
+        };
+        const auto bytes = matrix_bytes(l.ffn_gate_exps) +
+                           matrix_bytes(l.ffn_up_exps) +
+                           matrix_bytes(l.ffn_down_exps);
+        active_diag_->RecordLayer(
+            il, rows,
+            std::span<const std::uint32_t>(counts_host_, c.num_experts), bytes, n);
+      }
       Combine(s_.res, next_norm, rows);
       return true;
     };

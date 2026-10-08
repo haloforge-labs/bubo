@@ -86,6 +86,8 @@ private:
 
 class FakeBackend final : public gufo::server::TextGenerationBackend {
 public:
+  std::optional<gufo::models::qwen38_flash_next::PrefillDiagTotals>
+      prefill_diag;
   [[nodiscard]] std::string model_id() const override { return "test-model"; }
   [[nodiscard]] bool ready() const override { return true; }
   [[nodiscard]] SamplingDefaults sampling_defaults() const override {
@@ -121,6 +123,7 @@ public:
     last_sampling = sampling;
 
     Result result;
+    result.prefill_diag = prefill_diag;
     result.prompt_tokens = 7;
     result.cached_prompt_tokens = 5;
     result.prefill_tokens = 2;
@@ -241,6 +244,37 @@ gufo::server::HttpRequest Request(
       .headers = std::move(headers),
       .is_cancelled = {},
   };
+}
+
+void TestPrefillDiagnosticUsage() {
+  for (const bool enabled : {false, true}) {
+    FakeBackend backend;
+    if (enabled) {
+      backend.prefill_diag.emplace();
+      backend.prefill_diag->passes = 2;
+      backend.prefill_diag->table_reads = 9;
+      backend.prefill_diag->table_bytes = 123;
+      backend.prefill_diag->AddLayer(3, 64);
+    }
+    auto response = gufo::server::HandleOpenAiChat(Request(R"({
+      "model":"test-model","messages":[{"role":"user","content":"hello"}],
+      "max_tokens":2
+    })"),
+                                                   backend);
+    Expect(response.status == 200, "diagnostic usage fake request succeeds");
+    const auto body = gufo::json::parse(response.body);
+    const auto* usage = body.find("usage");
+    const auto* gufo = usage ? usage->find("gufo") : nullptr;
+    const auto* diagnostic = gufo ? gufo->find("prefill_diag") : nullptr;
+    Expect(bool(diagnostic) == enabled, "API diagnostic usage is opt-in");
+    if (diagnostic) {
+      Expect(diagnostic->member_size("passes") == 2 &&
+                 diagnostic->member_size("table_reads") == 9 &&
+                 diagnostic->member_size("table_bytes") == 123 &&
+                 diagnostic->member_size("expert_bytes") == 192,
+             "API retains additive measured totals");
+    }
+  }
 }
 
 void TestStreamingIsLive() {
@@ -5541,6 +5575,7 @@ int main(int argc, char** argv) {
   TestResponsesLiveAndCancellation();
   TestCachePromptOption();
   TestToolChoiceEnforcement();
+  TestPrefillDiagnosticUsage();
   TestStreamingIsLive();
   TestLessThanProseStreamsBeforeCompletion();
   TestStreamingWithoutUsage();

@@ -15,6 +15,7 @@
 
 #include "src/core/gguf_reader.hpp"
 #include "src/models/qwen38_flash_next/config.hpp"
+#include "src/models/qwen38_flash_next/prefill_diag.hpp"
 
 namespace gufo::models::qwen38_flash_next {
 
@@ -58,8 +59,17 @@ public:
   /// Starts a gather on the resident readers. The output must stay alive
   /// until WaitRead; only one gather may be outstanding on this table.
   [[nodiscard]] bool StartRead(std::span<const std::uint32_t> rows,
-                               std::span<float> out);
+                               std::span<float> out,
+                               TableReadCounters* diagnostic = nullptr);
   [[nodiscard]] bool WaitRead();
+  [[nodiscard]] double DiagnosticFetchElapsedUs() const {
+    return DiagMicroseconds(read_finished_ - read_started_);
+  }
+
+  [[nodiscard]] double DiagnosticFetchHiddenUs(DiagClock::time_point join) const {
+    return std::max(0.0, DiagMicroseconds(
+        std::min(read_finished_, join) - read_started_));
+  }
 
   [[nodiscard]] std::uint32_t RowDim() const noexcept { return row_dim_; }
   [[nodiscard]] std::uint64_t Rows() const noexcept { return rows_; }
@@ -78,8 +88,13 @@ private:
   };
   void DecodeRow(const std::uint8_t* src, float* dst) const;
   bool ReadCached(std::uint32_t row, float* dst);
-  bool ReadOne(std::uint32_t row, float* dst, std::vector<std::uint8_t>& buf);
+  template<bool Diagnostic>
+  bool ReadOne(std::uint32_t row, float* dst, std::vector<std::uint8_t>& buf,
+               TableReadCounters* counters);
+  template<bool Diagnostic>
   void Worker();
+  TableReadCounters* diagnostic_{nullptr};
+  DiagClock::time_point read_started_, read_finished_;
 
   struct CacheEntry {
     std::atomic_flag busy = ATOMIC_FLAG_INIT;

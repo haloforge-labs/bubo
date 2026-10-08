@@ -19,6 +19,7 @@
 #include "src/cli/serve/continuation_cache.hpp"
 #include "src/cli/serve/text_generation_backend.hpp"
 #include "src/core/sampling.hpp"
+#include "src/models/qwen38_flash_next/prefill_diag.hpp"
 
 namespace gufo::server {
 
@@ -165,6 +166,7 @@ struct TextPrefillStep {
   bool decode_ready{false};
   double checkpoint_ms{0};
   std::optional<std::chrono::steady_clock::time_point> capture_started;
+  std::optional<models::qwen38_flash_next::PrefillDiagTotals> prefill_diag;
 };
 
 struct TextDecodeSelection {

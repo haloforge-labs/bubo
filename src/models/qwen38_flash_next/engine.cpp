@@ -368,6 +368,10 @@ Session::Session(std::shared_ptr<Model> model,
 
 Session::~Session() = default;
 
+std::vector<PrefillDiagPass> Session::TakePrefillDiagnostics() {
+  return session_->TakePrefillDiagnostics();
+}
+
 std::uint32_t Session::Position() const noexcept {
   return session_->position();
 }

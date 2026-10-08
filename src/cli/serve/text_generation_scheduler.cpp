@@ -1206,6 +1206,8 @@ struct TextGenerationScheduler::Impl {
             start, step_ms, request->result.prefill_chunks, step.consumed_tokens,
             request->result.cached_prompt_tokens + request->result.prefill_tokens);
       }
+      models::qwen38_flash_next::AddPrefillDiag(request->result.prefill_diag,
+                                                step.prefill_diag);
       request->result.prefill_ms += step_ms;
       request->result.prefill_tokens += step.consumed_tokens;
       request->live_prefill_tokens.store(request->result.prefill_tokens,
