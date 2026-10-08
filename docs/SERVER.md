@@ -398,6 +398,17 @@ its changed suffix again.
 
 `SIGINT` and `SIGTERM` cancel active requests and drain accepted disk writes
 before exiting. `--cache-disk DIR` defaults to 8 GiB retained on disk.
+`GUFO_DISK_INPASS` is read once when disk capture is first considered: unset
+enables Flash-Next's admitted text prompt in-pass checkpoint capture with disk
+configured; exact `0` restores the old split/copying path. Restart the server
+to change it. Disk payloads remain version 16 and learned boundaries keep
+their existing round-down alignment (256 by default). Distinct learned or
+intermediate boundaries, image prompts, other models and refused/unsupported
+in-pass captures keep the copying path. After a successful in-pass capture,
+the complete-prompt snapshot also uses borrowed rows; the disk worker owns
+the snapshot until existing byte materialization finishes. This setting has
+no effect without `--cache-disk`. Qualify byte identity and performance before
+deploying the disk extension; the previous measured results predate it.
 `--cache-disk-staging-bytes 0` (the default) selects the smaller of one eighth
 of available host RAM after model/session loading (including cgroup limits) and
 the disk budget. This bounds queued captures/writes and each disk read

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <fstream>
 #include <future>
 #include <limits>
@@ -17,6 +18,16 @@
 #include "src/core/json.hpp"
 
 namespace gufo::server {
+
+namespace {
+bool DiskInPassEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("GUFO_DISK_INPASS");
+    return value == nullptr || std::string_view(value) != "0";
+  }();
+  return enabled;
+}
+}  // namespace
 
 std::optional<ChatRequest> ConstrainChatRequest(
     const ChatRequest& request, const TextModelRunner& runner,
@@ -906,7 +917,9 @@ struct TextRunnerPool::Request::Impl {
       // only to join it. Post-token captures remain asynchronous.
       snapshot_future =
           std::async(wait ? std::launch::deferred : std::launch::async,
-                     [owner = runner, state, persist = bool(disk_store)] {
+                     [owner = runner, state,
+                      persist = bool(disk_store) &&
+                                !(disk_in_pass_capture && retain_snapshot)] {
                        return persist ? owner->SnapshotForPersistence(*state)
                                       : owner->Snapshot(*state);
                      });
@@ -1003,6 +1016,30 @@ struct TextRunnerPool::Request::Impl {
       debug_boundary_capture.reset();
     }
     boundary_capture = false;
+  }
+
+  void PersistInPassSnapshot() noexcept {
+    // Use the same continuation admission/spacing policy as a split capture.
+    // SaveAsync owns the snapshot while the live state appends or rewinds;
+    // the model's byte reader materializes its protected borrowed rows.
+    const bool already_persisted =
+        lease.restored_from_disk() &&
+        lease.cached_tokens() == snapshot_tokens.size();
+    if (!prompt_snapshot || already_persisted)
+      return;
+    const auto started = std::chrono::steady_clock::now();
+    try {
+      const auto identity = InputIdentity(snapshot_tokens.size());
+      snapshot_metrics.disk_queued_bytes +=
+          disk_store->SaveAsync(runner, snapshot_tokens, prompt_snapshot,
+                                {identity.begin(), identity.end()});
+    } catch (...) {
+      // Persistence is advisory, as for FinishPromptSnapshot.
+    }
+    snapshot_metrics.disk_enqueue_ms +=
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started)
+            .count();
   }
 
   void CaptureBoundarySnapshot(
@@ -1155,6 +1192,7 @@ struct TextRunnerPool::Request::Impl {
   std::shared_ptr<const TextPromptContext> context;
   bool retain_fallback{false};
   bool overlap_snapshots{false};
+  bool disk_in_pass_capture{false};
   std::size_t fallback_position{0};
   /// This turn's stable boundary when the reused frontier sits before it, so
   /// the boundary is checkpointed after the frozen fallback instead of being
@@ -1343,8 +1381,12 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
     impl_->boundaries.erase(impl_->boundaries.begin());
   }
   if (!impl_->boundaries.empty()) {
-    max_input_tokens = std::min(
-        max_input_tokens, impl_->boundaries.front() - impl_->prefill_offset);
+    // A learned boundary at this exact prompt target shares its capture.
+    // Distinct learned/intermediate boundaries still end their own pass.
+    if (!(DiskInPassEnabled() && impl_->boundaries.size() == 1 &&
+          impl_->boundaries.front() == snapshot_position))
+      max_input_tokens = std::min(
+          max_input_tokens, impl_->boundaries.front() - impl_->prefill_offset);
   }
   while (!impl_->checkpoints.empty() &&
          impl_->checkpoints.front() <= impl_->prefill_offset)
@@ -1355,7 +1397,8 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
 
   auto& state = dynamic_cast<TextRunnerState&>(impl_->lease.state());
   bool in_pass = false;
-  if (!impl_->disk_store && !impl_->prompt_snapshot_attempted &&
+  if ((!impl_->disk_store || DiskInPassEnabled()) &&
+      !impl_->prompt_snapshot_attempted &&
       impl_->prefill_offset < snapshot_position &&
       snapshot_position < impl_->prompt.size() &&
       impl_->runner->Descriptor().capabilities.in_pass_checkpoint) {
@@ -1387,7 +1430,8 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
                       : impl_->prompt.size();
   if (!impl_->checkpoints.empty())
     frontier = std::min(frontier, impl_->checkpoints.front());
-  if (!impl_->boundaries.empty())
+  if (!impl_->boundaries.empty() &&
+      !(in_pass && impl_->boundaries.front() == snapshot_position))
     frontier = std::min(frontier, impl_->boundaries.front());
   const auto model_prompt =
       std::span<const TextRunnerToken>(impl_->prompt).first(frontier);
@@ -1423,6 +1467,10 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
       impl_->retain_snapshot = false;
     } else {
       impl_->prompt_snapshot = std::move(captured);
+      if (impl_->disk_store) {
+        impl_->disk_in_pass_capture = true;
+        impl_->PersistInPassSnapshot();
+      }
     }
     if (impl_->timeline) {
       if (!step.capture_started)
@@ -1438,6 +1486,10 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
       impl_->debug_inpass_capture = std::move(fields);
     }
     impl_->AdvancePromptTarget();
+    // The old split path consumes this coincident boundary at the target.
+    if (impl_->disk_store && !impl_->boundaries.empty() &&
+        impl_->boundaries.front() == snapshot_position)
+      impl_->boundaries.erase(impl_->boundaries.begin());
   }
   if (!reached_frontier && impl_->prefill_offset == snapshot_position)
     impl_->CapturePromptSnapshot(false);

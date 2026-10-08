@@ -316,9 +316,19 @@ Flash-Next snapshot prefers its source execution slot when
 that slot is available, avoiding a full-prefix copy for a rewritten turn.
 A busy source never blocks a branch into another slot; other choices use LRU.
 RAM admission continues to charge the complete payload size, and the disk
-byte format is unchanged. Captures intended for disk complete all device
-copies before prefill resumes, so disk serialization does not introduce a
-background K/V transfer during inference.
+byte format is unchanged. Eligible Flash-Next text boundaries use in-pass
+capture even with disk configured. The disk worker retains the captured
+snapshot and materializes its version-16 bytes through the existing reader;
+borrowed rows are protected before rewind, reset or destruction. Following
+an admitted disk in-pass capture, complete-prompt captures also borrow rows
+as in RAM-only serving. Serialization can therefore transfer K/V in the
+background while inference appends. Image prompts, other models, intermediate
+or distinct learned boundaries, refused reservations and unsupported chunk
+shapes retain the split/copying path. A learned boundary coincident with the
+stable target shares its in-pass capture, at the same rounded-down position.
+`GUFO_DISK_INPASS=0` selects the old disk path; unset enables this extension.
+The switch is read once, and does not affect RAM-only serving. Runtime byte
+identity and timing qualification remain required for the disk extension.
 
 **Admission is advisory, never fatal.** A refused reservation or a failed
 capture is a skipped optimisation. The request must still complete.
