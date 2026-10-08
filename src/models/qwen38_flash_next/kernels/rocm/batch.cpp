@@ -3,6 +3,7 @@
 #include <stdexcept>
 
 #include "qfn_mmq.h"
+#include "src/models/qwen38_flash_next/batch_twin_policy.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
@@ -10,8 +11,8 @@
 namespace gufo::models::qwen38_flash_next::rocm {
 namespace {
 
-constexpr std::uint32_t kBatchSessions = 8;
-constexpr std::uint32_t kDecodeRows = 8;
+constexpr std::uint32_t kBatchSessions = kBatchMaxSessions;
+constexpr std::uint32_t kDecodeRows = kBatchMaxChain;
 
 bool Fail(std::string* error, const std::string& message) {
   if (error != nullptr) {
@@ -567,9 +568,26 @@ bool Executor::QuantizeBatch(const float* x, std::uint32_t rows,
 
 bool Executor::DenseBatch(const DeviceTensor& w, const float* x, float* out,
                           std::uint32_t rows, std::string* error) const {
-  if (rows <= kDecodeRows)
+  const bool armed = model_->has_twin() && TwinBatchEnabled();
+  const auto path = BatchDenseDispatch(w.type, rows, armed);
+  if (path == BatchDensePath::kDense)
     return Dense(w, x, out, rows, error);
-  if (w.type != core::GgmlType::kQ8_0) {
+  if (path == BatchDensePath::kTwinSlices) {
+    const Scratch base = s_;
+    for (std::uint32_t r = 0; r < rows; r += kDecodeRows) {
+      UseScratch(RowScratch(base, r));
+      const bool ok =
+          Dense(w, x + std::size_t{r} * w.cols, out + std::size_t{r} * w.rows,
+                std::min(kDecodeRows, rows - r), error);
+      UseScratch(base);
+      if (!ok)
+        return false;
+    }
+    return true;
+  }
+  if (path == BatchDensePath::kSmallGemm) {
+    if (armed && TwinDenseType(w.type))
+      return Fail(error, "decode twin must never reach SmallGemm");
     SmallGemm(w.data, EmbeddingType(w.type), x, out, rows, w.rows, w.cols,
               stream_);
     return true;
@@ -725,6 +743,8 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
   if (rows > options_.max_batch) {
     return Fail(error, "decode batch exceeds executor capacity");
   }
+  if (model_->has_twin() && TwinBatchEnabled() && rows > kTwinBatchMax)
+    return Fail(error, "decode twin batch exceeds kTwinBatchMax");
   if (!AnyActive(items))
     return true;
   for (const auto& item : items) {
@@ -824,7 +844,7 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
           items[i].session->position_, items[i].tokens.size(), c.hidden_size,
           c.hc_count, stream_);
     }
-    const auto& layers = model_->layers();
+    const auto& layers = BatchPassLayers(rows);
     bool normed = false;
     for (std::uint32_t il = 0; il < c.num_layers; ++il) {
       if (!AnyActive(items))

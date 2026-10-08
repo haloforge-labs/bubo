@@ -550,6 +550,7 @@ private:
   /// Decode twin: the layer table a pass of n rows reads. The 4-bit copy serves exactly the vector-path passes (!MatrixRows(n): n <= 8 outside prefill),
   /// the 8-bit trunk serves everything else; without a twin this is model_->layers().
   const std::vector<DeviceLayer>& PassLayers(std::uint32_t n) const;
+  const std::vector<DeviceLayer>& BatchPassLayers(std::uint32_t rows) const;
   /// Per-pass counters (every Forward call, graph replays included) and their log lines; no-ops without a twin.
   void CountTwinPass(std::uint32_t n) const;
   void PrintTwinCounters(const char* tag, const char* copy, std::uint32_t n) const;
@@ -572,6 +573,9 @@ private:
   mutable std::unordered_map<const void*, ShadowStat> shadow_stats_;
   mutable std::array<std::atomic<std::uint64_t>, 6> twin_passes_{};  ///< [copy * 3 + kind], copy 0 = 8-bit, 1 = 4-bit; kind 0 decode (n = 1), 1 verify (2..8), 2 wide / prefill
   mutable std::atomic<std::uint64_t> twin_total_{0};
+  mutable std::array<std::atomic<std::uint64_t>, 2> twin_batch_passes_{};
+  mutable std::array<std::atomic<std::uint64_t>, 2> twin_batch_rows_{};
+  mutable std::atomic<std::uint64_t> twin_batch_mixed_{0};
   bool MtpBody(Session& session, std::uint32_t n, std::uint32_t pos, bool token,
                bool candidates, std::string* error_msg, std::uint32_t pool_grid,
                const float* hidden_source, MtpTrace* trace, bool kv_only) const;

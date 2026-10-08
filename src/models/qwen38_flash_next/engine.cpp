@@ -13,6 +13,7 @@
 
 #include "src/core/gguf_reader.hpp"
 #include "src/core/platform/tuning.hpp"
+#include "src/models/qwen38_flash_next/batch_twin_policy.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
@@ -214,8 +215,21 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
   }
   // Decode twin (default OFF): GUFO_DENSE_TWIN_MODEL = path of the 4-bit dense twin GGUF (see TwinWeights). Every failure is fatal (no fallback to the 8-bit copy).
   if (const char* twin_path = std::getenv("GUFO_DENSE_TWIN_MODEL"); twin_path != nullptr && twin_path[0] != '\0') {
-    if (options.decode_concurrency > 1) {
-      AssignError(error_msg, "GUFO_DENSE_TWIN_MODEL supports one decode session (the batched decode loop is not twinned)");
+    const char* max_n_env = std::getenv("GUFO_DENSE_TWIN_MAX_N");
+    const long max_n = max_n_env == nullptr || *max_n_env == '\0'
+                           ? 8
+                           : std::strtol(max_n_env, nullptr, 10);
+    const auto chain =
+        m->mtp_weights_ ? std::uint64_t{options.max_draft_tokens} + 1 : 1;
+    if (chain > kBatchMaxChain && TwinBatchEnabled()) {
+      AssignError(error_msg,
+                  "batched decode twin exceeds decode chain capacity");
+      return nullptr;
+    }
+    if (const char* failure = TwinBatchLoadError(
+            true, TwinBatchEnabled(), options.decode_concurrency,
+            static_cast<std::uint32_t>(chain), max_n)) {
+      AssignError(error_msg, failure);
       return nullptr;
     }
     auto twin_reader = core::GgufReader::OpenFile(twin_path, error_msg);

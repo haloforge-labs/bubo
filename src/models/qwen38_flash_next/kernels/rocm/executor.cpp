@@ -25,6 +25,7 @@
 #include "qfn_mmq.h"
 #include "src/core/hip/snapshot_transfer.hpp"
 #include "src/core/platform/tuning.hpp"
+#include "src/models/qwen38_flash_next/batch_twin_policy.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/trace.hpp"
 
@@ -3362,6 +3363,26 @@ const std::vector<DeviceLayer>& Executor::PassLayers(std::uint32_t n) const {
   return (MatrixRows(n) || n > TwinMaxN()) ? model_->layers() : model_->twin_layers();
 }
 
+const std::vector<DeviceLayer>& Executor::BatchPassLayers(
+    std::uint32_t rows) const {
+  const bool twin =
+      BatchUsesTwin(model_->has_twin(), TwinBatchEnabled(), prefill_phase);
+  if (model_->has_twin()) {
+    const unsigned copy = twin ? 1u : 0u;
+    twin_batch_passes_[copy].fetch_add(1, std::memory_order_relaxed);
+    twin_batch_rows_[copy].fetch_add(rows, std::memory_order_relaxed);
+    if (!prefill_phase && !twin)
+      twin_batch_mixed_.fetch_add(1, std::memory_order_relaxed);
+    const auto total = twin_batch_passes_[0].load(std::memory_order_relaxed) +
+                       twin_batch_passes_[1].load(std::memory_order_relaxed);
+    const char* trace = std::getenv("GUFO_DENSE_TWIN_TRACE");
+    if (total == 1 || (total & 0x3FF) == 0 ||
+        (trace != nullptr && trace[0] == '1' && trace[1] == '\0'))
+      PrintTwinCounters("batch", twin ? "4bit" : "8bit", rows);
+  }
+  return twin ? model_->twin_layers() : model_->layers();
+}
+
 bool Executor::ShadowCompare(const DeviceTensor& w, const Q8Input& q, const float* out, std::string* error_msg) const {
   const auto* entry = model_->ShadowFor(w.data);
   if (entry == nullptr) return true;
@@ -3438,6 +3459,21 @@ void Executor::PrintTwinCounters(const char* tag, const char* copy, std::uint32_
   std::fprintf(stderr,
                "[twin] %s copy=%s n=%u passes_total=%llu | 4bit decode=%llu verify=%llu wide=%llu (wide must stay 0) | 8bit decode=%llu verify=%llu (both must stay 0) wide=%llu | iq4_dense_launches=%llu\n", tag, copy, n,
                static_cast<unsigned long long>(twin_total_.load(std::memory_order_relaxed)), v(3), v(4), v(5), v(0), v(1), v(2), qfn_mmq_iq4_dense_launch_count());
+  if (!TwinBatchEnabled()) return;
+  const auto bp = [&](unsigned i) {
+    return static_cast<unsigned long long>(
+        twin_batch_passes_[i].load(std::memory_order_relaxed));
+  };
+  const auto br = [&](unsigned i) {
+    return static_cast<unsigned long long>(
+        twin_batch_rows_[i].load(std::memory_order_relaxed));
+  };
+  std::fprintf(stderr,
+               "[twin] batch 4bit_passes=%llu 8bit_passes=%llu 4bit_rows=%llu "
+               "8bit_rows=%llu armed_decode_8bit=%llu (must stay 0)\n",
+               bp(1), bp(0), br(1), br(0),
+               static_cast<unsigned long long>(
+                   twin_batch_mixed_.load(std::memory_order_relaxed)));
 }
 
 void Executor::CountTwinPass(std::uint32_t n) const {

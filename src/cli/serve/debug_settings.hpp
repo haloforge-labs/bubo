@@ -53,6 +53,7 @@ inline constexpr const char* kDebugSettingsEnvironment[] = {
     "GUFO_MOE_BENCH",
     "GUFO_ROUTED_LANEROW",
     "GUFO_DENSE_TWIN_MODEL",
+    "GUFO_DENSE_TWIN_BATCH",
     "GUFO_DENSE_TWIN_MAX_N",
     "GUFO_DENSE_TWIN_SHADOW",
     "GUFO_DENSE_TWIN_ALLOW_Q8",
