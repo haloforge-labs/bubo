@@ -141,7 +141,9 @@ This describes captures of the current request, not the origin of a restored ent
 Not available and omitted: `latin_filtered`, `latin_rejected`,
 `filter_changed`, `filter_rejected`, physical `rollback`,
 effective `policy_effective` and `policy_chosen_length_sum` on the batch adapter path, and restore
-`capture_origin`/a distinct `in_pass_checkpoint` restore kind.
+`capture_origin`/a distinct `in_pass_checkpoint` restore kind. Steps that go through
+`TextModelRunner::DecodeStep` (`max_tokens == 1`, the non-MTP fallback, autoregressive models) omit every one of the new
+step fields: the fields are absent there, not zero.
 The current cache retains the tier but loses how a snapshot was captured;
 `RAM` therefore also covers restoration of an in-pass checkpoint. Its earlier
 capture still reports `snapshot.in_pass=true`, and its prefill pass reports

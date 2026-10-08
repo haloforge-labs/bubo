@@ -199,7 +199,9 @@ inline constexpr DebugSettingsIrrelevantEnvironment
             ? "none"
             : policy->find("survival") && policy->find("survival")->as_bool()
                   ? "survival" : "length";
-    if (const auto* vocab = policy->find("draft_vocabulary"))
+    // The engine installs the latin table only when MTP weights exist (engine.cpp:219-221): report the property only for an enabled policy.
+    if (const auto* vocab = policy->find("draft_vocabulary");
+        vocab && policy->find("enabled") && policy->find("enabled")->as_bool())
       (*policy)["latin_vocab"] = vocab->str() == "latin_text" ? "latin" : "full";
     if (const auto* cap = policy->find("runner_max_draft_tokens"))
       (*policy)["cap"] = *cap;
