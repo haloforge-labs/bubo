@@ -858,7 +858,9 @@ void TestDiskInPassPayloadAndFallbacks() {
       auto request = pool.Acquire({1, 2, 3, 40, 41}, {}, {}, {}, true, 3);
       while (!request.Prefill(64).decode_ready) {
       }
-      if (delayed)
+      // GUFO_DISK_DEFER=1 deliberately holds the worker back while the request generates, so the immediate-entry check only applies to the default mode.
+      const char* defer_env = std::getenv("GUFO_DISK_DEFER");
+      if (delayed && !(defer_env && std::string_view(defer_env) == "1"))
         Expect(entered.try_acquire_for(std::chrono::seconds(2)),
                "captured boundary reaches disk worker before live append");
       (void)request.SelectNext();
@@ -2073,8 +2075,11 @@ void TestDiskOnlyCaptureReservesBudgetBeforeCommit() {
   auto first = pool.Acquire({1, 2, 3});
   (void)first.Prefill(3);
   first.CapturePromptSnapshot();
-  Expect(entered.try_acquire_for(std::chrono::seconds(2)),
-         "disk-only prompt is queued immediately after capture");
+  // GUFO_DISK_DEFER=1 holds serialization back while a request is generating (this test keeps `first` open), so the immediate-entry check is for the default mode.
+  const char* defer_env = std::getenv("GUFO_DISK_DEFER");
+  if (!(defer_env && std::string_view(defer_env) == "1"))
+    Expect(entered.try_acquire_for(std::chrono::seconds(2)),
+             "disk-only prompt is queued immediately after capture");
   auto second = pool.Acquire({4, 5, 6});
   (void)second.Prefill(3);
   second.CapturePromptSnapshot();

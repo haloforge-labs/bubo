@@ -50,15 +50,18 @@ bool DiskDeferEnabled() {
 
 // GUFO_DISK_DEFER_MS overrides the idle-gate bound (default 10 s, accepted 0..600000 ms), read once: the A/B can test a bound longer than a typical turn.
 std::chrono::milliseconds DiskDeferMaxWait(std::chrono::milliseconds fallback) {
-  static const std::chrono::milliseconds value = [fallback] {
+  // Only the environment parse is cached; the caller's option value is not (a static capturing `fallback` would pin the first store's bound).
+  static const std::optional<std::chrono::milliseconds> override_wait = []() -> std::optional<std::chrono::milliseconds> {
     const char* text = std::getenv("GUFO_DISK_DEFER_MS");
     if (!text || !*text)
-      return fallback;
+      return std::nullopt;
     char* end = nullptr;
     const long parsed = std::strtol(text, &end, 10);
-    return (end && !*end && parsed >= 0 && parsed <= 600000) ? std::chrono::milliseconds(parsed) : fallback;
+    if (end && !*end && parsed >= 0 && parsed <= 600000)
+      return std::chrono::milliseconds(parsed);
+    return std::nullopt;
   }();
-  return value;
+  return override_wait ? *override_wait : fallback;
 }
 
 TextRunnerDescriptor DescriptorForInput(

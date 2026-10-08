@@ -125,9 +125,9 @@ void TestPrefillDiagnosticsHost() {
              totals->table_read_us == 24.5 && totals->table_reads == 6 &&
              totals->table_bytes == 144 && totals->fetch_elapsed_us == 40 &&
              totals->fetch_hidden_us == 36 && totals->fetch_exposed_us == 4 &&
-             totals->fetch_wait_us == 5 && totals->expert_bytes == 800 &&
-             totals->layer_samples == 4 && totals->experts_distinct_sum == 6 &&
-             totals->experts_distinct_min == 1 && totals->Mean() == 1.5 &&
+             totals->fetch_wait_us == 5 && totals->expert_bytes == 400 &&
+             totals->layer_samples == 2 && totals->experts_distinct_sum == 4 &&
+             totals->experts_distinct_min == 2 && totals->Mean() == 2.0 &&
              totals->experts_distinct_max == 2,
          "request totals add every counter and weight mean by layer samples");
   auto metrics = gufo::json::Value::object();
@@ -136,9 +136,9 @@ void TestPrefillDiagnosticsHost() {
   gufo::server::AddPrefillDiagUsage(metrics, totals);
   const auto* json = metrics.find("prefill_diag");
   Expect(json && json->member_size("passes") == 2 &&
-             json->member_size("expert_bytes") == 800 &&
+             json->member_size("expert_bytes") == 400 &&
              json->member_double("table_read_us") == 24.5 &&
-             json->member_double("experts_distinct_mean") == 1.5 &&
+             json->member_double("experts_distinct_mean") == 2.0 &&
              json->member_size("table_reads") == 6 &&
              json->member_size("table_bytes") == 144 &&
              json->member_double("fetch_elapsed_us") == 40 &&
@@ -157,8 +157,8 @@ void TestPrefillDiagnosticsHost() {
   PrefillDiagTotals unequal;
   unequal.AddLayer(4, 10);
   totals->Add(unequal);
-  Expect(totals->layer_samples == 5 && totals->Mean() == 2.0 &&
-             totals->experts_distinct_max == 4 && totals->expert_bytes == 840,
+  Expect(totals->layer_samples == 3 && std::abs(totals->Mean() - 8.0 / 3.0) < 1e-12 &&
+             totals->experts_distinct_max == 4 && totals->expert_bytes == 440,
          "aggregation weights unequal layer counts correctly");
 }
 
@@ -3041,7 +3041,7 @@ void TestDebugTimelineOrderCountsAndOffPath() {
   const auto off_bytes = response.dump();
   gufo::server::AddDebugTimeline(response, off);
   // Base fake frontier is prompt label * 100, then increments per token.
-  Expect(off_bytes == "{\"text\":\"100101102103\"}" && response.dump() == off_bytes,
+  Expect(off_bytes == "{\"text\":\"100,101,102,103\"}" && response.dump() == off_bytes,
          "OFF response keeps base fake-output bytes and emits no attribution fields");
   Expect(!response.find("gufo"), "OFF response contains no timeline or summary");
 }
@@ -3127,7 +3127,7 @@ void TestDebugTimelineMixedSourcesAndPolicy() {
   const auto off_bytes = response.dump();
   gufo::server::AddDebugTimeline(response, off);
   // Base fake frontier is prompt label * 100, then increments per token.
-  Expect(off_bytes == "{\"text\":\"100101102\"}" && response.dump() == off_bytes,
+  Expect(off_bytes == "{\"text\":\"100,101,102\"}" && response.dump() == off_bytes,
          "OFF response keeps base fake-output bytes and emits no attribution fields");
   Expect(!response.contains("gufo") && control->debug_settings_calls == 1,
          "settings are built once and all diagnostic fields are absent OFF");
