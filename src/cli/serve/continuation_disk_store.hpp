@@ -91,7 +91,8 @@ struct ContinuationDiskStoreOptions {
   std::optional<std::chrono::milliseconds> idle_wait;
   /// Additional pinned evicted storage, independent of the staging budget.
   std::optional<std::size_t> evict_backlog_bytes;
-  std::size_t evict_backlog_count{2};
+  /// Absolute safety guard for tiny snapshots; bytes are the primary bound.
+  std::size_t evict_backlog_count{8};
   std::chrono::milliseconds shutdown_wait{std::chrono::seconds(30)};
   std::chrono::milliseconds slice_max_wait{std::chrono::seconds(10)};
 };

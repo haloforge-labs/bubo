@@ -1196,7 +1196,8 @@ void ContinuationCache::ResolveRemoved(
         const bool exact = record && next && record->tokens == next->tokens;
         if (record && next && record->input_identity == next->input_identity &&
             IsPrefix(record->tokens, next->tokens) &&
-            (exact || !record->shared_prefix)) {
+            (exact ? record->shared_prefix == next->shared_prefix
+                   : !record->shared_prefix)) {
           if (exact && record->state.load() == SnapshotPersistence::kPersisted) {
             unsigned dirty = SnapshotPersistence::kDirty;
             next->state.compare_exchange_strong(dirty,

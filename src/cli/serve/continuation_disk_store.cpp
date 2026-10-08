@@ -718,8 +718,11 @@ struct ContinuationDiskStore::Impl {
   void SkipPersistence(
       const std::shared_ptr<const ContinuationSnapshot>& snapshot,
       ContinuationDiskEventReason reason, std::string_view trigger) {
-    if (!snapshot || !snapshot->persistence)
+    if (!snapshot || !snapshot->persistence) {
+      Emit(ContinuationDiskEventAction::kDroppedEvict, reason, 0,
+           snapshot ? snapshot->PayloadBytes() : 0, 0, 0, 0, trigger);
       return;
+    }
     auto& record = *snapshot->persistence;
     record.state.store(SnapshotPersistence::kFailed);
     Emit(ContinuationDiskEventAction::kSkipped, reason, 0,
@@ -866,15 +869,9 @@ struct ContinuationDiskStore::Impl {
       try {
         if (stopping && options.persist_evict_idle.value() &&
             std::chrono::steady_clock::now() >= shutdown_deadline) {
-          if (record)
-            SkipPersistence(job.snapshot,
-                            ContinuationDiskEventReason::kShutdownDeadline,
-                            job.trigger);
-          else
-            Emit(ContinuationDiskEventAction::kSkipped,
-                 ContinuationDiskEventReason::kShutdownDeadline, 0,
-                 job.snapshot->PayloadBytes(), job.tokens.size(), 0, 0,
-                 job.trigger);
+          SkipPersistence(job.snapshot,
+                          ContinuationDiskEventReason::kShutdownDeadline,
+                          job.trigger);
         } else {
           // Existing exact files count as persisted without serializing again.
           bool exists = false;
@@ -988,7 +985,8 @@ struct ContinuationDiskStore::Impl {
             std::size_t payload_bytes, std::size_t token_count,
             double elapsed_ms = 0.0, std::size_t staging_used_bytes = 0,
             std::string_view trigger = "write_through") const noexcept {
-    if (action == ContinuationDiskEventAction::kSkipped && trigger == "evict" &&
+    if (action == ContinuationDiskEventAction::kSkipped &&
+        (trigger == "evict" || trigger == "idle" || trigger == "shutdown") &&
         reason != ContinuationDiskEventReason::kExactReplacement)
       action = ContinuationDiskEventAction::kDroppedEvict;
     if (action == ContinuationDiskEventAction::kDroppedEvict)
@@ -1048,13 +1046,14 @@ struct ContinuationDiskStore::Impl {
   /// Called with queue_mutex held. Report capacity rejection before allocation
   /// or enqueue, where it would otherwise look like a successful cache capture.
   [[nodiscard]] bool CanStage(std::size_t bytes, std::size_t payload_bytes,
-                              std::size_t token_count) const {
+                              std::size_t token_count,
+                              std::string_view trigger = "write_through") const {
     if (writer_exited ||
         (stopping && (!options.persist_evict_idle.value() ||
                       std::chrono::steady_clock::now() >= shutdown_deadline))) {
       Emit(ContinuationDiskEventAction::kSkipped,
            ContinuationDiskEventReason::kShutdownDeadline, bytes, payload_bytes,
-           token_count);
+           token_count, 0.0, 0, trigger);
       return false;
     }
     const auto used =
@@ -1062,7 +1061,7 @@ struct ContinuationDiskStore::Impl {
     if (bytes > options.capacity_bytes) {
       Emit(ContinuationDiskEventAction::kSkipped,
            ContinuationDiskEventReason::kByteCapacity, bytes, payload_bytes,
-           token_count, 0.0, used);
+           token_count, 0.0, used, trigger);
       return false;
     }
     const auto limit =
@@ -1070,7 +1069,7 @@ struct ContinuationDiskStore::Impl {
     if (bytes > limit || used > limit - bytes) {
       Emit(ContinuationDiskEventAction::kSkipped,
            ContinuationDiskEventReason::kStagingCapacity, bytes, payload_bytes,
-           token_count, 0.0, used);
+           token_count, 0.0, used, trigger);
       return false;
     }
     return true;
@@ -2064,7 +2063,7 @@ std::size_t ContinuationDiskStore::Impl::SaveAsync(
         return file_bytes;
       }
     } else if (!CanStage(charge, snapshot->PayloadBytes(),
-                         checkpoint_tokens.size())) {
+                         checkpoint_tokens.size(), trigger)) {
       return 0;
     }
     pending.push_back({std::move(runner), std::move(checkpoint_tokens),

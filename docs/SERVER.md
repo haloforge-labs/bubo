@@ -463,8 +463,8 @@ and graceful shutdown. Unset or any other value retains capture write-through.
 The setting is read once when the first store is created. Captures normally remain in
 `ContinuationCache`. Real drops (LRU/pressure, discarded diverged branches,
 and rewound history) offer eligible snapshots before their last reference is
-released. An identical-token replacement is not offered; its replacement
-inherits an already-persisted status. A growing conversation's superseded
+released. An identical-token replacement with the same shared-prefix flag is
+not offered; its replacement inherits an already-persisted status. A growing conversation's superseded
 strict prefixes are not offered when a longer tagged entry survives in RAM.
 The latest conversation entry persists at idle/shutdown. Learned shared/system
 prompt boundaries remain independently eligible even when a longer entry
@@ -473,17 +473,22 @@ capture/publication fails, the displaced original is offered instead.
 
 An eviction during a write waits in a separate bounded backlog:
 `GUFO_DISK_EVICT_BACKLOG_BYTES` (read once, default 2147483648 = 2 GiB,
-nonnegative integer bytes; invalid values use the default), at most two
-snapshots. The charge includes the greater of device/host snapshot size and
-serialized payload, plus file metadata. This allocates nothing upfront, but
+nonnegative integer bytes; invalid values use the default), with an absolute
+safety guard of eight snapshots. Bytes are the primary bound. The charge
+includes the greater of device/host snapshot size and serialized payload, plus
+file metadata. This allocates nothing upfront, but
 pins the snapshot's device/host storage until drained; it is additional to the
 unchanged active-plus-queued staging budget. Zero disables this extra backlog.
 Overflow or a snapshot larger than staging/disk capacity logs
 `action=dropped_evict` with its reason and increments `dropped_evict` in the
 shutdown summary. Reduce the bound on memory-constrained hosts. A reservation
-can also temporarily hold a removed candidate until replacement publication
-(one reservation's removed snapshots, per active lease); failed captures offer
-it rather than silently losing persistence.
+can also hold superseded snapshots in `Lease::superseded_` for the whole
+generation, until replacement publication or lease cleanup. Their device/host
+memory remains pinned after it leaves the RAM tier's byte accounting, outside
+the 2 GiB eviction backlog and staging budget (roughly one frontier snapshot
+per active lease). Budget peak memory for RAM tier + staging + backlog +
+active leases' pinned frontiers; measure peak RSS and device usage. Failed
+captures offer the removed candidates rather than silently losing persistence.
 
 While no request is generating or waiting for runner admission,
 `GUFO_DISK_IDLE_MS` (0..600000, default 30000, read once) starts newest-first
