@@ -699,6 +699,8 @@ struct TextRunnerPool::Request::Impl {
        std::shared_ptr<DebugTimeline> request_timeline)
       : runner(std::move(model_runner)),
         disk_store(std::move(persistent_store)),
+        disk_activity(disk_store ? disk_store->BeginGeneration()
+                                 : ContinuationDiskStore::GenerationActivity()),
         lease(std::move(state_lease)),
         timeline(std::move(request_timeline)),
         prompt(std::move(prompt_tokens)),
@@ -1162,6 +1164,9 @@ struct TextRunnerPool::Request::Impl {
 
   std::shared_ptr<TextModelRunner> runner;
   std::shared_ptr<ContinuationDiskStore> disk_store;
+  // Declared before lease: remain active through lease teardown/rewind, and
+  // release before disk_store. Impl lifetime also covers constructor failure.
+  ContinuationDiskStore::GenerationActivity disk_activity;
   ContinuationCache::Lease lease;
   std::shared_ptr<DebugTimeline> timeline;
   std::string debug_prefill_boundary;

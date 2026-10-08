@@ -2,6 +2,7 @@
 #define GUFO_SERVER_CONTINUATION_DISK_STORE_HPP_
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -66,6 +67,8 @@ struct ContinuationDiskStoreOptions {
   /// Minimum token advance over the longest stored prefix that is still a
   /// prefix of the checkpoint before writing it. Zero disables the gate.
   std::size_t min_checkpoint_step_tokens{0};
+  /// Maximum additional idle-gate delay from enqueue when GUFO_DISK_DEFER=1.
+  std::chrono::milliseconds defer_max_wait{std::chrono::seconds(10)};
 };
 
 /// Restart-safe, provider-neutral exact-prefix snapshot store.
@@ -77,6 +80,8 @@ struct ContinuationDiskStoreOptions {
 /// Persistence uses one bounded worker. Payload writes and fsync run outside
 /// the metadata gate, so existing entries remain readable during persistence.
 class ContinuationDiskStore {
+  struct Impl;
+
 public:
   using EventSink = std::function<void(const ContinuationDiskEvent&)>;
   using KeyHashFunction =
@@ -153,6 +158,22 @@ public:
   /// Drains accepted writes. Shutdown also drains automatically.
   void Flush();
 
+  /// Nonallocating, lock-free request-lifetime signal for the optional worker
+  /// idle gate. The store must outlive the token. Disabled tokens are no-ops.
+  class GenerationActivity {
+  public:
+    GenerationActivity() = default;
+    ~GenerationActivity();
+    GenerationActivity(const GenerationActivity&) = delete;
+    GenerationActivity& operator=(const GenerationActivity&) = delete;
+
+  private:
+    friend class ContinuationDiskStore;
+    explicit GenerationActivity(Impl* owner);
+    Impl* owner_{nullptr};
+  };
+  [[nodiscard]] GenerationActivity BeginGeneration();
+
   /// Restores the longest exact saved prefix of prompt into state. When a
   /// stable boundary is supplied, a later checkpoint requires an earlier
   /// saved prefix too, so legacy full-prompt files cannot bypass migration.
@@ -199,7 +220,6 @@ public:
   [[nodiscard]] const ContinuationDiskStoreOptions& options() const noexcept;
 
 private:
-  struct Impl;
   std::unique_ptr<Impl> impl_;
 };
 
