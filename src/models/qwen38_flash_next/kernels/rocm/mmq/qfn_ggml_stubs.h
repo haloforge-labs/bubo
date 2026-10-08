@@ -138,6 +138,7 @@ enum ggml_type {
     GGML_TYPE_Q4_0    = 2,
     GGML_TYPE_Q4_1    = 3,
     // GGML_TYPE_Q4_2 / Q4_3 deprecated
+    GGML_TYPE_Q5_1_EXACT = 4,  // decode-twin only (never in a file): Q5_1 blocks read by the exact vector dot (float products, min term from the int8 sums)
     GGML_TYPE_Q5_0    = 6,
     GGML_TYPE_Q5_1    = 7,
     GGML_TYPE_Q8_0    = 8,
@@ -234,6 +235,7 @@ inline size_t ggml_type_size(enum ggml_type t) {
         case GGML_TYPE_Q4_1:    return 20;
         case GGML_TYPE_Q5_0:    return 22;
         case GGML_TYPE_Q5_1:    return 24;
+        case GGML_TYPE_Q5_1_EXACT: return 24;
         case GGML_TYPE_Q8_0:    return 34;
         case GGML_TYPE_Q8_1:    return 36;
         case GGML_TYPE_Q2_K:    return 84;
@@ -273,6 +275,7 @@ inline int64_t ggml_blck_size(enum ggml_type t) {
         case GGML_TYPE_Q4_1:
         case GGML_TYPE_Q5_0:
         case GGML_TYPE_Q5_1:
+        case GGML_TYPE_Q5_1_EXACT:
         case GGML_TYPE_Q8_0:
         case GGML_TYPE_Q8_1:
         case GGML_TYPE_IQ4_NL:

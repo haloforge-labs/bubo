@@ -16,6 +16,7 @@ add_qwen38_flash_next_test(config gufo_qwen38_flash_next "cpu")
 add_qwen38_flash_next_test(ngram gufo_qwen38_flash_next "cpu")
 add_qwen38_flash_next_test(mtp_sampling gufo_core "cpu")
 add_qwen38_flash_next_test(prompt_lookup gufo_core "cpu")
+add_qwen38_flash_next_test(twin_weights gufo_qwen38_flash_next "cpu")
 
 add_executable(qwen38_flash_next_reference_probe EXCLUDE_FROM_ALL reference_probe.cpp)
 target_link_libraries(qwen38_flash_next_reference_probe PRIVATE
@@ -47,6 +48,10 @@ if (ENGINE_ENABLE_HIP)
   add_executable(qwen38_flash_next_dense_gemm_bench EXCLUDE_FROM_ALL
     dense_gemm_bench.cpp)
   target_link_libraries(qwen38_flash_next_dense_gemm_bench PRIVATE
+    gufo_qwen38_flash_next hip::host)
+
+  add_executable(qwen38_flash_next_dense_twin_gpu_test EXCLUDE_FROM_ALL dense_twin_gpu_test.cpp)
+  target_link_libraries(qwen38_flash_next_dense_twin_gpu_test PRIVATE
     gufo_qwen38_flash_next hip::host)
 
   add_executable(qwen38_flash_next_attn_bench EXCLUDE_FROM_ALL attn_bench.cpp)

@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <initializer_list>
 #include <thread>
@@ -475,6 +477,141 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     m->bytes_ -= c.count * sizeof(float) + kTailMargin;
   }
   return m;
+}
+
+bool DeviceModel::UploadDraftOut(const TensorRef& ref, const core::GgufReader& reader, std::string* error_msg) {
+  const auto fail = [&](const std::string& message) {
+    if (error_msg != nullptr) *error_msg = "draft output head: " + message;
+    return false;
+  };
+  if (!draft_out_.empty()) return fail("already uploaded");
+  const auto regions = reader.GetMappedRegions();
+  std::vector<core::GgufMappedRegion> shards(regions.begin(), regions.end());
+  auto stager = hip::WeightUpload::Create(shards, error_msg);
+  if (!stager) return false;
+  std::vector<Conversion> conversions;
+  const std::size_t before = bytes_;
+  Uploader up{*stager, conversions, allocations_, bytes_, max_half_cols_, max_q8_cols_, error_msg};
+  DeviceTensor t = up.Copy(ref);
+  if (!up.ok) return fail(error_msg != nullptr ? *error_msg : "upload failed");
+  if (!stager->Finish(error_msg)) return false;
+  if (!conversions.empty()) return fail("converted during upload (forbidden)");
+  if (t.type != core::GgmlType::kQ4_K && t.type != core::GgmlType::kQ5_K) return fail("not a 4/5-bit K-quant");
+  const auto status = hipDeviceSynchronize();
+  if (status != hipSuccess) return fail(std::string("synchronize failed: ") + hipGetErrorString(status));
+  draft_out_ = t;
+  std::fprintf(stderr, "[draftout] loaded output.weight %s %ux%u, %zu bytes resident (trunk head stays %zu bytes Q8_0)\n", t.type == core::GgmlType::kQ4_K ? "Q4_K" : "Q5_K", t.cols, t.rows, bytes_ - before, std::size_t{t.cols} / 32 * 34 * t.rows);
+  return true;
+}
+
+bool DeviceModel::UploadTwin(const TwinWeights& twin, const core::GgufReader& twin_reader, std::string* error_msg) {
+  return UploadTwinImpl(twin, twin_reader, error_msg, twin_layers_, true);
+}
+
+bool DeviceModel::UploadShadow(const TwinWeights& shadow, const core::GgufReader& shadow_reader, std::string* error_msg) {
+  if (twin_layers_.empty()) {
+    if (error_msg != nullptr) *error_msg = "decode twin shadow: needs the 4-bit twin first";
+    return false;
+  }
+  if (!UploadTwinImpl(shadow, shadow_reader, error_msg, shadow_layers_, false)) return false;
+  for (std::size_t il = 0; il < twin_layers_.size() && il < shadow_layers_.size(); ++il) {
+    const DeviceLayer& a = twin_layers_[il];
+    const DeviceLayer& b = shadow_layers_[il];
+    const auto add = [&](const DeviceTensor& x, const DeviceTensor& y, const char* name) {
+      if (!x.empty() && !y.empty() && x.type != core::GgmlType::kQ8_0 && y.type == core::GgmlType::kQ8_0 && x.data != y.data && x.rows == y.rows && x.cols == y.cols)
+        shadow_map_[x.data] = ShadowEntry{&y, "blk." + std::to_string(il) + "." + name};
+    };
+    add(a.ssm_qkv, b.ssm_qkv, "attn_qkv");
+    add(a.ssm_gate, b.ssm_gate, "attn_gate");
+    add(a.ssm_out, b.ssm_out, "ssm_out");
+    add(a.attn_q, b.attn_q, "attn_q");
+    add(a.attn_k, b.attn_k, "attn_k");
+    add(a.attn_v, b.attn_v, "attn_v");
+    add(a.attn_out, b.attn_out, "attn_output");
+    add(a.hc_attn.down, b.hc_attn.down, "hc_attn_down");
+    add(a.hc_attn.up, b.hc_attn.up, "hc_attn_up");
+    add(a.hc_ffn.down, b.hc_ffn.down, "hc_ffn_down");
+    add(a.hc_ffn.up, b.hc_ffn.up, "hc_ffn_up");
+    add(a.shexp_gate, b.shexp_gate, "ffn_gate_shexp");
+    add(a.shexp_up, b.shexp_up, "ffn_up_shexp");
+    add(a.shexp_down, b.shexp_down, "ffn_down_shexp");
+  }
+  std::fprintf(stderr, "[twin] shadow check armed: %zu 4-bit tensors paired with their fake-quant Q8_0 copy\n", shadow_map_.size());
+  return true;
+}
+
+bool DeviceModel::UploadTwinImpl(const TwinWeights& twin, const core::GgufReader& twin_reader, std::string* error_msg, std::vector<DeviceLayer>& out_layers, bool primary) {
+  const auto fail = [&](const std::string& message) {
+    if (error_msg != nullptr) *error_msg = "decode twin: " + message;
+    return false;
+  };
+  if (!out_layers.empty()) return fail("already uploaded");
+  if (twin.layers.size() != layers_.size()) return fail("layer count differs from the trunk");
+  const auto regions = twin_reader.GetMappedRegions();
+  std::vector<core::GgufMappedRegion> shards(regions.begin(), regions.end());
+  auto stager = hip::WeightUpload::Create(shards, error_msg);
+  if (!stager) return false;
+  std::vector<Conversion> conversions;
+  const std::size_t before = bytes_;
+  Uploader up{*stager, conversions, allocations_, bytes_, max_half_cols_, max_q8_cols_, error_msg};
+  std::vector<DeviceLayer> built;
+  built.reserve(layers_.size());
+  for (std::size_t il = 0; il < layers_.size(); ++il) {
+    DeviceLayer d = layers_[il];  // shares the trunk's device memory for every tensor that is not twinned
+    const LayerWeights& t = twin.layers[il];
+    const auto put = [&](DeviceTensor& dst, const TensorRef& src) {
+      if (!src.empty()) dst = up.Copy(src);
+    };
+    // a stacked trunk tensor is split only when all its members come from the twin (or were never stacked): a kept (8-bit) member of a split group has no separate device tensor
+    const bool qg = !t.ssm_qkv.empty() || !t.ssm_gate.empty();
+    const bool ag = !t.attn_q.empty() || !t.attn_k.empty() || !t.attn_v.empty();
+    if ((qg && (t.ssm_qkv.empty() || t.ssm_gate.empty()) && layers_[il].ssm_qkv.empty()) || (ag && (t.attn_q.empty() || t.attn_k.empty() || t.attn_v.empty()) && layers_[il].attn_q.empty()))
+      return fail("a stacked projection group is only partly twinned (keep_q8 must keep a whole group: attn_qkv + attn_gate, attn_q + attn_k + attn_v)");
+    if (!t.ssm_qkv.empty() || !t.ssm_gate.empty()) {
+      d.ssm_in = {};  // the trunk stacked qkv + gate (both Q8_0, then both are twinned: Bind requires every Q8_0 tensor); the twin keeps them separate; a non-Q8_0 member keeps its trunk tensor
+      put(d.ssm_qkv, t.ssm_qkv);
+      put(d.ssm_gate, t.ssm_gate);
+    }
+    put(d.ssm_out, t.ssm_out);
+    if (!t.attn_q.empty() || !t.attn_k.empty() || !t.attn_v.empty()) {
+      d.attn_qkv = {};
+      put(d.attn_q, t.attn_q);
+      put(d.attn_k, t.attn_k);
+      put(d.attn_v, t.attn_v);
+    }
+    put(d.attn_out, t.attn_out);
+    put(d.hc_attn.down, t.hc_attn.down);
+    put(d.hc_attn.up, t.hc_attn.up);
+    put(d.hc_ffn.down, t.hc_ffn.down);
+    put(d.hc_ffn.up, t.hc_ffn.up);
+    put(d.shexp_gate, t.shexp_gate);
+    put(d.shexp_up, t.shexp_up);
+    put(d.shexp_down, t.shexp_down);
+    if (!up.ok) return fail(error_msg != nullptr ? *error_msg : "upload failed");
+    built.push_back(std::move(d));
+  }
+  if (!stager->Finish(error_msg)) return false;
+  if (!conversions.empty()) return fail("a twin tensor was converted during upload (forbidden)");
+  const char* allow_q8_env = std::getenv("GUFO_DENSE_TWIN_ALLOW_Q8");  // DEBUG controls only (see TwinWeights::Bind)
+  const bool allow_q8_twin = allow_q8_env != nullptr && *allow_q8_env != '\0' && *allow_q8_env != '0';
+  for (std::size_t il = 0; il < built.size(); ++il) {
+    const LayerWeights& t = twin.layers[il];
+    const DeviceLayer& d = built[il];
+    const std::pair<const TensorRef*, const DeviceTensor*> pairs[] = {
+        {&t.ssm_qkv, &d.ssm_qkv}, {&t.ssm_gate, &d.ssm_gate}, {&t.ssm_out, &d.ssm_out}, {&t.attn_q, &d.attn_q}, {&t.attn_k, &d.attn_k}, {&t.attn_v, &d.attn_v}, {&t.attn_out, &d.attn_out},
+        {&t.hc_attn.down, &d.hc_attn.down}, {&t.hc_attn.up, &d.hc_attn.up}, {&t.hc_ffn.down, &d.hc_ffn.down}, {&t.hc_ffn.up, &d.hc_ffn.up}, {&t.shexp_gate, &d.shexp_gate},
+        {&t.shexp_up, &d.shexp_up}, {&t.shexp_down, &d.shexp_down}};
+    for (const auto& [src, dev] : pairs)
+      if (!allow_q8_twin && !src->empty() && dev->type == core::GgmlType::kQ8_0) return fail("a twinned tensor is still Q8_0");
+  }
+  const auto status = hipDeviceSynchronize();
+  if (status != hipSuccess) return fail(std::string("synchronize failed: ") + hipGetErrorString(status));
+  out_layers = std::move(built);
+  if (!primary) return true;
+  twin_bytes_ = bytes_ - before;
+  std::fprintf(stderr, "[twin] loaded tensors=%zu resident_4bit_bytes=%zu (incl. 4 KiB tail pads) mirrors_8bit_bytes=%zu saved_per_pass_bytes=%zu kept_q8_tensors=%zu kept_q8_bytes=%zu\n", twin.tensors,
+               twin_bytes_, twin.bytes_8bit, twin.bytes_8bit - twin.bytes_4bit, twin.kept_tensors, twin.kept_bytes);
+  return true;
 }
 
 }  // namespace gufo::models::qwen38_flash_next::rocm

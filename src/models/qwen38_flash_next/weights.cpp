@@ -1,6 +1,8 @@
 #include "src/models/qwen38_flash_next/weights.hpp"
 
+#include <cstdlib>
 #include <initializer_list>
+#include <set>
 #include <string>
 #include <utility>
 
@@ -321,6 +323,100 @@ std::optional<MtpWeights> MtpWeights::Bind(const core::GgufReader& reader,
     return std::nullopt;
   }
   return m;
+}
+
+std::optional<TensorRef> BindDraftOutput(const core::GgufReader& reader, const TensorRef& trunk_output, std::string* error_msg) {
+  Binder b{reader, error_msg};
+  if (trunk_output.empty() || trunk_output.type != GgmlType::kQ8_0) {
+    b.Fail("draft output head: the trunk output head must be Q8_0");
+    return std::nullopt;
+  }
+  TensorRef t = b.Get("output.weight", trunk_output.cols, trunk_output.rows, 1, {GgmlType::kQ4_K, GgmlType::kQ5_K});
+  if (!b.ok || t.empty()) return std::nullopt;
+  return t;
+}
+
+std::optional<TwinWeights> TwinWeights::Bind(const core::GgufReader& reader,
+                                             const ModelWeights& trunk,
+                                             std::string* error_msg) {
+  Binder b{reader, error_msg};
+  TwinWeights t;
+  // DEBUG (identity / fake-quant controls only): GUFO_DENSE_TWIN_ALLOW_Q8=1 lets the twin file carry Q8_0 tensors, which then run through the ordinary Q8_0 dense path in small passes.
+  const char* allow_q8_env = std::getenv("GUFO_DENSE_TWIN_ALLOW_Q8");
+  const bool allow_q8 = allow_q8_env != nullptr && *allow_q8_env != '\0' && *allow_q8_env != '0';
+  const auto four_bit = {GgmlType::kQ4_K, GgmlType::kQ5_K, GgmlType::kQ5_1, GgmlType::kIQ4_XS, GgmlType::kIQ4_NL};
+  const auto four_bit_or_q8 = {GgmlType::kQ4_K, GgmlType::kQ5_K, GgmlType::kQ5_1, GgmlType::kIQ4_XS, GgmlType::kIQ4_NL, GgmlType::kQ8_0};
+  std::set<std::string> keep;  // explicit keep-Q8 list (names, comma-separated in the string KV)
+  if (const auto list = reader.GetMetadataString("gufo.dense_twin.keep_q8")) {
+    std::size_t pos = 0;
+    const std::string s(*list);
+    while (pos < s.size()) {
+      std::size_t end = s.find(',', pos);
+      if (end == std::string::npos) end = s.size();
+      if (end > pos) keep.insert(s.substr(pos, end - pos));
+      pos = end + 1;
+    }
+  }
+  std::set<std::string> kept_seen;
+  t.layers.reserve(trunk.layers.size());
+  for (std::uint32_t il = 0; il < trunk.layers.size(); ++il) {
+    const LayerWeights& base = trunk.layers[il];
+    LayerWeights l;
+    l.linear = base.linear;
+    const std::string p = "blk." + std::to_string(il) + ".";
+    // A trunk Q8_0 tensor needs its twin; any other trunk type is left alone and must be absent from the twin file.
+    const auto take = [&](TensorRef& dst, const TensorRef& base_tensor, const std::string& name) {
+      const bool present = reader.FindTensor(name) != nullptr;
+      if (keep.count(name) != 0) {
+        if (present) {
+          b.Fail("twin tensor " + name + " is both in the twin file and in its keep_q8 list");
+        } else if (base_tensor.empty() || base_tensor.type != GgmlType::kQ8_0) {
+          b.Fail("keep_q8 lists " + name + " but the trunk tensor is not Q8_0");
+        } else {
+          kept_seen.insert(name);
+          ++t.kept_tensors;
+          t.kept_bytes += base_tensor.SizeBytes();
+        }
+        return;
+      }
+      if (base_tensor.empty() || base_tensor.type != GgmlType::kQ8_0) {
+        if (present) b.Fail("twin tensor " + name + " mirrors a trunk tensor that is not Q8_0");
+        return;
+      }
+      if (!present) {
+        b.Fail("twin file is missing " + name + " (the trunk copy is Q8_0; no silent fallback)");
+        return;
+      }
+      dst = allow_q8 ? b.Get(name, base_tensor.cols, base_tensor.rows, 1, four_bit_or_q8) : b.Get(name, base_tensor.cols, base_tensor.rows, 1, four_bit);
+      if (dst.empty()) return;
+      ++t.tensors;
+      t.bytes_4bit += dst.SizeBytes();
+      t.bytes_8bit += base_tensor.SizeBytes();
+    };
+    if (base.linear) {
+      take(l.ssm_qkv, base.ssm_qkv, p + "attn_qkv.weight");
+      take(l.ssm_gate, base.ssm_gate, p + "attn_gate.weight");
+      take(l.ssm_out, base.ssm_out, p + "ssm_out.weight");
+    } else {
+      take(l.attn_q, base.attn_q, p + "attn_q.weight");
+      take(l.attn_k, base.attn_k, p + "attn_k.weight");
+      take(l.attn_v, base.attn_v, p + "attn_v.weight");
+      take(l.attn_out, base.attn_out, p + "attn_output.weight");
+    }
+    take(l.hc_attn.down, base.hc_attn.down, p + "hc_attn_down.weight");
+    take(l.hc_attn.up, base.hc_attn.up, p + "hc_attn_up.weight");
+    take(l.hc_ffn.down, base.hc_ffn.down, p + "hc_ffn_down.weight");
+    take(l.hc_ffn.up, base.hc_ffn.up, p + "hc_ffn_up.weight");
+    take(l.shexp_gate, base.shexp_gate, p + "ffn_gate_shexp.weight");
+    take(l.shexp_up, base.shexp_up, p + "ffn_up_shexp.weight");
+    take(l.shexp_down, base.shexp_down, p + "ffn_down_shexp.weight");
+    t.layers.push_back(std::move(l));
+  }
+  for (const auto& name : keep)
+    if (kept_seen.count(name) == 0 && b.ok) b.Fail("keep_q8 lists " + name + " which is not a Q8_0 tensor of the twin set");
+  if (b.ok && t.tensors == 0) b.Fail("twin file contains no twinned tensor");
+  if (!b.ok) return std::nullopt;
+  return t;
 }
 
 }  // namespace gufo::models::qwen38_flash_next

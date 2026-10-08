@@ -687,6 +687,13 @@ struct ggml_hip_type_traits<GGML_TYPE_Q5_1> {
 };
 
 template<>
+struct ggml_hip_type_traits<GGML_TYPE_Q5_1_EXACT> {
+    static constexpr int qk = QK5_1;
+    static constexpr int qr = QR5_1;
+    static constexpr int qi = QI5_1;
+};
+
+template<>
 struct ggml_hip_type_traits<GGML_TYPE_Q8_0> {
     static constexpr int qk = QK8_0;
     static constexpr int qr = QR8_0;

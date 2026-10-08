@@ -13,6 +13,7 @@ void qfn_mmq_set_routed_tile_cols(int cols);
 int qfn_mmq_routed_tile_cols_for_counts(const unsigned int *counts,
                                         int n_experts);
 
+int qfn_mmq_k_dense(int weight_type, const void* W, const float* X, float* out, int M, int N, int K, hipStream_t stream);
 int qfn_mmq_q8_0_dense(
     const void  * W_q8_0,
     const float * X_f32,
@@ -63,6 +64,11 @@ void qfn_mmq_set_hc_down_deep_prefetch(int enabled);
 int qfn_mmq_q8_0_dense_vec_preq(const void* W_q8_0, const void* W_gate,
                                 const void* X_q8, float* out_f32, int M, int N,
                                 int K, hipStream_t stream);
+/// Decode twin: a dense Q4_K / Q5_K / Q5_1 projection of 1..8 pre-quantised (Q8_1) activation rows, run on the existing vector MMVQ kernel as a ONE-expert projection:
+/// `zero_ids` is a device array of >= N zeros (expert 0 for every row). Output layout out[row_token][M] = the dense layout. UNPROVEN until compared with the Q8 dense path.
+int qfn_mmq_dense_vec_preq(int weight_type, const void* W, const void* X_q8,
+                           const int32_t* zero_ids, float* out_f32, int M, int N,
+                           int K, hipStream_t stream);
 
 int qfn_mmq_build_ids_maps(
         const int32_t * ids, int32_t * ids_src1, int32_t * ids_dst, int32_t * expert_bounds,

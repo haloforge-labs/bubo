@@ -82,6 +82,31 @@ public:
   [[nodiscard]] bool has_mtp() const noexcept { return has_mtp_; }
   const DeviceLayer& mtp() const noexcept { return mtp_; }
   [[nodiscard]] std::size_t resident_bytes() const noexcept { return bytes_; }
+  /// Decode twin (see TwinWeights): uploads the 4-bit dense copy next to the trunk and builds twin_layers(), copies of layers() whose dense projections point at
+  /// the 4-bit tensors (every other tensor shares the trunk layer's device memory). Any failure is an error; there is no fallback.
+  [[nodiscard]] bool UploadTwin(const TwinWeights& twin,
+                                const core::GgufReader& twin_reader,
+                                std::string* error_msg = nullptr);
+  [[nodiscard]] bool has_twin() const noexcept { return !twin_layers_.empty(); }
+  /// Draft-only 4-bit copy of the output head (see BindDraftOutput); the trunk head (output()) is untouched.
+  [[nodiscard]] bool UploadDraftOut(const TensorRef& ref, const core::GgufReader& reader, std::string* error_msg);
+  [[nodiscard]] bool has_draft_out() const noexcept { return !draft_out_.empty(); }
+  const DeviceTensor& draft_out() const noexcept { return draft_out_; }
+  /// DEBUG (GUFO_DENSE_TWIN_SHADOW=<fake-quant twin file>, needs GUFO_DENSE_TWIN_ALLOW_Q8=1): uploads a second, Q8_0 twin whose values are the dequantised 4-bit values; the executor then runs every 4-bit dense
+  /// projection a second time through the Q8_0 path on the SAME activations and accumulates the per-tensor difference (real-activation kernel check).
+  [[nodiscard]] bool UploadShadow(const TwinWeights& shadow, const core::GgufReader& shadow_reader, std::string* error_msg);
+  [[nodiscard]] bool has_shadow() const noexcept { return !shadow_map_.empty(); }
+  struct ShadowEntry {
+    const DeviceTensor* shadow{nullptr};
+    std::string label;
+  };
+  [[nodiscard]] const ShadowEntry* ShadowFor(const void* twin_data) const {
+    const auto it = shadow_map_.find(twin_data);
+    return it == shadow_map_.end() ? nullptr : &it->second;
+  }
+  [[nodiscard]] bool UploadTwinImpl(const TwinWeights& twin, const core::GgufReader& twin_reader, std::string* error_msg, std::vector<DeviceLayer>& out_layers, bool primary);
+  const std::vector<DeviceLayer>& twin_layers() const noexcept { return twin_layers_; }
+  [[nodiscard]] std::size_t twin_bytes() const noexcept { return twin_bytes_; }
   /// Widest K among the BF16/F16 matrices (activation staging for hipBLAS).
   [[nodiscard]] std::size_t max_half_cols() const noexcept {
     return max_half_cols_;
@@ -101,6 +126,11 @@ private:
   std::vector<DeviceLayer> layers_;
   DeviceLayer mtp_;
   bool has_mtp_{false};
+  std::vector<DeviceLayer> twin_layers_;
+  DeviceTensor draft_out_;
+  std::vector<DeviceLayer> shadow_layers_;
+  std::unordered_map<const void*, ShadowEntry> shadow_map_;
+  std::size_t twin_bytes_{0};
   std::vector<void*> allocations_;
   std::size_t bytes_{0};
   std::size_t max_half_cols_{1};

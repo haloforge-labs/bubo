@@ -749,6 +749,37 @@ static __device__ __forceinline__ float vec_dot_q5_1_q8_1(
     return vec_dot_q5_1_q8_1_impl<VDR_Q5_1_Q8_1_MMVQ>(vl, vh, u, bq5_1->dm, bq8_1->ds);
 }
 
+// DECODE TWIN ONLY (GGML_TYPE_Q5_1_EXACT; the expert path keeps vec_dot_q5_1_q8_1 above). The stock Q5_1 dot takes its min term m * s8 from the half-precision sum s stored in the Q8_1 block and multiplies
+// (d5, m5) * (d8, s8) as half2: on real hyper-connection / shared-expert activations (large common-mode component) m5 * s8 and d5 * d8 * sum(q5 * q8) are two large terms that nearly cancel, so the half
+// roundings (and a half overflow of the product) become a large relative error of the small difference (measured: relRMS 2-6e-2 vs 1e-7 for Q4_K on the same activations). Here every product is float and the
+// sum of the int8 activations is recomputed from the int8 values (as the Q4_K / Q5_K dots do), so the result equals the dot of the dequantised weights with the dequantised activations.
+static __device__ __forceinline__ float vec_dot_q5_1_q8_1_exact(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+
+    const block_q5_1 * bq5_1 = (const block_q5_1 *) vbq + kbx;
+
+    int sumi = 0;
+    int sumq = 0;
+#pragma unroll
+    for (int i = 0; i < VDR_Q5_1_Q8_1_MMVQ; ++i) {
+        const int vl = get_int_b4(bq5_1->qs, iqs + i);
+        const int vh = get_int_b4(bq5_1->qh, 0) >> (4 * (iqs + i));
+        const int u0 = get_int_b4(bq8_1->qs, iqs + i);
+        const int u1 = get_int_b4(bq8_1->qs, iqs + i + QI5_1);
+        const unsigned lo = ((static_cast<unsigned>(vh) & 15u) * 0x00204081u) & 0x01010101u;
+        const unsigned hi = (((static_cast<unsigned>(vh) >> 16) & 15u) * 0x00204081u) & 0x01010101u;
+        const int vi0 = (vl & 0x0F0F0F0F) | (lo << 4);
+        const int vi1 = ((vl >> 4) & 0x0F0F0F0F) | (hi << 4);
+        sumi = ggml_hip_dp4a(vi0, u0, sumi);
+        sumi = ggml_hip_dp4a(vi1, u1, sumi);
+        sumq = ggml_hip_dp4a(0x01010101, u0, sumq);
+        sumq = ggml_hip_dp4a(0x01010101, u1, sumq);
+    }
+    const float2 dm5 = __half22float2(bq5_1->dm);
+    const float d8 = __low2float(bq8_1->ds);
+    return d8 * (dm5.x * static_cast<float>(sumi) + dm5.y * static_cast<float>(sumq));
+}
+
 static __device__ __forceinline__ float vec_dot_q8_0_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
 

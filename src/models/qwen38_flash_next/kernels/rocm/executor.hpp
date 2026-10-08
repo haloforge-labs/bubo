@@ -5,6 +5,8 @@
 #include <hip/hip_runtime.h>
 #include <hipblas/hipblas.h>
 
+#include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -524,6 +526,27 @@ private:
                    std::uint32_t first_layer, std::uint32_t end_layer,
                    std::string* error_msg,
                    PrefillCheckpoint* checkpoint = nullptr) const;
+  /// Decode twin: the layer table a pass of n rows reads. The 4-bit copy serves exactly the vector-path passes (!MatrixRows(n): n <= 8 outside prefill),
+  /// the 8-bit trunk serves everything else; without a twin this is model_->layers().
+  const std::vector<DeviceLayer>& PassLayers(std::uint32_t n) const;
+  /// Per-pass counters (every Forward call, graph replays included) and their log lines; no-ops without a twin.
+  void CountTwinPass(std::uint32_t n) const;
+  void PrintTwinCounters(const char* tag, const char* copy, std::uint32_t n) const;
+  /// Draft output head counters: [0] draft steps that read the 8-bit trunk head, [1] draft steps that read the 4-bit draft copy.
+  mutable std::array<std::atomic<std::uint64_t>, 2> draft_out_steps_{};
+  void PrintDraftOutCounters(const char* tag) const;
+  /// DEBUG shadow check (GUFO_DENSE_TWIN_SHADOW): re-runs a 4-bit dense projection through the fake-quant Q8_0 copy on the same quantized activations and accumulates the difference per tensor.
+  struct ShadowStat {
+    std::string label;
+    double d2{0}, r2{0}, maxabs{0};
+    std::uint64_t passes{0};
+  };
+  bool ShadowCompare(const DeviceTensor& w, const Q8Input& q, const float* out, std::string* error_msg) const;
+  void PrintShadowStats() const;
+  mutable std::mutex shadow_mutex_;
+  mutable std::unordered_map<const void*, ShadowStat> shadow_stats_;
+  mutable std::array<std::atomic<std::uint64_t>, 6> twin_passes_{};  ///< [copy * 3 + kind], copy 0 = 8-bit, 1 = 4-bit; kind 0 decode (n = 1), 1 verify (2..8), 2 wide / prefill
+  mutable std::atomic<std::uint64_t> twin_total_{0};
   bool MtpBody(Session& session, std::uint32_t n, std::uint32_t pos, bool token,
                bool candidates, std::string* error_msg, std::uint32_t pool_grid,
                const float* hidden_source, MtpTrace* trace, bool kv_only) const;
@@ -568,6 +591,8 @@ private:
     void* x_half;   ///< activations narrowed to the weight's 16-bit type
     void* x_q8[2];  ///< Q8_1 activations of a decode batch, alternating
     void* x_q8t;    ///< tiled Q8 activations of a wide batch (W8A8 route)
+    float* shadow_out{nullptr};  ///< DEBUG shadow check output (16384 x 8 floats)
+    std::int32_t* zero_ids{nullptr};  ///< 8 zeros: expert ids of a dense 4-bit tensor run as a one-expert vector projection (decode twin only)
     float* res;
     float* xn;
     __half* xn_half;  ///< xn as F16 on the F16 mixer input route

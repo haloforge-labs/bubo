@@ -193,6 +193,16 @@ extern "C" int qfn_mmq_q8_0_dense(
     return qfn_mmq_dense_impl<GGML_TYPE_Q8_0>("qfn_mmq_q8_0_dense", W, X, out, M, N, K, stream);
 }
 
+// EXPERIMENT (decode twin kernel speed): the same MMQ tile path for K-quant dense weights (activations quantised into the MMQ layout inside the call).
+extern "C" int qfn_mmq_k_dense(int weight_type, const void * W, const float * X, float * out, int M, int N, int K, hipStream_t stream) {
+    switch (static_cast<ggml_type>(weight_type)) {
+        case GGML_TYPE_Q4_K: return qfn_mmq_dense_impl<GGML_TYPE_Q4_K>("qfn_mmq_q4_K_dense", W, X, out, M, N, K, stream);
+        case GGML_TYPE_Q5_K: return qfn_mmq_dense_impl<GGML_TYPE_Q5_K>("qfn_mmq_q5_K_dense", W, X, out, M, N, K, stream);
+        case GGML_TYPE_Q5_1: return qfn_mmq_dense_impl<GGML_TYPE_Q5_1>("qfn_mmq_q5_1_dense", W, X, out, M, N, K, stream);
+        default: return -1;
+    }
+}
+
 template <ggml_type type>
 int qfn_mmq_moe_impl(
         const char    * tag,
@@ -731,6 +741,24 @@ extern "C" int qfn_mmq_q8_0_dense_vec_preq(const void* W, const void* W_gate,
   const int input_stride = GGML_PAD(K, MATRIX_ROW_PADDING) / QK8_1;
   mul_mat_vec_q8_dispatch(W, W_gate, static_cast<const block_q8_1*>(X_q8),
                           out_f32, K, M, N, input_stride, stream);
+  return hipGetLastError() == hipSuccess ? 0 : -3;
+}
+
+extern "C" int qfn_mmq_dense_vec_preq(int weight_type, const void* W,
+                                      const void* X_q8, const int32_t* zero_ids,
+                                      float* out_f32, int M, int N, int K,
+                                      hipStream_t stream) {
+  const auto type = static_cast<ggml_type>(weight_type);
+  if ((type != GGML_TYPE_Q4_K && type != GGML_TYPE_Q5_K && type != GGML_TYPE_Q5_1 && type != GGML_TYPE_IQ4_XS && type != GGML_TYPE_IQ4_NL) ||
+      !W || !X_q8 || !zero_ids || !out_f32 || M <= 0 || N <= 0 ||
+      N > MMVQ_MAX_BATCH_SIZE || K <= 0 || K % ggml_blck_size(type) != 0) {
+    fprintf(stderr, "qfn_mmq_dense_vec_preq: bad arguments type=%d M=%d N=%d K=%d\n", weight_type, M, N, K);
+    return -1;
+  }
+  const int input_stride = GGML_PAD(K, MATRIX_ROW_PADDING) / QK8_1;
+  // dense Q5_1 tensors of the decode twin use the exact dot (see vec_dot_q5_1_q8_1_exact); the expert path keeps the stock one
+  mul_mat_vec_moe_dispatch(W, type == GGML_TYPE_Q5_1 ? GGML_TYPE_Q5_1_EXACT : type, static_cast<const block_q8_1*>(X_q8), zero_ids,
+                           out_f32, K, M, N, /*experts_used=*/1, input_stride, stream);
   return hipGetLastError() == hipSuccess ? 0 : -3;
 }
 template void mul_mat_q_case<GGML_TYPE_Q8_0>(

@@ -208,6 +208,50 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
   if (!m->device_) {
     return nullptr;
   }
+  // Decode twin (default OFF): GUFO_DENSE_TWIN_MODEL = path of the 4-bit dense twin GGUF (see TwinWeights). Every failure is fatal (no fallback to the 8-bit copy).
+  if (const char* twin_path = std::getenv("GUFO_DENSE_TWIN_MODEL"); twin_path != nullptr && twin_path[0] != '\0') {
+    if (options.decode_concurrency > 1) {
+      AssignError(error_msg, "GUFO_DENSE_TWIN_MODEL supports one decode session (the batched decode loop is not twinned)");
+      return nullptr;
+    }
+    auto twin_reader = core::GgufReader::OpenFile(twin_path, error_msg);
+    if (!twin_reader) {
+      return nullptr;
+    }
+    auto twin = TwinWeights::Bind(*twin_reader, *m->weights_, error_msg);
+    if (!twin) {
+      return nullptr;
+    }
+    if (!m->device_->UploadTwin(*twin, *twin_reader, error_msg)) {
+      return nullptr;
+    }
+    // DEBUG: GUFO_DENSE_TWIN_SHADOW = a fake-quant (Q8_0) twin of the same tensors; every 4-bit dense projection is recomputed through the Q8_0 path on the same activations and compared (needs GUFO_DENSE_TWIN_ALLOW_Q8=1).
+    if (const char* shadow_path = std::getenv("GUFO_DENSE_TWIN_SHADOW"); shadow_path != nullptr && shadow_path[0] != '\0') {
+      auto shadow_reader = core::GgufReader::OpenFile(shadow_path, error_msg);
+      if (!shadow_reader) {
+        return nullptr;
+      }
+      auto shadow = TwinWeights::Bind(*shadow_reader, *m->weights_, error_msg);
+      if (!shadow || !m->device_->UploadShadow(*shadow, *shadow_reader, error_msg)) {
+        return nullptr;
+      }
+    }
+  }
+  // DRAFT OUTPUT HEAD (default OFF): GUFO_DRAFT_OUT_MODEL = GGUF with only output.weight at Q4_K / Q5_K, read by the MTP draft steps only (see BindDraftOutput). Fatal on any problem.
+  if (const char* head_path = std::getenv("GUFO_DRAFT_OUT_MODEL"); head_path != nullptr && head_path[0] != '\0') {
+    if (!m->mtp_weights_) {
+      AssignError(error_msg, "GUFO_DRAFT_OUT_MODEL needs the MTP draft head (--speculative mtp)");
+      return nullptr;
+    }
+    auto head_reader = core::GgufReader::OpenFile(head_path, error_msg);
+    if (!head_reader) {
+      return nullptr;
+    }
+    auto head = BindDraftOutput(*head_reader, m->weights_->output, error_msg);
+    if (!head || !m->device_->UploadDraftOut(*head, *head_reader, error_msg)) {
+      return nullptr;
+    }
+  }
   rocm::Executor::Options exec;
   exec.max_batch = m->PrefillThroughCapacity();
   exec.max_logit_rows =

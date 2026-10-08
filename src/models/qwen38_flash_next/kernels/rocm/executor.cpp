@@ -99,6 +99,10 @@ bool MatrixRows(std::uint32_t rows) {
 bool ExpertMatrixRows(std::uint32_t rows) {
   return prefill_phase || rows > 4 * kVecBatch;
 }
+/// Decode twin: the 4-bit dense types (only the twin ever holds a dense tensor of these types).
+bool IsTwinDenseType(GgmlType type) {
+  return type == GgmlType::kQ4_K || type == GgmlType::kQ5_K || type == GgmlType::kQ5_1 || type == GgmlType::kIQ4_XS || type == GgmlType::kIQ4_NL;
+}
 
 /// Key-tile splits per row of a narrow attention batch (decode at depth).
 constexpr std::uint32_t kAttnSplits = 8;
@@ -895,6 +899,9 @@ void Session::Reset() {
 }
 
 Executor::~Executor() {
+  if (model_ != nullptr && model_->has_twin()) PrintTwinCounters("final", "-", 0);
+  if (model_ != nullptr && model_->has_draft_out()) PrintDraftOutCounters("final");
+  if (model_ != nullptr && model_->has_shadow()) PrintShadowStats();
   // Readers write pinned staging memory; drain them before freeing it,
   // including when a forward failed before reaching PLE.
   if (ple_pending_) {
@@ -979,6 +986,17 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   auto f32 = [&](std::size_t n) { return Alloc<float>(a, n, error_msg); };
   s.tokens = Alloc<std::int32_t>(a, T, error_msg);
   s.x_half = Alloc<std::uint16_t>(a, T * model.max_half_cols(), error_msg);
+  if (model.has_twin() || model.has_draft_out()) {
+    if (model.has_shadow()) {
+      s.shadow_out = Alloc<float>(a, std::size_t{16384} * kVecBatch, error_msg);
+      if (s.shadow_out == nullptr) return nullptr;
+    }
+    s.zero_ids = Alloc<std::int32_t>(a, kVecBatch, error_msg);
+    if (s.zero_ids == nullptr || hipMemset(s.zero_ids, 0, kVecBatch * sizeof(std::int32_t)) != hipSuccess) {
+      AssignError(error_msg, "decode twin: zero ids allocation failed");
+      return nullptr;
+    }
+  }
   for (void*& slot : s.x_q8) {
     slot = Alloc<std::uint8_t>(
         a,
@@ -1153,7 +1171,7 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
     // distribution is unchanged; only acceptance can drop when the target
     // wants a token outside the list.
     if (!options.draft_vocab.empty()) {
-      const DeviceTensor& out = model.output();
+      const DeviceTensor& out = model.has_draft_out() ? model.draft_out() : model.output();
       std::vector<std::int32_t> ids;
       for (const std::int32_t id : options.draft_vocab) {
         if (id >= 0 && static_cast<std::uint32_t>(id) < out.rows) {
@@ -1162,14 +1180,14 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
       }
       std::sort(ids.begin(), ids.end());
       ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
-      if (ids.size() < kMtpCandidates || out.type != GgmlType::kQ8_0 ||
+      if (ids.size() < kMtpCandidates || (out.type != GgmlType::kQ8_0 && !model.has_draft_out()) ||
           out.experts != 1 || out.cols % 32 != 0) {
         AssignError(error_msg,
                     "the draft vocabulary needs at least 64 valid token ids "
                     "and a Q8_0 output head");
         return nullptr;
       }
-      const std::size_t row_bytes = std::size_t{out.cols} / 32 * 34;
+      const std::size_t row_bytes = out.type == GgmlType::kQ4_K ? std::size_t{out.cols} / 256 * 144 : out.type == GgmlType::kQ5_K ? std::size_t{out.cols} / 256 * 176 : std::size_t{out.cols} / 32 * 34;
       auto* rows =
           Alloc<std::uint8_t>(a, ids.size() * row_bytes + 256, error_msg);
       auto* map = Alloc<std::int32_t>(a, ids.size(), error_msg);
@@ -1460,6 +1478,18 @@ bool Executor::Quantize(const float* x, std::uint32_t n_tokens, std::uint32_t k,
 
 bool Executor::Dense(const DeviceTensor& w, const Q8Input& q, float* out,
                      std::string* error_msg) const {
+  if (IsTwinDenseType(w.type) && q.data != nullptr) {
+    if (w.cols != q.k || s_.zero_ids == nullptr) {
+      AssignError(error_msg, "decode twin: quantized input width mismatch or no zero ids");
+      return false;
+    }
+    if (qfn_mmq_dense_vec_preq(static_cast<int>(w.type), w.data, q.data, s_.zero_ids, out, static_cast<int>(w.rows), static_cast<int>(q.n), static_cast<int>(w.cols), stream_) != 0) {
+      AssignError(error_msg, "4-bit dense GEMV failed");
+      return false;
+    }
+    if (model_->has_shadow() && !ShadowCompare(w, q, out, error_msg)) return false;
+    return true;
+  }
   if (w.type == GgmlType::kQ8_0 && q.data != nullptr) {
     if (w.cols != q.k) {
       AssignError(error_msg, "quantized input width mismatch");
@@ -1553,6 +1583,14 @@ bool Executor::DenseF16Route(const DeviceTensor& w,
 
 bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
                      std::uint32_t n_tokens, std::string* error_msg) const {
+  if (IsTwinDenseType(w.type)) {
+    if (MatrixRows(n_tokens)) {
+      AssignError(error_msg, "decode twin: a 4-bit dense tensor reached a wide / prefill pass (forbidden, no fallback)");
+      return false;
+    }
+    Q8Input q;
+    return Quantize(x, n_tokens, w.cols, &q, error_msg) && Dense(w, q, out, error_msg);
+  }
   if (w.type == GgmlType::kQ8_0) {
     if (!MatrixRows(n_tokens)) {
       Q8Input q;
@@ -2605,7 +2643,11 @@ bool Executor::MtpHead(const DeviceMixer& head, const float* res, bool token,
   // A draft vocabulary scores its subset rows; selected rows map back to
   // token ids before the host reads them.
   const bool subset = draft_ids_ != nullptr;
-  const DeviceTensor& output = subset ? draft_head_ : model_->output();
+  const DeviceTensor& output = subset ? draft_head_ : (model_->has_draft_out() ? model_->draft_out() : model_->output());
+  if (model_->has_draft_out()) {
+    const auto n = draft_out_steps_[IsTwinDenseType(output.type) ? 1 : 0].fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n == 1 || (n & 0x1FF) == 0) PrintDraftOutCounters("periodic");
+  }
   if (!HcMix(head, res, false, s_.mixed, nullptr, 1, error_msg) ||
       !Dense(output, s_.mixed, s_.logits, 1, error_msg)) {
     return false;
@@ -2661,7 +2703,7 @@ bool Executor::Run(Session& session, std::uint64_t key, bool graph,
     }
     return true;
   };
-  if (graph && session.warmed_.contains(key)) {
+  if (graph && !model_->has_shadow() && session.warmed_.contains(key)) {
     hipGraphExec_t exec = nullptr;
     if (const auto it = session.graphs_.find(key);
         it != session.graphs_.end()) {
@@ -2725,6 +2767,7 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   }
   const bool speculative = mode == ForwardMode::kVerify;
   PrefillPhase phase(mode == ForwardMode::kPrefill);
+  CountTwinPass(static_cast<std::uint32_t>(tokens.size()));
   selected_logits_ = nullptr;
   const Config& c = config();
   const auto n = static_cast<std::uint32_t>(tokens.size());
@@ -2942,6 +2985,100 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   return true;
 }
 
+namespace {
+// GUFO_DENSE_TWIN_MAX_N (default 8 = every vector pass): the widest pass that reads the 4-bit twin; wider decode / verify passes read the 8-bit copy. Set it to the twin kernel's measured
+// DRAM break-even width (pass bench 10-07: Q4_K ~2, IQ4_XS / IQ4_NL map ~6).
+std::uint32_t TwinMaxN() {
+  static const std::uint32_t v = [] {
+    const char* e = std::getenv("GUFO_DENSE_TWIN_MAX_N");
+    if (e == nullptr || *e == '\0') return std::uint32_t{8};
+    const long x = std::strtol(e, nullptr, 10);
+    return static_cast<std::uint32_t>(x < 1 ? 1 : (x > 8 ? 8 : x));
+  }();
+  return v;
+}
+}  // namespace
+
+const std::vector<DeviceLayer>& Executor::PassLayers(std::uint32_t n) const {
+  if (!model_->has_twin()) return model_->layers();
+  return (MatrixRows(n) || n > TwinMaxN()) ? model_->layers() : model_->twin_layers();
+}
+
+bool Executor::ShadowCompare(const DeviceTensor& w, const Q8Input& q, const float* out, std::string* error_msg) const {
+  const auto* entry = model_->ShadowFor(w.data);
+  if (entry == nullptr) return true;
+  const std::size_t count = static_cast<std::size_t>(w.rows) * q.n;
+  if (s_.shadow_out == nullptr || count > std::size_t{16384} * kVecBatch) {
+    AssignError(error_msg, "shadow check: scratch too small");
+    return false;
+  }
+  if (qfn_mmq_q8_0_dense_vec_preq(entry->shadow->data, nullptr, q.data, s_.shadow_out, static_cast<int>(w.rows), static_cast<int>(q.n), static_cast<int>(w.cols), stream_) != 0) {
+    AssignError(error_msg, "shadow check: Q8_0 GEMV failed");
+    return false;
+  }
+  std::vector<float> a(count), b(count);
+  if (hipStreamSynchronize(stream_) != hipSuccess || hipMemcpy(a.data(), out, count * sizeof(float), hipMemcpyDeviceToHost) != hipSuccess ||
+      hipMemcpy(b.data(), s_.shadow_out, count * sizeof(float), hipMemcpyDeviceToHost) != hipSuccess) {
+    AssignError(error_msg, "shadow check: copy failed");
+    return false;
+  }
+  double d2 = 0, r2 = 0, mx = 0;
+  for (std::size_t i = 0; i < count; ++i) {
+    const double d = static_cast<double>(a[i]) - b[i];
+    d2 += d * d;
+    r2 += static_cast<double>(b[i]) * b[i];
+    mx = std::max(mx, std::abs(d));
+  }
+  std::lock_guard<std::mutex> lock(shadow_mutex_);
+  auto& st = shadow_stats_[w.data];
+  st.label = entry->label;
+  st.d2 += d2;
+  st.r2 += r2;
+  st.maxabs = std::max(st.maxabs, mx);
+  ++st.passes;
+  return true;
+}
+
+void Executor::PrintShadowStats() const {
+  std::vector<const ShadowStat*> v;
+  for (const auto& kv : shadow_stats_) v.push_back(&kv.second);
+  std::sort(v.begin(), v.end(), [](const ShadowStat* x, const ShadowStat* y) { return x->d2 / (x->r2 + 1e-30) > y->d2 / (y->r2 + 1e-30); });
+  std::fprintf(stderr, "[shadow] %zu tensors compared (4-bit kernel vs fake-quant Q8_0 on the same real activations); worst first: label relRMS maxabs passes\n", v.size());
+  for (std::size_t i = 0; i < v.size() && i < 40; ++i)
+    std::fprintf(stderr, "[shadow] %-30s %.3e %.3e %llu\n", v[i]->label.c_str(), std::sqrt(v[i]->d2 / (v[i]->r2 + 1e-30)), v[i]->maxabs, static_cast<unsigned long long>(v[i]->passes));
+  std::map<std::string, std::vector<double>> by_class;
+  for (const auto* s : v) by_class[s->label.substr(s->label.find('.', 4) + 1)].push_back(std::sqrt(s->d2 / (s->r2 + 1e-30)));
+  for (auto& kv : by_class) {
+    std::sort(kv.second.begin(), kv.second.end());
+    std::fprintf(stderr, "[shadow] class %-16s n=%zu median %.3e worst %.3e\n", kv.first.c_str(), kv.second.size(), kv.second[kv.second.size() / 2], kv.second.back());
+  }
+}
+
+void Executor::PrintDraftOutCounters(const char* tag) const {
+  std::fprintf(stderr, "[draftout] %s draft steps: 4-bit copy=%llu 8-bit trunk head=%llu (8-bit must stay 0 when the copy is armed; verify / trunk logits always read the 8-bit head)\n", tag,
+               static_cast<unsigned long long>(draft_out_steps_[1].load(std::memory_order_relaxed)), static_cast<unsigned long long>(draft_out_steps_[0].load(std::memory_order_relaxed)));
+}
+
+void Executor::PrintTwinCounters(const char* tag, const char* copy, std::uint32_t n) const {
+  const auto v = [&](unsigned i) { return static_cast<unsigned long long>(twin_passes_[i].load(std::memory_order_relaxed)); };
+  std::fprintf(stderr,
+               "[twin] %s copy=%s n=%u passes_total=%llu | 4bit decode=%llu verify=%llu wide=%llu (wide must stay 0) | 8bit decode=%llu verify=%llu (both must stay 0) wide=%llu\n", tag, copy, n,
+               static_cast<unsigned long long>(twin_total_.load(std::memory_order_relaxed)), v(3), v(4), v(5), v(0), v(1), v(2));
+}
+
+void Executor::CountTwinPass(std::uint32_t n) const {
+  if (!model_->has_twin()) return;
+  static const bool trace = [] {
+    const char* e = std::getenv("GUFO_DENSE_TWIN_TRACE");
+    return e != nullptr && e[0] == '1' && e[1] == '\0';
+  }();
+  const bool twin = !MatrixRows(n) && n <= TwinMaxN();
+  const unsigned kind = prefill_phase ? 2u : (n <= 1 ? 0u : (n <= kVecBatch ? 1u : 2u));
+  twin_passes_[(twin ? 3u : 0u) + kind].fetch_add(1, std::memory_order_relaxed);
+  const auto total = twin_total_.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (total == 1 || (total & 0x3FF) == 0 || trace) PrintTwinCounters(total == 1 ? "first" : "periodic", twin ? "4bit" : "8bit", n);
+}
+
 template<bool Diagnostic>
 bool Executor::ForwardBody(Session& session, std::uint32_t n,
                            std::uint32_t n_logits, bool download_logits,
@@ -2965,7 +3102,7 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
     session.vision_input_.Inject(s_.res, start_pos, n, c.hidden_size,
                                  c.hc_count, stream_);
   }
-  const auto& layers = model_->layers();
+  const auto& layers = PassLayers(n);
   bool normed = false;  ///< xn holds the next mixer's grouped norm of res
   for (std::uint32_t il = first_layer; il < end_layer; ++il) {
     if (!session.CheckCancellation(error_msg))
