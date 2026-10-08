@@ -2458,13 +2458,18 @@ void DebugHooksHttpTestResponsesLogprobs() {
 }
 
 void DebugHooksHttpTestNullableLegacyLimit() {
+  // 35c386a reads max_tokens non-nullable with a minimum of 1 (ReadSamplingInteger in ReadCompatibilityOptions), so `null` was and stays a 400
+  // whatever the backend default is: hooks OFF must keep the base bytes (the round-1 test expected 200, which the base never returned).
   RunningServer server;
   server.backend->defaults.max_tokens = 0;
   const auto response = server.Post("/v1/completions",
                                     R"({"prompt":"x","max_tokens":null})");
-  ExpectStatus(response, 200);
-  assert(server.backend->calls == 1 && server.backend->score_calls == 0);
-  assert(server.backend->LastCall().max_tokens == 0);
+  ExpectStatus(response, 400);
+  const auto start = response.find("\r\n\r\n");
+  assert(start != std::string::npos);
+  assert(response.substr(start + 4) ==
+         R"({"error":{"message":"'max_tokens' must be an integer between 1 and 4294967295","type":"invalid_request_error","code":"invalid_request"}})");
+  assert(server.backend->calls == 0 && server.backend->score_calls == 0);
 }
 
 void DebugHooksHttpTestDisabledAndProbeErrors() {
