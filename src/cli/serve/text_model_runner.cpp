@@ -916,7 +916,8 @@ struct TextRunnerPool::Request::Impl {
       snapshot_future =
           std::async(wait ? std::launch::deferred : std::launch::async,
                      [owner = runner, state,
-                      persist = bool(disk_store) && !disk_in_pass_capture] {
+                      persist = bool(disk_store) &&
+                                !(disk_in_pass_capture && retain_snapshot)] {
                        return persist ? owner->SnapshotForPersistence(*state)
                                       : owner->Snapshot(*state);
                      });
