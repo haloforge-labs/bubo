@@ -66,8 +66,11 @@ inline HttpResponse ScoredOpenAiStream(
                       std::span<const sampling::TokenLogprob>(score, 1);
                   choice["logprobs"] = chat ? ChatLogprobs(records, decode)
                                             : LegacyLogprobs(records, decode);
-                  if (!chat)
-                    choice["logprobs"]["text_offset"][0] = offset;
+                  if (!chat) {
+                    // Not `["text_offset"][0]`: json::Value::operator[] takes a std::string, so a literal 0 is a null const char* (crash in strlen).
+                    choice["logprobs"]["text_offset"] = json::Value::array();
+                    choice["logprobs"]["text_offset"].push_back(offset);
+                  }
                 }
                 chunk["choices"].push_back(std::move(choice));
               }
