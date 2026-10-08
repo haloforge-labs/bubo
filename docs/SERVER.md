@@ -426,7 +426,7 @@ the complete-prompt snapshot also uses borrowed rows; the disk worker owns
 the snapshot until existing byte materialization finishes. This setting has
 no effect without `--cache-disk`. Qualify byte identity and performance before
 deploying the disk extension; the previous measured results predate it.
-`GUFO_DISK_DEFER` is read once when the disk store is created. Unset or `0`
+`GUFO_DISK_DEFER_MS` (0..600000, default 10000) sets the idle-gate bound counted from enqueue; read once. `GUFO_DISK_DEFER` is read once when the disk store is created. Unset or `0`
 keeps immediate worker serialization; exact `1` delays queued serialization
 while any request in that runner pool is resident (including prefill and gaps
 between decode steps). The worker starts when idle, after 10 seconds from

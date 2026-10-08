@@ -48,6 +48,19 @@ bool DiskDeferEnabled() {
   return enabled;
 }
 
+// GUFO_DISK_DEFER_MS overrides the idle-gate bound (default 10 s, accepted 0..600000 ms), read once: the A/B can test a bound longer than a typical turn.
+std::chrono::milliseconds DiskDeferMaxWait(std::chrono::milliseconds fallback) {
+  static const std::chrono::milliseconds value = [fallback] {
+    const char* text = std::getenv("GUFO_DISK_DEFER_MS");
+    if (!text || !*text)
+      return fallback;
+    char* end = nullptr;
+    const long parsed = std::strtol(text, &end, 10);
+    return (end && !*end && parsed >= 0 && parsed <= 600000) ? std::chrono::milliseconds(parsed) : fallback;
+  }();
+  return value;
+}
+
 TextRunnerDescriptor DescriptorForInput(
     const TextModelRunner& runner,
     std::span<const std::uint8_t> input_identity) {
@@ -622,7 +635,7 @@ struct ContinuationDiskStore::Impl {
           return;
         if (defer_enabled) {
           const auto deadline =
-              pending.front().enqueued + options.defer_max_wait;
+              pending.front().enqueued + DiskDeferMaxWait(options.defer_max_wait);
           while (!stopping && flush_waiters == 0 &&
                  active_generations.load(std::memory_order_acquire) != 0 &&
                  queued_bytes + capture_bytes->load(std::memory_order_relaxed) <
