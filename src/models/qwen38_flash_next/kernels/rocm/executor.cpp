@@ -78,7 +78,7 @@ struct NoBenchEvents {};
 void CopyReferenceOnce(hipStream_t stream) {
   static std::once_flag once;
   std::call_once(once, [stream] {
-    constexpr std::size_t bytes = std::size_t{4} << 30;
+    std::size_t bytes = std::size_t{4} << 30;   // falls back to 2 and 1 GiB when memory is short (review F3)
     constexpr std::size_t reserve = std::size_t{1} << 30;
     std::size_t free = 0, total = 0;
     struct Buffers {
@@ -97,6 +97,8 @@ void CopyReferenceOnce(hipStream_t stream) {
                    "[moe-bench] copy_ref=skipped(memory query failed)\n");
       return;
     }
+    while (bytes > (std::size_t{1} << 30) && free < 2 * bytes + reserve)
+      bytes >>= 1;
     if (free < 2 * bytes + reserve ||
         hipMalloc(&buffers.src, bytes) != hipSuccess ||
         hipMalloc(&buffers.dst, bytes) != hipSuccess) {
@@ -2623,6 +2625,7 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
                             (l.ffn_down_exps.type == GgmlType::kQ5_1 ||
                              l.ffn_down_exps.type == GgmlType::kQ8_0) &&
                             c.hidden_size % 256 == 0 && c.expert_ff % 64 == 0;
+  bool bench_gated = false, bench_wide = false;
   if (wmma_experts) {
     RoutedCompact(s_.ids, s_.expert_counts, s_.routed_bounds, s_.routed_cursors,
                   s_.rows_token, s_.rows_slot, n_tokens, used, c.num_experts,
@@ -2640,6 +2643,7 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
       half_bf16_ = false;
     }
     const auto* x_half = static_cast<const __half*>(s_.x_half);
+    bench_gated = n_tokens >= 1024 && routed_tile_rows_ == 48;
     // Large batches pair the gate/up projections and apply SwiGLU without
     // materializing the gate. Smaller buckets favor separate projections.
     auto* up_half = reinterpret_cast<__half*>(s_.up_e);
@@ -2676,6 +2680,7 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
         (down_type == WeightType::kQ5_1 || down_type == WeightType::kQ8_0) &&
         routed_tile_rows_ == 48 && routed_64_tiles_ != 0 &&
         routed_64_tiles_ * 4 <= routed_n_tiles_ * 3;
+    bench_wide = wide_down;
     // The down projection's rows are F16 too: the epilogue reads half the
     // bytes of the largest routed intermediate.
     if (!RoutedF16Gemm(l.ffn_down_exps.data, down_type, up_half,
@@ -2700,8 +2705,20 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
     }
   }
   if constexpr (Benchmark) {
-    if (!events.Finish(stream_, active_diag_->totals.moe_us, error_msg))
+    double layer_us = 0;
+    if (!events.Finish(stream_, layer_us, error_msg))
       return false;
+    auto& bench = active_diag_->totals;
+    bench.moe_us += layer_us;
+    if (wmma_experts) {
+      bench.moe_wmma_us += layer_us;
+      ++bench.moe_wmma_layers;
+      bench.moe_gated_layers += bench_gated ? 1 : 0;
+      bench.moe_wide_down_layers += bench_wide ? 1 : 0;
+      bench.moe_tiles += routed_n_tiles_;
+    } else {
+      ++bench.moe_fallback_layers;
+    }
   }
   if (wmma_experts) {
     // The combine that follows folds this epilogue into its own pass when

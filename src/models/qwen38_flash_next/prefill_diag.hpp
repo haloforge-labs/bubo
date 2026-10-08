@@ -72,6 +72,10 @@ struct PrefillDiagTotals : TableReadCounters {
   bool moe_bench{false};
   double moe_us{0}, moe_flops{0};
   std::uint64_t moe_expert_bytes{0};  // Includes tail-only layers too.
+  // Route attribution (review F1): the timed region is the WMMA route for layers that qualify and the GatedExperts/Experts fallback otherwise;
+  // kill-rule numbers are only meaningful when moe_fallback_layers == 0. tiles = sum of routed row tiles of the WMMA layers (re-read factor of the weights).
+  double moe_wmma_us{0};
+  std::uint64_t moe_wmma_layers{0}, moe_fallback_layers{0}, moe_gated_layers{0}, moe_wide_down_layers{0}, moe_tiles{0};
   void AddLayer(std::uint32_t distinct, std::uint64_t bytes_per_expert) {
     experts_distinct_min = layer_samples == 0
                                ? distinct
@@ -93,6 +97,12 @@ struct PrefillDiagTotals : TableReadCounters {
       moe_us += other.moe_us;
       moe_flops += other.moe_flops;
       moe_expert_bytes += other.moe_expert_bytes;
+      moe_wmma_us += other.moe_wmma_us;
+      moe_wmma_layers += other.moe_wmma_layers;
+      moe_fallback_layers += other.moe_fallback_layers;
+      moe_gated_layers += other.moe_gated_layers;
+      moe_wide_down_layers += other.moe_wide_down_layers;
+      moe_tiles += other.moe_tiles;
     }
     passes += other.passes;
     tokens += other.tokens;
@@ -166,7 +176,9 @@ inline std::string PrefillDiagFields(const PrefillDiagTotals& t) {
     out << " moe_us=" << t.moe_us << " moe_expert_bytes=" << t.moe_expert_bytes
         << " moe_flops=" << t.moe_flops
         << " moe_gbps=" << MoeGbps(t.moe_expert_bytes, t.moe_us)
-        << " moe_tflops=" << MoeTflops(t.moe_flops, t.moe_us);
+        << " moe_tflops=" << MoeTflops(t.moe_flops, t.moe_us)
+        << " moe_wmma_layers=" << t.moe_wmma_layers << " moe_fallback_layers=" << t.moe_fallback_layers << " moe_wmma_us=" << t.moe_wmma_us
+        << " moe_gated_layers=" << t.moe_gated_layers << " moe_wide_down_layers=" << t.moe_wide_down_layers << " moe_tiles=" << t.moe_tiles;
   return out.str();
 }
 
