@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -12,6 +13,7 @@
 #include <future>
 #include <initializer_list>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -1054,6 +1056,171 @@ void TestBoundedAsyncPersistenceDoesNotBlockLookup() {
          "shutdown drains accepted persistence jobs");
 }
 
+bool DiskDeferExpected() {
+  const char* value = std::getenv("GUFO_DISK_DEFER");
+  return value && std::string_view(value) == "1";
+}
+
+void TestDeferredPersistenceIdleAndBytes() {
+  TemporaryDirectory directory, reference_directory;
+  auto runner = std::make_shared<FakeRunner>("defer-idle");
+  // Synchronous Save is the unchanged immediate-serialization byte reference.
+  {
+    ContinuationDiskStore reference(StoreOptions(reference_directory.path()));
+    Expect(SaveTokens(reference, *runner, {1, 2}, *MakeSnapshot(*runner, 42, 2))
+               .stored,
+           "immediate reference is stored");
+  }
+  std::binary_semaphore entered(0);
+  runner->before_stream = [&] { entered.release(); };
+  ContinuationDiskStore store(StoreOptions(directory.path()));
+  {
+    auto active = store.BeginGeneration();
+    {
+      auto second_active = store.BeginGeneration();
+      Expect(store.SaveAsync(runner, {1, 2}, MakeSnapshot(*runner, 42, 2)) != 0,
+             "busy generation admits persistence");
+      if (DiskDeferExpected())
+        Expect(!entered.try_acquire_for(std::chrono::milliseconds(100)),
+               "serialization cannot begin during active decode");
+      else
+        Expect(entered.try_acquire_for(std::chrono::seconds(2)),
+               "unset/0 retain immediate serialization despite active decode");
+    }
+    if (DiskDeferExpected())
+      Expect(!entered.try_acquire_for(std::chrono::milliseconds(100)),
+             "one remaining generation still gates serialization");
+  }
+  if (DiskDeferExpected())
+    Expect(entered.try_acquire_for(std::chrono::seconds(2)),
+           "serialization begins when the last generation becomes idle");
+  store.Flush();
+  const auto files = CacheFiles(directory.path());
+  const auto reference_files = CacheFiles(reference_directory.path());
+  Expect(files.size() == 1 && reference_files.size() == 1,
+         "both modes persist exactly one file");
+  const auto read = [](const auto& path) {
+    std::ifstream input(path, std::ios::binary);
+    Expect(input.good(), "persisted file is readable");
+    return std::vector<char>(std::istreambuf_iterator<char>(input), {});
+  };
+  Expect(
+      read(files.front()) == read(reference_files.front()),
+      "deferred/immediate complete persisted bytes equal the same reference");
+}
+
+void TestDeferredPersistenceDeadline() {
+  TemporaryDirectory directory;
+  auto runner = std::make_shared<FakeRunner>("defer-deadline");
+  std::binary_semaphore entered(0);
+  runner->before_stream = [&] { entered.release(); };
+  auto options = StoreOptions(directory.path());
+  options.defer_max_wait = std::chrono::milliseconds(250);
+  ContinuationDiskStore store(options);
+  auto active = store.BeginGeneration();
+  const auto start = std::chrono::steady_clock::now();
+  Expect(store.SaveAsync(runner, {1, 2}, MakeSnapshot(*runner, 42, 2)) != 0,
+         "bounded busy write is admitted");
+  if (DiskDeferExpected()) {
+    Expect(!entered.try_acquire_for(std::chrono::milliseconds(50)),
+           "deadline does not bypass the initial busy gate");
+  }
+  Expect(entered.try_acquire_for(std::chrono::seconds(2)),
+         "deadline starts serialization even while generation stays active");
+  if (DiskDeferExpected())
+    Expect(std::chrono::steady_clock::now() - start >= options.defer_max_wait,
+           "deadline is measured from admission, without early expiry");
+  store.Flush();
+  Expect(store.entry_count() == 1, "deadline does not discard persistence");
+}
+
+void TestDeferredPersistencePressure() {
+  for (const bool capture_pressure : {false, true}) {
+    TemporaryDirectory directory;
+    auto runner = std::make_shared<FakeRunner>("defer-pressure");
+    std::binary_semaphore entered(0), release(0);
+    bool first = true;
+    runner->before_stream = [&] {
+      if (std::exchange(first, false)) {
+        entered.release();
+        release.acquire();
+      }
+    };
+    const auto bytes = ExpectedFileBytes(
+        runner->Descriptor().persistence->compatibility_identity.size(), 2);
+    ContinuationDiskStore store(
+        StoreOptions(directory.path(), 4096, 2 * bytes));
+    auto active = store.BeginGeneration();
+    Expect(
+        store.SaveAsync(runner, {1, 2}, MakeSnapshot(*runner, 42, 2)) == bytes,
+        "first pressure payload is queued");
+    if (DiskDeferExpected())
+      Expect(!entered.try_acquire_for(std::chrono::milliseconds(50)),
+             "partial staging still defers busy materialization");
+    std::unique_ptr<ContinuationDiskStore::CaptureReservation> reservation;
+    if (capture_pressure) {
+      reservation = store.ReserveCapture(*runner, 2, kFakePayloadBytes);
+      Expect(reservation != nullptr, "capture fills remaining staging");
+    } else {
+      Expect(store.SaveAsync(runner, {3, 4}, MakeSnapshot(*runner, 43, 2)) ==
+                 bytes,
+             "second queued payload fills remaining staging");
+    }
+    Expect(entered.try_acquire_for(std::chrono::seconds(2)),
+           "full queued/capture staging bypasses the idle gate");
+    Expect(
+        !store.CanSave(*runner, 2, kFakePayloadBytes) &&
+            !store.ReserveCapture(*runner, 2, kFakePayloadBytes) &&
+            store.SaveAsync(runner, {5, 6}, MakeSnapshot(*runner, 44, 2)) == 0,
+        "deferred and active bytes retain the original staging bound");
+    reservation.reset();
+    release.release();
+    store.Flush();
+    Expect(store.entry_count() == (capture_pressure ? 1U : 2U) &&
+               store.CanSave(*runner, 2, kFakePayloadBytes),
+           "accepted payloads persist and release staging after completion");
+  }
+}
+
+void TestDeferredPersistenceFlushAndShutdown() {
+  for (const bool explicit_flush : {false, true}) {
+    TemporaryDirectory directory;
+    auto runner = std::make_shared<FakeRunner>("defer-drain");
+    std::binary_semaphore entered(0);
+    runner->before_stream = [&] { entered.release(); };
+    auto store =
+        std::make_unique<ContinuationDiskStore>(StoreOptions(directory.path()));
+    {
+      auto active = store->BeginGeneration();
+      Expect(
+          store->SaveAsync(runner, {1, 2}, MakeSnapshot(*runner, 42, 2)) != 0,
+          "drain payload is admitted");
+      if (DiskDeferExpected())
+        Expect(!entered.try_acquire_for(std::chrono::milliseconds(50)),
+               "drain starts with a deferred payload");
+      if (explicit_flush) {
+        auto drained = std::async(std::launch::async, [&] { store->Flush(); });
+        Expect(drained.wait_for(std::chrono::seconds(2)) ==
+                   std::future_status::ready,
+               "Flush bypasses deferral even while generation remains active");
+        drained.get();
+        Expect(store->entry_count() == 1,
+               "Flush persists the deferred payload");
+      }
+    }  // Token must end before the store; idle notification may race shutdown.
+    const auto start = std::chrono::steady_clock::now();
+    store.reset();
+    Expect(std::chrono::steady_clock::now() - start < std::chrono::seconds(2),
+           "shutdown drains without waiting for the ten-second deadline");
+    ContinuationDiskStore restarted(StoreOptions(directory.path()));
+    auto state = runner->CreateState();
+    Expect(
+        RestoreTokens(restarted, *runner, *state, {1, 2, 3}).restored &&
+            RequireFakeState(*state).value == 42,
+        "shutdown loses no deferred persist and bytes restore after restart");
+  }
+}
+
 void TestIndexedPrefixLookup() {
   TemporaryDirectory directory;
   FakeRunner runner("prefix-index");
@@ -1250,6 +1417,10 @@ void TestMinimumCheckpointStep() {
 int main() {
   // Lead 1 (learned shared-prefix boundaries rounded down to a multiple of 256) is off in these tests: they assert exact tiny boundaries.
   ::setenv("GUFO_DISK_BOUNDARY_ALIGN", "0", 1);
+  TestDeferredPersistenceIdleAndBytes();
+  TestDeferredPersistenceDeadline();
+  TestDeferredPersistencePressure();
+  TestDeferredPersistenceFlushAndShutdown();
   TestAppendedImagePrefixesSurviveRestart();
   TestBoundedAsyncPersistenceDoesNotBlockLookup();
   TestIndexedPrefixLookup();

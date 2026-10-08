@@ -40,6 +40,14 @@
 namespace gufo::server {
 namespace {
 
+bool DiskDeferEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("GUFO_DISK_DEFER");
+    return value && std::strcmp(value, "1") == 0;
+  }();
+  return enabled;
+}
+
 TextRunnerDescriptor DescriptorForInput(
     const TextModelRunner& runner,
     std::span<const std::uint8_t> input_identity) {
@@ -570,6 +578,7 @@ struct ContinuationDiskStore::Impl {
     std::vector<std::uint8_t> identity;
     std::size_t retained_bytes;
     bool shared_prefix{false};
+    std::chrono::steady_clock::time_point enqueued;
   };
 
   Impl(ContinuationDiskStoreOptions store_options, EventSink sink,
@@ -611,6 +620,22 @@ struct ContinuationDiskStore::Impl {
                            [this] { return stopping || !pending.empty(); });
         if (pending.empty())
           return;
+        if (defer_enabled) {
+          const auto deadline =
+              pending.front().enqueued + options.defer_max_wait;
+          while (!stopping && flush_waiters == 0 &&
+                 active_generations.load(std::memory_order_acquire) != 0 &&
+                 queued_bytes + capture_bytes->load(std::memory_order_relaxed) <
+                     std::min(options.capacity_bytes,
+                              options.staging_capacity_bytes) &&
+                 std::chrono::steady_clock::now() < deadline) {
+            // No queue lock on request entry/exit. Polling also covers a
+            // notification arriving between the atomic load and the wait.
+            queue_changed.wait_until(
+                lock, std::min(deadline, std::chrono::steady_clock::now() +
+                                             std::chrono::milliseconds(5)));
+          }
+        }
         job = std::move(pending.front());
         pending.pop_front();
       }
@@ -1499,6 +1524,9 @@ struct ContinuationDiskStore::Impl {
   std::size_t queued_bytes{0};
   std::shared_ptr<std::atomic<std::size_t>> capture_bytes =
       std::make_shared<std::atomic<std::size_t>>(0);
+  const bool defer_enabled{DiskDeferEnabled()};
+  std::atomic<std::size_t> active_generations{0};
+  std::size_t flush_waiters{0};
   bool stopping{false};
   std::thread writer;
 };
@@ -1510,6 +1538,24 @@ ContinuationDiskStore::ContinuationDiskStore(
                                    std::move(key_hash))) {}
 
 ContinuationDiskStore::~ContinuationDiskStore() = default;
+
+ContinuationDiskStore::GenerationActivity::GenerationActivity(Impl* owner)
+    : owner_(owner) {
+  if (owner_)
+    owner_->active_generations.fetch_add(1, std::memory_order_acq_rel);
+}
+
+ContinuationDiskStore::GenerationActivity::~GenerationActivity() {
+  if (owner_) {
+    owner_->active_generations.fetch_sub(1, std::memory_order_acq_rel);
+    owner_->queue_changed.notify_all();
+  }
+}
+
+ContinuationDiskStore::GenerationActivity
+ContinuationDiskStore::BeginGeneration() {
+  return GenerationActivity(impl_->defer_enabled ? impl_.get() : nullptr);
+}
 
 ContinuationDiskStore::CaptureReservation::~CaptureReservation() {
   counter_->fetch_sub(bytes_, std::memory_order_relaxed);
@@ -1579,9 +1625,11 @@ std::size_t ContinuationDiskStore::SaveAsync(
     if (!impl_->CanStage(charge, snapshot->PayloadBytes(),
                          checkpoint_tokens.size()))
       return 0;
-    impl_->pending.push_back({std::move(runner), std::move(checkpoint_tokens),
-                              std::move(snapshot), std::move(input_identity),
-                              charge, shared_prefix});
+    impl_->pending.push_back(
+        {std::move(runner), std::move(checkpoint_tokens), std::move(snapshot),
+         std::move(input_identity), charge, shared_prefix,
+         impl_->defer_enabled ? std::chrono::steady_clock::now()
+                              : std::chrono::steady_clock::time_point{}});
     impl_->queued_bytes += charge;
   }
   impl_->queue_changed.notify_one();
@@ -1590,7 +1638,13 @@ std::size_t ContinuationDiskStore::SaveAsync(
 
 void ContinuationDiskStore::Flush() {
   std::unique_lock lock(impl_->queue_mutex);
+  if (impl_->defer_enabled) {
+    ++impl_->flush_waiters;
+    impl_->queue_changed.notify_all();
+  }
   impl_->queue_changed.wait(lock, [this] { return impl_->queued_bytes == 0; });
+  if (impl_->defer_enabled)
+    --impl_->flush_waiters;
 }
 
 ContinuationDiskStore::SaveResult ContinuationDiskStore::Save(

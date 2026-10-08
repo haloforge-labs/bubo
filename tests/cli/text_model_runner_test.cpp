@@ -754,6 +754,64 @@ bool DiskInPassExpected() {
   return value == nullptr || std::string_view(value) != "0";
 }
 
+void TestDiskDeferRequestLifetime() {
+  const char* value = std::getenv("GUFO_DISK_DEFER");
+  const bool deferred = value && std::string_view(value) == "1";
+  for (const int finish : {0, 1, 2, 3}) {
+    TemporaryDirectory directory;
+    auto stats = std::make_shared<FakeStats>();
+    auto runner = std::make_shared<PersistentInPassRunner>(stats, "disk-defer");
+    std::binary_semaphore entered(0);
+    runner->before_serialize = [&] { entered.release(); };
+    {
+      TextRunnerPool pool(
+          runner, 1,
+          TextRunnerDiskCacheOptions{.directory = directory.path(),
+                                     .capacity_bytes = 4096,
+                                     .staging_capacity_bytes = 4096});
+      {
+        auto request = pool.Acquire({1, 2, 3, 40, 41}, {}, {}, {}, true, 3);
+        while (!request.Prefill(64).decode_ready) {
+        }
+        if (deferred)
+          Expect(!entered.try_acquire_for(std::chrono::milliseconds(100)),
+                 "resident request gates its in-pass payload before decode");
+        else
+          Expect(entered.try_acquire_for(std::chrono::seconds(2)),
+                 "default worker serializes during resident generation");
+        (void)request.SelectNext();
+        request.Advance();
+        if (deferred)
+          Expect(!entered.try_acquire_for(std::chrono::milliseconds(100)),
+                 "request stays active through decode and between steps");
+        // Unique Impl ownership follows Request moves; all exits release it.
+        auto moved = std::move(request);
+        if (finish == 0)
+          (void)moved.Commit();
+        else if (finish == 1)
+          (void)moved.Cancel();
+        else if (finish == 2)
+          moved.Invalidate();
+        // finish == 3 tests ordinary destruction with queued storage retained.
+      }
+      if (deferred)
+        Expect(entered.try_acquire_for(std::chrono::seconds(2)),
+               "commit/cancel/invalidate/destruction release the worker gate");
+    }  // Store drains after the request has released its activity token.
+    gufo::server::ContinuationDiskStore restarted(
+        gufo::server::ContinuationDiskStoreOptions{
+            .directory = directory.path(),
+            .capacity_bytes = 4096,
+            .staging_capacity_bytes = 4096});
+    auto state = runner->CreateState();
+    const std::vector<TextRunnerToken> prompt{1, 2, 3, 50, 51};
+    Expect(
+        restarted.RestoreLongestPrefix(*runner, *state, prompt).token_count ==
+            3,
+        "deferred snapshot survives live append and request teardown");
+  }
+}
+
 std::vector<std::vector<std::uint8_t>> DiskImages(
     const std::filesystem::path& directory) {
   std::vector<std::vector<std::uint8_t>> images;
@@ -2526,9 +2584,16 @@ void TestServerInstructionsAreFraming() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
   // Lead 1 (learned shared-prefix boundaries rounded down to a multiple of 256) is off in these tests: they assert exact tiny boundaries.
   ::setenv("GUFO_DISK_BOUNDARY_ALIGN", "0", 1);
+  // Dedicated opt-in invocation preserves the old suite's immediate-worker
+  // timing assertions. Run the unchanged full suite with DEFER unset/0 too.
+  if (argc == 2 && std::string_view(argv[1]) == "--disk-defer-only") {
+    TestDiskDeferRequestLifetime();
+    std::cout << "disk defer request tests passed\n";
+    return 0;
+  }
   TestServerInstructionsAreFraming();
   // The cache warning assertion in this binary matches the plain "[WARN]
   // [cache]" text captured from a redirected sink; a TTY stderr tints it.

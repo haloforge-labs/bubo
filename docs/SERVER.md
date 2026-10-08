@@ -426,6 +426,18 @@ the complete-prompt snapshot also uses borrowed rows; the disk worker owns
 the snapshot until existing byte materialization finishes. This setting has
 no effect without `--cache-disk`. Qualify byte identity and performance before
 deploying the disk extension; the previous measured results predate it.
+`GUFO_DISK_DEFER` is read once when the disk store is created. Unset or `0`
+keeps immediate worker serialization; exact `1` delays queued serialization
+while any request in that runner pool is resident (including prefill and gaps
+between decode steps). The worker starts when idle, after 10 seconds from
+enqueue, or when queued writes plus capture reservations fill the staging
+budget. Flush and shutdown drain accepted writes without the idle delay.
+Already started copies continue if a new request arrives; deadline or staging
+pressure can also allow overlap. The bound limits added waiting, not existing
+writer backlog or I/O time. Borrowed/private device storage may stay pinned
+longer within the existing logical staging budget. Payload bytes remain
+unchanged, and RAM caching and serving without `--cache-disk` are unaffected.
+Restart to change this setting; qualify payload identity and decode timing.
 `--cache-disk-staging-bytes 0` (the default) selects the smaller of one eighth
 of available host RAM after model/session loading (including cgroup limits) and
 the disk budget. This bounds queued captures/writes and each disk read
