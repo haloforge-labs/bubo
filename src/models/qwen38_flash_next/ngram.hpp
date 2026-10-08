@@ -26,6 +26,7 @@ struct NgramHistory {
   std::array<std::int32_t, Config::kMaxPleNgram - 1> prev{kNone, kNone};
 
   void Reset() noexcept { prev.fill(kNone); }
+  bool operator==(const NgramHistory&) const = default;
 };
 
 /// Computes the table rows every token gathers: `ple_heads` rows per token,
@@ -62,6 +63,12 @@ public:
                                std::span<float> out,
                                TableReadCounters* diagnostic = nullptr);
   [[nodiscard]] bool WaitRead();
+  [[nodiscard]] DiagClock::time_point DiagnosticReadStarted() const {
+    return read_started_;
+  }
+  [[nodiscard]] DiagClock::time_point DiagnosticReadFinished() const {
+    return read_finished_;
+  }
   [[nodiscard]] double DiagnosticFetchElapsedUs() const {
     return DiagMicroseconds(read_finished_ - read_started_);
   }

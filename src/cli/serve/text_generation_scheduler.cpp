@@ -1170,7 +1170,15 @@ struct TextGenerationScheduler::Impl {
           request->decode_due = true;
           decoding.push_back(std::move(request));
         } else {
-          prefilling.push_back(std::move(request));
+          // The last-served prefill just moved to the back of its round.
+          // Give an arrival its first turn before repeating that work, while
+          // retaining the order of peers that have already been waiting.
+          auto next = prefilling.end();
+          if (!prefilling.empty() &&
+              prefilling.back()->id == last_prefill_request_id) {
+            --next;
+          }
+          prefilling.insert(next, std::move(request));
         }
       } catch (...) {
         CompleteFailure(request, std::current_exception());
@@ -1179,7 +1187,7 @@ struct TextGenerationScheduler::Impl {
   }
 
   void StepPrefill(const std::shared_ptr<ScheduledRequest>& request,
-                   bool decoder_runnable, bool snapshot_pending = false) {
+                   bool decoder_runnable, bool peer_waiting = false) {
     try {
       if (CompleteIfStopped(request)) {
         return;
@@ -1187,11 +1195,11 @@ struct TextGenerationScheduler::Impl {
 
       request->phase.store(TextRequestPhase::kPrefilling,
                            std::memory_order_release);
-      // A published first token is also latency-sensitive while its frozen
-      // prompt is being captured. Bound other prefill work so we can poll
-      // that capture promptly. Spare slots alone do not change lone prefill.
-      const bool bounded_prefill = incremental_prefill_supported &&
-                                   (decoder_runnable || snapshot_pending);
+      last_prefill_request_id = request->id;
+      // Bound work for short waiting prefills and captures as well as decoders.
+      // Long prefills alone retain the model's efficient chunk size.
+      const bool bounded_prefill =
+          incremental_prefill_supported && (decoder_runnable || peer_waiting);
       const std::size_t budget = bounded_prefill
                                      ? prefill_policy.decode_active_tokens
                                      : request->runner_request.prompt_tokens();
@@ -1935,6 +1943,9 @@ struct TextGenerationScheduler::Impl {
       const bool assemble_initial_batch =
           preparing_multi_token_batch &&
           consecutive_active_prefill_chunks == 0 &&
+          prefilling.front()->runner_request.prompt_tokens() -
+                  prefilling.front()->runner_request.prefill_position() <=
+              prefill_policy.decode_active_tokens &&
           std::all_of(decoding.begin(), decoding.end(),
                       [](const auto& request) {
                         return request->result.tokens.empty();
@@ -1990,7 +2001,13 @@ struct TextGenerationScheduler::Impl {
 
       auto request = std::move(prefilling.front());
       prefilling.pop_front();
-      StepPrefill(request, false, !capturing.empty());
+      const bool short_peer_waiting = std::any_of(
+          prefilling.begin(), prefilling.end(), [&](const auto& peer) {
+            return peer->runner_request.prompt_tokens() -
+                       peer->runner_request.prefill_position() <=
+                   prefill_policy.decode_active_tokens;
+          });
+      StepPrefill(request, false, !capturing.empty() || short_peer_waiting);
       if (!IsTerminal(request)) {
         if (request->runner_request.SnapshotPending()) {
           capturing.push_back(std::move(request));
@@ -2031,6 +2048,7 @@ struct TextGenerationScheduler::Impl {
           TextGenerationErrorCode::kDeviceLost, kDeviceLostMessage));
   std::vector<std::shared_ptr<ScheduledRequest>> device_lost_requests;
   std::size_t consecutive_active_prefill_chunks{0};
+  std::uint64_t last_prefill_request_id{0};
   std::atomic<std::uint64_t> next_request_id{1};
   std::jthread worker;
 };

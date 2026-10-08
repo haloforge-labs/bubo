@@ -1468,6 +1468,83 @@ void TestMultiResidentPrefillUsesBoundedWorkUnits() {
   }
 }
 
+void TestArrivalDoesNotWaitForAnotherLongChunk() {
+  for (const bool speculative : {false, true}) {
+    auto control = std::make_shared<FakeControl>();
+    control->multi_token_decode = speculative;
+    control->batched_multi_token_decode = speculative;
+    control->supports_batched_advance = speculative;
+    control->prefill_capacity = 4;
+    control->block_prefill_label = 1;
+    auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
+    auto long_request = scheduler->Submit(
+        {1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}, 4, 0.0F);
+    control->WaitForPrefill(1);
+    auto short_request = scheduler->Submit({2}, 1, 0.0F);
+    control->ReleasePrefill();
+    Expect(short_request.Wait().tokens == ExpectedTokens(2, 1),
+           "the arrival produces its independent first token");
+    Expect(long_request.Wait().tokens == ExpectedTokens(1, 4),
+           "the interrupted prefill retains its trajectory");
+    const auto events = control->Events();
+    const auto second_long = EventIndex(events, EventKind::kPrefill, 1, 1);
+    Expect(EventIndex(events, EventKind::kPrefill, 2) < second_long,
+           "a newcomer prefills before another chunk of the previous request");
+    Expect(EventIndex(events, EventKind::kAdvance, 2) < second_long,
+           "a ready short request does not wait to batch with a distant peer");
+  }
+}
+
+void TestLongPrefillsKeepWideFairTurns() {
+  auto control = std::make_shared<FakeControl>();
+  control->prefill_capacity = 4;
+  control->block_prefill_label = 1;
+  auto scheduler = MakeScheduler(control, 2, {.decode_active_tokens = 2});
+  auto first = scheduler->Submit(
+      {1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}, 2, 0.0F);
+  control->WaitForPrefill(1);
+  auto second = scheduler->Submit(
+      {2, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30}, 2, 0.0F);
+  control->ReleasePrefill();
+  Expect(first.Wait().tokens == ExpectedTokens(1, 2) &&
+             second.Wait().tokens == ExpectedTokens(2, 2),
+         "interleaved prefills preserve both outputs");
+  const auto events = control->Events();
+  const auto a = EventIndex(events, EventKind::kPrefill, 1, 1);
+  const auto b = EventIndex(events, EventKind::kPrefill, 2);
+  const auto next_b = EventIndex(events, EventKind::kPrefill, 2, 1);
+  Expect(b < a && a < next_b,
+         "the newcomer gets one turn, then the older prefill progresses");
+  Expect(
+      events[a].count == 4 && events[b].count == 4 && events[next_b].count == 4,
+      "long waiting prefills keep wide chunks before any decoder is ready");
+}
+
+void TestShortArrivalBehindWaitingPrefill() {
+  auto control = std::make_shared<FakeControl>();
+  control->prefill_capacity = 4;
+  control->block_prefill_label = 1;
+  auto scheduler = MakeScheduler(control, 3, {.decode_active_tokens = 2});
+  auto first = scheduler->Submit(
+      {1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}, 2, 0.0F);
+  control->WaitForPrefill(1);
+  auto second = scheduler->Submit({2, 20, 21, 22, 23, 24, 25, 26}, 2, 0.0F);
+  auto short_request = scheduler->Submit({3}, 1, 0.0F);
+  control->ReleasePrefill();
+  Expect(first.Wait().tokens == ExpectedTokens(1, 2) &&
+             second.Wait().tokens == ExpectedTokens(2, 2) &&
+             short_request.Wait().tokens == ExpectedTokens(3, 1),
+         "three independent requests preserve their outputs");
+  const auto events = control->Events();
+  const auto second_start = EventIndex(events, EventKind::kPrefill, 2);
+  Expect(events[second_start].count == 2,
+         "a long peer gets bounded work ahead of a waiting short request");
+  Expect(second_start < EventIndex(events, EventKind::kPrefill, 3) &&
+             EventIndex(events, EventKind::kAdvance, 3) <
+                 EventIndex(events, EventKind::kPrefill, 1, 1),
+         "the short newcomer gets its first token without repeating the round");
+}
+
 void TestDecodeActivePrefillIsBounded(bool multi_token, bool batched) {
   auto control = std::make_shared<FakeControl>();
   control->multi_token_decode = multi_token;
@@ -3828,6 +3905,9 @@ int main(int argc, char** argv) {
   TestBatchFailureIsolation();
   TestBatchDeviceLossFailsSuccessfulPeers();
   TestMultiResidentPrefillUsesBoundedWorkUnits();
+  TestArrivalDoesNotWaitForAnotherLongChunk();
+  TestLongPrefillsKeepWideFairTurns();
+  TestShortArrivalBehindWaitingPrefill();
   for (const bool multi_token : {false, true}) {
     for (const bool batched : {false, true}) {
       if (batched && !multi_token)

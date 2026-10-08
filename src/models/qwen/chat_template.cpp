@@ -16,6 +16,7 @@
 
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/gguf_reader.hpp"
+#include "src/models/qwen/control_tokens.hpp"
 #include "src/models/qwen/tokenizer.hpp"
 
 namespace gufo::tokenization {
@@ -460,10 +461,10 @@ std::optional<std::string> QwenChatTemplate::Render(
   for (const auto& span : system_content_spans)
     system_spans.push_back({system_content_offset + span.offset, span.size});
   if (!system_prefix.empty()) {
-    output.append("<|im_start|>system\n");
+    output.append(kImStart).append("system\n");
     const auto prefix_offset = output.size();
     output.append(system_prefix);
-    output.append("<|im_end|>\n");
+    output.append(kImEnd).append("\n");
     if (content_spans != nullptr) {
       for (const auto& span : system_spans)
         content_spans->push_back({prefix_offset + span.offset, span.size});
@@ -507,7 +508,7 @@ std::optional<std::string> QwenChatTemplate::Render(
     const auto& msg = messages[message_index];
     const bool tool_result = msg.role == ChatRole::kTool;
     if (tool_result) {
-      output.append("<|im_start|>user\n");
+      output.append(kImStart).append("user\n");
       while (message_index < messages.size() &&
              messages[message_index].role == ChatRole::kTool) {
         const auto& tool_message = messages[message_index];
@@ -521,7 +522,7 @@ std::optional<std::string> QwenChatTemplate::Render(
         }
       }
       --message_index;
-      output.append("<|im_end|>\n");
+      output.append(kImEnd).append("\n");
       continue;
     }
     // Current tool-cycle assistants retain their reasoning even when older
@@ -536,7 +537,7 @@ std::optional<std::string> QwenChatTemplate::Render(
              message_index == last_user_index)
       final_user_start = output.size();
     const auto role_name = ToString(msg.role);
-    output.append("<|im_start|>");
+    output.append(kImStart);
     output.append(role_name);
     output.push_back('\n');
 
@@ -552,9 +553,9 @@ std::optional<std::string> QwenChatTemplate::Render(
         ++image_count;
         if (options.add_vision_id)
           image_content.append("Picture " + std::to_string(image_count) + ": ");
-        image_content.append("<|vision_start|>");
+        image_content.append(kVisionStart);
         local_image_offsets.push_back(image_content.size());
-        image_content.append("<|image_pad|><|vision_end|>");
+        image_content.append(kImagePad).append(kVisionEnd);
         cursor = image.offset;
       }
       AppendContent(image_content, &image_spans,
@@ -600,7 +601,7 @@ std::optional<std::string> QwenChatTemplate::Render(
       }
       AppendToolCalls(output, msg.tool_calls, content_spans);
     }
-    output.append("<|im_end|>\n");
+    output.append(kImEnd).append("\n");
 
     if (output.size() > options.max_output_bytes) {
       if (error_msg != nullptr) {
@@ -628,8 +629,15 @@ std::optional<std::string> QwenChatTemplate::Render(
 }
 
 std::string_view GenerationPrompt(bool enable_thinking) {
-  return enable_thinking ? "<|im_start|>assistant\n<think>\n"
-                         : "<|im_start|>assistant\n<think>\n\n</think>\n\n";
+  static constexpr std::string_view kThinkingSuffix = "assistant\n<think>\n";
+  static constexpr std::string_view kAnsweredSuffix =
+      "assistant\n<think>\n\n</think>\n\n";
+  static constexpr auto kThinking =
+      ConcatControlText<kImStart, kThinkingSuffix>();
+  static constexpr auto kAnswered =
+      ConcatControlText<kImStart, kAnsweredSuffix>();
+  return enable_thinking ? std::string_view(kThinking.data(), kThinking.size())
+                         : std::string_view(kAnswered.data(), kAnswered.size());
 }
 
 std::optional<std::vector<TokenId>> QwenChatTemplate::RenderAndTokenize(

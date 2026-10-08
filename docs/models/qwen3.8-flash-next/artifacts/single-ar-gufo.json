@@ -1,5 +1,9 @@
 {
   "artifactType": "model-bench-table",
+  "conditions": {
+    "powerProfile": "performance",
+    "profileVerifiedThroughoutSweep": true
+  },
   "fingerprint": {
     "canonical": {
       "cppStandard": "C++20",
@@ -14,15 +18,15 @@
       "gpuName": "AMD Radeon 8060S Graphics",
       "gpuPciId": "1002:1586",
       "kernelRelease": "7.1.8",
-      "memoryTotalBytes": 134309883904,
+      "memoryTotalBytes": 134309888000,
       "memoryType": "LPDDR5X (Unified)",
       "rocmVersion": "7.2.3",
       "schemaVersion": "1.0.0"
     },
-    "fingerprintId": "46337fb568b92fb76472ec90a0af584eb7d7ae401f9878d8d18b09762e7c4caa",
+    "fingerprintId": "4dcf1077494084b2d72ecf90594aad3c844b087618d3db6af2cd796f06cb1c36",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-10-06",
+  "measuredOn": "2026-10-07",
   "mode": null,
   "model": {
     "id": "Qwen3.8-Flash-Next",
@@ -30,16 +34,12 @@
   },
   "notes": [
     "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task is recorded per row; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
-    "synthetic text: 1.161 tokens/word, template overhead 12 tokens",
-    "One warmed valid measurement per depth, without repetitions; out-of-tolerance token-count calibration attempts remain in the raw logs.",
-    "The immutable Nix release binary was built before committing the prefill patch; its production sources match eecb008a and 4c5a00d2. Only tests and documentation changed between those revisions.",
-    "Reference, concurrency, loading and memory measurements were not rerun. Deep AR/MTP HTTP cache frontiers differ by one token; exact numerical replay is qualified separately with identical prefill boundaries in prefill-final-rows.json."
+    "synthetic text: 1.161 tokens/word, template overhead 12 tokens"
   ],
-  "rawArtifactSha256": "e18aab305722ed191caa6a06b9d412e66648f3c8628e236f9254d40ee2f01262",
   "referenceName": "llama.cpp",
   "rows": {
     "0": {
-      "command": "gufo serve --port 57693 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "fix-gufo serve --port 58131 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 0,
@@ -50,15 +50,15 @@
           "prompt_n": 2040
         }
       ],
-      "pp": 1639.03,
+      "pp": 1644.68,
       "pp_sd": null,
       "samples": 1,
-      "tg": 25.96,
+      "tg": 25.99,
       "tg_sd": null,
       "workload": "prose"
     },
     "12288": {
-      "command": "gufo serve --port 57693 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "fix-gufo serve --port 58131 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 12249,
@@ -69,15 +69,15 @@
           "prompt_n": 2047
         }
       ],
-      "pp": 1553.6,
+      "pp": 1560.97,
       "pp_sd": null,
       "samples": 1,
-      "tg": 25.93,
+      "tg": 25.96,
       "tg_sd": null,
       "workload": "prose"
     },
     "131072": {
-      "command": "gufo serve --port 57693 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "fix-gufo serve --port 58131 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 130932,
@@ -88,15 +88,15 @@
           "prompt_n": 2047
         }
       ],
-      "pp": 1444.79,
+      "pp": 1446.1,
       "pp_sd": null,
       "samples": 1,
-      "tg": 24.9,
+      "tg": 24.97,
       "tg_sd": null,
       "workload": "prose"
     },
     "16384": {
-      "command": "gufo serve --port 57693 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "fix-gufo serve --port 58131 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 16324,
@@ -107,15 +107,15 @@
           "prompt_n": 2047
         }
       ],
-      "pp": 1553.97,
+      "pp": 1556.02,
       "pp_sd": null,
       "samples": 1,
-      "tg": 25.89,
+      "tg": 25.93,
       "tg_sd": null,
       "workload": "prose"
     },
     "32768": {
-      "command": "gufo serve --port 57693 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "fix-gufo serve --port 58131 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 32718,
@@ -126,15 +126,15 @@
           "prompt_n": 2029
         }
       ],
-      "pp": 1540.25,
+      "pp": 1546.81,
       "pp_sd": null,
       "samples": 1,
-      "tg": 25.75,
+      "tg": 25.8,
       "tg_sd": null,
       "workload": "prose"
     },
     "4096": {
-      "command": "gufo serve --port 57693 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "fix-gufo serve --port 58131 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 4095,
@@ -145,15 +145,15 @@
           "prompt_n": 2043
         }
       ],
-      "pp": 1564.36,
+      "pp": 1518.57,
       "pp_sd": null,
       "samples": 1,
-      "tg": 25.96,
+      "tg": 25.73,
       "tg_sd": null,
       "workload": "prose"
     },
     "65536": {
-      "command": "gufo serve --port 57693 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "fix-gufo serve --port 58131 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 65447,
@@ -164,15 +164,15 @@
           "prompt_n": 2058
         }
       ],
-      "pp": 1459.69,
+      "pp": 1425.49,
       "pp_sd": null,
       "samples": 1,
-      "tg": 25.5,
+      "tg": 25.43,
       "tg_sd": null,
       "workload": "prose"
     },
     "8192": {
-      "command": "gufo serve --port 57693 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "command": "fix-gufo serve --port 58131 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
       "counts": [
         {
           "cache_n": 8184,
@@ -183,10 +183,10 @@
           "prompt_n": 2048
         }
       ],
-      "pp": 1557.47,
+      "pp": 1567.32,
       "pp_sd": null,
       "samples": 1,
-      "tg": 25.95,
+      "tg": 25.99,
       "tg_sd": null,
       "workload": "prose"
     }
@@ -194,10 +194,10 @@
   "schemaVersion": 1,
   "server": {
     "command": [
-      "gufo",
+      "fix-gufo",
       "serve",
       "--port",
-      "57693",
+      "58131",
       "--sessions",
       "1",
       "llm",
@@ -214,12 +214,10 @@
     ]
   },
   "source": {
-    "binaryRevision": "eecb008a909ca299c13d1ef773765c7e2e24d395",
-    "binarySha256": "2ebf7a2cf22eae84b0c78bf87bc39adda3336fc59f9ecb4e3f1b7c06227571d4",
-    "buildMode": "nix-release",
+    "binarySha256": "1ea59e9bfb214b5cdd4d4b6bcc896058df43a06f9c5e180086ea6a8d4301ca58",
+    "buildMode": "cmake-release-preset",
     "dirty": false,
-    "flakeLockSha256": "faabad820ec09caab7351bf48910cec895a38cf1766e098e3065aea86f405ed6",
-    "revision": "4c5a00d2d609846cb73e79aa33de324624aa9c2c"
+    "revision": "def2ed1e904f912e69550344aa7c13a99f535d0e"
   },
   "table": "single-ar",
   "target": "gufo"

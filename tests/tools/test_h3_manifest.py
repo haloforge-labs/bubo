@@ -15,7 +15,7 @@ from unittest import mock
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT / "tools"))
 
-from gufo import h3_manifest, safetensors  # noqa: E402
+from gufo import control_tokens, h3_manifest, safetensors  # noqa: E402
 
 
 def write_json(path: Path, value) -> None:
@@ -102,20 +102,9 @@ class H3ManifestFixture:
             }
         })
         write_json(root / "FL2VA/tokenizer/tokenizer_config.json", {
-            "eos_token": "<|im_end|>",
-            "pad_token": "<|endoftext|>",
-            "additional_special_tokens": [
-                "<|im_start|>",
-                "<|im_end|>",
-                "<|vision_start|>",
-                "<|vision_end|>",
-                "<|image_pad|>",
-                "<|video_pad|>",
-                "<|lyrics_start|>",
-                "<|lyrics_end|>",
-                "<|caption_start|>",
-                "<|caption_end|>",
-            ],
+            "eos_token": control_tokens.kImEnd,
+            "pad_token": control_tokens.kEndOfText,
+            "additional_special_tokens": list(control_tokens.H3_SPECIAL_TOKENS),
         })
         write_json(root / "FL2VA/audio_vae/metadata.json", {
             "metadata": {
@@ -190,6 +179,16 @@ class H3ManifestFixture:
 
 
 class H3ManifestTest(unittest.TestCase):
+    def test_control_token_catalogue_keeps_pinned_spellings(self):
+        # These independent bytes were the fixture before catalogue extraction.
+        self.assertEqual(control_tokens.kImEnd, "<|im_end|>")
+        self.assertEqual(control_tokens.kEndOfText, "<|endoftext|>")
+        self.assertEqual(control_tokens.H3_SPECIAL_TOKENS, (
+            "<|im_start|>", "<|im_end|>", "<|vision_start|>", "<|vision_end|>",
+            "<|image_pad|>", "<|video_pad|>", "<|lyrics_start|>", "<|lyrics_end|>",
+            "<|caption_start|>", "<|caption_end|>",
+        ))
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name) / "MiniMax-H3"

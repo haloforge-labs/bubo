@@ -20,7 +20,8 @@ below; none is averaged away or hidden.
 - Flash-Next captures a text prompt's stable boundary inside the final prefill
   pass: GDN recurrent state in both kernel routes, convolution/PLE history,
   kept hidden rows, boundary logits and token/position metadata. The final
-  prefill pass takes up to 128 tokens beyond the normal 2,048-token chunk,
+  prefill pass takes up to 128 tokens beyond the normal 4,096-token chunk
+  (overridden by `GUFO_PREFILL_FORWARD_TOKENS`),
   which absorbs a short assistant suffix and any short prompt tail. Attention queries keep the boundary's grouping. Other
   models, image prompts and intermediate/shared checkpoints keep the split
   path. Disk-enabled text prompts now use the same admitted in-pass capture;

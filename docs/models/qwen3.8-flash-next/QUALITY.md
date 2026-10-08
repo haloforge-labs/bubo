@@ -69,8 +69,9 @@ weights. [Vision reproduction](../qwen3.8-27b/QUALITY.md#vision).
 
 ## Benchmark method
 
-Gufo single-user pp/tg refreshed October 6, 2026 (`4c5a00d2`); reference,
-concurrency, loading and memory measurements retain September 22–23 provenance.
+Gufo single-user pp/tg refreshed October 7, 2026 (`def2ed1e`), Performance power
+profile. Reference, concurrency, loading and memory retain September 22–23
+provenance.
 One warmed sample per point, greedy, thinking off, penalties disabled.
 Single-user uses pp2048/tg128; MTP pp is the maximum across mixed/repetitive
 workloads. Gufo capacity is 133760; reference capacity is 35456 through 32K,

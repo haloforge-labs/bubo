@@ -7,6 +7,7 @@
 #include <string_view>
 
 #include "src/core/crypto/sha256.hpp"
+#include "src/models/qwen/control_tokens.hpp"
 
 namespace gufo::models::qwen::vision {
 namespace {
@@ -307,7 +308,7 @@ Prompt Prepare(const tokenization::QwenTokenizer& tokenizer,
       prompt.tokens.insert(prompt.tokens.end(), count, kImageToken);
       prompt.rope.images.push_back(grid);
       prompt.images.push_back({std::move(pixels), grid, identity.Digest()});
-      cursor = offsets[index++] + std::string_view("<|image_pad|>").size();
+      cursor = offsets[index++] + tokenization::kImagePad.size();
     }
   }
   append(cursor, rendered->size());

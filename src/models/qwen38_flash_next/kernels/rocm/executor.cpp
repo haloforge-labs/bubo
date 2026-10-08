@@ -1013,7 +1013,7 @@ Executor::~Executor() {
   if (model_ != nullptr && model_->has_shadow()) PrintShadowStats();
   // Readers write pinned staging memory; drain them before freeing it,
   // including when a forward failed before reaching PLE.
-  if (ple_pending_) {
+  if (ple_pending_ || prefetch_.pending) {
     (void)ngram_->WaitRead();
   }
   (void)hipFree(batch_logits_);
@@ -1120,33 +1120,63 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   s.xn_half = Alloc<__half>(a, T * hc_dim, error_msg);
   s.xn_q8t = Alloc<std::uint8_t>(a, Q8TiledBytes(T, hc_dim), error_msg);
   s.lo = f32(T * c.hc_low_rank);
-  s.hc_gate = f32(T * hc_dim);
   s.mixed = f32(T * hidden);
   s.inject = f32(T * c.hc_count * HcInjectParts(hidden));
   s.block_out = f32(T * hidden);
-  // Stacked and separate SSM projections are mutually exclusive. MTP's
-  // projected embedding is consumed before attention and reuses this space.
-  s.qkvz = f32(T * std::max<std::size_t>({c.SsmConvChannels() + c.SsmValueDim(),
-                                          c.ple_layer >= 0 ? hc_dim : 0}));
-  s.qkv = s.qkvz;
-  s.z = s.qkvz != nullptr ? s.qkvz + T * c.SsmConvChannels() : nullptr;
-  s.alpha_beta = f32(T * 2 * c.ssm_num_v_heads);
-  s.conv_scratch = f32((T + c.ssm_conv_kernel) * c.SsmConvChannels());
-  s.qn = f32(T * c.SsmKeyDim());
-  s.kn = f32(T * c.SsmKeyDim());
-  s.gdn_raw = f32(T * c.SsmValueDim());
-  s.gdn_out = f32(T * c.SsmValueDim());
-  s.qg = f32(T * (2 * c.AttentionQDim() + 2 * c.AttentionKvDim()));
-  s.q = f32(T * c.AttentionQDim());
-  s.attn_gate = f32(T * c.AttentionQDim());
-  s.k = f32(T * c.AttentionKvDim());
-  s.v = f32(T * c.AttentionKvDim());
-  s.iq = f32(T * c.indexer_heads * c.indexer_head_dim);
-  s.ik = f32(T * c.indexer_head_dim);
   const std::uint32_t max_blocks =
       (c.context_length + c.compress_ratio - 1) / c.compress_ratio;
   e->mask_words_ = (max_blocks + 31) / 32;
-  s.mask = Alloc<std::uint32_t>(a, T * e->mask_words_, error_msg);
+  const std::size_t linear_projection = std::max<std::size_t>(
+      c.SsmConvChannels() + c.SsmValueDim(), c.ple_layer >= 0 ? hc_dim : 0);
+  const std::size_t linear_floats =
+      T * (linear_projection + 2 * c.ssm_num_v_heads + 2 * c.SsmKeyDim() +
+           2 * c.SsmValueDim()) +
+      (T + c.ssm_conv_kernel) * c.SsmConvChannels();
+  const std::size_t attention_floats =
+      T * (5 * c.AttentionQDim() + 4 * c.AttentionKvDim() +
+           c.indexer_heads * c.indexer_head_dim + c.indexer_head_dim +
+           e->mask_words_);
+  const std::size_t expert_floats = slots * (2 * c.expert_ff + hidden);
+  // Linear/full attention and routed experts run sequentially on stream_.
+  // Their intermediates die before the next stage, including batched rows,
+  // MTP catch-up and the deferred MoE epilogue consumed by Combine. Keep
+  // stable addresses for graph replay without reserving all three stages.
+  float* const stage =
+      f32(std::max({linear_floats, attention_floats, expert_floats,
+                    T * (linear_projection + hc_dim)}));
+  if (stage == nullptr) {
+    return nullptr;
+  }
+  // Mixer gates die before attention/experts start. PLE also uses this
+  // buffer as its key, so keep it beyond PLE's gated output at stage.
+  s.hc_gate = stage + T * linear_projection;
+  float* cursor = stage;
+  const auto take = [&](std::size_t count) {
+    float* result = cursor;
+    cursor += count;
+    return result;
+  };
+  // Stacked and separate SSM projections are mutually exclusive. MTP's
+  // projected embedding is consumed before attention and reuses this space.
+  s.qkvz = take(T * linear_projection);
+  s.qkv = s.qkvz;
+  s.z = s.qkvz != nullptr ? s.qkvz + T * c.SsmConvChannels() : nullptr;
+  s.alpha_beta = take(T * 2 * c.ssm_num_v_heads);
+  s.conv_scratch = take((T + c.ssm_conv_kernel) * c.SsmConvChannels());
+  s.qn = take(T * c.SsmKeyDim());
+  s.kn = take(T * c.SsmKeyDim());
+  s.gdn_raw = take(T * c.SsmValueDim());
+  s.gdn_out = take(T * c.SsmValueDim());
+  cursor = stage;
+  s.qg = take(T * (2 * c.AttentionQDim() + 2 * c.AttentionKvDim()));
+  s.q = take(T * c.AttentionQDim());
+  s.attn_gate = take(T * c.AttentionQDim());
+  s.k = take(T * c.AttentionKvDim());
+  s.v = take(T * c.AttentionKvDim());
+  s.iq = take(T * c.indexer_heads * c.indexer_head_dim);
+  s.ik = take(T * c.indexer_head_dim);
+  s.mask = reinterpret_cast<std::uint32_t*>(take(T * e->mask_words_));
+  s.ctx = take(T * c.AttentionQDim());
   // Keep score/selection traffic near the device cache size. Captured
   // verification still needs all its rows at the maximum context.
   const std::size_t score_stride = std::size_t{e->mask_words_} * 32;
@@ -1154,7 +1184,6 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
       std::max(kVecBatch * score_stride,
                std::min(std::size_t{5 * 1024 * 1024}, 512 * score_stride));
   s.scores = f32(e->select_score_floats_);
-  s.ctx = f32(T * c.AttentionQDim());
   s.attn_partials = f32(static_cast<std::size_t>(kVecBatch) * c.num_heads *
                         kAttnSplits * (c.head_dim + 2));
   if (c.ple_layer >= 0) {
@@ -1191,9 +1220,10 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
         Alloc<std::int32_t>(a, 3 * RoutedTileCapacity(slots, c), error_msg);
   }
   s.weights = f32(slots);
-  s.gate_e = f32(slots * c.expert_ff);
-  s.up_e = f32(slots * c.expert_ff);
-  s.down_e = f32(slots * hidden);
+  cursor = stage;
+  s.gate_e = take(slots * c.expert_ff);
+  s.up_e = take(slots * c.expert_ff);
+  s.down_e = take(slots * hidden);
   s.shexp_gate = f32(T * c.shared_expert_ff);
   s.shexp_up = f32(T * c.shared_expert_ff);
   s.shexp_out = f32(T * hidden);
@@ -2167,6 +2197,16 @@ bool Executor::PleFetch(Session& session, std::span<const std::int32_t> tokens,
   if (ple_pending_ && !WaitPle(error_msg)) {
     return false;
   }
+  if ((prefetch_.pending || prefetch_.ready) && !speculative &&
+      session.ngram_ == prefetch_.before &&
+      std::ranges::equal(tokens, prefetch_.tokens)) {
+    // These are this batch's rows: WaitPle collects them.
+    session.ngram_ = prefetch_.after;
+    prefetch_.claimed = true;
+    ple_pending_ = true;
+    return true;
+  }
+  FinishPrefetch();
   const Config& c = config();
   const auto n = static_cast<std::uint32_t>(tokens.size());
   // Only proper prefixes need snapshots; the full batch keeps its live state.
@@ -2255,13 +2295,36 @@ bool Executor::WaitPle(std::string* error_msg) const {
   DiagClock::time_point wait_started;
   if (diagnostic_prefill_)
     wait_started = DiagClock::now();
-  const bool ok = ple_pending_ && ngram_->WaitRead();
+  bool ok = ple_pending_;
+  const bool prefetched = ok && prefetch_.claimed;
+  if (prefetched) {
+    FinishPrefetch();
+    ok = prefetch_.ready;
+    if (ok) {
+      std::copy_n(prefetch_.rows.data(),
+                  prefetch_.tokens.size() * config().PleEmbeddingDim(),
+                  host_emb_);
+    }
+    prefetch_.ready = false;
+    prefetch_.claimed = false;
+  } else if (ok) {
+    ok = ngram_->WaitRead();
+  }
   if (diagnostic_prefill_) {
     active_diag_->totals.fetch_wait_us +=
         DiagMicroseconds(DiagClock::now() - wait_started);
-    active_diag_->totals.fetch_elapsed_us = ngram_->DiagnosticFetchElapsedUs();
-    active_diag_->totals.fetch_hidden_us =
-        ngram_->DiagnosticFetchHiddenUs(wait_started);
+    if (prefetched) {
+      active_diag_->totals.TableReadCounters::Add(prefetch_.diagnostic);
+      active_diag_->totals.fetch_elapsed_us =
+          DiagMicroseconds(prefetch_.read_finished - prefetch_.read_started);
+      active_diag_->totals.fetch_hidden_us = std::max(
+          0.0, DiagMicroseconds(std::min(prefetch_.read_finished, wait_started) -
+                               prefetch_.read_started));
+    } else {
+      active_diag_->totals.fetch_elapsed_us = ngram_->DiagnosticFetchElapsedUs();
+      active_diag_->totals.fetch_hidden_us =
+          ngram_->DiagnosticFetchHiddenUs(wait_started);
+    }
     active_diag_->totals.fetch_exposed_us =
         active_diag_->totals.fetch_elapsed_us - active_diag_->totals.fetch_hidden_us;
   }
@@ -2270,6 +2333,42 @@ bool Executor::WaitPle(std::string* error_msg) const {
     AssignError(error_msg, "n-gram table read failed");
   }
   return ok;
+}
+
+void Executor::PrefetchPle(const Session& session,
+                           std::span<const std::int32_t> next) const {
+  const Config& c = config();
+  if (ple_pending_ || prefetch_.pending || next.empty() ||
+      next.size() > options_.max_batch) {
+    return;
+  }
+  // Hashed from the history after this batch, which PleFetch already
+  // advanced; the session keeps it until the next batch claims the rows.
+  prefetch_.ready = false;
+  prefetch_.before = session.ngram_;
+  prefetch_.after = session.ngram_;
+  const std::span<std::uint32_t> rows(host_rows_.data(),
+                                      next.size() * c.ple_heads);
+  HashNgramRows(c, prefetch_.after, next, rows);
+  prefetch_.tokens.assign(next.begin(), next.end());
+  const std::size_t count = next.size() * c.PleEmbeddingDim();
+  if (prefetch_.rows.size() < count) {
+    prefetch_.rows.resize(count);
+  }
+  prefetch_.pending =
+      ngram_->StartRead(rows, std::span<float>(prefetch_.rows.data(), count),
+                        diagnostic_prefill_ ? &prefetch_.diagnostic : nullptr);
+}
+
+void Executor::FinishPrefetch() const {
+  if (prefetch_.pending) {
+    prefetch_.ready = ngram_->WaitRead();
+    if (PrefillDiagEnabled()) {
+      prefetch_.read_started = ngram_->DiagnosticReadStarted();
+      prefetch_.read_finished = ngram_->DiagnosticReadFinished();
+    }
+    prefetch_.pending = false;
+  }
 }
 
 bool Executor::Ple(const DeviceLayer& l, Session& session, std::uint32_t n,
@@ -2284,6 +2383,10 @@ bool Executor::Ple(const DeviceLayer& l, Session& session, std::uint32_t n,
                    hipMemcpyHostToDevice, stream_, "n-gram upload",
                    error_msg))) {
     return false;
+  }
+  if (!embeddings_ready && !prefetch_next_.empty()) {
+    PrefetchPle(session, prefetch_next_);
+    prefetch_next_ = {};
   }
   const std::uint32_t hc_dim = c.HcDim();
   Q8Input emb;
@@ -2539,36 +2642,46 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
              "partial attention output initialization", error_msg)) {
     return false;
   }
+  // Queries before the token budget always take the dense tiles, also in a
+  // batch that crosses it, so each position's key sweep (and its rounding)
+  // does not depend on where the prefill chunks fall. The sparse part goes
+  // first: it is the launch that can be refused.
+  const auto attend = [&](std::uint32_t first, std::uint32_t rows, bool last) {
+    const std::uint32_t pos = start_pos + first;
+    const std::uint32_t dense_rows =
+        mask != nullptr && !last && pos < c.indexer_top_k
+            ? std::min(rows, c.indexer_top_k - pos)
+            : 0;
+    const auto at = [&](std::uint32_t row) {
+      return std::size_t{first + row} * c.AttentionQDim();
+    };
+    return (dense_rows == rows ||
+            WmmaCausalAttention(
+                s_.q + at(dense_rows), s_.attn_gate + at(dense_rows), s.k_cache,
+                s.v_cache,
+                mask ? mask + std::size_t{first + dense_rows} * mask_words_
+                     : nullptr,
+                mask_words_, s_.ctx + at(dense_rows), rows - dense_rows,
+                pos + dense_rows, c.num_heads, c.num_kv_heads, c.head_dim,
+                c.compress_ratio, stream_, last)) &&
+           (dense_rows == 0 ||
+            WmmaCausalAttention(s_.q + at(0), s_.attn_gate + at(0), s.k_cache,
+                                s.v_cache, nullptr, mask_words_, s_.ctx + at(0),
+                                dense_rows, pos, c.num_heads, c.num_kv_heads,
+                                c.head_dim, c.compress_ratio, stream_, false));
+  };
   if (checkpoint_tokens != 0 && checkpoint_tokens < n_tokens) {
     // Sparse tiles compact the union of their queries' selected keys.
     // Keep the checkpoint's query grouping identical to a pass ending there.
-    const auto prefix_sparse =
-        c.compress_ratio > 0 && start_pos + checkpoint_tokens > c.indexer_top_k;
-    const auto tail = n_tokens - checkpoint_tokens;
-    const auto offset = std::size_t{checkpoint_tokens} * c.AttentionQDim();
-    if (!WmmaCausalAttention(s_.q, s_.attn_gate, s.k_cache, s.v_cache,
-                             prefix_sparse ? mask : nullptr, mask_words_,
-                             s_.ctx, checkpoint_tokens, start_pos, c.num_heads,
-                             c.num_kv_heads, c.head_dim, c.compress_ratio,
-                             stream_) ||
-        !WmmaCausalAttention(
-            s_.q + offset, s_.attn_gate + offset, s.k_cache, s.v_cache,
-            mask ? mask + std::size_t{checkpoint_tokens} * mask_words_
-                 : nullptr,
-            mask_words_, s_.ctx + offset, tail, start_pos + checkpoint_tokens,
-            c.num_heads, c.num_kv_heads, c.head_dim, c.compress_ratio,
-            stream_)) {
+    if (!attend(0, checkpoint_tokens, false) ||
+        !attend(checkpoint_tokens, n_tokens - checkpoint_tokens, false)) {
       AssignError(error_msg, "checkpoint attention geometry is unsupported");
       return false;
     }
     return !project_output ||
            Dense(l.attn_out, s_.ctx, out, n_tokens, error_msg);
   }
-  if (MatrixRows(n_tokens) &&
-      WmmaCausalAttention(s_.q, s_.attn_gate, s.k_cache, s.v_cache, mask,
-                          mask_words_, s_.ctx, n_tokens, start_pos, c.num_heads,
-                          c.num_kv_heads, c.head_dim, c.compress_ratio, stream_,
-                          last_only)) {
+  if (MatrixRows(n_tokens) && attend(0, n_tokens, last_only)) {
     return !project_output ||
            Dense(l.attn_out, s_.ctx, out, n_tokens, error_msg);
   }
@@ -2981,12 +3094,21 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
                        std::uint32_t n_logits, float* logits, ForwardMode mode,
                        std::string* error_msg,
                        PrefillCheckpoint* checkpoint,
-                       bool verify_candidates) const {
+                       bool verify_candidates,
+                       std::span<const std::int32_t> next) const {
   verify_candidates_ready_ = 0;
   // Only decode-sized passes may run on the alternate stream.
   if ((mode == ForwardMode::kPrefill || tokens.size() > kVecBatch) &&
       !UsePrimaryStream(error_msg)) {
     return false;
+  }
+  // Only this call's PLE layer may start the prefetch of `next`.
+  struct NextHint {
+    std::span<const std::int32_t>& hint;
+    ~NextHint() { hint = {}; }
+  } next_hint{prefetch_next_};
+  if (mode == ForwardMode::kPrefill) {
+    prefetch_next_ = next;
   }
   const bool speculative = mode == ForwardMode::kVerify;
   PrefillPhase phase(mode == ForwardMode::kPrefill);

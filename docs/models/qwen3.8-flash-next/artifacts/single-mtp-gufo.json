@@ -1,5 +1,9 @@
 {
   "artifactType": "model-bench-table",
+  "conditions": {
+    "powerProfile": "performance",
+    "profileVerifiedThroughoutSweep": true
+  },
   "fingerprint": {
     "canonical": {
       "cppStandard": "C++20",
@@ -14,15 +18,15 @@
       "gpuName": "AMD Radeon 8060S Graphics",
       "gpuPciId": "1002:1586",
       "kernelRelease": "7.1.8",
-      "memoryTotalBytes": 134309883904,
+      "memoryTotalBytes": 134309888000,
       "memoryType": "LPDDR5X (Unified)",
       "rocmVersion": "7.2.3",
       "schemaVersion": "1.0.0"
     },
-    "fingerprintId": "46337fb568b92fb76472ec90a0af584eb7d7ae401f9878d8d18b09762e7c4caa",
+    "fingerprintId": "4dcf1077494084b2d72ecf90594aad3c844b087618d3db6af2cd796f06cb1c36",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-10-06",
+  "measuredOn": "2026-10-07",
   "mode": "mtp",
   "model": {
     "id": "Qwen3.8-Flash-Next",
@@ -30,12 +34,8 @@
   },
   "notes": [
     "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task is recorded per row; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
-    "synthetic text: 1.161 tokens/word, template overhead 12 tokens",
-    "One warmed valid measurement per depth, without repetitions; out-of-tolerance token-count calibration attempts remain in the raw logs.",
-    "The immutable Nix release binary was built before committing the prefill patch; its production sources match eecb008a and 4c5a00d2. Only tests and documentation changed between those revisions.",
-    "Reference, concurrency, loading and memory measurements were not rerun. Deep AR/MTP HTTP cache frontiers differ by one token; exact numerical replay is qualified separately with identical prefill boundaries in prefill-final-rows.json."
+    "synthetic text: 1.161 tokens/word, template overhead 12 tokens"
   ],
-  "rawArtifactSha256": "1def651097763e335a9d036dbe664c18bf3fbdd01d148f3f6bdd2fd7e4e4024b",
   "referenceName": "llama.cpp",
   "rows": {
     "0": {
@@ -43,7 +43,7 @@
       "acceptance_sd": null,
       "accepted_per_step": 0.66,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 45747 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+      "command": "fix-gufo serve --port 46959 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 0,
@@ -54,10 +54,10 @@
           "prompt_n": 2040
         }
       ],
-      "pp": 1584.63,
+      "pp": 1560.11,
       "pp_sd": null,
       "samples": 1,
-      "tg": 31.33,
+      "tg": 30.16,
       "tg_sd": null,
       "workload": "prose"
     },
@@ -66,7 +66,7 @@
       "acceptance_sd": null,
       "accepted_per_step": 0.86,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 45747 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+      "command": "fix-gufo serve --port 46959 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 12250,
@@ -77,10 +77,10 @@
           "prompt_n": 2046
         }
       ],
-      "pp": 1503.9,
+      "pp": 1511.22,
       "pp_sd": null,
       "samples": 1,
-      "tg": 34.72,
+      "tg": 34.78,
       "tg_sd": null,
       "workload": "prose"
     },
@@ -89,7 +89,7 @@
       "acceptance_sd": null,
       "accepted_per_step": 1.03,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 45747 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+      "command": "fix-gufo serve --port 46959 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 130933,
@@ -100,10 +100,10 @@
           "prompt_n": 2046
         }
       ],
-      "pp": 1403.96,
+      "pp": 1408.06,
       "pp_sd": null,
       "samples": 1,
-      "tg": 33.1,
+      "tg": 33.18,
       "tg_sd": null,
       "workload": "prose"
     },
@@ -112,7 +112,7 @@
       "acceptance_sd": null,
       "accepted_per_step": 0.91,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 45747 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+      "command": "fix-gufo serve --port 46959 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 16325,
@@ -123,10 +123,10 @@
           "prompt_n": 2046
         }
       ],
-      "pp": 1492.72,
+      "pp": 1499.47,
       "pp_sd": null,
       "samples": 1,
-      "tg": 35.21,
+      "tg": 35.27,
       "tg_sd": null,
       "workload": "prose"
     },
@@ -135,7 +135,7 @@
       "acceptance_sd": null,
       "accepted_per_step": 1.0,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 45747 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+      "command": "fix-gufo serve --port 46959 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 32719,
@@ -146,10 +146,10 @@
           "prompt_n": 2028
         }
       ],
-      "pp": 1489.54,
+      "pp": 1496.75,
       "pp_sd": null,
       "samples": 1,
-      "tg": 34.21,
+      "tg": 34.27,
       "tg_sd": null,
       "workload": "prose"
     },
@@ -158,7 +158,7 @@
       "acceptance_sd": null,
       "accepted_per_step": 0.75,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 45747 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+      "command": "fix-gufo serve --port 46959 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 4096,
@@ -169,10 +169,10 @@
           "prompt_n": 2042
         }
       ],
-      "pp": 1522.58,
+      "pp": 1521.72,
       "pp_sd": null,
       "samples": 1,
-      "tg": 32.83,
+      "tg": 32.86,
       "tg_sd": null,
       "workload": "prose"
     },
@@ -181,7 +181,7 @@
       "acceptance_sd": null,
       "accepted_per_step": 0.88,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 45747 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+      "command": "fix-gufo serve --port 46959 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 65448,
@@ -192,10 +192,10 @@
           "prompt_n": 2057
         }
       ],
-      "pp": 1415.89,
+      "pp": 1390.03,
       "pp_sd": null,
       "samples": 1,
-      "tg": 33.5,
+      "tg": 33.51,
       "tg_sd": null,
       "workload": "prose"
     },
@@ -204,7 +204,7 @@
       "acceptance_sd": null,
       "accepted_per_step": 0.68,
       "accepted_per_step_sd": null,
-      "command": "gufo serve --port 45747 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+      "command": "fix-gufo serve --port 46959 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
       "counts": [
         {
           "cache_n": 8185,
@@ -215,10 +215,10 @@
           "prompt_n": 2047
         }
       ],
-      "pp": 1519.38,
+      "pp": 1525.11,
       "pp_sd": null,
       "samples": 1,
-      "tg": 32.41,
+      "tg": 32.47,
       "tg_sd": null,
       "workload": "prose"
     }
@@ -226,10 +226,10 @@
   "schemaVersion": 1,
   "server": {
     "command": [
-      "gufo",
+      "fix-gufo",
       "serve",
       "--port",
-      "45747",
+      "46959",
       "--sessions",
       "1",
       "llm",
@@ -250,12 +250,10 @@
     ]
   },
   "source": {
-    "binaryRevision": "eecb008a909ca299c13d1ef773765c7e2e24d395",
-    "binarySha256": "2ebf7a2cf22eae84b0c78bf87bc39adda3336fc59f9ecb4e3f1b7c06227571d4",
-    "buildMode": "nix-release",
+    "binarySha256": "1ea59e9bfb214b5cdd4d4b6bcc896058df43a06f9c5e180086ea6a8d4301ca58",
+    "buildMode": "cmake-release-preset",
     "dirty": false,
-    "flakeLockSha256": "faabad820ec09caab7351bf48910cec895a38cf1766e098e3065aea86f405ed6",
-    "revision": "4c5a00d2d609846cb73e79aa33de324624aa9c2c"
+    "revision": "def2ed1e904f912e69550344aa7c13a99f535d0e"
   },
   "table": "single-mtp",
   "target": "gufo"

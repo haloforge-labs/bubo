@@ -31,7 +31,7 @@ TESTS = Path(__file__).resolve().parent
 SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "image-count", "structured", "structured-limits",
           "tool-reasoning", "reasoning-separator",
           "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
-          "long-context", "state-edges", "progress", "stream-start", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix", "cache-bridge", "system-injection", "cache")
+          "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix", "cache-bridge", "system-injection", "cache")
 SAMPLING = {
     "--temperature": ("temperature", float), "--top-p": ("top_p", float),
     "--top-k": ("top_k", int), "--min-p": ("min_p", float),
@@ -48,7 +48,7 @@ COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_override
 
 def provenance():
     source = hashlib.sha256()
-    for name in ("run.py", "metrics.py", "progress.py", "stream_start.py", "server_metrics.py", "openai_sdk.py", "continuation.py",
+    for name in ("run.py", "metrics.py", "progress.py", "stream_start.py", "prefill_scheduling.py", "server_metrics.py", "openai_sdk.py", "continuation.py",
                  "tool_reasoning.py", "tool_agent.py", "tool_native.py", "discovery.py", "image_inputs.py", "cache_edits.py", "cache_growth.py", "cache_depth.py", "cache_rotation.py", "cache_concurrency.py", "cache_shared_prefix.py", "cache_bridge.py", "system_injection.py",
                  "cache_disk_spacing.py"):
         source.update((TESTS / name).read_bytes())
@@ -255,7 +255,7 @@ def main():
     if "all" in selected:
         if len(selected) != 1:
             parser.error("all cannot be combined with other suites")
-        selected = [suite for suite in SUITES if suite not in ("auto-tools", "tool-native-types", "cache-bridge")
+        selected = [suite for suite in SUITES if suite not in ("auto-tools", "tool-native-types", "cache-bridge", "prefill-scheduling")
                     and (suite not in ("image-inputs", "image-count")
                          or option(command, "--mmproj") is not None)]
     selected = list(dict.fromkeys(selected))

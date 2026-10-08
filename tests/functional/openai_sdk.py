@@ -39,6 +39,7 @@ from system_injection import check_system_injection
 from cache_growth import check_cache_growth
 from cache_depth import check_cache_depth
 from cache_rotation import check_cache_rotation
+from prefill_scheduling import check_prefill_scheduling
 
 
 class CompletionStreamChoice(CompletionChoice):
@@ -2525,7 +2526,7 @@ def check_server_metrics(client, model, checks, width, context, speculative):
 SDK_SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "image-count", "structured", "structured-limits",
               "tool-reasoning", "reasoning-separator",
               "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
-              "long-context", "state-edges", "progress", "stream-start", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix",
+              "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix",
               "cache-bridge", "system-injection")
 
 
@@ -2657,6 +2658,8 @@ def main():
                 args.allow_missing_progress),
             "stream-start": lambda: check_stream_start(
                 client, args.model, checks, args.concurrency, args.context),
+            "prefill-scheduling": lambda: check_prefill_scheduling(
+                client, args.model, checks, chat_result, args.concurrency, args.context),
             "metrics": lambda: check_server_metrics(client, args.model, checks, args.concurrency,
                                                      args.context, args.speculative),
             "cache-edits": lambda: check_cache_edits(client, args.model, checks, chat_result),
@@ -2674,7 +2677,7 @@ def main():
             "system-injection": lambda: check_system_injection(
                 client, args.model, checks, chat_result),
         }
-        selected = ([name for name in suites if name not in ("tool-native-types", "cache-bridge")
+        selected = ([name for name in suites if name not in ("tool-native-types", "cache-bridge", "prefill-scheduling")
                      and (name not in ("image-inputs", "image-count") or args.vision)]
                     if args.suite == "all" else
                     ["native-tools", "auto-tools"] if args.suite == "tools" else [args.suite])

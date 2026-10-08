@@ -23,14 +23,18 @@
 namespace gufo::models::qwen38_flash_next {
 namespace {
 
-// gfx1151 pp4096 at depths 0/4096: the 512/1024/2048/4096 sweep favored
-// 2048; larger chunks used more scratch without improving throughput.
-constexpr std::uint32_t kPrefillChunkTokens = 2048;
+// gfx1151, served repository prompts: 4096-token chunks prefill 24K-102K
+// tokens 6-11% faster than 2048 (pp4096 +5% at d0, +6% at d32K). Each
+// chunk's n-gram gather doubles; next-chunk prefetch overlaps that read.
+// Prefill logits do not depend on the chunk size
+// (pre-budget queries always take the dense attention tiles).
+constexpr std::uint32_t kPrefillChunkTokens = 4096;
 // A prompt ending this close past a chunk finishes in that chunk: a separate
 // tail pass costs about as much as this many more chunk rows.
 constexpr std::uint32_t kPrefillTailTokens = 128;
 
-// Experiment hook (prefill session 2026-10-04, re-ported 2026-10-07): GUFO_PREFILL_FORWARD_TOKENS overrides the 2,048-token forward size.
+// GUFO_PREFILL_FORWARD_TOKENS is the single override of upstream's 4,096-token
+// forward size (including checkpoint capture and disk in-pass prefill).
 // Measured on gfx1151 at 28K-token cold prompts: 4,096 -> 0.88 ms/token, 2,048 -> 1.4-1.8, 8,192 -> 1.5. Scratch is sized from this value
 // (executor max_batch), so it is read once; unset or out of [64, 16384] keeps the default.
 std::uint32_t PrefillChunkTokens() {
@@ -780,7 +784,8 @@ bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
                    bool prefill, std::uint32_t boundary,
                    std::unique_ptr<SessionSnapshot>* checkpoint,
                    double* capture_ms,
-                   std::chrono::steady_clock::time_point* capture_started) {
+                   std::chrono::steady_clock::time_point* capture_started,
+                   std::span<const std::int32_t> after) {
   if (!EnsureFrontier(error_msg)) {
     return false;
   }
@@ -808,8 +813,14 @@ bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
       if (!capture)
         return false;
     }
+    // The chunk this loop, or the following Sync, takes next.
+    const auto rest = off + n < tokens.size() ? tokens.subspan(off + n) : after;
+    const auto next = rest.first(std::min<std::size_t>(
+        rest.size() <= exec.max_batch() ? exec.max_batch()
+                                        : model_->PrefillCapacity(),
+        rest.size()));
     if (!exec.Forward(*session_, chunk, 1, logits_.data(), mode, error_msg,
-                      capture.get())) {
+                      capture.get(), false, next)) {
       return false;
     }
     const auto kept = capture && capture->tokens < n ? n - capture->tokens : n;
@@ -838,9 +849,9 @@ bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
   return true;
 }
 
-bool Session::Sync(std::span<const std::int32_t> prompt,
-                   std::string* error_msg) {
-  return SyncImpl(prompt, error_msg, 0, nullptr);
+bool Session::Sync(std::span<const std::int32_t> prompt, std::string* error_msg,
+                   std::span<const std::int32_t> next) {
+  return SyncImpl(prompt, error_msg, 0, nullptr, nullptr, nullptr, next);
 }
 
 bool Session::SyncThrough(std::span<const std::int32_t> prompt,
@@ -865,7 +876,8 @@ bool Session::SyncImpl(std::span<const std::int32_t> prompt,
                        std::string* error_msg, std::uint32_t boundary,
                        std::unique_ptr<SessionSnapshot>* checkpoint,
                        double* capture_ms,
-                       std::chrono::steady_clock::time_point* capture_started) {
+                       std::chrono::steady_clock::time_point* capture_started,
+                       std::span<const std::int32_t> next) {
   if (prompt.empty()) {
     AssignError(error_msg, "prompt is empty");
     return false;
@@ -894,9 +906,9 @@ bool Session::SyncImpl(std::span<const std::int32_t> prompt,
   const bool ok = capture_started
                       ? Feed<true>(prompt.subspan(common), error_msg, true,
                                    boundary, checkpoint, capture_ms,
-                                   capture_started)
+                                   capture_started, next)
                       : Feed<false>(prompt.subspan(common), error_msg, true,
-                                    boundary, checkpoint, capture_ms);
+                                    boundary, checkpoint, capture_ms, nullptr, next);
   valid_ = ok;
   return ok;
 }

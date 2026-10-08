@@ -1,7 +1,9 @@
 // Session snapshot round trips: a restored session must continue exactly
 // like the session it was captured from, in memory and through the
 // persistent byte form, at a prompt boundary and mid-decode.
+#include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cmath>
 #include <cstring>
 #include <future>
@@ -336,6 +338,18 @@ int main(int argc, char** argv) {
                                    .max_draft_tokens = 7},
                                   &error);
     Require(model != nullptr, error);
+    // Run in separate processes with the knob unset, 2048, 4096 and 8192.
+    // Check the model capacities used by scratch and both runner paths.
+    const char* forward_env = std::getenv("GUFO_PREFILL_FORWARD_TOKENS");
+    const long requested =
+        forward_env ? std::strtol(forward_env, nullptr, 10) : 0;
+    const auto forward = static_cast<std::uint32_t>(
+        requested >= 64 && requested <= 16384 ? requested : 4096);
+    Require(model->PrefillCapacity() == std::min(forward, kContext),
+            "prefill uses the single override with upstream's 4096 default");
+    Require(model->PrefillThroughCapacity() ==
+                std::min(forward + 128, kContext),
+            "in-pass capacity includes exactly the 128-token tail");
     const auto pattern = model->Tokenize(
         "The quick brown fox jumps over the lazy dog. "
         "Strix Halo executes this deterministic benchmark sequence. ");
@@ -360,6 +374,9 @@ int main(int argc, char** argv) {
         CheckPrefillCheckpoint(
             model, std::span<const std::int32_t>(prompt).first(boundary + 8),
             mode, 0, 8);
+      CheckPrefillCheckpoint(
+          model, std::span<const std::int32_t>(warm_prompt).first(4096 + 8),
+          mode, 0, 8);
       CheckPrefillCheckpoint(model, warm_prompt, mode, prompt.size());
       CheckPrefillCheckpoint(model, overflow_prompt, mode, prompt.size());
       CheckPrefillCheckpoint(

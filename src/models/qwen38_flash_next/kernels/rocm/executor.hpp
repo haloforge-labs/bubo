@@ -270,7 +270,10 @@ public:
   /// verification. The final wide residual of those tokens stays on
   /// the device for MtpForward. kVerify permits Rollback (at most
   /// max_speculative rows). kPrefill uses consistent prompt arithmetic at
-  /// every chunk width.
+  /// every chunk width. A kPrefill call may name the `next` chunk of the same
+  /// prompt: once its own n-gram rows have arrived it starts reading the
+  /// next chunk's, so that read overlaps this chunk's layers. The rows are
+  /// used only if the next batch has exactly those tokens.
   /// `verify_candidates` (kVerify with null logits): the pass also selects
   /// every row's candidate list for VerifyCandidates inside its own graph,
   /// saving the separate launch and synchronization afterwards.
@@ -279,7 +282,8 @@ public:
                              std::uint32_t n_logits, float* logits,
                              ForwardMode mode, std::string* error_msg,
                              PrefillCheckpoint* checkpoint = nullptr,
-                             bool verify_candidates = false) const;
+                             bool verify_candidates = false,
+                             std::span<const std::int32_t> next = {}) const;
 
   struct BatchItem {
     Session* session;
@@ -488,6 +492,12 @@ private:
   bool PleFetch(Session& s, std::span<const std::int32_t> tokens,
                 bool speculative, std::string* error_msg) const;
   bool WaitPle(std::string* error_msg) const;
+  /// Starts reading `next`'s rows into the prefetch buffer. Best effort: a
+  /// prefetch that cannot start is skipped.
+  void PrefetchPle(const Session& s, std::span<const std::int32_t> next) const;
+  /// Waits for a prefetch in flight before another read; its rows stay
+  /// claimable.
+  void FinishPrefetch() const;
   bool Ple(const DeviceLayer& l, Session& s, std::uint32_t n_tokens, float* res,
            bool speculative, std::string* error_msg,
            bool embeddings_ready = false,
@@ -709,6 +719,25 @@ private:
   mutable bool ple_pending_{false};
   mutable std::optional<PrefillDiagPass> active_diag_;
   mutable bool diagnostic_prefill_{false};
+  /// The rows a prefill chunk reads are a pure function of its tokens and
+  /// the n-gram history before them, so prefetched rows are claimed only by
+  /// a batch with exactly those tokens and that history, whichever session
+  /// it belongs to. A claim copies them into host_emb_, the only buffer
+  /// uploads (and captured graphs) read.
+  struct PlePrefetch {
+    bool pending{false};  ///< read in flight
+    bool ready{false};    ///< rows complete in `rows`
+    bool claimed{false};  ///< WaitPle collects them for the current batch
+    NgramHistory before;
+    NgramHistory after;
+    std::vector<std::int32_t> tokens;
+    std::vector<float> rows;
+    // The gather belongs to the chunk that claims it, not its launching pass.
+    TableReadCounters diagnostic;
+    DiagClock::time_point read_started, read_finished;
+  };
+  mutable PlePrefetch prefetch_;
+  mutable std::span<const std::int32_t> prefetch_next_;
   // Pinned host staging the launched (or captured) work reads and writes.
   Session::Control* control_host_{nullptr};
   std::int32_t* tokens_host_{nullptr};

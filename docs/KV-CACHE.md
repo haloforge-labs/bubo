@@ -280,7 +280,8 @@ capture a text prompt's stable boundary within the final prefill pass: its
 recurrent kernels retain the boundary state, convolution and PLE retain their
 history, and a one-row head computes the boundary logits. Attention queries
 on either side keep the grouping of separate passes. The final batch can
-include up to 128 tokens beyond the normal 2,048-token chunk, so a prompt that
+include up to 128 tokens beyond the normal 4,096-token chunk
+(overridden by `GUFO_PREFILL_FORWARD_TOKENS`), so a prompt that
 ends just past a chunk needs no separate tail pass; the stable boundary must be
 within eight tokens of that batch's end.
 The cache reserves the full payload before enabling this capture. Disk,

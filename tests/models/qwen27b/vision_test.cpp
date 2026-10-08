@@ -11,7 +11,14 @@
 #include <string>
 #include <unordered_map>
 
+#include "src/models/qwen/control_tokens.hpp"
 #include "src/models/qwen/vision/prompt.hpp"
+
+using gufo::tokenization::kImagePad;
+using gufo::tokenization::kImEnd;
+using gufo::tokenization::kImStart;
+using gufo::tokenization::kVisionEnd;
+using gufo::tokenization::kVisionStart;
 
 #if defined(ENGINE_ENABLE_HIP)
 #include "src/models/qwen/vision/encoder.hpp"
@@ -225,7 +232,7 @@ void TestRendering() {
                     "<|vision_start|><|image_pad|><|vision_end|>after") !=
          std::string::npos);
   for (auto offset : offsets)
-    assert(text->substr(offset, 13) == "<|image_pad|>");
+    assert(text->substr(offset, 13) == kImagePad);
 }
 
 void TestToolReasoningCheckpoint() {
@@ -234,9 +241,9 @@ void TestToolReasoningCheckpoint() {
   for (int i = 0; i < 256; ++i)
     vocab.emplace_back(1, static_cast<char>(i));
   std::unordered_map<std::string, TokenId> specials;
-  for (const auto* token : {"<|im_start|>", "<|im_end|>", "<think>", "</think>",
-                            "<|vision_start|>", "<|vision_end|>"}) {
-    specials[token] = static_cast<TokenId>(vocab.size());
+  for (std::string_view token : std::initializer_list<std::string_view>{
+           kImStart, kImEnd, "<think>", "</think>", kVisionStart, kVisionEnd}) {
+    specials[std::string(token)] = static_cast<TokenId>(vocab.size());
     vocab.emplace_back(token);
   }
   const auto tokenizer =

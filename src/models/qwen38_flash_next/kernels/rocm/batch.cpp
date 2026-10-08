@@ -732,6 +732,7 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
   if (ple_pending_ && !WaitPle(error)) {
     return false;
   }
+  FinishPrefetch();
   batch_rows_ = 0;
   for (std::size_t i = 0; i < items.size(); ++i) {
     const auto& item = items[i];

@@ -3,6 +3,11 @@
 import json
 import sys
 from copy import deepcopy
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
+
+from gufo.control_tokens import kEndOfText, kImEnd, kImStart  # noqa: E402
 
 from metrics import validate_tool_events
 
@@ -208,7 +213,7 @@ ENVELOPE_CASES = {
         "Call terminal with exactly this command: printf '%s' '</invoke>'"
     ),
     "vocab_token_in_arguments": (
-        "Call terminal with exactly this command: printf '%s' 'EOS = \"<|im_end|>\"'"
+        f"Call terminal with exactly this command: printf '%s' 'EOS = \"{kImEnd}\"'"
     ),
     "lookalike_in_arguments": (
         "Call terminal with exactly this command: printf '%s' '<|not_a_vocab_entry|>'"
@@ -439,7 +444,7 @@ def check_envelope_closer_framing(client, model, checks, chat_result, deepseek=F
     """
     commands = {"closer_before_call": "pwd", "framing_between_calls": "pwd",
                 "closer_in_arguments": "printf '%s' '</invoke>'",
-                "vocab_token_in_arguments": "printf '%s' 'EOS = \"<|im_end|>\"'",
+                "vocab_token_in_arguments": f"printf '%s' 'EOS = \"{kImEnd}\"'",
                 "lookalike_in_arguments": "printf '%s' '<|not_a_vocab_entry|>'"}
     for name, prompt in ENVELOPE_CASES.items():
         # A shape may override the documented call format: the model can only
@@ -593,10 +598,10 @@ def check_envelope_closer_framing(client, model, checks, chat_result, deepseek=F
         assert_terminal_call(warm, "pwd")
         assert_no_envelope_framing(warm)
         request["messages"] = tool_history(
-            request, warm, "/tmp/pr400-fixture\nLiteral <|im_start|> in tool output.")
+            request, warm, f"/tmp/pr400-fixture\nLiteral {kImStart} in tool output.")
         request["messages"][-2]["content"] = (
             (warm["text"] or "") + "\nPrinting the working directory.\n\n</invoke>\n"
-            "Literal <|endoftext|> in stored assistant text.")
+            f"Literal {kEndOfText} in stored assistant text.")
         request["messages"].append({"role": "user", "content": "Now call terminal with command date."})
         result = chat_result(client, request, streaming)
         checks[label] = result
@@ -612,7 +617,7 @@ def check_literal_protocol_data(client, model, checks, chat_result):
     """Vocabulary spellings and undeclared XML remain literal with tools enabled."""
     literals = {
         "raw_xml": '<invoke name="documentation"><parameter name="value">x</parameter></invoke>',
-        "token_word": 'EOS = "<|im_end|>"',
+        "token_word": f'EOS = "{kImEnd}"',
         "comparison": "3 < 5 and x < y.",
     }
     for name, literal in literals.items():

@@ -1513,6 +1513,21 @@ DSpark's short boundary check is available without the complete serving suite:
 nix develop -c build/gpu-test/tests/models/deepseek_v4_flash/ds4_serving_test --dspark-eos
 ```
 
+## Flash-Next prefill size
+
+Flash-Next uses upstream's 4,096-token forward chunks by default.
+`GUFO_PREFILL_FORWARD_TOKENS` is the single forward-size override, read once
+per process: values from 64 through 16384 select that many tokens; unset or
+out-of-range values use 4096. Restart to change it. The model context caps
+both capacities. Executor scratch, ordinary prefill, in-pass checkpoint
+capture and the disk in-pass path all use this value; the final pass may
+include up to 128 additional tokens. Scheduler budgets and distinct learned
+boundaries can shorten a pass. The independent 2048-token history grid and
+disk minimum checkpoint spacing are cache retention policies, not chunk-size
+settings. Learned disk boundaries still round down under
+`GUFO_DISK_BOUNDARY_ALIGN` (unset = 256; 0 or 1 disables rounding) for operator
+A/B qualification of upstream's chunk-independent attention fix.
+
 ## Flash-Next prefill diagnostics
 
 Set `GUFO_PREFILL_DIAG=1` before starting the process to enable diagnostics;
