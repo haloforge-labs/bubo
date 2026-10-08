@@ -3345,8 +3345,10 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
 }
 
 namespace {
-// GUFO_DENSE_TWIN_MAX_N (default 8 = every vector pass): the widest pass that reads the 4-bit twin; wider decode / verify passes read the 8-bit copy. Set it to the twin kernel's measured
-// DRAM break-even width (pass bench 10-07: Q4_K ~2, IQ4_XS / IQ4_NL map ~6).
+// Legacy vector cutoff parser, retained unchanged. Armed twins reject MAX_N < 8
+// at load, so every decode/verify vector pass reads the same copy. The
+// historical IQ4 DRAM break-even (~6 rows) motivates the separate wide-kernel
+// pass bench; it must never become a per-pass precision fallback.
 std::uint32_t TwinMaxN() {
   static const std::uint32_t v = [] {
     const char* e = std::getenv("GUFO_DENSE_TWIN_MAX_N");

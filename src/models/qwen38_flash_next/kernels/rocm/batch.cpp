@@ -568,10 +568,24 @@ bool Executor::QuantizeBatch(const float* x, std::uint32_t rows,
 
 bool Executor::DenseBatch(const DeviceTensor& w, const float* x, float* out,
                           std::uint32_t rows, std::string* error) const {
+  if (rows <= kDecodeRows)
+    return Dense(w, x, out, rows, error);
   const bool armed = model_->has_twin() && TwinBatchEnabled();
   const auto path = BatchDenseDispatch(w.type, rows, armed);
-  if (path == BatchDensePath::kDense)
-    return Dense(w, x, out, rows, error);
+  if (path == BatchDensePath::kTwinMultiRow) {
+    if (!QuantizeBatch(x, rows, w.cols, error))
+      return false;
+    for (std::uint32_t r = 0; r < rows; r += 32) {
+      const auto* input = static_cast<const std::uint8_t*>(s_.x_q8t) +
+                          qfn_mmq_q8_1_bytes(r, w.cols);
+      if (qfn_mmq_iq4_dense_batch_preq(static_cast<int>(w.type), w.data, input,
+                                       out + std::size_t{r} * w.rows, w.rows,
+                                       std::min(32u, rows - r), w.cols,
+                                       stream_) != 0)
+        return Fail(error, "batched IQ4 projection failed (no fallback)");
+    }
+    return true;
+  }
   if (path == BatchDensePath::kTwinSlices) {
     const Scratch base = s_;
     for (std::uint32_t r = 0; r < rows; r += kDecodeRows) {
@@ -625,6 +639,31 @@ bool Executor::GatedDenseBatch(const DeviceTensor& up, const DeviceTensor& gate,
                                const float* x, float* out, std::uint32_t rows,
                                std::string* error) const {
   const Scratch base = s_;
+  const auto iq4 = [](core::GgmlType t) {
+    return t == core::GgmlType::kIQ4_XS || t == core::GgmlType::kIQ4_NL;
+  };
+  const bool iq4_pair = iq4(up.type) && iq4(gate.type) &&
+                        up.rows == gate.rows && up.cols == gate.cols;
+  if (rows > kDecodeRows && iq4_pair && model_->has_twin() &&
+      TwinBatchEnabled()) {
+    if (!QuantizeBatch(x, rows, up.cols, error))
+      return false;
+    for (std::uint32_t r = 0; r < rows; r += 32) {
+      const auto* input = static_cast<const std::uint8_t*>(base.x_q8t) +
+                          qfn_mmq_q8_1_bytes(r, up.cols);
+      const auto n = std::min(32u, rows - r);
+      if (qfn_mmq_iq4_dense_batch_preq(static_cast<int>(gate.type), gate.data,
+                                       input, out + std::size_t{r} * up.rows,
+                                       up.rows, n, up.cols, stream_) != 0 ||
+          qfn_mmq_iq4_dense_batch_preq(
+              static_cast<int>(up.type), up.data, input,
+              base.shexp_gate + std::size_t{r} * up.rows, up.rows, n, up.cols,
+              stream_) != 0)
+        return Fail(error, "batched gated IQ4 projection failed (no fallback)");
+    }
+    Swiglu(out, base.shexp_gate, std::size_t{rows} * up.rows, stream_);
+    return true;
+  }
   const bool q8 = up.type == core::GgmlType::kQ8_0 &&
                   gate.type == core::GgmlType::kQ8_0 && up.rows == gate.rows &&
                   up.cols == gate.cols;

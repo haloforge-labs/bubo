@@ -773,6 +773,21 @@ extern "C" int qfn_mmq_dense_vec_preq(int weight_type, const void* W,
                            out_f32, K, M, N, /*experts_used=*/1, input_stride, stream);
   return hipGetLastError() == hipSuccess ? 0 : -3;
 }
+// Batched-only IQ4 adapter, chunks of at most 32 VALID activation rows.
+extern "C" int qfn_mmq_iq4_dense_batch_preq(int weight_type, const void* W,
+    const void* X_q8, float* out, int M, int N, int K, hipStream_t stream) {
+  const auto type = static_cast<ggml_type>(weight_type);
+  if ((type != GGML_TYPE_IQ4_XS && type != GGML_TYPE_IQ4_NL) || !W || !X_q8 ||
+      !out || M <= 0 || N < 1 || N > 32 || K <= 0 ||
+      K % ggml_blck_size(type) != 0) return -1;
+  mul_mat_vec_iq4_dense_batch_dispatch(W, type,
+      static_cast<const block_q8_1*>(X_q8), out, K, M, N,
+      GGML_PAD(K, MATRIX_ROW_PADDING) / QK8_1, stream);
+  if (hipGetLastError() != hipSuccess) return -3;
+  g_iq4_dense_launches.fetch_add(1, std::memory_order_relaxed);
+  return 0;
+}
+
 // Test reference: execute the unchanged routed-vector kernel on expert zero.
 extern "C" int qfn_mmq_dense_vec_preq_reference(int weight_type, const void* W,
     const void* X_q8, const int32_t* zero_ids, float* out, int M, int N, int K,

@@ -46,11 +46,19 @@ inline bool TwinDenseType(core::GgmlType t) {
   return t == T::kIQ4_XS || t == T::kIQ4_NL || t == T::kQ4_K || t == T::kQ5_K ||
          t == T::kQ5_1;
 }
-enum class BatchDensePath { kDense, kTwinSlices, kQ8, kSmallGemm };
+enum class BatchDensePath {
+  kDense,
+  kTwinSlices,
+  kTwinMultiRow,
+  kQ8,
+  kSmallGemm
+};
 inline BatchDensePath BatchDenseDispatch(core::GgmlType t, std::uint32_t rows,
                                          bool armed) {
   if (rows <= kBatchMaxChain)
     return BatchDensePath::kDense;
+  if (armed && (t == core::GgmlType::kIQ4_XS || t == core::GgmlType::kIQ4_NL))
+    return BatchDensePath::kTwinMultiRow;
   if (armed && TwinDenseType(t))
     return BatchDensePath::kTwinSlices;
   return t == core::GgmlType::kQ8_0 ? BatchDensePath::kQ8

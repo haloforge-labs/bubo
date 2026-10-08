@@ -130,6 +130,104 @@ static void launch_iq4_dense(const void* weights, const block_q8_1* input,
   }
 }
 
+// Wide tiles are separate: the 1..8 kernels and launch recursion above stay
+// unchanged. Stage each K tile once through LDS for all four output waves.
+// The lane's K traversal, FP32 fragment arithmetic and XOR sum tree match N=1.
+template<ggml_type type, int tokens>
+__launch_bounds__(128) static __global__ void mul_mat_vec_iq4_dense_batch(
+    const void* __restrict__ weights, const block_q8_1* __restrict__ input,
+    float* __restrict__ output, int k, int rows, int input_stride, int n_valid) {
+  constexpr int qk = ggml_hip_type_traits<type>::qk;
+  constexpr int qi = ggml_hip_type_traits<type>::qi;
+  constexpr int vdr = type == GGML_TYPE_IQ4_XS ? VDR_IQ4_XS_Q8_1_MMVQ : VDR_IQ4_NL_Q8_1_MMVQ;
+  constexpr int step = vdr * 32 / qi;
+  constexpr int xblocks = step * (qk / QK8_1);
+  // Two output rows also for NL K=640: match the N=1 storing lane and keep
+  // sum registers bounded at 32 rows. G1 checks this shape explicitly.
+  constexpr int row_tile = 2;
+  __shared__ block_q8_1 staged[tokens][xblocks];
+  const int lane = threadIdx.x % 32;
+  const int row0 = (blockIdx.x * 4 + threadIdx.x / 32) * row_tile;
+  const int blocks = k / qk;
+  const int iqs = vdr * (lane % (qi / vdr));
+  float sum[tokens][row_tile]{};
+  for (int tile = 0; tile < blocks; tile += step) {
+    for (int i = threadIdx.x; i < tokens * xblocks; i += 128) {
+      const int t = i / xblocks, b = i % xblocks;
+      const int src = tile * (qk / QK8_1) + b;
+      if (t < n_valid && src < k / QK8_1)
+        staged[t][b] = input[t * input_stride + src];
+    }
+    __syncthreads();
+    const int kb = tile + lane / (qi / vdr);
+    if (row0 < rows && kb < blocks) {
+#pragma unroll
+      for (int r = 0; r < row_tile; ++r) {
+        const IQ4DenseFragment<type> w(weights,
+            min(row0 + r, rows - 1) * blocks + kb, iqs);
+#pragma unroll
+        for (int t = 0; t < tokens; ++t) {
+          if (t < n_valid)
+            sum[t][r] = w.Accumulate(staged[t] + (kb - tile) * (qk / QK8_1),
+                                    iqs, sum[t][r]);
+        }
+      }
+    }
+    __syncthreads();
+  }
+#pragma unroll
+  for (int t = 0; t < tokens; ++t) {
+    if (t < n_valid) {
+#pragma unroll
+      for (int r = 0; r < row_tile; ++r)
+        sum[t][r] = warp_reduce_sum<32>(sum[t][r]);
+      if (lane < row_tile && row0 + lane < rows) {
+        // Fixed indexing keeps the accumulator array in VGPRs at 24/32.
+        const float value = lane == 0 ? sum[t][0] : sum[t][1];
+        output[t * rows + row0 + lane] = isfinite(value) ? value : 0.0f;
+      }
+    }
+  }
+}
+
+template<ggml_type type, int tokens>
+static void launch_iq4_dense_batch_tile(const void* weights,
+    const block_q8_1* input, float* output, int k, int rows, int input_stride,
+    int n_valid, hipStream_t stream) {
+  mul_mat_vec_iq4_dense_batch<type, tokens>
+      <<<(rows + 7) / 8, 128, 0, stream>>>(weights, input, output, k, rows,
+                                           input_stride, n_valid);
+}
+
+template<ggml_type type>
+static void launch_iq4_dense_batch(const void* weights, const block_q8_1* input,
+    float* output, int k, int rows, int n_valid, int input_stride,
+    hipStream_t stream) {
+  if (n_valid <= 8)
+    launch_iq4_dense_batch_tile<type, 8>(weights, input, output, k, rows,
+                                         input_stride, n_valid, stream);
+  else if (n_valid <= 16)
+    launch_iq4_dense_batch_tile<type, 16>(weights, input, output, k, rows,
+                                          input_stride, n_valid, stream);
+  else if (n_valid <= 24)
+    launch_iq4_dense_batch_tile<type, 24>(weights, input, output, k, rows,
+                                          input_stride, n_valid, stream);
+  else
+    launch_iq4_dense_batch_tile<type, 32>(weights, input, output, k, rows,
+                                          input_stride, n_valid, stream);
+}
+
+void mul_mat_vec_iq4_dense_batch_dispatch(const void* weights, ggml_type type,
+    const block_q8_1* input, float* output, int k, int rows, int n_valid,
+    int input_stride, hipStream_t stream) {
+  if (type == GGML_TYPE_IQ4_XS)
+    launch_iq4_dense_batch<GGML_TYPE_IQ4_XS>(weights, input, output, k, rows,
+                                             n_valid, input_stride, stream);
+  else
+    launch_iq4_dense_batch<GGML_TYPE_IQ4_NL>(weights, input, output, k, rows,
+                                             n_valid, input_stride, stream);
+}
+
 void mul_mat_vec_iq4_dense_dispatch(const void* weights, ggml_type type,
                                     const block_q8_1* input, float* output,
                                     int k, int rows, int tokens, int input_stride,
