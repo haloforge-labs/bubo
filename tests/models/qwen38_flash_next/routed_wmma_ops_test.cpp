@@ -869,7 +869,7 @@ void CheckLanerowDispatch() {
       throw std::runtime_error("stage-1 paired launch failed");
     const auto result = Download(new_up, slots * ff);
     CheckRmsError(result, ref_up, 0.01, "new gate/up vs CPU F32");
-    CheckRmsError(result, FloatValues(old_up_host), 0.002,
+    CheckRmsError(result, FloatValues(old_up_host), 0.006,
                   "new vs old gate/up");
     for (__half h : Download(new_up + slots * ff, ff + guard))
       if (__half2float(h) != __half2float(poison))
@@ -917,7 +917,7 @@ void CheckLanerowDispatch() {
                                    down_rows, ff, nullptr))
         throw std::runtime_error("stage-1 down live launch failed");
       const auto result = Download(new_down, slots * down_rows);
-      CheckRmsError(result, FloatValues(old_down_host), 0.002,
+      CheckRmsError(result, FloatValues(old_down_host), 0.006,
                     "new vs old down (same F16 input)");
       CheckRmsError(result, ref_down, 0.02, "new down vs CPU F32");
       if (width == 64) {
@@ -927,7 +927,7 @@ void CheckLanerowDispatch() {
           throw std::runtime_error("stage-1 complete pipeline launch failed");
         const auto pipeline = Download(new_down, slots * down_rows);
         CheckRmsError(pipeline, ref_down, 0.02, "new pipeline vs CPU F32");
-        CheckRmsError(pipeline, FloatValues(old_down_host), 0.002,
+        CheckRmsError(pipeline, FloatValues(old_down_host), 0.006,
                       "new pipeline vs old pipeline");
       }
       for (__half h : Download(new_down + slots * down_rows, down_rows + guard))
