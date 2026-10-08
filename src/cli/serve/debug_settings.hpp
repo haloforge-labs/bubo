@@ -50,6 +50,7 @@ inline constexpr const char* kDebugSettingsEnvironment[] = {
     "GUFO_DISK_SLICE",
     "GUFO_PREFILL_DIAG",
     "GUFO_MOE_BENCH",
+    "GUFO_ROUTED_LANEROW",
     "GUFO_DENSE_TWIN_MODEL",
     "GUFO_DENSE_TWIN_MAX_N",
     "GUFO_DENSE_TWIN_SHADOW",
