@@ -3035,7 +3035,7 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
                            matrix_bytes(l.ffn_down_exps);
         active_diag_->RecordLayer(
             il, rows,
-            std::span<const std::uint32_t>(counts_host_, c.num_experts), bytes);
+            std::span<const std::uint32_t>(counts_host_, c.num_experts), bytes, n);
       }
       Combine(s_.res, next_norm, rows);
       return true;

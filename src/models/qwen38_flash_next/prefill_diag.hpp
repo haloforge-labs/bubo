@@ -106,13 +106,16 @@ struct PrefillDiagPass {
   std::uint32_t start{0};
   PrefillDiagTotals totals;
   std::vector<PrefillDiagLayer> layers;
+  // pass_tokens: the pass width. Without MTP the last trunk layer routes only the tail rows; its distinct-expert count is not comparable
+  // with the full-width layers, so it stays in `layers` (with its routed_tokens) but is left out of the pass totals (review finding 1).
   void RecordLayer(std::uint32_t layer, std::uint32_t routed_tokens,
                    std::span<const std::uint32_t> counts,
-                   std::uint64_t bytes_per_expert) {
+                   std::uint64_t bytes_per_expert, std::uint32_t pass_tokens) {
     const auto distinct = static_cast<std::uint32_t>(std::count_if(
         counts.begin(), counts.end(), [](auto n) { return n != 0; }));
     layers.push_back({layer, routed_tokens, distinct, bytes_per_expert});
-    totals.AddLayer(distinct, bytes_per_expert);
+    if (routed_tokens == pass_tokens)
+      totals.AddLayer(distinct, bytes_per_expert);
   }
 };
 

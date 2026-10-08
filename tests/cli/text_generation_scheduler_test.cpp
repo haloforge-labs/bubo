@@ -89,18 +89,18 @@ void TestPrefillDiagnosticsHost() {
   pass.totals.fetch_wait_us = 2.5;
   const std::array<std::uint32_t, 4> first{4, 0, 1, 0};
   const std::array<std::uint32_t, 4> last{0, 0, 7, 0};
-  pass.RecordLayer(0, 2048, first, 100);
-  pass.RecordLayer(1, 128, last, 200);
-  Expect(pass.totals.expert_bytes == 400 && pass.totals.layer_samples == 2 &&
-             pass.totals.experts_distinct_min == 1 &&
-             pass.totals.Mean() == 1.5 && pass.totals.experts_distinct_max == 2,
-         "diversity counts nonzero expert buckets, with tail coverage");
+  pass.RecordLayer(0, 2048, first, 100, 2048);
+  pass.RecordLayer(1, 128, last, 200, 2048);   // tail-only layer: listed, but not folded into the pass totals
+  Expect(pass.totals.expert_bytes == 200 && pass.totals.layer_samples == 1 &&
+             pass.totals.experts_distinct_min == 2 &&
+             pass.totals.Mean() == 2.0 && pass.totals.experts_distinct_max == 2,
+         "diversity counts nonzero expert buckets of full-width layers only; the tail layer is listed but excluded from the totals");
   const std::string expected =
       "pass=3 tokens=2048 start=4096 table_read_us=12.250 table_reads=3 "
       "table_bytes=72 fetch_elapsed_us=20.000 fetch_hidden_us=18.000 "
       "fetch_exposed_us=2.000 fetch_wait_us=2.500 "
-      "experts_distinct_min=1 experts_distinct_mean=1.500 "
-      "experts_distinct_max=2 expert_bytes=400 layers=0:2048:2:100,1:128:1:200";
+      "experts_distinct_min=2 experts_distinct_mean=2.000 "
+      "experts_distinct_max=2 expert_bytes=200 layers=0:2048:2:100,1:128:1:200";
   Expect(PrefillDiagLine(pass) == expected, "structured pass line is exact");
   int takes = 0, emits = 0;
   const auto take = [&] {
