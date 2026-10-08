@@ -277,6 +277,23 @@ bool RoutedGatedF16Gemm(const void* gate, const void* up, WeightType type,
                         const std::int32_t* rows_out, __half* out,
                         std::size_t m, std::size_t k, hipStream_t stream);
 
+/// Stage-1 variants use real bucket counts, mask padding and skip dead
+/// 16-token subtiles even below BN=48. Legacy entry points stay unchanged.
+bool RoutedLanerowF16Gemm(const void* w, WeightType type, const __half* x,
+                          const std::int32_t* tiles, std::uint32_t n_tiles,
+                          std::uint32_t tile_rows,
+                          const std::int32_t* pad_bounds,
+                          const std::uint32_t* counts,
+                          const std::int32_t* rows_in,
+                          const std::int32_t* rows_out, __half* out,
+                          std::size_t m, std::size_t k, hipStream_t stream);
+bool RoutedLanerowGatedF16Gemm(
+    const void* gate, const void* up, const __half* x,
+    const std::int32_t* tiles, std::uint32_t n_tiles, std::uint32_t tile_rows,
+    const std::int32_t* pad_bounds, const std::uint32_t* counts,
+    const std::int32_t* rows_in, const std::int32_t* rows_out, __half* out,
+    std::size_t m, std::size_t k, hipStream_t stream);
+
 /// F32/BF16/F16 projection in groups of up to eight token rows. Each token
 /// keeps the same accumulation order at every batch width.
 void SmallGemm(const void* w, WeightType type, const float* x, float* out,

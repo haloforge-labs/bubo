@@ -76,6 +76,7 @@ struct PrefillDiagTotals : TableReadCounters {
   // kill-rule numbers are only meaningful when moe_fallback_layers == 0. tiles = sum of routed row tiles of the WMMA layers (re-read factor of the weights).
   double moe_wmma_us{0};
   std::uint64_t moe_wmma_layers{0}, moe_fallback_layers{0}, moe_gated_layers{0}, moe_wide_down_layers{0}, moe_tiles{0};
+  std::uint64_t moe_lanerow_layers{0}, moe_lanerow_fallback_layers{0};
   void AddLayer(std::uint32_t distinct, std::uint64_t bytes_per_expert) {
     experts_distinct_min = layer_samples == 0
                                ? distinct
@@ -104,6 +105,8 @@ struct PrefillDiagTotals : TableReadCounters {
       moe_wide_down_layers += other.moe_wide_down_layers;
       moe_tiles += other.moe_tiles;
     }
+    moe_lanerow_layers += other.moe_lanerow_layers;
+    moe_lanerow_fallback_layers += other.moe_lanerow_fallback_layers;
     passes += other.passes;
     tokens += other.tokens;
     expert_bytes += other.expert_bytes;
@@ -179,6 +182,9 @@ inline std::string PrefillDiagFields(const PrefillDiagTotals& t) {
         << " moe_tflops=" << MoeTflops(t.moe_flops, t.moe_us)
         << " moe_wmma_layers=" << t.moe_wmma_layers << " moe_fallback_layers=" << t.moe_fallback_layers << " moe_wmma_us=" << t.moe_wmma_us
         << " moe_gated_layers=" << t.moe_gated_layers << " moe_wide_down_layers=" << t.moe_wide_down_layers << " moe_tiles=" << t.moe_tiles;
+  if (t.moe_lanerow_layers || t.moe_lanerow_fallback_layers)
+    out << " moe_lanerow_layers=" << t.moe_lanerow_layers
+        << " moe_lanerow_fallback_layers=" << t.moe_lanerow_fallback_layers;
   return out.str();
 }
 

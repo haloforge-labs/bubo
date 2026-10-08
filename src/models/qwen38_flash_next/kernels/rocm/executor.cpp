@@ -75,6 +75,22 @@ struct BenchEvents {
 };
 struct NoBenchEvents {};
 
+bool RoutedLanerowEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("GUFO_ROUTED_LANEROW");
+    if (value == nullptr || std::strcmp(value, "0") == 0)
+      return false;
+    if (std::strcmp(value, "1") == 0)
+      return true;
+    std::fprintf(stderr,
+                 "[routed-lanerow] warning: unsupported GUFO_ROUTED_LANEROW "
+                 "value '%s' (2 reserved); using default dispatch\n",
+                 value);
+    return false;
+  }();
+  return enabled;
+}
+
 void CopyReferenceOnce(hipStream_t stream) {
   static std::once_flag once;
   std::call_once(once, [stream] {
@@ -1777,8 +1793,8 @@ void Executor::RoutedHints(const DeviceTensor& w,
       RoutedTileCols(n_tokens, config().num_experts_used, w.experts));
 }
 
-bool Executor::RouteHints(std::uint32_t n_tokens,
-                          std::string* error_msg) const {
+bool Executor::RouteHints(std::uint32_t n_tokens, std::string* error_msg,
+                          bool lanerow) const {
   // Every column tile past an expert's bucket still costs a dispatch and a
   // full shared-memory reservation, so the grid is cut to the real largest
   // bucket. Counts are downloaded before the shared expert; wait only for
@@ -1794,6 +1810,41 @@ bool Executor::RouteHints(std::uint32_t n_tokens,
   }
   if (!Check(hipEventSynchronize(counts_ready_), "expert counts", error_msg)) {
     return false;
+  }
+  if (lanerow) {
+    // Coverage is decided before this call. Keep the count sync: declined
+    // layers need MMQ hints, and diagnostics consume this same download.
+    routed_tile_rows_ = 64;
+    routed_tile_cols_ = qfn_mmq_routed_tile_cols_for_counts(
+        counts_host_, static_cast<int>(c.num_experts));
+    routed_n_tiles_ = 0;
+    std::uint32_t tiles_128 = 0;
+    for (std::uint32_t e = 0; e < c.num_experts; ++e) {
+      routed_max_rows_ = std::max(routed_max_rows_, counts_host_[e]);
+      tiles_128 += (counts_host_[e] + 127u) / 128u;
+      for (std::uint32_t j = 0; j < (counts_host_[e] + 63u) / 64u; ++j)
+        tiles_host_[routed_n_tiles_++] =
+            static_cast<std::int32_t>(e | (j << 16));
+    }
+    routed_max_rows_ = std::max(1u, routed_max_rows_);
+    routed_64_tiles_ = routed_n_tiles_;
+    routed_pair_tiles_ = routed_n_tiles_;
+    std::uint32_t upload_tiles = routed_n_tiles_;
+    // Reuse the existing map-cost threshold and existing single-stage LDS.
+    if (tiles_128 * 4 <= routed_n_tiles_ * 3) {
+      routed_pair_rows_ = 128;
+      routed_pair_offset_ = upload_tiles;
+      routed_pair_tiles_ = tiles_128;
+      for (std::uint32_t e = 0; e < c.num_experts; ++e)
+        for (std::uint32_t j = 0; j < (counts_host_[e] + 127u) / 128u; ++j)
+          tiles_host_[upload_tiles++] =
+              static_cast<std::int32_t>(e | (j << 16));
+    }
+    return upload_tiles == 0 ||
+           Check(hipMemcpyAsync(s_.routed_tiles, tiles_host_,
+                                upload_tiles * sizeof(std::int32_t),
+                                hipMemcpyHostToDevice, stream_),
+                 "lanerow tile map upload", error_msg);
   }
   // The F16 expert GEMM launches one block per (expert, row tile of its
   // 16-padded bucket): the map is built here and uploaded ahead of the
@@ -2607,7 +2658,34 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
   const Config& c = config();
   const std::uint32_t used = c.num_experts_used;
   const std::uint32_t slots = n_tokens * used;
-  if (!RouteHints(n_tokens, error_msg)) {
+  const bool wmma_experts = ExpertMatrixRows(n_tokens) &&
+                            (l.ffn_gate_exps.type == GgmlType::kQ4_K ||
+                             l.ffn_gate_exps.type == GgmlType::kQ5_K) &&
+                            l.ffn_up_exps.type == l.ffn_gate_exps.type &&
+                            (l.ffn_down_exps.type == GgmlType::kQ5_1 ||
+                             l.ffn_down_exps.type == GgmlType::kQ8_0) &&
+                            c.hidden_size % 256 == 0 && c.expert_ff % 64 == 0;
+  const bool lanerow_requested = prefill_phase && RoutedLanerowEnabled();
+  const bool lanerow = lanerow_requested && wmma_experts &&
+                       l.ffn_gate_exps.type == GgmlType::kQ4_K &&
+                       c.hidden_size != 0 && c.expert_ff != 0 &&
+                       c.num_experts <= 65536;
+  if (lanerow_requested) {
+    if (diagnostic_prefill_) {
+      active_diag_->totals.moe_lanerow_layers += lanerow ? 1 : 0;
+      active_diag_->totals.moe_lanerow_fallback_layers += lanerow ? 0 : 1;
+    }
+    if (!lanerow)
+      std::fprintf(stderr,
+                   "[routed-lanerow] fallback gate=%d up=%d down=%d "
+                   "hidden=%u ff=%u experts=%u tokens=%u "
+                   "reason=unsupported-format-or-shape\n",
+                   static_cast<int>(l.ffn_gate_exps.type),
+                   static_cast<int>(l.ffn_up_exps.type),
+                   static_cast<int>(l.ffn_down_exps.type), c.hidden_size,
+                   c.expert_ff, c.num_experts, n_tokens);
+  }
+  if (!RouteHints(n_tokens, error_msg, lanerow)) {
     return false;
   }
   std::conditional_t<Benchmark, BenchEvents, NoBenchEvents> events;
@@ -2618,13 +2696,6 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
   // Tiled batches take the WMMA route: assignments compacted by expert
   // into 16-row padded buckets, token rows narrowed to F16 once, then the
   // F16 matrix-core GEMM per (expert, row tile).
-  const bool wmma_experts = ExpertMatrixRows(n_tokens) &&
-                            (l.ffn_gate_exps.type == GgmlType::kQ4_K ||
-                             l.ffn_gate_exps.type == GgmlType::kQ5_K) &&
-                            l.ffn_up_exps.type == l.ffn_gate_exps.type &&
-                            (l.ffn_down_exps.type == GgmlType::kQ5_1 ||
-                             l.ffn_down_exps.type == GgmlType::kQ8_0) &&
-                            c.hidden_size % 256 == 0 && c.expert_ff % 64 == 0;
   bool bench_gated = false, bench_wide = false;
   if (wmma_experts) {
     RoutedCompact(s_.ids, s_.expert_counts, s_.routed_bounds, s_.routed_cursors,
@@ -2643,15 +2714,21 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
       half_bf16_ = false;
     }
     const auto* x_half = static_cast<const __half*>(s_.x_half);
-    bench_gated = n_tokens >= 1024 && routed_tile_rows_ == 48;
-    // Large batches pair the gate/up projections and apply SwiGLU without
-    // materializing the gate. Smaller buckets favor separate projections.
+    bench_gated = lanerow || (n_tokens >= 1024 && routed_tile_rows_ == 48);
+    // Stage 1 pairs at every prefill width; legacy dispatch pairs only
+    // large batches. Both apply SwiGLU without materializing the gate.
     auto* up_half = reinterpret_cast<__half*>(s_.up_e);
     const WeightType gate_type = l.ffn_gate_exps.type == GgmlType::kQ5_K
                                      ? WeightType::kQ5_K
                                      : WeightType::kQ4_K;
     const bool gated_ok =
-        n_tokens >= 1024 && routed_tile_rows_ == 48
+        lanerow ? RoutedLanerowGatedF16Gemm(
+                      l.ffn_gate_exps.data, l.ffn_up_exps.data, x_half,
+                      s_.routed_tiles + routed_pair_offset_, routed_pair_tiles_,
+                      routed_pair_rows_, s_.routed_bounds, s_.expert_counts,
+                      s_.rows_token, s_.rows_slot, up_half, c.expert_ff,
+                      c.hidden_size, stream_)
+        : n_tokens >= 1024 && routed_tile_rows_ == 48
             ? RoutedGatedF16Gemm(
                   l.ffn_gate_exps.data, l.ffn_up_exps.data, gate_type, x_half,
                   s_.routed_tiles + routed_pair_offset_, routed_pair_tiles_,
@@ -2680,16 +2757,25 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
         (down_type == WeightType::kQ5_1 || down_type == WeightType::kQ8_0) &&
         routed_tile_rows_ == 48 && routed_64_tiles_ != 0 &&
         routed_64_tiles_ * 4 <= routed_n_tiles_ * 3;
-    bench_wide = wide_down;
+    bench_wide = lanerow || wide_down;
     // The down projection's rows are F16 too: the epilogue reads half the
     // bytes of the largest routed intermediate.
-    if (!RoutedF16Gemm(l.ffn_down_exps.data, down_type, up_half,
-                       s_.routed_tiles + (wide_down ? routed_n_tiles_ : 0),
-                       wide_down ? routed_64_tiles_ : routed_n_tiles_,
-                       wide_down ? 64 : routed_tile_rows_, s_.routed_bounds,
-                       s_.rows_slot, s_.rows_slot, nullptr, nullptr,
-                       reinterpret_cast<__half*>(s_.down_e), c.hidden_size,
-                       c.expert_ff, stream_)) {
+    const bool down_ok =
+        lanerow ? RoutedLanerowF16Gemm(l.ffn_down_exps.data, down_type, up_half,
+                                       s_.routed_tiles, routed_n_tiles_, 64,
+                                       s_.routed_bounds, s_.expert_counts,
+                                       s_.rows_slot, s_.rows_slot,
+                                       reinterpret_cast<__half*>(s_.down_e),
+                                       c.hidden_size, c.expert_ff, stream_)
+                : RoutedF16Gemm(
+                      l.ffn_down_exps.data, down_type, up_half,
+                      s_.routed_tiles + (wide_down ? routed_n_tiles_ : 0),
+                      wide_down ? routed_64_tiles_ : routed_n_tiles_,
+                      wide_down ? 64 : routed_tile_rows_, s_.routed_bounds,
+                      s_.rows_slot, s_.rows_slot, nullptr, nullptr,
+                      reinterpret_cast<__half*>(s_.down_e), c.hidden_size,
+                      c.expert_ff, stream_);
+    if (!down_ok) {
       AssignError(error_msg, "routed F16 down GEMM failed");
       return false;
     }
@@ -2719,6 +2805,17 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
     } else {
       ++bench.moe_fallback_layers;
     }
+    if (lanerow_requested)
+      std::fprintf(
+          stderr,
+          "[moe-bench] moe_lanerow_layers=%llu "
+          "moe_lanerow_fallback_layers=%llu path=%s tokens=%u "
+          "gate_item_rows=%u down_item_rows=%u layer_us=%.3f\n",
+          static_cast<unsigned long long>(bench.moe_lanerow_layers),
+          static_cast<unsigned long long>(bench.moe_lanerow_fallback_layers),
+          lanerow ? "stage1" : "fallback", n_tokens,
+          lanerow ? routed_pair_rows_ : 0, lanerow ? routed_tile_rows_ : 0,
+          layer_us);
   }
   if (wmma_experts) {
     // The combine that follows folds this epilogue into its own pass when

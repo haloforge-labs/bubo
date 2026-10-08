@@ -3899,12 +3899,29 @@ __device__ __forceinline__ void CodesToHalves(std::uint32_t codes,
   hi = __hfma2(__hadd2(__builtin_bit_cast(__half2, p1), magic), scale2, bias2);
 }
 
-template<WeightType kType, int BM, int BN, int BK, bool kPair = false>
+struct RoutedLiveBounds {
+  const std::int32_t* padded;
+  const std::uint32_t* counts;
+};
+template<bool kLive>
+using RoutedBounds =
+    std::conditional_t<kLive, RoutedLiveBounds, const std::int32_t*>;
+template<bool kLive>
+RoutedBounds<kLive> RoutedBoundsArg(const std::int32_t* padded,
+                                    const std::uint32_t* counts) {
+  if constexpr (kLive)
+    return {padded, counts};
+  else
+    return padded;
+}
+
+template<WeightType kType, int BM, int BN, int BK, bool kPair = false,
+         bool kLive = false>
 __launch_bounds__(256) __global__
     void RoutedF16GEMMKernel(const void* __restrict__ w,
                              const __half* __restrict__ x,
                              const std::int32_t* __restrict__ tiles,
-                             const std::int32_t* __restrict__ pad_bounds,
+                             RoutedBounds<kLive> bounds,
                              const std::int32_t* __restrict__ rows_in,
                              const std::int32_t* __restrict__ rows_out,
                              const float* __restrict__ swiglu_gate,
@@ -3952,8 +3969,25 @@ __launch_bounds__(256) __global__
   const std::int32_t tile = tiles[blockIdx.y];
   const int expert = tile & 0xFFFF;
   const int t_local = (tile >> 16) * BN;
+  const auto* pad_bounds = [&] {
+    if constexpr (kLive)
+      return bounds.padded;
+    else
+      return bounds;
+  }();
   const int bucket_begin = pad_bounds[expert];
-  const int bucket_rows = pad_bounds[expert + 1] - bucket_begin;
+  const int bucket_rows = [&] {
+    if constexpr (kLive)
+      return static_cast<int>(bounds.counts[expert]);
+    else
+      return pad_bounds[expert + 1] - bucket_begin;
+  }();
+  if constexpr (kLive) {
+    // Uniform exit before weight fetch/LDS barriers; padded bounds only
+    // locate the bucket and never determine live activation rows.
+    if (t_local >= bucket_rows)
+      return;
+  }
   const int live_tok_tiles =
       std::min(kTokTiles, (bucket_rows - t_local + 15) / 16);
   const int num_kb = static_cast<int>(k / 32);
@@ -4247,7 +4281,7 @@ __launch_bounds__(256) __global__
       }
 #pragma unroll
       for (int j = 0; j < kTokTiles; ++j) {
-        if constexpr (kPair || ((kQ5 || kQ8) && BN >= 48)) {
+        if constexpr (kLive || kPair || ((kQ5 || kQ8) && BN >= 48)) {
           // Keep one token tile's LDS fragments live at a time. Hoisting
           // all eight tiles spills registers and defeats the wider tile's
           // reuse of each weight decode. This is a compiler barrier only.
@@ -4255,7 +4289,8 @@ __launch_bounds__(256) __global__
         }
         // A short expert bucket has no output in the remaining token
         // tiles, so omit their WMMA work.
-        if constexpr ((kPair || ((kQ5 || kQ8) && BN >= 48)) && kTokTiles > 1) {
+        if constexpr ((kLive || kPair || ((kQ5 || kQ8) && BN >= 48)) &&
+                      kTokTiles > 1) {
           if (j >= live_tok_tiles)
             continue;
         }
@@ -4302,6 +4337,10 @@ __launch_bounds__(256) __global__
     float* scratch = base + wave_id * plane;
 #pragma unroll
     for (int j = 0; j < kTokTiles; ++j) {
+      if constexpr (kLive) {
+        if (j >= live_tok_tiles)
+          break;
+      }
 #pragma unroll
       for (int l = 0; l < 8; ++l) {
         scratch[sub_lane * stride + 2 * l + half_id] = acc[0][j][l];
@@ -4355,6 +4394,10 @@ __launch_bounds__(256) __global__
       float* scratch = reinterpret_cast<float*>(lds);
 #pragma unroll
       for (int j = 0; j < kTokTiles; ++j) {
+        if constexpr (kLive) {
+          if (j >= live_tok_tiles)
+            break;
+        }
 #pragma unroll
         for (int u = 0; u < kWaveRowTiles; ++u) {
 #pragma unroll
@@ -4403,6 +4446,10 @@ __launch_bounds__(256) __global__
     const int r0 = r_block + (wave_id * 16) + (u * 128);
 #pragma unroll
     for (int j = 0; j < kTokTiles; ++j) {
+      if constexpr (kLive) {
+        if (j >= live_tok_tiles)
+          break;
+      }
 #pragma unroll
       for (int l = 0; l < 8; ++l) {
         tile_scratch[(sub_lane * 16) + (2 * l) + half_id] = acc[u][j][l];
@@ -4747,47 +4794,52 @@ void RoutedCompact(const std::int32_t* ids, const std::uint32_t* counts,
                      static_cast<std::uint32_t>(slots), k);
 }
 
-template<int BN>
+template<int BN, bool kLive = false>
 bool LaunchRoutedF16(const void* w, WeightType type, const __half* x,
                      const std::int32_t* tiles, std::uint32_t n_tiles,
                      const std::int32_t* pad_bounds,
                      const std::int32_t* rows_in, const std::int32_t* rows_out,
                      const float* swiglu_gate, float* out, __half* out_half,
-                     std::size_t m, std::size_t k, hipStream_t stream) {
+                     std::size_t m, std::size_t k, hipStream_t stream,
+                     const std::uint32_t* counts = nullptr) {
   constexpr int kBM = 128;
   constexpr int kBK = 2;
   const dim3 grid(static_cast<unsigned int>((m + kBM - 1) / kBM), n_tiles);
   switch (type) {
     case WeightType::kQ4_K:
-      if constexpr (BN > 48) {
+      if constexpr (BN > 48 || kLive) {
         return false;
       } else {
-        hipLaunchKernelGGL(
-            (RoutedF16GEMMKernel<WeightType::kQ4_K, kBM, BN, kBK>), grid,
-            dim3(kThreads), 0, stream, w, x, tiles, pad_bounds, rows_in,
-            rows_out, swiglu_gate, out, out_half, m, k, nullptr);
+        hipLaunchKernelGGL((RoutedF16GEMMKernel<WeightType::kQ4_K, kBM, BN, kBK,
+                                                false, kLive>),
+                           grid, dim3(kThreads), 0, stream, w, x, tiles,
+                           RoutedBoundsArg<kLive>(pad_bounds, counts), rows_in,
+                           rows_out, swiglu_gate, out, out_half, m, k, nullptr);
         return true;
       }
     case WeightType::kQ5_1:
-      hipLaunchKernelGGL((RoutedF16GEMMKernel<WeightType::kQ5_1, kBM, BN, kBK>),
-                         grid, dim3(kThreads), 0, stream, w, x, tiles,
-                         pad_bounds, rows_in, rows_out, swiglu_gate, out,
-                         out_half, m, k, nullptr);
+      hipLaunchKernelGGL(
+          (RoutedF16GEMMKernel<WeightType::kQ5_1, kBM, BN, kBK, false, kLive>),
+          grid, dim3(kThreads), 0, stream, w, x, tiles,
+          RoutedBoundsArg<kLive>(pad_bounds, counts), rows_in, rows_out,
+          swiglu_gate, out, out_half, m, k, nullptr);
       return true;
     case WeightType::kQ8_0:
-      hipLaunchKernelGGL((RoutedF16GEMMKernel<WeightType::kQ8_0, kBM, BN, kBK>),
-                         grid, dim3(kThreads), 0, stream, w, x, tiles,
-                         pad_bounds, rows_in, rows_out, swiglu_gate, out,
-                         out_half, m, k, nullptr);
+      hipLaunchKernelGGL(
+          (RoutedF16GEMMKernel<WeightType::kQ8_0, kBM, BN, kBK, false, kLive>),
+          grid, dim3(kThreads), 0, stream, w, x, tiles,
+          RoutedBoundsArg<kLive>(pad_bounds, counts), rows_in, rows_out,
+          swiglu_gate, out, out_half, m, k, nullptr);
       return true;
     case WeightType::kQ5_K:
-      if constexpr (BN > 48) {
+      if constexpr (BN > 48 || kLive) {
         return false;
       } else {
-        hipLaunchKernelGGL(
-            (RoutedF16GEMMKernel<WeightType::kQ5_K, kBM, BN, kBK>), grid,
-            dim3(kThreads), 0, stream, w, x, tiles, pad_bounds, rows_in,
-            rows_out, swiglu_gate, out, out_half, m, k, nullptr);
+        hipLaunchKernelGGL((RoutedF16GEMMKernel<WeightType::kQ5_K, kBM, BN, kBK,
+                                                false, kLive>),
+                           grid, dim3(kThreads), 0, stream, w, x, tiles,
+                           RoutedBoundsArg<kLive>(pad_bounds, counts), rows_in,
+                           rows_out, swiglu_gate, out, out_half, m, k, nullptr);
         return true;
       }
     default:
@@ -4825,13 +4877,14 @@ bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
   }
 }
 
-template<int BN>
+template<int BN, bool kLive = false>
 bool LaunchRoutedGatedF16(const void* gate, const void* up, WeightType type,
                           const __half* x, const std::int32_t* tiles,
                           std::uint32_t n_tiles, const std::int32_t* pad_bounds,
                           const std::int32_t* rows_in,
                           const std::int32_t* rows_out, __half* out,
-                          std::size_t m, std::size_t k, hipStream_t stream) {
+                          std::size_t m, std::size_t k, hipStream_t stream,
+                          const std::uint32_t* counts = nullptr) {
   if (m == 0 || k == 0 || k % 256 != 0 || n_tiles == 0 || out == nullptr) {
     return false;
   }
@@ -4839,16 +4892,21 @@ bool LaunchRoutedGatedF16(const void* gate, const void* up, WeightType type,
   switch (type) {
     case WeightType::kQ4_K:
       hipLaunchKernelGGL(
-          (RoutedF16GEMMKernel<WeightType::kQ4_K, 128, BN, 2, true>), grid,
-          dim3(kThreads), 0, stream, gate, x, tiles, pad_bounds, rows_in,
-          rows_out, nullptr, nullptr, out, m, k, up);
+          (RoutedF16GEMMKernel<WeightType::kQ4_K, 128, BN, 2, true, kLive>),
+          grid, dim3(kThreads), 0, stream, gate, x, tiles,
+          RoutedBoundsArg<kLive>(pad_bounds, counts), rows_in, rows_out,
+          nullptr, nullptr, out, m, k, up);
       return true;
     case WeightType::kQ5_K:
-      hipLaunchKernelGGL(
-          (RoutedF16GEMMKernel<WeightType::kQ5_K, 128, BN, 2, true>), grid,
-          dim3(kThreads), 0, stream, gate, x, tiles, pad_bounds, rows_in,
-          rows_out, nullptr, nullptr, out, m, k, up);
-      return true;
+      if constexpr (kLive) {
+        return false;
+      } else {
+        hipLaunchKernelGGL(
+            (RoutedF16GEMMKernel<WeightType::kQ5_K, 128, BN, 2, true>), grid,
+            dim3(kThreads), 0, stream, gate, x, tiles, pad_bounds, rows_in,
+            rows_out, nullptr, nullptr, out, m, k, up);
+        return true;
+      }
     default:
       return false;
   }
@@ -4869,6 +4927,53 @@ bool RoutedGatedF16Gemm(const void* gate, const void* up, WeightType type,
   return tile_rows == 64 &&
          LaunchRoutedGatedF16<64>(gate, up, type, x, tiles, n_tiles, pad_bounds,
                                   rows_in, rows_out, out, m, k, stream);
+}
+
+bool RoutedLanerowF16Gemm(const void* w, WeightType type, const __half* x,
+                          const std::int32_t* tiles, std::uint32_t n_tiles,
+                          std::uint32_t tile_rows,
+                          const std::int32_t* pad_bounds,
+                          const std::uint32_t* counts,
+                          const std::int32_t* rows_in,
+                          const std::int32_t* rows_out, __half* out,
+                          std::size_t m, std::size_t k, hipStream_t stream) {
+  if (counts == nullptr || m == 0 || k == 0 || k % 64 != 0 || out == nullptr ||
+      n_tiles == 0 || (type != WeightType::kQ5_1 && type != WeightType::kQ8_0))
+    return false;
+  switch (tile_rows) {
+    case 16:
+      return LaunchRoutedF16<16, true>(w, type, x, tiles, n_tiles, pad_bounds,
+                                       rows_in, rows_out, nullptr, nullptr, out,
+                                       m, k, stream, counts);
+    case 48:
+      return LaunchRoutedF16<48, true>(w, type, x, tiles, n_tiles, pad_bounds,
+                                       rows_in, rows_out, nullptr, nullptr, out,
+                                       m, k, stream, counts);
+    case 64:
+      return LaunchRoutedF16<64, true>(w, type, x, tiles, n_tiles, pad_bounds,
+                                       rows_in, rows_out, nullptr, nullptr, out,
+                                       m, k, stream, counts);
+    default:
+      return false;
+  }
+}
+
+bool RoutedLanerowGatedF16Gemm(
+    const void* gate, const void* up, const __half* x,
+    const std::int32_t* tiles, std::uint32_t n_tiles, std::uint32_t tile_rows,
+    const std::int32_t* pad_bounds, const std::uint32_t* counts,
+    const std::int32_t* rows_in, const std::int32_t* rows_out, __half* out,
+    std::size_t m, std::size_t k, hipStream_t stream) {
+  if (counts == nullptr)
+    return false;
+  if (tile_rows == 128)
+    return LaunchRoutedGatedF16<128, true>(gate, up, WeightType::kQ4_K, x,
+                                           tiles, n_tiles, pad_bounds, rows_in,
+                                           rows_out, out, m, k, stream, counts);
+  return tile_rows == 64 &&
+         LaunchRoutedGatedF16<64, true>(gate, up, WeightType::kQ4_K, x, tiles,
+                                        n_tiles, pad_bounds, rows_in, rows_out,
+                                        out, m, k, stream, counts);
 }
 
 // Keep the separate four-tap convolution's F32 rounding order when its

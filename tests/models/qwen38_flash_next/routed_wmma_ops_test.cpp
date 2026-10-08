@@ -14,6 +14,7 @@
 
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
+#include "src/models/qwen38_flash_next/prefill_diag.hpp"
 
 namespace q = gufo::models::qwen38_flash_next::rocm;
 namespace {
@@ -705,13 +706,259 @@ void CheckPairedMmq() {
     throw std::runtime_error("paired MMQ differs from separate projections");
 }
 
+// Stage 1 is a numerical contract, not a bitwise contract. Compare the
+// maximum absolute error against the CPU reference RMS, including small
+// outputs; an elementwise relative error would be ill-defined near zero.
+void CheckRmsError(const std::vector<__half>& actual,
+                   const std::vector<float>& reference, double tolerance,
+                   const char* label) {
+  double squares = 0.0, worst = 0.0;
+  for (std::size_t i = 0; i < reference.size(); ++i) {
+    const float a = __half2float(actual[i]);
+    if (!std::isfinite(a) || !std::isfinite(reference[i]))
+      throw std::runtime_error(std::string(label) + " nonfinite output");
+    squares += static_cast<double>(reference[i]) * reference[i];
+    worst = std::max(worst, std::abs(static_cast<double>(a) - reference[i]));
+  }
+  const double rms = std::sqrt(squares / reference.size());
+  const double error = worst / std::max(rms, 1e-12);
+  std::cout << label << " max_error/reference_rms=" << error
+            << " limit=" << tolerance << '\n';
+  if (error > tolerance)
+    throw std::runtime_error(std::string(label) + " RMS-scale error exceeded");
+}
+
+std::vector<float> FloatValues(const std::vector<__half>& values) {
+  std::vector<float> result(values.size());
+  std::transform(values.begin(), values.end(), result.begin(),
+                 [](__half value) { return __half2float(value); });
+  return result;
+}
+
+void CheckLanerowCounters() {
+  namespace d = gufo::models::qwen38_flash_next;
+  d::PrefillDiagTotals totals, layer;
+  const auto baseline = d::PrefillDiagFields(totals);
+  totals.Add(layer);
+  if (baseline != d::PrefillDiagFields(totals) ||
+      baseline.find("moe_lanerow") != std::string::npos)
+    throw std::runtime_error("unset lanerow changed diagnostic fields");
+  layer.moe_lanerow_layers = 2;
+  layer.moe_lanerow_fallback_layers = 1;
+  totals.Add(layer);  // GUFO_PREFILL_DIAG alone, without moe_bench.
+  const auto fields = d::PrefillDiagFields(totals);
+  if (fields.find("moe_lanerow_layers=2") == std::string::npos ||
+      fields.find("moe_lanerow_fallback_layers=1") == std::string::npos)
+    throw std::runtime_error("lanerow attribution missing from diagnostics");
+  layer.moe_bench = true;
+  totals.Add(layer);
+  if (totals.moe_lanerow_layers != 4 || totals.moe_lanerow_fallback_layers != 2)
+    throw std::runtime_error("lanerow counters not aggregated for moe bench");
+}
+
+void CheckLanerowDispatch() {
+  constexpr std::size_t experts = 13, tokens = 130, used = 10;
+  constexpr std::size_t hidden = 256, ff = 640, down_rows = 129;
+  constexpr std::size_t slots = tokens * used, guard = 32;
+  const std::vector<std::uint32_t> counts{0,  1,  15,  16,  17,  48, 63,
+                                          64, 65, 127, 128, 129, 130};
+  std::vector<std::int32_t> ids(slots, -1);
+  std::array<std::size_t, tokens> occupied{};
+  std::size_t assignment = 0;
+  // Each expert visits distinct tokens; each token has at most top-10 slots.
+  // Inactive slots also verify the caller's zeroed output contract.
+  for (std::size_t e = 0; e < experts; ++e)
+    for (std::uint32_t j = 0; j < counts[e]; ++j) {
+      const auto t = assignment++ % tokens;
+      if (occupied[t] >= used)
+        throw std::runtime_error("invalid stage-1 test histogram");
+      ids[t * used + occupied[t]++] = static_cast<std::int32_t>(e);
+    }
+  std::uint32_t seed = 0x17306480U;
+  std::vector<__half> x(tokens * hidden);
+  for (std::size_t i = 0; i < x.size(); ++i)
+    x[i] = __float2half(Uniform(&seed, (i / hidden) % 2 ? 0.004F : 0.04F));
+  const auto gate = MakeQ4K(experts, ff, hidden, 11);
+  const auto up = MakeQ4K(experts, ff, hidden, 23);
+  std::vector<float> ref_up(slots * ff, 0.0F);
+  for (std::size_t slot = 0; slot < slots; ++slot) {
+    if (ids[slot] < 0)
+      continue;
+    for (std::size_t row = 0; row < ff; ++row) {
+      float g = 0.0F, u = 0.0F;
+      const auto w = (static_cast<std::size_t>(ids[slot]) * ff + row) * hidden;
+      for (std::size_t k = 0; k < hidden; ++k) {
+        const float activation = __half2float(x[(slot / used) * hidden + k]);
+        g = std::fma(gate.values[w + k], activation, g);
+        u = std::fma(up.values[w + k], activation, u);
+      }
+      ref_up[slot * ff + row] = (u * g) / (1.0F + std::exp(-g));
+    }
+  }
+  std::vector<__half> ref_up_half(ref_up.size());
+  std::transform(ref_up.begin(), ref_up.end(), ref_up_half.begin(),
+                 [](float value) { return __float2half(value); });
+
+  auto* dg = Upload(gate.packed);
+  auto* du = Upload(up.packed);
+  auto* dx = Upload(x);
+  auto* di = Upload(ids);
+  auto* dc = Upload(counts);
+  const std::size_t compact = q::RoutedCompactRows(slots, experts);
+  auto* db = Upload(std::vector<std::int32_t>(experts + 1));
+  auto* cursors = Upload(std::vector<std::int32_t>(experts));
+  auto* rt = Upload(std::vector<std::int32_t>(compact));
+  auto* rs = Upload(std::vector<std::int32_t>(compact));
+  q::RoutedCompact(di, dc, db, cursors, rt, rs, tokens, used, experts, nullptr);
+  const auto bounds = Download(db, experts + 1);
+  const auto rows_token = Download(rt, compact);
+  const auto rows_slot = Download(rs, compact);
+  for (std::size_t e = 0; e < experts; ++e) {
+    if (bounds[e + 1] - bounds[e] !=
+        static_cast<std::int32_t>((counts[e] + 15) / 16 * 16))
+      throw std::runtime_error("unexpected compact bucket padding");
+    for (int r = bounds[e] + counts[e]; r < bounds[e + 1]; ++r)
+      if (rows_token[r] != -1 || rows_slot[r] != -1)
+        throw std::runtime_error("compact padding must be masked");
+  }
+  const auto tiles_for = [&](std::uint32_t width, bool extra_empty = false) {
+    std::vector<std::int32_t> tiles;
+    for (std::size_t e = 0; e < experts; ++e)
+      for (std::uint32_t j = 0;
+           j < (counts[e] + width - 1) / width + (extra_empty ? 1 : 0); ++j)
+        tiles.push_back(static_cast<std::int32_t>(e | (j << 16)));
+    return tiles;
+  };
+  auto* old_tiles = Upload(tiles_for(16));
+  auto* old_gate = Upload(std::vector<float>(slots * ff));
+  auto* old_up = Upload(std::vector<__half>(slots * ff));
+  if (!q::RoutedF16Gemm(dg, q::WeightType::kQ4_K, dx, old_tiles,
+                        tiles_for(16).size(), 16, db, rt, rs, nullptr, old_gate,
+                        nullptr, ff, hidden, nullptr) ||
+      !q::RoutedF16Gemm(du, q::WeightType::kQ4_K, dx, old_tiles,
+                        tiles_for(16).size(), 16, db, rt, rs, old_gate, nullptr,
+                        old_up, ff, hidden, nullptr))
+    throw std::runtime_error("legacy stage-1 gate/up reference launch failed");
+  const auto old_up_host = Download(old_up, slots * ff);
+  // 1% max error/reference RMS allows F16 activations, affine weight
+  // rounding and nonlinear amplification, but detects layout/padding errors.
+  CheckRmsError(old_up_host, ref_up, 0.01, "old gate/up vs CPU F32");
+  const __half poison = __float2half(-123.0F);
+  std::vector<__half> dirty((slots + 1) * ff + guard, poison);
+  std::fill(dirty.begin(), dirty.begin() + slots * ff, __float2half(0.0F));
+  auto* new_up = Upload(dirty);
+  // Positive padding indices deliberately target the output guard. Real
+  // counts must mask them before gather/store, even if metadata is dirty.
+  auto dirty_token = rows_token, dirty_slot = rows_slot;
+  for (std::size_t e = 0; e < experts; ++e)
+    for (int r = bounds[e] + counts[e]; r < bounds[e + 1]; ++r) {
+      dirty_token[r] = 0;
+      dirty_slot[r] = slots;
+    }
+  auto* dirty_rt = Upload(dirty_token);
+  auto* dirty_rs = Upload(dirty_slot);
+  for (std::uint32_t width : {64U, 128U}) {
+    const auto tiles = tiles_for(width, true);
+    auto* dt = Upload(tiles);
+    CheckHip(hipMemcpy(new_up, dirty.data(), dirty.size() * sizeof(__half),
+                       hipMemcpyHostToDevice),
+             "reset stage-1 output");
+    if (!q::RoutedLanerowGatedF16Gemm(dg, du, dx, dt, tiles.size(), width, db,
+                                      dc, dirty_rt, dirty_rs, new_up, ff,
+                                      hidden, nullptr))
+      throw std::runtime_error("stage-1 paired launch failed");
+    const auto result = Download(new_up, slots * ff);
+    CheckRmsError(result, ref_up, 0.01, "new gate/up vs CPU F32");
+    CheckRmsError(result, FloatValues(old_up_host), 0.002,
+                  "new vs old gate/up");
+    for (__half h : Download(new_up + slots * ff, ff + guard))
+      if (__half2float(h) != __half2float(poison))
+        throw std::runtime_error("stage-1 paired padding wrote guard");
+    CheckHip(hipFree(dt), "stage-1 pair map free");
+  }
+
+  for (q::WeightType type : {q::WeightType::kQ5_1, q::WeightType::kQ8_0}) {
+    const auto down = type == q::WeightType::kQ5_1
+                          ? MakeQ5_1(experts, down_rows, ff, 41)
+                          : MakeQ8_0(experts, down_rows, ff, 43);
+    std::vector<float> ref_down(slots * down_rows, 0.0F);
+    for (std::size_t slot = 0; slot < slots; ++slot) {
+      if (ids[slot] < 0)
+        continue;
+      for (std::size_t row = 0; row < down_rows; ++row) {
+        float sum = 0.0F;
+        const auto w =
+            (static_cast<std::size_t>(ids[slot]) * down_rows + row) * ff;
+        for (std::size_t k = 0; k < ff; ++k)
+          sum = std::fma(down.values[w + k],
+                         __half2float(ref_up_half[slot * ff + k]), sum);
+        ref_down[slot * down_rows + row] = sum;
+      }
+    }
+    auto* dw = Upload(down.packed);
+    auto* old_down = Upload(std::vector<__half>(slots * down_rows));
+    if (!q::RoutedF16Gemm(dw, type, old_up, old_tiles, tiles_for(16).size(), 16,
+                          db, rs, rs, nullptr, nullptr, old_down, down_rows, ff,
+                          nullptr))
+      throw std::runtime_error("legacy stage-1 down reference failed");
+    const auto old_down_host = Download(old_down, slots * down_rows);
+    CheckRmsError(old_down_host, ref_down, 0.02, "old down vs CPU F32");
+    std::vector<__half> down_dirty((slots + 1) * down_rows + guard, poison);
+    std::fill(down_dirty.begin(), down_dirty.begin() + slots * down_rows,
+              __float2half(0.0F));
+    auto* new_down = Upload(down_dirty);
+    // Isolate down dispatch using identical narrowed activations, then
+    // compare the complete paired->down pipeline against CPU and old.
+    for (std::uint32_t width : {16U, 48U, 64U}) {
+      const auto tiles = tiles_for(width, true);
+      auto* dt = Upload(tiles);
+      if (!q::RoutedLanerowF16Gemm(dw, type, old_up, dt, tiles.size(), width,
+                                   db, dc, dirty_rs, dirty_rs, new_down,
+                                   down_rows, ff, nullptr))
+        throw std::runtime_error("stage-1 down live launch failed");
+      const auto result = Download(new_down, slots * down_rows);
+      CheckRmsError(result, FloatValues(old_down_host), 0.002,
+                    "new vs old down (same F16 input)");
+      CheckRmsError(result, ref_down, 0.02, "new down vs CPU F32");
+      if (width == 64) {
+        if (!q::RoutedLanerowF16Gemm(dw, type, new_up, dt, tiles.size(), width,
+                                     db, dc, dirty_rs, dirty_rs, new_down,
+                                     down_rows, ff, nullptr))
+          throw std::runtime_error("stage-1 complete pipeline launch failed");
+        const auto pipeline = Download(new_down, slots * down_rows);
+        CheckRmsError(pipeline, ref_down, 0.02, "new pipeline vs CPU F32");
+        CheckRmsError(pipeline, FloatValues(old_down_host), 0.002,
+                      "new pipeline vs old pipeline");
+      }
+      for (__half h : Download(new_down + slots * down_rows, down_rows + guard))
+        if (__half2float(h) != __half2float(poison))
+          throw std::runtime_error("stage-1 down padding wrote guard");
+      CheckHip(hipFree(dt), "stage-1 down map free");
+    }
+    for (void* ptr : {static_cast<void*>(dw), static_cast<void*>(old_down),
+                      static_cast<void*>(new_down)})
+      CheckHip(hipFree(ptr), "stage-1 down free");
+  }
+  for (void* ptr :
+       {static_cast<void*>(dg), static_cast<void*>(du), static_cast<void*>(dx),
+        static_cast<void*>(di), static_cast<void*>(dc), static_cast<void*>(db),
+        static_cast<void*>(cursors), static_cast<void*>(rt),
+        static_cast<void*>(rs), static_cast<void*>(old_tiles),
+        static_cast<void*>(old_gate), static_cast<void*>(old_up),
+        static_cast<void*>(new_up), static_cast<void*>(dirty_rt),
+        static_cast<void*>(dirty_rs)})
+    CheckHip(hipFree(ptr), "stage-1 free");
+}
+
 }  // namespace
 
 int main() {
   try {
+    CheckLanerowCounters();
     CheckVectorGrouping();
     CheckVectorGrouping(true);
     CheckPairedMmq();
+    CheckLanerowDispatch();
     bool ok = true;
     // Gate/up view: 64 experts, top-10, 640 x 2560 Q4_K.
     ok = Ok(Run(q::WeightType::kQ4_K, 300, 10, 64, 640, 2560, 0x1234ABCDU)) &&
