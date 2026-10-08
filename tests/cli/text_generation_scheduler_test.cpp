@@ -154,6 +154,44 @@ void TestPrefillDiagnosticsHost() {
   Expect(gufo::server::GenerationLogDetails(result).find("table_reads=6") !=
              std::string::npos,
          "completion log includes diagnostic totals");
+  Expect(MoeGbps(1'000'000'000, 10'000) == 100.0 &&
+             MoeGbps(10, 0) == 0 && MoeTflops(10, 0) == 0,
+         "decimal GB/s and zero-time arithmetic");
+  // 2 tokens * 3 experts * 2 FLOPs/FMA * 3 GEMMs * 4 hidden * 5 FF = 720.
+  Expect(MoeFlops(2, 3, 4, 5) == 720 && MoeTflops(720, 2) == 0.00036,
+         "three GEMMs count two operations per multiply-add");
+  Expect(PrefillDiagFields(*totals).find("moe_us=") == std::string::npos &&
+             !json->find("moe_us"),
+         "ordinary diagnostics emit no benchmark fields");
+  PrefillDiagTotals bench;
+  bench.moe_bench = true;
+  bench.moe_us = 2;
+  bench.moe_flops = MoeFlops(2, 3, 4, 5);
+  bench.moe_expert_bytes = 200;
+  PrefillDiagTotals combined;
+  combined.Add(bench);
+  combined.Add(bench);
+  Expect(combined.moe_bench && combined.moe_us == 4 &&
+             combined.moe_flops == 1440 && combined.moe_expert_bytes == 400,
+         "benchmark aggregation sums time, bytes and FLOPs");
+  std::optional<PrefillDiagTotals> benchmark = combined;
+  auto benchmark_usage = gufo::json::Value::object();
+  gufo::server::AddPrefillDiagUsage(benchmark_usage, benchmark);
+  const auto* benchmark_json = benchmark_usage.find("prefill_diag");
+  Expect(benchmark_json && benchmark_json->member_double("moe_us") == 4 &&
+             benchmark_json->member_double("moe_gbps") == 0.1 &&
+             benchmark_json->member_double("moe_tflops") == 0.00036 &&
+             PrefillDiagFields(combined).find("moe_us=4.000") != std::string::npos,
+         "benchmark usage and logs derive ratios after aggregation");
+  for (const auto width : {730U, 2048U, 8192U}) {
+    PrefillDiagPass grid;
+    grid.RecordLayer(0, width, first, 100, width);
+    grid.RecordLayer(1, 96, last, 200, width);
+    Expect(grid.layers.size() == 2 && grid.totals.expert_bytes == 200 &&
+               MoeFlops(width, 10, 2560, 640) ==
+                   static_cast<double>(width) * 98'304'000,
+           "variable pass widths and tail layers have no fixed-width assumption");
+  }
   PrefillDiagTotals unequal;
   unequal.AddLayer(4, 10);
   totals->Add(unequal);

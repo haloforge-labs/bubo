@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -44,6 +45,96 @@ bool Check(hipError_t err, const char* what, std::string* error_msg) {
   }
   AssignError(error_msg, std::string(what) + ": " + hipGetErrorString(err));
   return false;
+}
+
+// Constructed only by the benchmark specialization. Events use the model
+// stream.
+struct BenchEvents {
+  hipEvent_t begin{nullptr}, end{nullptr};
+  ~BenchEvents() {
+    if (end)
+      (void)hipEventDestroy(end);
+    if (begin)
+      (void)hipEventDestroy(begin);
+  }
+  bool Start(hipStream_t stream, std::string* error) {
+    return Check(hipEventCreate(&begin), "moe bench begin", error) &&
+           Check(hipEventCreate(&end), "moe bench end", error) &&
+           Check(hipEventRecord(begin, stream), "moe bench start", error);
+  }
+  bool Finish(hipStream_t stream, double& us, std::string* error) {
+    float ms = 0;
+    if (!Check(hipEventRecord(end, stream), "moe bench stop", error) ||
+        !Check(hipStreamSynchronize(stream), "moe bench stream", error) ||
+        !Check(hipEventElapsedTime(&ms, begin, end), "moe bench elapsed",
+               error))
+      return false;
+    us += static_cast<double>(ms) * 1000.0;
+    return true;
+  }
+};
+struct NoBenchEvents {};
+
+void CopyReferenceOnce(hipStream_t stream) {
+  static std::once_flag once;
+  std::call_once(once, [stream] {
+    constexpr std::size_t bytes = std::size_t{4} << 30;
+    constexpr std::size_t reserve = std::size_t{1} << 30;
+    std::size_t free = 0, total = 0;
+    struct Buffers {
+      void* src{nullptr};
+      void* dst{nullptr};
+      ~Buffers() {
+        if (dst)
+          (void)hipFree(dst);
+        if (src)
+          (void)hipFree(src);
+      }
+    } buffers;
+    const auto info = hipMemGetInfo(&free, &total);
+    if (info != hipSuccess) {
+      std::fprintf(stderr,
+                   "[moe-bench] copy_ref=skipped(memory query failed)\n");
+      return;
+    }
+    if (free < 2 * bytes + reserve ||
+        hipMalloc(&buffers.src, bytes) != hipSuccess ||
+        hipMalloc(&buffers.dst, bytes) != hipSuccess) {
+      std::fprintf(stderr, "[moe-bench] copy_ref=skipped(no memory)\n");
+      return;
+    }
+    // Initialize and warm outside the three measured copies.
+    std::string error;
+    if (!Check(hipMemsetAsync(buffers.src, 0, bytes, stream), "copy init",
+               &error) ||
+        !Check(hipMemcpyAsync(buffers.dst, buffers.src, bytes,
+                              hipMemcpyDeviceToDevice, stream),
+               "copy warm", &error) ||
+        !Check(hipStreamSynchronize(stream), "copy warm sync", &error)) {
+      std::fprintf(stderr, "[moe-bench] copy_ref=failed(%s)\n", error.c_str());
+      return;
+    }
+    std::array<double, 3> times{};
+    for (auto& us : times) {
+      BenchEvents events;
+      if (!events.Start(stream, &error) ||
+          !Check(hipMemcpyAsync(buffers.dst, buffers.src, bytes,
+                                hipMemcpyDeviceToDevice, stream),
+                 "copy ref", &error) ||
+          !events.Finish(stream, us, &error) || us <= 0) {
+        std::fprintf(stderr, "[moe-bench] copy_ref=failed(%s)\n",
+                     error.c_str());
+        return;
+      }
+    }
+    std::sort(times.begin(), times.end());
+    std::fprintf(stderr,
+                 "[moe-bench] copy_ref_gbps=%.3f copy_ref_read_gbps=%.3f "
+                 "copy_ref_bytes=%zu copy_ref_us=%.3f repeats=3 "
+                 "convention=read+write,read-equivalent\n",
+                 MoeGbps(2.0 * bytes, times[1]), MoeGbps(bytes, times[1]),
+                 bytes, times[1]);
+  });
 }
 
 /// Allocates `count` elements of T and records the allocation.
@@ -2440,9 +2531,10 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   return !project_output || Dense(l.attn_out, s_.ctx, out, n_tokens, error_msg);
 }
 
+template<bool Benchmark>
 bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
-                   std::uint32_t n_tokens, std::string* error_msg,
-                   bool last_only) const {
+                       std::uint32_t n_tokens, std::string* error_msg,
+                       bool last_only) const {
   const Config& c = config();
   const std::uint32_t used = c.num_experts_used;
   // Router logits and the shared-expert gate come out of one GEMM.
@@ -2494,7 +2586,8 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
     try {
       const std::size_t offset =
           static_cast<std::size_t>(n_tokens - 1) * c.hidden_size;
-      const bool ok = MoeExperts(l, x + offset, out + offset, 1, error_msg);
+      const bool ok =
+          MoeExperts<Benchmark>(l, x + offset, out + offset, 1, error_msg);
       UseScratch(base);
       return ok;
     } catch (...) {
@@ -2502,17 +2595,23 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
       throw;
     }
   }
-  return MoeExperts(l, x, out, n_tokens, error_msg);
+  return MoeExperts<Benchmark>(l, x, out, n_tokens, error_msg);
 }
 
+template<bool Benchmark>
 bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
-                          std::uint32_t n_tokens,
-                          std::string* error_msg) const {
+                              std::uint32_t n_tokens,
+                              std::string* error_msg) const {
   const Config& c = config();
   const std::uint32_t used = c.num_experts_used;
   const std::uint32_t slots = n_tokens * used;
   if (!RouteHints(n_tokens, error_msg)) {
     return false;
+  }
+  std::conditional_t<Benchmark, BenchEvents, NoBenchEvents> events;
+  if constexpr (Benchmark) {
+    if (!events.Start(stream_, error_msg))
+      return false;
   }
   // Tiled batches take the WMMA route: assignments compacted by expert
   // into 16-row padded buckets, token rows narrowed to F16 once, then the
@@ -2600,6 +2699,10 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
       return false;
     }
   }
+  if constexpr (Benchmark) {
+    if (!events.Finish(stream_, active_diag_->totals.moe_us, error_msg))
+      return false;
+  }
   if (wmma_experts) {
     // The combine that follows folds this epilogue into its own pass when
     // it takes the F16 route (Combine); otherwise it runs here.
@@ -2620,6 +2723,12 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
   }
   return true;
 }
+
+// Batch callers instantiate the untimed declarations from executor.hpp.
+template bool Executor::Moe<false>(const DeviceLayer&, const float*, float*,
+                                   std::uint32_t, std::string*, bool) const;
+template bool Executor::MoeExperts<false>(const DeviceLayer&, const float*, float*,
+                                          std::uint32_t, std::string*) const;
 
 bool Executor::CopyTrunkHidden(const Session& session, std::span<float> hidden,
                                std::string* error_msg) const {
@@ -2818,6 +2927,10 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
     active_diag_->totals.passes = 1;
     active_diag_->totals.tokens = n;
     active_diag_->layers.reserve(c.num_layers);
+    if (MoeBenchEnabled()) {
+      active_diag_->totals.moe_bench = true;
+      CopyReferenceOnce(stream_);
+    }
   }
   if (diagnostic) diagnostic_prefill_ = true;
   struct EndDiagnostic {
@@ -3155,10 +3268,18 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
                              : 0U;
     const auto finish = [&](std::uint32_t rows) {
       Combine(s_.res, l.hc_ffn.norm.f32(), rows);
-      if (!HcMix(l.hc_ffn, s_.res, true, s_.mixed, s_.inject, rows,
-                 error_msg) ||
-          !Moe(l, s_.mixed, s_.block_out, rows, error_msg))
+      if (!HcMix(l.hc_ffn, s_.res, true, s_.mixed, s_.inject, rows, error_msg))
         return false;
+      if constexpr (Diagnostic) {
+        const bool ok =
+            active_diag_->totals.moe_bench
+                ? Moe<true>(l, s_.mixed, s_.block_out, rows, error_msg)
+                : Moe(l, s_.mixed, s_.block_out, rows, error_msg);
+        if (!ok)
+          return false;
+      } else if (!Moe(l, s_.mixed, s_.block_out, rows, error_msg)) {
+        return false;
+      }
       if constexpr (Diagnostic) {
         // RouteHints already synchronized this existing device count download.
         const auto matrix_bytes = [](const DeviceTensor& t) {
@@ -3172,7 +3293,14 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
                            matrix_bytes(l.ffn_down_exps);
         active_diag_->RecordLayer(
             il, rows,
-            std::span<const std::uint32_t>(counts_host_, c.num_experts), bytes, n);
+            std::span<const std::uint32_t>(counts_host_, c.num_experts), bytes,
+            n);
+        if (active_diag_->totals.moe_bench) {
+          active_diag_->totals.moe_expert_bytes +=
+              active_diag_->layers.back().distinct * bytes;
+          active_diag_->totals.moe_flops +=
+              MoeFlops(rows, c.num_experts_used, c.hidden_size, c.expert_ff);
+        }
       }
       Combine(s_.res, next_norm, rows);
       return true;

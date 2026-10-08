@@ -1444,6 +1444,34 @@ log details only when measured passes are available. Streaming OpenAI usage
 still requires `stream_options.include_usage=true`. Other models do not emit
 these fields.
 
+Set `GUFO_MOE_BENCH=1` to also enable the prefill diagnostic path and measure
+existing routed-expert computation. This flag is read once and defaults OFF.
+`moe_us` sums HIP event regions per layer: after host route preparation,
+before compaction/narrowing and gate/up/down, ending before the epilogue.
+Router, shared expert and the later fused Combine are excluded. Events and
+per-layer stream synchronizations perturb timing; this is not pass wall time.
+`moe_expert_bytes` counts distinct experts times stored gate/up/down bytes,
+including tail-only layers (the existing `expert_bytes` diversity total excludes
+those layers). `moe_gbps` is that byte count / time in decimal GB/s; it is
+unique weight throughput, not measured DRAM traffic. `moe_flops` counts
+`routed_tokens * num_experts_used * 2 * 3 * hidden_size * expert_ff`, and
+`moe_tflops` divides it by the timed region. The three logical GEMMs count
+2*M*N*K operations, without padding/dequantization/activation operations;
+the WMMA path uses F16 operands with FP32 accumulation. Request usage and
+completion details report ratios of summed bytes/FLOPs to summed time.
+
+Once per process, before the first measured pass's layers, `[moe-bench]`
+reports the median of three timed 4 GiB device-to-device copies, after an
+untimed initialization/warm copy. Two 4 GiB allocations are freed afterward;
+free-memory checking reserves another 1 GiB, with `copy_ref=skipped(no memory)`
+if allocation is unsafe or fails. `copy_ref_gbps` counts read + write bytes;
+`copy_ref_read_gbps` counts bytes read only (read-equivalent). This control
+is diagnostic overhead, outside `moe_us`. Test natural text at roughly 730,
+2048 and 8192 tokens; set `GUFO_PREFILL_FORWARD_TOKENS=8192` for the last.
+Compare unique-weight GB/s with the measured 237 GB/s DRAM read ceiling and
+logical TFLOPS with the 42 TFLOPS WMMA reference; copy read-equivalent uses
+a different read/write traffic mix. No kernel or dispatch policy is changed.
+
 `table_read_us` sums steady-clock wall microseconds around each existing
 worker's pread loop, including retries; worker times overlap and are not an
 end-to-end duration. `table_reads` counts calls including retries;
