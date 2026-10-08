@@ -41,6 +41,8 @@ inline constexpr const char* kDebugSettingsEnvironment[] = {
     "GUFO_MTP_TRACE",
     "GUFO_PLATFORM_TUNING",
     "GUFO_DISK_BOUNDARY_ALIGN",
+    "GUFO_DISK_INPASS",
+    "GUFO_PREFILL_FORWARD_TOKENS",
     "GUFO_DISPATCH_TELEMETRY",
     "GUFO_TRACE",
     "GPU_MAX_HW_QUEUES",
