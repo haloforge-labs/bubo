@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // HIP adapters for the llama.cpp-derived quantized kernels. See VENDOR.md.
 #include "qfn_mmq_prelude.h"
+#include <atomic>
 namespace qfn_mmq {
 #include "qfn_mmq.h"
 #include "common.hpp"
@@ -8,6 +9,10 @@ namespace qfn_mmq {
 #include "mmvq.hpp"
 #include "quantize.hpp"
 #include "mmid.hpp"
+static std::atomic<unsigned long long> g_iq4_dense_launches{0};
+extern "C" unsigned long long qfn_mmq_iq4_dense_launch_count() {
+  return g_iq4_dense_launches.load(std::memory_order_relaxed);
+}
 static int g_routed_max_expert_rows = 0;
 static int g_routed_tile_cols = 0;
 extern "C" int qfn_mmq_init(int device) {
@@ -756,9 +761,28 @@ extern "C" int qfn_mmq_dense_vec_preq(int weight_type, const void* W,
     return -1;
   }
   const int input_stride = GGML_PAD(K, MATRIX_ROW_PADDING) / QK8_1;
+  if (type == GGML_TYPE_IQ4_XS || type == GGML_TYPE_IQ4_NL) {
+    mul_mat_vec_iq4_dense_dispatch(W, type, static_cast<const block_q8_1*>(X_q8),
+                                   out_f32, K, M, N, input_stride, stream);
+    if (hipGetLastError() != hipSuccess) return -3;
+    g_iq4_dense_launches.fetch_add(1, std::memory_order_relaxed);
+    return 0;
+  }
   // dense Q5_1 tensors of the decode twin use the exact dot (see vec_dot_q5_1_q8_1_exact); the expert path keeps the stock one
   mul_mat_vec_moe_dispatch(W, type == GGML_TYPE_Q5_1 ? GGML_TYPE_Q5_1_EXACT : type, static_cast<const block_q8_1*>(X_q8), zero_ids,
                            out_f32, K, M, N, /*experts_used=*/1, input_stride, stream);
+  return hipGetLastError() == hipSuccess ? 0 : -3;
+}
+// Test reference: execute the unchanged routed-vector kernel on expert zero.
+extern "C" int qfn_mmq_dense_vec_preq_reference(int weight_type, const void* W,
+    const void* X_q8, const int32_t* zero_ids, float* out, int M, int N, int K,
+    hipStream_t stream) {
+  const auto type = static_cast<ggml_type>(weight_type);
+  if ((type != GGML_TYPE_IQ4_XS && type != GGML_TYPE_IQ4_NL) || !W || !X_q8 ||
+      !zero_ids || !out || M <= 0 || N < 1 || N > 8 || K <= 0 ||
+      K % ggml_blck_size(type) != 0) return -1;
+  mul_mat_vec_moe_dispatch(W, type, static_cast<const block_q8_1*>(X_q8),
+      zero_ids, out, K, M, N, 1, GGML_PAD(K, MATRIX_ROW_PADDING) / QK8_1, stream);
   return hipGetLastError() == hipSuccess ? 0 : -3;
 }
 template void mul_mat_q_case<GGML_TYPE_Q8_0>(

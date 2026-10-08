@@ -3,6 +3,7 @@ namespace qfn_mmq {
 #include "mmvq.hpp"
 #include "unary.hpp"
 #include "vecdotq.hpp"
+#include "iq4_dense.hpp"
 
 // Each wave handles up to eight dense inputs for one weight row on gfx1151.
 template<int ncols_dst, bool has_gate, int token_waves = 1, bool ragged = false>

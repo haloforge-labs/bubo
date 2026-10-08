@@ -37,3 +37,9 @@ void mul_mat_vec_moe_batch_wave64(const void* gate, const void* up,
                                  float* output, int k, int rows,
                                  int experts_used, int input_stride,
                                  hipStream_t stream);
+
+// Dense IQ4 batched path; routed projections retain their existing dispatch.
+void mul_mat_vec_iq4_dense_dispatch(const void* weights, ggml_type type,
+                                    const block_q8_1* input, float* output,
+                                    int k, int rows, int tokens, int input_stride,
+                                    hipStream_t stream);

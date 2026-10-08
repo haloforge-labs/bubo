@@ -3411,8 +3411,8 @@ void Executor::PrintDraftOutCounters(const char* tag) const {
 void Executor::PrintTwinCounters(const char* tag, const char* copy, std::uint32_t n) const {
   const auto v = [&](unsigned i) { return static_cast<unsigned long long>(twin_passes_[i].load(std::memory_order_relaxed)); };
   std::fprintf(stderr,
-               "[twin] %s copy=%s n=%u passes_total=%llu | 4bit decode=%llu verify=%llu wide=%llu (wide must stay 0) | 8bit decode=%llu verify=%llu (both must stay 0) wide=%llu\n", tag, copy, n,
-               static_cast<unsigned long long>(twin_total_.load(std::memory_order_relaxed)), v(3), v(4), v(5), v(0), v(1), v(2));
+               "[twin] %s copy=%s n=%u passes_total=%llu | 4bit decode=%llu verify=%llu wide=%llu (wide must stay 0) | 8bit decode=%llu verify=%llu (both must stay 0) wide=%llu | iq4_dense_launches=%llu\n", tag, copy, n,
+               static_cast<unsigned long long>(twin_total_.load(std::memory_order_relaxed)), v(3), v(4), v(5), v(0), v(1), v(2), qfn_mmq_iq4_dense_launch_count());
 }
 
 void Executor::CountTwinPass(std::uint32_t n) const {

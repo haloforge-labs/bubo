@@ -1,5 +1,5 @@
-// GPU test of the decode-twin dense kernel glue (qfn_mmq_dense_vec_preq = the existing vector MMVQ kernel run as a one-expert projection with a zero-ids buffer).
-// For chosen tensors of a real trunk file (Q8_0) and the matching twin file (Q4_K / Q5_K / Q5_1), on identical activations (N = 1 and N = 8):
+// GPU correctness and DRAM pass bench of the decode-twin dense kernels.
+// For every selected tensor of a real trunk and its twin, at each N = 1..8:
 //   kernel8 = qfn_mmq_q8_0_dense_vec_preq (the existing Q8 dense path), kernel4 = qfn_mmq_dense_vec_preq,
 //   ref4 / ref8 = CPU dot of the DEQUANTISED weights with the DEQUANTISED Q8_1 activations (the same activation bits the kernels read).
 // Reports per tensor and N: kernel4 vs ref4 (kernel / layout correctness: must agree to float tolerance), kernel8 vs ref8 (sanity of the reference), kernel4 vs kernel8
@@ -28,6 +28,8 @@ size_t qfn_mmq_q8_1_bytes(int N, int K);
 int qfn_mmq_quantize_q8_1(const float* X_f32, void* X_q8, int N, int K, hipStream_t stream);
 int qfn_mmq_q8_0_dense_vec_preq(const void* W_q8_0, const void* W_gate, const void* X_q8, float* out_f32, int M, int N, int K, hipStream_t stream);
 int qfn_mmq_k_dense(int weight_type, const void* W, const float* X, float* out, int M, int N, int K, hipStream_t stream);
+unsigned long long qfn_mmq_iq4_dense_launch_count();
+int qfn_mmq_dense_vec_preq_reference(int weight_type, const void* W, const void* X_q8, const int32_t* zero_ids, float* out_f32, int M, int N, int K, hipStream_t stream);
 int qfn_mmq_dense_vec_preq(int weight_type, const void* W, const void* X_q8, const int32_t* zero_ids, float* out_f32, int M, int N, int K, hipStream_t stream);
 }
 
@@ -190,7 +192,7 @@ int PassBench(const core::GgufReader& trunk, const core::GgufReader& twin) {
   HIPCHECK(hipEventCreate(&e0));
   HIPCHECK(hipEventCreate(&e1));
   // ABAB: per N, 10 rounds of (one Q8_0 pass, one 4-bit pass), each pass timed alone after a sync; launch errors checked after every pass; min / median / max per path.
-  for (int N : {1, 2, 4, 8}) {
+  for (int N : {1, 2, 3, 4, 5, 6, 7, 8}) {
     std::vector<double> v[2];
     for (int round = -1; round < 10; ++round) {
       for (int which = 0; which < 2; ++which) {
@@ -215,6 +217,7 @@ int PassBench(const core::GgufReader& trunk, const core::GgufReader& twin) {
     std::printf("PASS N=%d | Q8_0 median %7.2f ms (min %6.2f max %6.2f, %5.1f GB/s) | 4-bit median %7.2f ms (min %6.2f max %6.2f, %5.1f GB/s) | 4-bit/Q8 time %.2f\n", N, m8, v[0].front(), v[0].back(),
                 bytes8 / (m8 * 1e6), m4, v[1].front(), v[1].back(), bytes4 / (m4 * 1e6), m4 / m8);
   }
+  std::printf("iq4_dense_launches=%llu\n", qfn_mmq_iq4_dense_launch_count());
   return 0;
 }
 }  // namespace
@@ -236,7 +239,7 @@ int main(int argc, char** argv) {
   for (auto it = names.begin(); it != names.end();) {
     if (*it == "--bench") { bench = true; it = names.erase(it); } else { ++it; }
   }
-  if (names.size() == 1 && names[0] == "--all") {  // every tensor of the twin file (the whole twin set), N = 1 and 8
+  if (names.size() == 1 && names[0] == "--all") {  // every tensor of the twin file (the whole twin set), N = 1..8
     names.clear();
     for (const auto& ti : twin->GetTensors()) names.emplace_back(ti.name);
   }
@@ -266,7 +269,7 @@ int main(int argc, char** argv) {
       DequantRow(core::GgmlType::kQ8_0, static_cast<const std::uint8_t*>(t8->data) + r * rb8, dq8.data() + r * K, K);
       DequantRow(ty4, static_cast<const std::uint8_t*>(t4->data) + r * rb4, dq4.data() + r * K, K);
     }
-    for (int N : (bench ? std::vector<int>{1, 2, 4, 8} : std::vector<int>{1, 8})) {
+    for (int N : {1, 2, 3, 4, 5, 6, 7, 8}) {
       std::mt19937 rng(1234 + N);
       std::normal_distribution<float> gauss(0.0F, 1.0F);
       std::vector<float> x(static_cast<std::size_t>(N) * K);
@@ -282,6 +285,20 @@ int main(int argc, char** argv) {
       std::vector<float> k8(N * M), k4(N * M);
       HIPCHECK(hipMemcpy(k8.data(), dout8.p, N * M * 4, hipMemcpyDeviceToHost));
       HIPCHECK(hipMemcpy(k4.data(), dout4.p, N * M * 4, hipMemcpyDeviceToHost));
+      if (ty4 == core::GgmlType::kIQ4_XS || ty4 == core::GgmlType::kIQ4_NL) {
+        if (qfn_mmq_dense_vec_preq_reference(static_cast<int>(ty4), w4.p, dq.p,
+            static_cast<const std::int32_t*>(zero_ids.p), static_cast<float*>(dout4.p),
+            static_cast<int>(M), N, static_cast<int>(K), stream) != 0) return 2;
+        HIPCHECK(hipStreamSynchronize(stream));
+        std::vector<float> old(N * M);
+        HIPCHECK(hipMemcpy(old.data(), dout4.p, N * M * 4, hipMemcpyDeviceToHost));
+        std::size_t different = 0;
+        for (std::size_t i = 0; i < old.size(); ++i)
+          different += std::memcmp(&old[i], &k4[i], sizeof(float)) != 0;
+        const auto d = Diff(k4, old);
+        std::printf("IDENTITY %s N=%d different=%zu/%zu maxabs=%.9e relRMS=%.9e\n",
+                    name.c_str(), N, different, old.size(), d.max_abs, d.rel_rms);
+      }
       // activations as the kernels read them: block_q8_1 = { half d; half s; int8 qs[32] }, row stride GGML_PAD(K, 512) / 32 blocks
       std::vector<std::uint8_t> qh(qbytes);
       HIPCHECK(hipMemcpy(qh.data(), dq.p, qbytes, hipMemcpyDeviceToHost));
@@ -341,6 +358,7 @@ int main(int argc, char** argv) {
       if (a.rel_rms > 2e-3 || b.rel_rms > 2e-3) { std::printf("  FAIL: kernel disagrees with its own CPU reference\n"); ++failures; }
     }
   }
+  std::printf("iq4_dense_launches=%llu\n", qfn_mmq_iq4_dense_launch_count());
   std::printf("dense_twin_gpu_test: %s (%d failures)\n", failures ? "FAIL" : "all kernels agree with their CPU references", failures);
   return failures ? 1 : 0;
 }
