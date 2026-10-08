@@ -151,6 +151,15 @@ inline void AddPrefillDiagUsage(
   value["experts_distinct_sum"] = t.experts_distinct_sum;
   value["layer_samples"] = t.layer_samples;
   value["expert_bytes"] = t.expert_bytes;
+  if (t.moe_bench) {
+    value["moe_us"] = t.moe_us;
+    value["moe_expert_bytes"] = t.moe_expert_bytes;
+    value["moe_flops"] = t.moe_flops;
+    value["moe_gbps"] =
+        models::qwen38_flash_next::MoeGbps(t.moe_expert_bytes, t.moe_us);
+    value["moe_tflops"] =
+        models::qwen38_flash_next::MoeTflops(t.moe_flops, t.moe_us);
+  }
   metrics["prefill_diag"] = std::move(value);
 }
 
