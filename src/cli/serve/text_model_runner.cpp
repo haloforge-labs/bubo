@@ -415,6 +415,10 @@ std::string_view DiskEventReasonName(
       return "restore_failure";
     case ContinuationDiskEventReason::kBusy:
       return "busy";
+    case ContinuationDiskEventReason::kRamNotRetained:
+      return "ram_not_retained";
+    case ContinuationDiskEventReason::kShutdownDeadline:
+      return "shutdown_deadline";
   }
   return "unknown";
 }
@@ -445,7 +449,9 @@ void EmitDiskEvent(const ContinuationDiskEvent& event) noexcept {
          << " staging_capacity_bytes=" << event.staging_capacity_bytes
          << " staging_used_bytes=" << event.staging_used_bytes;
     if (event.reason == ContinuationDiskEventReason::kSaved) {
-      line << " write_ms=" << event.elapsed_ms;
+      line << " trigger=" << event.trigger << " write_ms=" << event.elapsed_ms;
+      line << " slice_yields=" << event.slice_yields
+           << " slice_wait_ms=" << event.slice_wait_ms;
       line << " gather_ms=" << event.phase_gather_ms << " file_write_ms=" << event.phase_write_ms << " hash_ms=" << event.phase_hash_ms << " fsync_ms=" << event.phase_fsync_ms;
       Logger::Info("cache", line.str());
     } else if (event.reason == ContinuationDiskEventReason::kLru ||
@@ -640,6 +646,14 @@ struct TextRunnerPool::Impl {
                   disk_cache_options->min_checkpoint_step_tokens,
           },
           EmitDiskEvent);
+      if (disk_store->persist_on_evict_idle()) {
+        cache.SetPersistenceEvictionHook([this](auto snapshot) {
+          disk_store->PersistEvicted(std::move(snapshot));
+        });
+        disk_store->SetPersistenceSource(validated.runner, [this](bool failed) {
+          return cache.NextPendingPersistence(failed);
+        });
+      }
       Logger::Info("cache",
                    "event=disk_cache_configured capacity_bytes=" +
                        std::to_string(disk_store->capacity_bytes()) +
@@ -649,6 +663,11 @@ struct TextRunnerPool::Impl {
       shared_prefix_max_boundaries =
           disk_cache_options->shared_prefix_max_boundaries;
     }
+  }
+
+  ~Impl() {
+    if (disk_store && disk_store->persist_on_evict_idle())
+      disk_store->Shutdown();
   }
 
   ValidatedRunner validated;
@@ -897,6 +916,11 @@ struct TextRunnerPool::Request::Impl {
       try {
         if (!disk_store)
           return;
+        if (disk_store->persist_on_evict_idle()) {
+          (void)disk_store->Capture(runner, snapshot_tokens, nullptr, {}, {},
+                                    false, false, false);
+          return;
+        }
         // Copying device state only for disk is costly on the request path.
         // Skip it when the disk store would discard the checkpoint anyway.
         if (disk_store->WithinCheckpointStep(
@@ -918,14 +942,14 @@ struct TextRunnerPool::Request::Impl {
       // A warm prefill must await its fallback before mutating recurrent
       // state. Run that copy on this worker instead of starting a thread
       // only to join it. Post-token captures remain asynchronous.
-      snapshot_future =
-          std::async(wait ? std::launch::deferred : std::launch::async,
-                     [owner = runner, state,
-                      persist = bool(disk_store) &&
-                                !(disk_in_pass_capture && retain_snapshot)] {
-                       return persist ? owner->SnapshotForPersistence(*state)
-                                      : owner->Snapshot(*state);
-                     });
+      snapshot_future = std::async(
+          wait ? std::launch::deferred : std::launch::async,
+          [owner = runner, state,
+           persist = bool(disk_store) && !disk_store->persist_on_evict_idle() &&
+                     !(disk_in_pass_capture && retain_snapshot)] {
+            return persist ? owner->SnapshotForPersistence(*state)
+                           : owner->Snapshot(*state);
+          });
     } catch (...) {
       disk_capture.reset();
       if (retain_snapshot)
@@ -979,13 +1003,15 @@ struct TextRunnerPool::Request::Impl {
     const bool already_persisted =
         lease.restored_from_disk() &&
         lease.cached_tokens() == snapshot_tokens.size();
-    if (disk_store && !already_persisted) {
+    if (disk_store &&
+        (!already_persisted || disk_store->persist_on_evict_idle())) {
       const auto started = std::chrono::steady_clock::now();
       try {
         const auto identity = InputIdentity(snapshot_tokens.size());
-        snapshot_metrics.disk_queued_bytes += disk_store->SaveAsync(
+        snapshot_metrics.disk_queued_bytes += disk_store->Capture(
             runner, snapshot_tokens, prompt_snapshot,
-            {identity.begin(), identity.end()}, std::move(disk_capture));
+            {identity.begin(), identity.end()}, std::move(disk_capture), false,
+            already_persisted, retain_snapshot);
       } catch (...) {
         // Earlier checkpoints may already be queued.
       }
@@ -1028,14 +1054,16 @@ struct TextRunnerPool::Request::Impl {
     const bool already_persisted =
         lease.restored_from_disk() &&
         lease.cached_tokens() == snapshot_tokens.size();
-    if (!prompt_snapshot || already_persisted)
+    if (!prompt_snapshot ||
+        (already_persisted && !disk_store->persist_on_evict_idle()))
       return;
     const auto started = std::chrono::steady_clock::now();
     try {
       const auto identity = InputIdentity(snapshot_tokens.size());
       snapshot_metrics.disk_queued_bytes +=
-          disk_store->SaveAsync(runner, snapshot_tokens, prompt_snapshot,
-                                {identity.begin(), identity.end()});
+          disk_store->Capture(runner, snapshot_tokens, prompt_snapshot,
+                              {identity.begin(), identity.end()}, {}, false,
+                              already_persisted, retain_snapshot);
     } catch (...) {
       // Persistence is advisory, as for FinishPromptSnapshot.
     }
@@ -1103,15 +1131,32 @@ struct TextRunnerPool::Request::Impl {
       if (history && !lease.HasSnapshotFor(prefix))
         reserved = lease.TryReserveSnapshot(bytes, position, true, purpose);
       std::unique_ptr<ContinuationDiskStore::CaptureReservation> persistence;
-      if (shared && disk_store && !disk_store->Touch(*runner, prefix, identity))
-        persistence =
-            disk_store->ReserveCapture(*runner, position, bytes, identity);
+      const bool evict_idle = disk_store && disk_store->persist_on_evict_idle();
+      const bool needs_disk =
+          shared && disk_store && !disk_store->Touch(*runner, prefix, identity);
+      if (needs_disk) {
+        if (evict_idle) {
+          if (!reserved)
+            reserved = lease.TryReserveSnapshot(bytes, position, true, purpose);
+          if (!reserved)
+            (void)disk_store->Capture(runner, {prefix.begin(), prefix.end()},
+                                      nullptr, {}, {}, true, false, false);
+        } else {
+          persistence =
+              disk_store->ReserveCapture(*runner, position, bytes, identity);
+        }
+      }
       if (!reserved && !persistence)
         return;
       std::shared_ptr<const TextRunnerSnapshot> snapshot =
           persistence ? runner->SnapshotForPersistence(state)
                       : runner->Snapshot(state);
       failed = !snapshot;
+      if (snapshot && needs_disk && evict_idle) {
+        (void)disk_store->Capture(runner, {prefix.begin(), prefix.end()},
+                                  snapshot, {identity.begin(), identity.end()},
+                                  {}, true);
+      }
       if (snapshot && reserved) {
         snapshot_metrics.snapshot_bytes += lease.PublishSnapshot(
             {prefix.begin(), prefix.end()}, snapshot, true);
@@ -1120,7 +1165,7 @@ struct TextRunnerPool::Request::Impl {
       // A RAM checkpoint and a learned disk boundary can coincide. Share the
       // immutable copy instead of reading the same device state twice.
       if (snapshot && persistence) {
-        const auto saved = disk_store->SaveAsync(
+        const auto saved = disk_store->Capture(
             runner, {prefix.begin(), prefix.end()}, std::move(snapshot),
             {identity.begin(), identity.end()}, std::move(persistence),
             /*shared_prefix=*/true);
@@ -1761,6 +1806,18 @@ TextRunnerPool::TextRunnerPool(
 
 TextRunnerPool::~TextRunnerPool() = default;
 
+std::shared_ptr<const void> TextRunnerPool::TrackPendingAdmission() const {
+  if (!impl_->disk_store || !impl_->disk_store->persist_on_evict_idle())
+    return {};
+  struct Activity {
+    explicit Activity(std::shared_ptr<ContinuationDiskStore> owner)
+        : store(std::move(owner)), token(store->BeginAdmission()) {}
+    std::shared_ptr<ContinuationDiskStore> store;
+    ContinuationDiskStore::GenerationActivity token;
+  };
+  return std::make_shared<Activity>(impl_->disk_store);
+}
+
 const TextModelRunner& TextRunnerPool::runner() const noexcept {
   return *impl_->validated.runner;
 }
@@ -1992,6 +2049,9 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
   if (cache_prefix_tokens > prompt.size())
     throw std::invalid_argument("cache prefix exceeds prompt length");
 
+  auto disk_admission = impl_->disk_store
+                            ? impl_->disk_store->BeginAdmission()
+                            : ContinuationDiskStore::GenerationActivity();
   std::unique_lock admission(impl_->admission_mutex, std::defer_lock);
   while (!admission.try_lock_for(std::chrono::milliseconds(10))) {
     if (is_cancelled && is_cancelled())
@@ -2044,6 +2104,13 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
           snapshot = runner.Snapshot(state);
           if (snapshot == nullptr)
             throw std::runtime_error("live checkpoint capture failed");
+          if (impl_->disk_store && impl_->disk_store->persist_on_evict_idle()) {
+            const auto prefix_identity =
+                PrefixInputIdentity(identity, input_prefixes, prefix.size());
+            (void)impl_->disk_store->Capture(
+                impl_->validated.runner, {prefix.begin(), prefix.end()},
+                snapshot, {prefix_identity.begin(), prefix_identity.end()});
+          }
           if (lease.PublishSnapshot({prefix.begin(), prefix.end()}, snapshot) ==
               0)
             snapshot.reset();
@@ -2065,11 +2132,11 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
           fields["success"] = true;
           timeline->Add("snapshot", started, std::move(fields));
         }
-        if (impl_->disk_store) {
+        if (impl_->disk_store && !impl_->disk_store->persist_on_evict_idle()) {
           try {
             const auto prefix_identity =
                 PrefixInputIdentity(identity, input_prefixes, prefix.size());
-            (void)impl_->disk_store->SaveAsync(
+            (void)impl_->disk_store->Capture(
                 impl_->validated.runner, {prefix.begin(), prefix.end()},
                 snapshot, {prefix_identity.begin(), prefix_identity.end()});
           } catch (...) {

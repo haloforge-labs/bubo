@@ -35,10 +35,40 @@
 #include <utility>
 #include <vector>
 
+#include "src/cli/serve/logging.hpp"
 #include "src/core/crypto/sha256.hpp"
 
 namespace gufo::server {
 namespace {
+
+struct WriterSettings {
+  bool evict_idle{false};
+  bool slice{false};
+  std::chrono::milliseconds idle{30000};
+};
+const WriterSettings& DiskWriterSettings() {
+  static const WriterSettings settings = [] {
+    WriterSettings result;
+    const auto* persist = std::getenv("GUFO_DISK_PERSIST");
+    result.evict_idle = persist && std::strcmp(persist, "evict_idle") == 0;
+    const auto* slice = std::getenv("GUFO_DISK_SLICE");
+    result.slice = slice && std::strcmp(slice, "1") == 0;
+    const auto* idle = std::getenv("GUFO_DISK_IDLE_MS");
+    if (idle && *idle) {
+      char* end = nullptr;
+      const auto value = std::strtol(idle, &end, 10);
+      if (end && !*end && value >= 0 && value <= 600000)
+        result.idle = std::chrono::milliseconds(value);
+    }
+    return result;
+  }();
+  return settings;
+}
+std::int64_t ActivityTime() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
 
 bool DiskDeferEnabled() {
   static const bool enabled = [] {
@@ -595,6 +625,7 @@ struct ContinuationDiskStore::Impl {
     std::size_t retained_bytes;
     bool shared_prefix{false};
     std::chrono::steady_clock::time_point enqueued;
+    std::string_view trigger{"write_through"};
   };
 
   Impl(ContinuationDiskStoreOptions store_options, EventSink sink,
@@ -602,6 +633,10 @@ struct ContinuationDiskStore::Impl {
       : options(std::move(store_options)),
         event_sink(std::move(sink)),
         key_hash(std::move(hasher)) {
+    options.persist_evict_idle =
+        options.persist_evict_idle.value_or(DiskWriterSettings().evict_idle);
+    options.slice = options.slice.value_or(DiskWriterSettings().slice);
+    options.idle_wait = options.idle_wait.value_or(DiskWriterSettings().idle);
     ValidateOptions();
     InitializeDirectory();
     IndexExistingFiles();
@@ -615,16 +650,48 @@ struct ContinuationDiskStore::Impl {
   Impl& operator=(Impl&&) = delete;
 
   ~Impl() {
+    Shutdown();
+    try {
+      std::ostringstream line;
+      line << "event=disk_cache_writer_summary captures_seen="
+           << captures.load()
+           << " persisted_write_through=" << persisted[0].load()
+           << " persisted_evict=" << persisted[1].load()
+           << " persisted_idle=" << persisted[2].load()
+           << " persisted_shutdown=" << persisted[3].load()
+           << " skipped=" << skipped->load()
+           << " bytes_written=" << bytes_written.load();
+      Logger::Info("cache", line.str());
+    } catch (...) {
+    }
+    if (directory_fd >= 0) {
+      ::close(directory_fd);
+    }
+  }
+
+  void Shutdown() {
     {
       std::lock_guard lock(queue_mutex);
-      stopping = true;
+      if (!stopping) {
+        shutdown_deadline =
+            std::chrono::steady_clock::now() + options.shutdown_wait;
+        stopping.store(true, std::memory_order_release);
+      }
     }
     queue_changed.notify_all();
     if (writer.joinable())
       writer.join();
-    if (directory_fd >= 0) {
-      ::close(directory_fd);
-    }
+  }
+
+  void SkipPersistence(
+      const std::shared_ptr<const ContinuationSnapshot>& snapshot,
+      ContinuationDiskEventReason reason, std::string_view trigger) {
+    if (!snapshot || !snapshot->persistence)
+      return;
+    auto& record = *snapshot->persistence;
+    record.state.store(SnapshotPersistence::kFailed);
+    Emit(ContinuationDiskEventAction::kSkipped, reason, 0,
+         snapshot->PayloadBytes(), record.tokens.size(), 0, 0, trigger);
   }
 
   void PersistQueued() noexcept {
@@ -632,38 +699,127 @@ struct ContinuationDiskStore::Impl {
       PendingSave job;
       {
         std::unique_lock lock(queue_mutex);
-        queue_changed.wait(lock,
-                           [this] { return stopping || !pending.empty(); });
-        if (pending.empty())
-          return;
-        if (defer_enabled) {
-          const auto deadline =
-              pending.front().enqueued + DiskDeferMaxWait(options.defer_max_wait);
-          while (!stopping && flush_waiters == 0 &&
+        while (pending.empty()) {
+          if (options.persist_evict_idle.value() && persistence_source) {
+            const auto now = std::chrono::steady_clock::now();
+            const auto idle_since =
+                std::chrono::steady_clock::time_point(std::chrono::nanoseconds(
+                    last_activity.load(std::memory_order_acquire)));
+            if (stopping ||
+                (active_generations.load(std::memory_order_acquire) == 0 &&
+                 now - idle_since >= options.idle_wait.value())) {
+              // Source locks only the existing RAM metadata mutex. Never hold
+              // queue_mutex across it: eviction may concurrently enqueue.
+              auto source = persistence_source;
+              const bool shutdown = stopping;
+              lock.unlock();
+              std::shared_ptr<const ContinuationSnapshot> snapshot;
+              try {
+                snapshot = source(shutdown);
+              } catch (...) {
+                Emit(ContinuationDiskEventAction::kSkipped,
+                     ContinuationDiskEventReason::kSerializationFailure, 0, 0,
+                     0);
+              }
+              if (snapshot) {
+                if (shutdown &&
+                    std::chrono::steady_clock::now() >= shutdown_deadline) {
+                  // Terminal for this shutdown: source must advance past it.
+                  SkipPersistence(
+                      snapshot, ContinuationDiskEventReason::kShutdownDeadline,
+                      "shutdown");
+                  snapshot->persistence->state.store(
+                      SnapshotPersistence::kAbandoned);
+                } else if (shutdown || active_generations.load(
+                                           std::memory_order_acquire) == 0) {
+                  EnqueuePersistence(snapshot, shutdown ? "shutdown" : "idle");
+                }
+              }
+              lock.lock();
+              if (!pending.empty())
+                break;
+              if (shutdown && !snapshot)
+                return;
+              if (stopping && !shutdown)
+                continue;  // Re-query with failed entries included at shutdown.
+              if (snapshot)
+                continue;
+            }
+          }
+          if (stopping)
+            return;
+          if (options.persist_evict_idle.value())
+            queue_changed.wait_for(lock, std::chrono::milliseconds(5));
+          else
+            queue_changed.wait(lock,
+                               [this] { return stopping || !pending.empty(); });
+        }
+        if (defer_enabled && !stopping) {
+          const auto deadline = pending.front().enqueued +
+                                DiskDeferMaxWait(options.defer_max_wait);
+          while (flush_waiters == 0 && !stopping &&
                  active_generations.load(std::memory_order_acquire) != 0 &&
                  queued_bytes + capture_bytes->load(std::memory_order_relaxed) <
                      std::min(options.capacity_bytes,
                               options.staging_capacity_bytes) &&
                  std::chrono::steady_clock::now() < deadline) {
-            // No queue lock on request entry/exit. Polling also covers a
-            // notification arriving between the atomic load and the wait.
             queue_changed.wait_until(
                 lock, std::min(deadline, std::chrono::steady_clock::now() +
                                              std::chrono::milliseconds(5)));
           }
         }
+        // Idle work stays pending if admission raced its final preflight.
+        if (pending.front().trigger == "idle" && !stopping &&
+            flush_waiters == 0 &&
+            (active_generations.load(std::memory_order_acquire) != 0 ||
+             std::chrono::steady_clock::now().time_since_epoch() -
+                     std::chrono::nanoseconds(
+                         last_activity.load(std::memory_order_acquire)) <
+                 options.idle_wait.value())) {
+          queue_changed.wait_for(lock, std::chrono::milliseconds(5));
+          continue;
+        }
         job = std::move(pending.front());
         pending.pop_front();
       }
+      const auto record = job.snapshot->persistence;
+      bool stored = false;
       try {
-        (void)Save(*job.runner, job.tokens, *job.snapshot, job.identity,
-                   job.shared_prefix);
+        if (stopping && options.persist_evict_idle.value() &&
+            std::chrono::steady_clock::now() >= shutdown_deadline) {
+          if (record)
+            SkipPersistence(job.snapshot,
+                            ContinuationDiskEventReason::kShutdownDeadline,
+                            job.trigger);
+          else
+            Emit(ContinuationDiskEventAction::kSkipped,
+                 ContinuationDiskEventReason::kShutdownDeadline, 0,
+                 job.snapshot->PayloadBytes(), job.tokens.size(), 0, 0,
+                 job.trigger);
+        } else {
+          // Existing exact files count as persisted without serializing again.
+          const bool exists =
+              record && Touch(*job.runner, job.tokens, job.identity);
+          if (exists) {
+            stored = true;
+          } else {
+            stored = Save(*job.runner, job.tokens, *job.snapshot, job.identity,
+                          job.shared_prefix, job.trigger)
+                         .stored;
+            if (!stored && record)
+              stored = Touch(*job.runner, job.tokens, job.identity);
+          }
+        }
       } catch (...) {
         Emit(ContinuationDiskEventAction::kSkipped,
-             ContinuationDiskEventReason::kIoFailure, 0, 0, job.tokens.size());
+             ContinuationDiskEventReason::kIoFailure, 0, 0, job.tokens.size(),
+             0, 0, job.trigger);
       }
+      if (record)
+        record->state.store(stored ? SnapshotPersistence::kPersisted
+                                   : (stopping ? SnapshotPersistence::kAbandoned
+                                               : SnapshotPersistence::kFailed));
       const auto released = job.retained_bytes;
-      // Release GPU/host snapshot storage before making its budget available.
       job = {};
       {
         std::lock_guard lock(queue_mutex);
@@ -740,8 +896,18 @@ struct ContinuationDiskStore::Impl {
   void Emit(ContinuationDiskEventAction action,
             ContinuationDiskEventReason reason, std::size_t file_bytes,
             std::size_t payload_bytes, std::size_t token_count,
-            double elapsed_ms = 0.0,
-            std::size_t staging_used_bytes = 0) const noexcept {
+            double elapsed_ms = 0.0, std::size_t staging_used_bytes = 0,
+            std::string_view trigger = "write_through") const noexcept {
+    if (action == ContinuationDiskEventAction::kSkipped)
+      skipped->fetch_add(1, std::memory_order_relaxed);
+    if (action == ContinuationDiskEventAction::kStored) {
+      bytes_written.fetch_add(payload_bytes, std::memory_order_relaxed);
+      const auto index = trigger == "evict"      ? 1
+                         : trigger == "idle"     ? 2
+                         : trigger == "shutdown" ? 3
+                                                 : 0;
+      persisted[index].fetch_add(1, std::memory_order_relaxed);
+    }
     if (!event_sink) {
       return;
     }
@@ -757,10 +923,25 @@ struct ContinuationDiskStore::Impl {
           .staging_capacity_bytes = options.staging_capacity_bytes,
           .staging_used_bytes = staging_used_bytes,
           .elapsed_ms = elapsed_ms,
-          .phase_gather_ms = phase_gather_ms_,
-          .phase_write_ms = phase_write_ms_,
-          .phase_hash_ms = phase_hash_ms_,
-          .phase_fsync_ms = phase_fsync_ms_,
+          .trigger = trigger,
+          .slice_yields = action == ContinuationDiskEventAction::kStored
+                              ? phase_slice_yields
+                              : 0,
+          .slice_wait_ms = action == ContinuationDiskEventAction::kStored
+                               ? phase_slice_wait_ms
+                               : 0,
+          .phase_gather_ms = action == ContinuationDiskEventAction::kStored
+                                 ? phase_gather_ms_
+                                 : 0,
+          .phase_write_ms = action == ContinuationDiskEventAction::kStored
+                                ? phase_write_ms_
+                                : 0,
+          .phase_hash_ms = action == ContinuationDiskEventAction::kStored
+                               ? phase_hash_ms_
+                               : 0,
+          .phase_fsync_ms = action == ContinuationDiskEventAction::kStored
+                                ? phase_fsync_ms_
+                                : 0,
       });
     } catch (...) {
       return;
@@ -771,8 +952,13 @@ struct ContinuationDiskStore::Impl {
   /// or enqueue, where it would otherwise look like a successful cache capture.
   [[nodiscard]] bool CanStage(std::size_t bytes, std::size_t payload_bytes,
                               std::size_t token_count) const {
-    if (stopping)
+    if (stopping && (!options.persist_evict_idle.value() ||
+                     std::chrono::steady_clock::now() >= shutdown_deadline)) {
+      Emit(ContinuationDiskEventAction::kSkipped,
+           ContinuationDiskEventReason::kShutdownDeadline, bytes, payload_bytes,
+           token_count);
       return false;
+    }
     const auto used =
         queued_bytes + capture_bytes->load(std::memory_order_relaxed);
     if (bytes > options.capacity_bytes) {
@@ -1127,6 +1313,9 @@ struct ContinuationDiskStore::Impl {
       const auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
       double write_ms = 0.0, hash_ms = 0.0;
       phase_gather_ms_ = phase_write_ms_ = phase_hash_ms_ = phase_fsync_ms_ = 0.0;
+      phase_slice_yields = 0;
+      phase_slice_wait_ms = 0;
+      std::size_t slice_bytes = 0;
       const auto sink = [&](std::span<const std::uint8_t> bytes) {
         // Keep write sizes bounded and checksum each byte exactly once.
         while (!bytes.empty()) {
@@ -1141,6 +1330,20 @@ struct ContinuationDiskStore::Impl {
           write_ms += ms(t1 - t0);
           hash_ms += ms(Clock::now() - t1);
           bytes = bytes.subspan(chunk.size());
+          if (options.slice.value()) {
+            slice_bytes += chunk.size();
+            if (slice_bytes >= 16 * 1024 * 1024) {
+              slice_bytes = 0;
+              while (active_generations.load(std::memory_order_acquire) != 0 &&
+                     phase_slice_wait_ms < options.slice_max_wait.count() &&
+                     !stopping) {
+                const auto wait_start = Clock::now();
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                ++phase_slice_yields;
+                phase_slice_wait_ms += ms(Clock::now() - wait_start);
+              }
+            }
+          }
         }
       };
       sink(header);
@@ -1157,7 +1360,9 @@ struct ContinuationDiskStore::Impl {
       }
       phase_write_ms_ = write_ms;
       phase_hash_ms_ = hash_ms;
-      phase_gather_ms_ = std::max(0.0, ms(Clock::now() - stream_start) - write_ms - hash_ms);
+      phase_gather_ms_ =
+          std::max(0.0, ms(Clock::now() - stream_start) - write_ms - hash_ms -
+                            phase_slice_wait_ms);
       const auto checksum = hasher.FinishHex();
       if (::lseek(temporary.get(), kChecksumOffset, SEEK_SET) < 0 ||
           !WriteAll(temporary.get(),
@@ -1196,8 +1401,8 @@ struct ContinuationDiskStore::Impl {
       const TextModelRunner& runner,
       std::span<const TextRunnerToken> checkpoint_tokens,
       const TextRunnerSnapshot& snapshot,
-      std::span<const std::uint8_t> input_identity,
-      bool shared_prefix = false) {
+      std::span<const std::uint8_t> input_identity, bool shared_prefix = false,
+      std::string_view trigger = "write_through") {
     // Serialize writers, but keep existing entries readable during payload
     // serialization, hashing and filesystem durability operations.
     const std::lock_guard write_lock(write_mutex);
@@ -1319,7 +1524,8 @@ struct ContinuationDiskStore::Impl {
          checkpoint_tokens.size(),
          std::chrono::duration<double, std::milli>(
              std::chrono::steady_clock::now() - started)
-             .count());
+             .count(),
+         0, trigger);
     return {
         .stored = true,
         .file_bytes = file_bytes,
@@ -1564,7 +1770,26 @@ struct ContinuationDiskStore::Impl {
   const bool defer_enabled{DiskDeferEnabled()};
   std::atomic<std::size_t> active_generations{0};
   std::size_t flush_waiters{0};
-  bool stopping{false};
+  std::atomic<bool> stopping{false};
+  std::chrono::steady_clock::time_point shutdown_deadline;
+  std::atomic<std::int64_t> last_activity{ActivityTime()};
+  std::shared_ptr<const TextModelRunner> persistence_runner;
+  PersistenceSource persistence_source;
+  std::atomic<std::size_t> captures{0};
+  std::shared_ptr<std::atomic<std::size_t>> skipped =
+      std::make_shared<std::atomic<std::size_t>>(0);
+  mutable std::array<std::atomic<std::size_t>, 4> persisted{};
+  mutable std::atomic<std::size_t> bytes_written{0};
+  mutable std::size_t phase_slice_yields{0};
+  mutable double phase_slice_wait_ms{0};
+  std::size_t SaveAsync(std::shared_ptr<const TextModelRunner> runner,
+                        std::vector<TextRunnerToken> tokens,
+                        std::shared_ptr<const TextRunnerSnapshot> snapshot,
+                        std::vector<std::uint8_t> identity,
+                        std::unique_ptr<CaptureReservation> reservation,
+                        bool shared_prefix, std::string_view trigger);
+  void EnqueuePersistence(std::shared_ptr<const ContinuationSnapshot> snapshot,
+                          std::string_view trigger);
   std::thread writer;
 };
 
@@ -1584,6 +1809,8 @@ ContinuationDiskStore::GenerationActivity::GenerationActivity(Impl* owner)
 
 ContinuationDiskStore::GenerationActivity::~GenerationActivity() {
   if (owner_) {
+    if (owner_->options.persist_evict_idle.value())
+      owner_->last_activity.store(ActivityTime(), std::memory_order_release);
     owner_->active_generations.fetch_sub(1, std::memory_order_acq_rel);
     owner_->queue_changed.notify_all();
   }
@@ -1591,7 +1818,17 @@ ContinuationDiskStore::GenerationActivity::~GenerationActivity() {
 
 ContinuationDiskStore::GenerationActivity
 ContinuationDiskStore::BeginGeneration() {
-  return GenerationActivity(impl_->defer_enabled ? impl_.get() : nullptr);
+  return GenerationActivity(impl_->defer_enabled ||
+                                    impl_->options.slice.value() ||
+                                    impl_->options.persist_evict_idle.value()
+                                ? impl_.get()
+                                : nullptr);
+}
+
+ContinuationDiskStore::GenerationActivity
+ContinuationDiskStore::BeginAdmission() {
+  return GenerationActivity(
+      impl_->options.persist_evict_idle.value() ? impl_.get() : nullptr);
 }
 
 ContinuationDiskStore::CaptureReservation::~CaptureReservation() {
@@ -1637,12 +1874,33 @@ std::size_t ContinuationDiskStore::SaveAsync(
     std::vector<TextRunnerToken> checkpoint_tokens,
     std::shared_ptr<const TextRunnerSnapshot> snapshot,
     std::vector<std::uint8_t> input_identity,
-    std::unique_ptr<CaptureReservation> reservation, bool shared_prefix) {
-  if (!runner || !snapshot || checkpoint_tokens.empty())
+    std::unique_ptr<CaptureReservation> reservation, bool shared_prefix,
+    std::string_view trigger) {
+  return impl_->SaveAsync(std::move(runner), std::move(checkpoint_tokens),
+                          std::move(snapshot), std::move(input_identity),
+                          std::move(reservation), shared_prefix, trigger);
+}
+
+std::size_t ContinuationDiskStore::Impl::SaveAsync(
+    std::shared_ptr<const TextModelRunner> runner,
+    std::vector<TextRunnerToken> checkpoint_tokens,
+    std::shared_ptr<const TextRunnerSnapshot> snapshot,
+    std::vector<std::uint8_t> input_identity,
+    std::unique_ptr<CaptureReservation> reservation, bool shared_prefix,
+    std::string_view trigger) {
+  if (!runner || !snapshot || checkpoint_tokens.empty()) {
+    Emit(ContinuationDiskEventAction::kSkipped,
+         ContinuationDiskEventReason::kSerializationFailure, 0, 0,
+         checkpoint_tokens.size(), 0, 0, trigger);
     return 0;
+  }
   const auto descriptor = DescriptorForInput(*runner, input_identity);
-  if (!descriptor.persistence)
+  if (!descriptor.persistence) {
+    Emit(ContinuationDiskEventAction::kSkipped,
+         ContinuationDiskEventReason::kUnsupported, 0, 0,
+         checkpoint_tokens.size(), 0, 0, trigger);
     return 0;
+  }
   const auto file_bytes =
       CheckedFileBytes(descriptor.persistence->compatibility_identity.size(),
                        checkpoint_tokens.size(),
@@ -1653,34 +1911,145 @@ std::size_t ContinuationDiskStore::SaveAsync(
       std::max(snapshot->PayloadBytes(),
                runner->PersistentSnapshotPayloadBytes(*snapshot)));
   {
-    std::lock_guard lock(impl_->queue_mutex);
+    std::lock_guard lock(queue_mutex);
+    if (trigger == "idle" &&
+        active_generations.load(std::memory_order_acquire) != 0) {
+      if (snapshot->persistence)
+        snapshot->persistence->state.store(SnapshotPersistence::kDirty);
+      return 0;
+    }
     if (reservation) {
-      if (reservation->counter_ != impl_->capture_bytes)
+      if (reservation->counter_ != capture_bytes) {
+        Emit(ContinuationDiskEventAction::kSkipped,
+             ContinuationDiskEventReason::kSerializationFailure, 0, 0,
+             checkpoint_tokens.size(), 0, 0, trigger);
         return 0;
+      }
       reservation.reset();
     }
-    if (!impl_->CanStage(charge, snapshot->PayloadBytes(),
-                         checkpoint_tokens.size()))
+    if (!CanStage(charge, snapshot->PayloadBytes(), checkpoint_tokens.size()))
       return 0;
-    impl_->pending.push_back(
-        {std::move(runner), std::move(checkpoint_tokens), std::move(snapshot),
-         std::move(input_identity), charge, shared_prefix,
-         impl_->defer_enabled ? std::chrono::steady_clock::now()
-                              : std::chrono::steady_clock::time_point{}});
-    impl_->queued_bytes += charge;
+    pending.push_back({std::move(runner), std::move(checkpoint_tokens),
+                       std::move(snapshot), std::move(input_identity), charge,
+                       shared_prefix,
+                       defer_enabled ? std::chrono::steady_clock::now()
+                                     : std::chrono::steady_clock::time_point{},
+                       trigger});
+    queued_bytes += charge;
   }
-  impl_->queue_changed.notify_one();
+  queue_changed.notify_one();
   return file_bytes;
+}
+
+bool ContinuationDiskStore::persist_on_evict_idle() const noexcept {
+  return impl_->options.persist_evict_idle.value();
+}
+void ContinuationDiskStore::SetPersistenceSource(
+    std::shared_ptr<const TextModelRunner> runner, PersistenceSource source) {
+  std::lock_guard lock(impl_->queue_mutex);
+  impl_->persistence_runner = std::move(runner);
+  impl_->persistence_source = std::move(source);
+  impl_->queue_changed.notify_all();
+}
+void ContinuationDiskStore::Shutdown() {
+  impl_->Shutdown();
+}
+void ContinuationDiskStore::PersistEvicted(
+    std::shared_ptr<const ContinuationSnapshot> snapshot) {
+  if (persist_on_evict_idle())
+    impl_->EnqueuePersistence(std::move(snapshot), "evict");
+}
+
+std::size_t ContinuationDiskStore::Capture(
+    std::shared_ptr<const TextModelRunner> runner,
+    std::vector<TextRunnerToken> tokens,
+    std::shared_ptr<const TextRunnerSnapshot> snapshot,
+    std::vector<std::uint8_t> identity,
+    std::unique_ptr<CaptureReservation> reservation, bool shared_prefix,
+    bool already_persisted, bool retained_in_ram) {
+  if (snapshot)
+    impl_->captures.fetch_add(1, std::memory_order_relaxed);
+  const auto count = tokens.size();
+  try {
+    if (!persist_on_evict_idle())
+      return already_persisted
+                 ? 0
+                 : SaveAsync(std::move(runner), std::move(tokens),
+                             std::move(snapshot), std::move(identity),
+                             std::move(reservation), shared_prefix);
+    reservation.reset();
+    if (!snapshot || !retained_in_ram) {
+      impl_->Emit(ContinuationDiskEventAction::kSkipped,
+                  ContinuationDiskEventReason::kRamNotRetained, 0,
+                  snapshot ? snapshot->PayloadBytes() : 0, tokens.size());
+      return 0;
+    }
+    auto record = std::make_shared<SnapshotPersistence>();
+    record->tokens = std::move(tokens);
+    record->input_identity = std::move(identity);
+    record->shared_prefix = shared_prefix;
+    record->state.store(already_persisted ? SnapshotPersistence::kPersisted
+                                          : SnapshotPersistence::kDirty);
+    auto sink = impl_->event_sink;
+    auto skipped = impl_->skipped;
+    const auto count = record->tokens.size(), bytes = snapshot->PayloadBytes();
+    record->on_discard = [sink, skipped, count, bytes] {
+      skipped->fetch_add(1, std::memory_order_relaxed);
+      if (sink)
+        sink({.action = ContinuationDiskEventAction::kSkipped,
+              .reason = ContinuationDiskEventReason::kRamNotRetained,
+              .payload_bytes = bytes,
+              .token_count = count});
+    };
+    snapshot->persistence = std::move(record);
+    return 0;
+  } catch (...) {
+    impl_->Emit(ContinuationDiskEventAction::kSkipped,
+                ContinuationDiskEventReason::kSerializationFailure, 0, 0,
+                count);
+    return 0;
+  }
+}
+
+void ContinuationDiskStore::Impl::EnqueuePersistence(
+    std::shared_ptr<const ContinuationSnapshot> snapshot,
+    std::string_view trigger) {
+  if (!snapshot || !snapshot->persistence)
+    return;
+  auto record = snapshot->persistence;
+  auto state = record->state.load();
+  if ((state != SnapshotPersistence::kDirty &&
+       state != SnapshotPersistence::kFailed) ||
+      !record->state.compare_exchange_strong(state,
+                                             SnapshotPersistence::kQueued))
+    return;
+  bool accepted = false;
+  try {
+    auto text = std::dynamic_pointer_cast<const TextRunnerSnapshot>(snapshot);
+    if (!persistence_runner || !text)
+      throw std::runtime_error("persistent RAM snapshot has no text runner");
+    accepted = SaveAsync(persistence_runner, record->tokens, std::move(text),
+                         record->input_identity, {}, record->shared_prefix,
+                         trigger) != 0;
+  } catch (...) {
+    Emit(ContinuationDiskEventAction::kSkipped,
+         ContinuationDiskEventReason::kSerializationFailure, 0,
+         snapshot->PayloadBytes(), record->tokens.size(), 0, 0, trigger);
+  }
+  if (!accepted && record->state.load() != SnapshotPersistence::kDirty)
+    record->state.store(stopping ? SnapshotPersistence::kAbandoned
+                                 : SnapshotPersistence::kFailed);
+  queue_changed.notify_all();
 }
 
 void ContinuationDiskStore::Flush() {
   std::unique_lock lock(impl_->queue_mutex);
-  if (impl_->defer_enabled) {
+  if (impl_->defer_enabled || impl_->options.persist_evict_idle.value()) {
     ++impl_->flush_waiters;
     impl_->queue_changed.notify_all();
   }
   impl_->queue_changed.wait(lock, [this] { return impl_->queued_bytes == 0; });
-  if (impl_->defer_enabled)
+  if (impl_->defer_enabled || impl_->options.persist_evict_idle.value())
     --impl_->flush_waiters;
 }
 

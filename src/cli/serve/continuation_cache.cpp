@@ -901,6 +901,15 @@ bool ContinuationCache::ReserveSnapshot(
       }
     }
   }
+  if (impl_->snapshot_support.on_evict) {
+    for (const auto& removed : removed_snapshots) {
+      try {
+        impl_->snapshot_support.on_evict(removed);
+      } catch (...) {
+        // A dirty tag logs abandonment when its last reference is released.
+      }
+    }
+  }
   removed_snapshots.clear();
   EmitSnapshotEvents(impl_->snapshot_support.on_event, events);
   return admitted;
@@ -1151,10 +1160,43 @@ std::size_t ContinuationCache::Commit(
       state_entry.state_last_used = ++impl_->clock;
     }
   }
+  if (impl_->snapshot_support.on_evict) {
+    for (const auto& removed : removed_snapshots) {
+      try {
+        impl_->snapshot_support.on_evict(removed);
+      } catch (...) {
+        // A dirty tag logs abandonment when its last reference is released.
+      }
+    }
+  }
   removed_snapshots.clear();
   EmitSnapshotEvents(impl_->snapshot_support.on_event, events);
   impl_->condition.notify_all();
   return retained_bytes;
+}
+
+void ContinuationCache::SetPersistenceEvictionHook(
+    std::function<void(std::shared_ptr<const ContinuationSnapshot>)> hook) {
+  const std::lock_guard lock(impl_->mutex);
+  impl_->snapshot_support.on_evict = std::move(hook);
+}
+
+std::shared_ptr<const ContinuationSnapshot>
+ContinuationCache::NextPendingPersistence(bool include_failed) const {
+  const std::lock_guard lock(impl_->mutex);
+  const Entry* newest = nullptr;
+  for (const auto& candidate : impl_->entries) {
+    const auto& entry = *candidate;
+    if (!entry.valid || !entry.snapshot || !entry.snapshot->persistence)
+      continue;
+    const auto state = entry.snapshot->persistence->state.load();
+    if (state != SnapshotPersistence::kDirty &&
+        !(include_failed && state == SnapshotPersistence::kFailed))
+      continue;
+    if (!newest || entry.snapshot_last_used > newest->snapshot_last_used)
+      newest = &entry;
+  }
+  return newest ? newest->snapshot : nullptr;
 }
 
 void ContinuationCache::Invalidate(std::size_t index,

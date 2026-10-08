@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -42,6 +43,8 @@ enum class ContinuationDiskEventReason : std::uint8_t {
   kSerializationFailure,
   kRestoreFailure,
   kBusy,
+  kRamNotRetained,
+  kShutdownDeadline,
 };
 
 /// Sanitized disk-cache event. Prompt contents, token values, paths, model
@@ -57,6 +60,9 @@ struct ContinuationDiskEvent {
   std::size_t staging_capacity_bytes{0};
   std::size_t staging_used_bytes{0};
   double elapsed_ms{0.0};
+  std::string_view trigger{"write_through"};
+  std::size_t slice_yields{0};
+  double slice_wait_ms{0.0};
   // Phase split of a completed write (prefill thread 2026-10-08, writer-fix diagnostics): serialize = device->host gather inside StreamPersistentSnapshot,
   // write = ::write time, hash = SHA-256 Update time, fsync = file fsync + rename + directory fsync. Zero for other events.
   double phase_gather_ms{0.0}, phase_write_ms{0.0}, phase_hash_ms{0.0}, phase_fsync_ms{0.0};
@@ -72,6 +78,12 @@ struct ContinuationDiskStoreOptions {
   std::size_t min_checkpoint_step_tokens{0};
   /// Maximum additional idle-gate delay from enqueue when GUFO_DISK_DEFER=1.
   std::chrono::milliseconds defer_max_wait{std::chrono::seconds(10)};
+  /// Unspecified values resolve from once-read environment settings.
+  std::optional<bool> persist_evict_idle;
+  std::optional<bool> slice;
+  std::optional<std::chrono::milliseconds> idle_wait;
+  std::chrono::milliseconds shutdown_wait{std::chrono::seconds(30)};
+  std::chrono::milliseconds slice_max_wait{std::chrono::seconds(10)};
 };
 
 /// Restart-safe, provider-neutral exact-prefix snapshot store.
@@ -156,7 +168,26 @@ public:
       std::shared_ptr<const TextRunnerSnapshot> snapshot,
       std::vector<std::uint8_t> input_identity = {},
       std::unique_ptr<CaptureReservation> reservation = {},
-      bool shared_prefix = false);
+      bool shared_prefix = false, std::string_view trigger = "write_through");
+
+  /// Capture offer: default delegates to SaveAsync; opt-in tags RAM storage.
+  [[nodiscard]] std::size_t Capture(
+      std::shared_ptr<const TextModelRunner> runner,
+      std::vector<TextRunnerToken> tokens,
+      std::shared_ptr<const TextRunnerSnapshot> snapshot,
+      std::vector<std::uint8_t> identity = {},
+      std::unique_ptr<CaptureReservation> reservation = {},
+      bool shared_prefix = false, bool already_persisted = false,
+      bool retained_in_ram = true);
+  using PersistenceSource =
+      std::function<std::shared_ptr<const ContinuationSnapshot>(
+          bool include_failed)>;
+  void SetPersistenceSource(std::shared_ptr<const TextModelRunner> runner,
+                            PersistenceSource source);
+  void PersistEvicted(std::shared_ptr<const ContinuationSnapshot> snapshot);
+  /// Stops sourcing and joins the writer; deadline bounds new shutdown work.
+  void Shutdown();
+  [[nodiscard]] bool persist_on_evict_idle() const noexcept;
 
   /// Drains accepted writes. Shutdown also drains automatically.
   void Flush();
@@ -176,6 +207,7 @@ public:
     Impl* owner_{nullptr};
   };
   [[nodiscard]] GenerationActivity BeginGeneration();
+  [[nodiscard]] GenerationActivity BeginAdmission();
 
   /// Restores the longest exact saved prefix of prompt into state. When a
   /// stable boundary is supplied, a later checkpoint requires an earlier

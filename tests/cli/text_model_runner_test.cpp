@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -2587,11 +2588,72 @@ void TestServerInstructionsAreFraming() {
   }
 }
 
+void TestDiskWriterPoolEvictionShutdownAndRestore() {
+  TemporaryDirectory directory;
+  auto stats = std::make_shared<FakeStats>();
+  auto runner = std::make_shared<PersistentSnapshotRunner>(
+      stats, "writer-pool", sizeof(FakeSnapshot));
+  const TextRunnerDiskCacheOptions options{.directory = directory.path(),
+                                           .capacity_bytes = 4096,
+                                           .staging_capacity_bytes = 4096,
+                                           .min_checkpoint_step_tokens = 0};
+  std::atomic<std::size_t> serialized{0};
+  runner->before_serialize = [&] { ++serialized; };
+  {
+    TextRunnerPool pool(runner, 1, options);
+    auto first = pool.Acquire({1, 2, 3});
+    Expect(first.Prefill(16).decode_ready, "first pool capture prefills");
+    const auto first_metrics = first.Commit();
+    Expect(first_metrics.disk_queued_bytes == 0 && serialized == 0,
+           "evict_idle capture has no immediate writer offer");
+    auto second = pool.Acquire({4, 5, 6});
+    Expect(second.Prefill(16).decode_ready, "second pool capture prefills");
+    second.Commit();  // Pressure evicts the first; second remains for shutdown.
+  }
+  Expect(
+      serialized == 2 && DiskImages(directory.path()).size() == 2,
+      "pool eviction and graceful shutdown each persist one remaining entry");
+  {
+    TextRunnerPool restarted(runner, 1, options);
+    auto restored = restarted.Acquire({4, 5, 6});
+    Expect(restored.cache_disk_hit() && restored.cached_prompt_tokens() == 3,
+           "shutdown-persisted prompt restores across pools");
+    restored.Commit();
+  }
+  Expect(serialized == 2,
+         "disk-restored RAM entry is not rewritten at shutdown");
+
+  TemporaryDirectory rejected_directory;
+  auto rejected_stats = std::make_shared<FakeStats>();
+  auto rejected_runner = std::make_shared<PersistentSnapshotRunner>(
+      rejected_stats, "writer-pool-refused", sizeof(FakeSnapshot) - 1);
+  std::atomic<std::size_t> rejected_writes{0};
+  rejected_runner->before_serialize = [&] { ++rejected_writes; };
+  {
+    auto rejected_options = options;
+    rejected_options.directory = rejected_directory.path();
+    TextRunnerPool rejected(rejected_runner, 1, rejected_options);
+    auto request = rejected.Acquire({1, 2, 3});
+    Expect(request.Prefill(16).decode_ready,
+           "RAM refusal leaves serving functional");
+    request.Commit();
+  }
+  Expect(rejected_stats->snapshot_captures == 0 && rejected_writes == 0,
+         "evict_idle avoids disk-only captures when RAM cannot retain them");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   // Lead 1 (learned shared-prefix boundaries rounded down to a multiple of 256) is off in these tests: they assert exact tiny boundaries.
   ::setenv("GUFO_DISK_BOUNDARY_ALIGN", "0", 1);
+  if (argc == 2 && std::string_view(argv[1]) == "--disk-writer-only") {
+    ::setenv("GUFO_DISK_PERSIST", "evict_idle", 1);
+    ::setenv("GUFO_DISK_IDLE_MS", "600000", 1);
+    TestDiskWriterPoolEvictionShutdownAndRestore();
+    std::cout << "disk writer pool tests passed\n";
+    return 0;
+  }
   // Dedicated opt-in invocation preserves the old suite's immediate-worker
   // timing assertions. Run the unchanged full suite with DEFER unset/0 too.
   if (argc == 2 && std::string_view(argv[1]) == "--disk-defer-only") {

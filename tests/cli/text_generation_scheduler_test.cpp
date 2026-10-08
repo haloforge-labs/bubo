@@ -3647,7 +3647,74 @@ void TestLiveScoredQueueAndMissingRecords() {
   }
 }
 
+void TestDiskWriterSchedulerPendingAndTerminalLifetime() {
+  std::string pattern =
+      (std::filesystem::temp_directory_path() / "gufo-writer-scheduler-XXXXXX")
+          .string();
+  const auto* created = ::mkdtemp(pattern.data());
+  Expect(created != nullptr, "scheduler writer test creates its store");
+  const std::filesystem::path directory(created);
+  const auto files = [&] {
+    std::size_t count = 0;
+    for (const auto& file : std::filesystem::directory_iterator(directory))
+      if (file.path().extension() == ".kvc")
+        ++count;
+    return count;
+  };
+  std::binary_semaphore scoring(0), release(0);
+  auto control = std::make_shared<FakeControl>();
+  control->snapshot_callback = [] {};
+  control->persistent_snapshots = true;
+  control->score_supported = true;
+  control->score_callback = [&] {
+    scoring.release();
+    release.acquire();
+  };
+  {
+    auto pool = std::make_shared<TextRunnerPool>(
+        std::make_shared<FakeRunner>(control), 1,
+        gufo::server::TextRunnerDiskCacheOptions{
+            .directory = directory,
+            .capacity_bytes = 4096,
+            .staging_capacity_bytes = 4096,
+            .min_checkpoint_step_tokens = 0});
+    TextGenerationScheduler scheduler(pool);
+    auto completed = scheduler.Submit({1, 2, 3}, 1, 0.0F);
+    Expect(completed.Wait().cache_disk_queued_bytes == 0,
+           "scheduler capture remains RAM-only before idle");
+    gufo::sampling::SamplingConfig config;
+    config.logprobs = 2;
+    auto score = scheduler.ScorePrompt({0, 1}, config);
+    Expect(scoring.try_acquire_for(kTestTimeout),
+           "scorer enters without a runner lease");
+    auto pending = scheduler.Submit({2, 3}, 1, 0.0F);
+    pending.Cancel();
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    Expect(files() == 0,
+           "scoring and queued admission prevent idle RAM persistence");
+    release.release();
+    (void)score.Wait();
+    (void)pending.Wait();
+    const auto deadline = std::chrono::steady_clock::now() + kTestTimeout;
+    while (files() == 0 && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    Expect(
+        files() == 1,
+        "terminal resets activity even while completed handles remain alive");
+  }
+  std::error_code error;
+  std::filesystem::remove_all(directory, error);
+}
+
 int main(int argc, char** argv) {
+  if (argc == 2 && std::string_view(argv[1]) == "--disk-writer-only") {
+    ::setenv("GUFO_DISK_PERSIST", "evict_idle", 1);
+    ::setenv("GUFO_DISK_IDLE_MS", "100", 1);
+    TestDiskWriterSchedulerPendingAndTerminalLifetime();
+    std::cout << "disk writer scheduler tests passed\n";
+    return 0;
+  }
+
   TestPrefillDiagnosticsHost();
   if (argc == 2 && std::string_view(argv[1]) == "--debug-hooks") {
     TestLiveScoredQueueAndMissingRecords();

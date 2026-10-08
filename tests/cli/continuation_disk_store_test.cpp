@@ -1414,9 +1414,389 @@ void TestMinimumCheckpointStep() {
       "zero disables the step");
 }
 
+// Policy tests use per-store overrides: environment settings remain read once.
+std::vector<char> ReadWriterFile(const std::filesystem::path& file) {
+  std::ifstream input(file, std::ios::binary);
+  Expect(input.good(), "writer comparison file opens");
+  return {std::istreambuf_iterator<char>(input), {}};
+}
+
+struct WriterHarness {
+  std::shared_ptr<FakeRunner> runner =
+      std::make_shared<FakeRunner>("writer-policy");
+  gufo::server::ContinuationCache cache;
+  ContinuationDiskStore store;
+
+  WriterHarness(const ContinuationDiskStoreOptions& options,
+                ContinuationDiskStore::EventSink sink = {},
+                std::size_t ram_entries = 4, std::size_t ram_bytes = 64)
+      : cache(
+            1, [this] { return runner->CreateState(); },
+            {.restore =
+                 [this](auto& state, const auto& snapshot) {
+                   runner->RestoreOrFork(
+                       dynamic_cast<TextRunnerState&>(state),
+                       dynamic_cast<const TextRunnerSnapshot&>(snapshot));
+                 },
+             .capacity_bytes = [ram_bytes] { return ram_bytes; }},
+            ram_entries),
+        store(options, std::move(sink)) {
+    if (store.persist_on_evict_idle()) {
+      cache.SetPersistenceEvictionHook(
+          [this](auto snapshot) { store.PersistEvicted(std::move(snapshot)); });
+      store.SetPersistenceSource(runner, [this](bool failed) {
+        return cache.NextPendingPersistence(failed);
+      });
+    }
+  }
+
+  std::shared_ptr<const TextRunnerSnapshot> Capture(
+      std::vector<TextRunnerToken> tokens, std::uint64_t value,
+      bool restored = false, bool shared = false) {
+    auto lease = cache.Acquire(tokens);
+    Expect(lease.TryReserveSnapshot(kFakePayloadBytes, tokens.size()),
+           "policy capture obtains RAM reservation");
+    std::shared_ptr<const TextRunnerSnapshot> snapshot =
+        MakeSnapshot(*runner, value, tokens.size());
+    (void)store.Capture(runner, tokens, snapshot, {}, {}, shared, restored);
+    Expect(lease.Commit(std::move(tokens), snapshot) == kFakePayloadBytes,
+           "policy capture retains snapshot");
+    return snapshot;
+  }
+};
+
+ContinuationDiskStoreOptions WriterOptions(
+    const std::filesystem::path& directory) {
+  auto options = StoreOptions(directory);
+  options.persist_evict_idle = true;
+  options.slice = false;
+  options.idle_wait = std::chrono::minutes(10);
+  return options;
+}
+
+void TestWriterEvictionBytesAndDedup() {
+  // Exercise both entry-count and byte-pressure eviction, without changing LRU.
+  for (const bool byte_pressure : {false, true}) {
+    TemporaryDirectory directory, reference_directory;
+    WriterHarness writer(WriterOptions(directory.path()), {},
+                         byte_pressure ? 4 : 2, byte_pressure ? 32 : 64);
+    auto first = writer.Capture({1}, 41);
+    writer.Capture({2}, 42);
+    Expect(writer.store.entry_count() == 0,
+           "RAM captures do not write through");
+    writer.Capture({3}, 43);
+    writer.store.Flush();
+    Expect(writer.store.entry_count() == 1,
+           "only the LRU-evicted entry persists");
+    Expect(first->persistence->state ==
+               gufo::server::SnapshotPersistence::kPersisted,
+           "evicted entry marked only after successful persistence");
+    writer.store.PersistEvicted(first);
+    writer.store.Flush();
+    Expect(writer.store.entry_count() == 1,
+           "second eviction offer cannot write twice");
+    auto state = writer.runner->CreateState();
+    Expect(
+        RestoreTokens(writer.store, *writer.runner, *state, {1, 99}).restored &&
+            RequireFakeState(*state).value == 41,
+        "the exactly evicted state restores");
+    Expect(
+        !RestoreTokens(writer.store, *writer.runner, *state, {2, 99}).restored,
+        "retained RAM entry has not persisted");
+    auto reference_options = WriterOptions(reference_directory.path());
+    reference_options.persist_evict_idle = false;
+    WriterHarness reference(reference_options);
+    reference.Capture({1}, 41);
+    reference.store.Flush();
+    Expect(ReadWriterFile(CacheFiles(directory.path()).front()) ==
+               ReadWriterFile(CacheFiles(reference_directory.path()).front()),
+           "eviction and write-through complete file bytes are identical");
+    writer.store.Shutdown();
+    Expect(writer.store.entry_count() == 3,
+           "shutdown flushes remaining RAM entries");
+  }
+}
+
+void TestWriterIdleBoundNewestFirstAndAdmission() {
+  TemporaryDirectory directory;
+  auto options = WriterOptions(directory.path());
+  options.idle_wait = std::chrono::milliseconds(100);
+  std::counting_semaphore<16> entered(0), stored(0);
+  std::binary_semaphore release(0);
+  std::atomic<std::size_t> idle_count{0}, first_tokens{0};
+  WriterHarness writer(options, [&](const auto& event) {
+    if (event.action == ContinuationDiskEventAction::kStored &&
+        event.trigger == "idle") {
+      if (idle_count.fetch_add(1) == 0)
+        first_tokens.store(event.token_count);
+      stored.release();
+    }
+  });
+  bool first = true;
+  writer.runner->before_stream = [&] {
+    entered.release();
+    if (std::exchange(first, false))
+      release.acquire();
+  };
+  {
+    auto pending_admission = writer.store.BeginAdmission();
+    writer.Capture({1}, 41);
+    writer.Capture({2, 2}, 42);
+    writer.Capture({3, 3, 3}, 43);
+    Expect(!entered.try_acquire_for(std::chrono::milliseconds(150)),
+           "pending admission prevents idle persistence even after idle bound");
+  }
+  const auto idle_start = std::chrono::steady_clock::now();
+  Expect(!entered.try_acquire_for(std::chrono::milliseconds(25)),
+         "idle persistence cannot fire before its bound");
+  Expect(entered.try_acquire_for(std::chrono::seconds(2)),
+         "idle persistence eventually fires");
+  Expect(std::chrono::steady_clock::now() - idle_start >=
+             options.idle_wait.value(),
+         "idle deadline starts when admission ends");
+  {
+    auto admitted = writer.store.BeginAdmission();
+    release.release();
+    Expect(stored.try_acquire_for(std::chrono::seconds(2)),
+           "already-started idle write finishes");
+    Expect(first_tokens == 3, "idle drains newest RAM entry first");
+    Expect(!entered.try_acquire_for(std::chrono::milliseconds(150)),
+           "admission stops the next idle entry");
+    Expect(writer.store.entry_count() == 1,
+           "idle persists one entry at a time");
+  }
+  writer.store.Shutdown();
+  Expect(writer.store.entry_count() == 3 && idle_count == 1,
+         "shutdown flushes the two remaining entries with shutdown trigger");
+}
+
+void TestWriterRestoredAndAlreadyStoredEntries() {
+  TemporaryDirectory directory;
+  WriterHarness writer(WriterOptions(directory.path()));
+  auto saved = MakeSnapshot(*writer.runner, 41, 1);
+  Expect(SaveTokens(writer.store, *writer.runner, {1}, *saved).stored,
+         "seed represents restart-persistent state");
+  auto restored = writer.Capture({1}, 41, true);
+  Expect(restored->persistence->state ==
+             gufo::server::SnapshotPersistence::kPersisted,
+         "disk-restored entry is marked persisted at capture");
+  auto exact = writer.Capture({2}, 42);
+  Expect(SaveTokens(writer.store, *writer.runner, {2}, *exact).stored,
+         "another caller has already stored the exact RAM entry");
+  std::atomic<std::size_t> serializations{0};
+  writer.runner->before_stream = [&] { ++serializations; };
+  writer.store.PersistEvicted(restored);
+  writer.store.PersistEvicted(exact);
+  writer.store.Flush();
+  writer.store.Shutdown();
+  Expect(serializations == 0 && writer.store.entry_count() == 2,
+         "restore and exact-file dedup cause no payload rewrite");
+}
+
+void TestWriterShutdownDeadlineAndDiscardLogging() {
+  TemporaryDirectory directory;
+  auto options = WriterOptions(directory.path());
+  options.shutdown_wait = std::chrono::milliseconds(0);
+  std::atomic<std::size_t> deadline_skips{0}, ram_skips{0};
+  WriterHarness writer(options, [&](const auto& event) {
+    if (event.reason == ContinuationDiskEventReason::kShutdownDeadline)
+      ++deadline_skips;
+    if (event.reason == ContinuationDiskEventReason::kRamNotRetained)
+      ++ram_skips;
+  });
+  writer.Capture({1}, 41);
+  writer.Capture({2}, 42);
+  (void)writer.store.Capture(writer.runner, {3},
+                             MakeSnapshot(*writer.runner, 43, 1), {}, {}, false,
+                             false, false);
+  {
+    auto abandoned = MakeSnapshot(*writer.runner, 44, 1);
+    (void)writer.store.Capture(writer.runner, {4}, std::move(abandoned));
+    // No cache publication: the tag logs this discard itself.
+  }
+  writer.store.Shutdown();
+  Expect(
+      deadline_skips == 2 && ram_skips == 2 && writer.store.entry_count() == 0,
+      "bounded shutdown and unpublished/unretained captures each log their "
+      "skip");
+}
+
+void TestWriterDefaultsStillWriteThrough() {
+  TemporaryDirectory directory;
+  auto options = WriterOptions(directory.path());
+  options.persist_evict_idle = false;
+  WriterHarness writer(options);
+  auto active = writer.store.BeginGeneration();
+  auto snapshot = writer.Capture({1}, 41);
+  Expect(!snapshot->persistence,
+         "write-through does not allocate persistence tags");
+  writer.store.Flush();
+  Expect(writer.store.entry_count() == 1,
+         "default writes capture without eviction or idle");
+}
+
+class LargeWriterRunner final : public TextModelRunner {
+public:
+  TextRunnerDescriptor Descriptor() const override {
+    return base_.Descriptor();
+  }
+  TextRunnerResourceClaim ResourceClaim() const override {
+    return base_.ResourceClaim();
+  }
+  std::vector<TextExecutionPlan> SupportedPlans() const override {
+    return base_.SupportedPlans();
+  }
+  std::vector<TextRunnerToken> Tokenize(std::string_view text) const override {
+    return base_.Tokenize(text);
+  }
+  std::optional<std::vector<TextRunnerToken>> RenderAndTokenize(
+      const ChatRequest& request) const override {
+    return base_.RenderAndTokenize(request);
+  }
+  std::string Decode(std::span<const TextRunnerToken> tokens) const override {
+    return base_.Decode(tokens);
+  }
+  std::unique_ptr<TextRunnerState> CreateState() const override {
+    return base_.CreateState();
+  }
+  TextPrefillStep Prefill(TextRunnerState& state,
+                          std::span<const TextRunnerToken> tokens,
+                          std::size_t offset,
+                          std::size_t budget) const override {
+    return base_.Prefill(state, tokens, offset, budget);
+  }
+  TextDecodeSelection SelectNext(
+      TextRunnerState& state,
+      gufo::sampling::SamplerState& sampler) const override {
+    return base_.SelectNext(state, sampler);
+  }
+  void Advance(TextRunnerState& state, TextRunnerToken token) const override {
+    base_.Advance(state, token);
+  }
+  std::size_t CheckpointPosition(const TextRunnerState& state) const override {
+    return base_.CheckpointPosition(state);
+  }
+  std::size_t SnapshotPayloadBytes(
+      const TextRunnerState& state) const override {
+    return base_.SnapshotPayloadBytes(state);
+  }
+  std::unique_ptr<TextRunnerSnapshot> Snapshot(
+      const TextRunnerState& state) const override {
+    return base_.Snapshot(state);
+  }
+  void RestoreOrFork(TextRunnerState& state,
+                     const TextRunnerSnapshot& snapshot) const override {
+    base_.RestoreOrFork(state, snapshot);
+  }
+  std::size_t PersistentSnapshotPayloadBytes(
+      const TextRunnerSnapshot&) const override {
+    return kFakePayloadBytes + 32 * 1024 * 1024;
+  }
+  void StreamPersistentSnapshot(const TextRunnerSnapshot& snapshot,
+                                const SnapshotSink& sink) const override {
+    base_.StreamPersistentSnapshot(snapshot, sink);
+    // Deliberately irregular provider segments cross multiple writer slices.
+    std::vector<std::uint8_t> bytes(5 * 1024 * 1024, 0x5a);
+    std::size_t left = 32 * 1024 * 1024;
+    while (left) {
+      const auto size = std::min(left, bytes.size());
+      sink(std::span(bytes).first(size));
+      left -= size;
+    }
+  }
+
+private:
+  FakeRunner base_{"writer-slice"};
+};
+
+void TestWriterSlicingBytesAndActiveYield() {
+  TemporaryDirectory sliced_directory, reference_directory;
+  auto runner = std::make_shared<LargeWriterRunner>();
+  auto reference_options = WriterOptions(reference_directory.path());
+  reference_options.persist_evict_idle = false;
+  reference_options.capacity_bytes = reference_options.staging_capacity_bytes =
+      64 * 1024 * 1024;
+  ContinuationDiskStore reference(reference_options);
+  auto state = runner->CreateState();
+  RequireFakeState(*state).value = 41;
+  RequireFakeState(*state).position = 1;
+  auto snapshot = runner->Snapshot(*state);
+  const std::vector<TextRunnerToken> tokens{1};
+  Expect(reference.Save(*runner, tokens, *snapshot).stored,
+         "unsliced reference stores");
+  auto sliced_options = reference_options;
+  sliced_options.directory = sliced_directory.path();
+  sliced_options.slice = true;
+  sliced_options.slice_max_wait = std::chrono::milliseconds(20);
+  std::size_t yields = 0;
+  double wait_ms = 0;
+  ContinuationDiskStore sliced(sliced_options, [&](const auto& event) {
+    if (event.action == ContinuationDiskEventAction::kStored) {
+      yields = event.slice_yields;
+      wait_ms = event.slice_wait_ms;
+    }
+  });
+  {
+    auto active = sliced.BeginGeneration();
+    Expect(sliced.Save(*runner, tokens, *snapshot).stored,
+           "sliced active write stores");
+  }
+  Expect(yields > 0 && wait_ms >= 20 && wait_ms < 1000,
+         "active generation causes bounded between-slice yields");
+  Expect(ReadWriterFile(CacheFiles(sliced_directory.path()).front()) ==
+             ReadWriterFile(CacheFiles(reference_directory.path()).front()),
+         "slicing preserves all header, payload and checksum bytes");
+}
+
+void TestWriterStagingAndSharedSpacing() {
+  TemporaryDirectory rejected_directory;
+  auto rejected_options = WriterOptions(rejected_directory.path());
+  rejected_options.staging_capacity_bytes = kDiskHeaderBytes;
+  std::atomic<std::size_t> staging_skips{0};
+  WriterHarness rejected(
+      rejected_options,
+      [&](const auto& event) {
+        if (event.reason == ContinuationDiskEventReason::kStagingCapacity)
+          ++staging_skips;
+      },
+      1);
+  rejected.Capture({1}, 41);
+  rejected.Capture({2}, 42);
+  rejected.store.Flush();
+  Expect(staging_skips > 0 && rejected.store.entry_count() == 0,
+         "eviction staging refusal logs the unchanged capacity reason");
+  rejected.store.Shutdown();
+
+  TemporaryDirectory shared_directory;
+  auto options = WriterOptions(shared_directory.path());
+  options.min_checkpoint_step_tokens = 10;
+  WriterHarness shared(options);
+  Expect(SaveTokens(shared.store, *shared.runner, {1},
+                    *MakeSnapshot(*shared.runner, 40, 1))
+             .stored,
+         "seed minimum-step prefix");
+  auto boundary = shared.Capture({1, 2}, 41, false, true);
+  auto continuation = shared.Capture({1, 3}, 42);
+  shared.store.Shutdown();
+  Expect(shared.store.entry_count() == 2 &&
+             boundary->persistence->state ==
+                 gufo::server::SnapshotPersistence::kPersisted &&
+             continuation->persistence->state !=
+                 gufo::server::SnapshotPersistence::kPersisted,
+         "deferred shared boundary keeps exemption while continuation keeps "
+         "min-step gate");
+}
+
 int main() {
   // Lead 1 (learned shared-prefix boundaries rounded down to a multiple of 256) is off in these tests: they assert exact tiny boundaries.
   ::setenv("GUFO_DISK_BOUNDARY_ALIGN", "0", 1);
+  TestWriterStagingAndSharedSpacing();
+  TestWriterEvictionBytesAndDedup();
+  TestWriterIdleBoundNewestFirstAndAdmission();
+  TestWriterRestoredAndAlreadyStoredEntries();
+  TestWriterShutdownDeadlineAndDiscardLogging();
+  TestWriterDefaultsStillWriteThrough();
+  TestWriterSlicingBytesAndActiveYield();
   TestDeferredPersistenceIdleAndBytes();
   TestDeferredPersistenceDeadline();
   TestDeferredPersistencePressure();

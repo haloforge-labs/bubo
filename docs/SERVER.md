@@ -458,6 +458,52 @@ writer backlog or I/O time. Borrowed/private device storage may stay pinned
 longer within the existing logical staging budget. Payload bytes remain
 unchanged, and RAM caching and serving without `--cache-disk` are unaffected.
 Restart to change this setting; qualify payload identity and decode timing.
+`GUFO_DISK_PERSIST=evict_idle` opts into persistence on RAM eviction, idle,
+and graceful shutdown. Unset or any other value retains capture write-through.
+The setting is read once when the first store is created. Captures remain in
+`ContinuationCache`; an evicted eligible snapshot is offered to the same bounded
+writer before its last reference is released. While no request is generating
+or waiting for runner admission, `GUFO_DISK_IDLE_MS` (0..600000, default 30000,
+read once) starts newest-first persistence, one entry at a time. A newly
+admitted request stops further idle entries; a started gather/write completes.
+Exact restored entries are already persisted and are not rewritten. Optional
+history-only checkpoints stay RAM-only; shared disk boundaries obtain a normal
+RAM reservation in this mode. RAM refusal skips disk-only capture with
+`reason=ram_not_retained`, and every rejected/failed persist logs a reason.
+Failed entries retry on eviction or shutdown. Existing staging, disk byte/LRU,
+minimum checkpoint step and learned-boundary alignment rules still apply.
+
+Graceful shutdown offers the remaining eligible RAM entries newest-first for
+up to 30 seconds, then logs `reason=shutdown_deadline` for leftovers. One
+already-started provider gather or filesystem operation must finish before
+joining the writer; the deadline bounds additional work, not an uninterruptible
+transfer or `fsync`. A forced termination before eviction/idle/shutdown loses
+RAM-only entries. Allow idle persistence before relying on restart recovery.
+
+`GUFO_DISK_SLICE=1` independently enables pause-aware hash/write slices. Unset or
+any other value keeps the existing writer. After each approximately 16 MiB of
+byte processing, the writer sleeps in 2 ms increments while generation is
+active, with a 10-second total pause budget per publication. No new lock is
+added to decode. Flash-Next's borrowed-row materialization has no safe sliced
+streaming API: its gather still holds the registry mutex for the complete
+materialization, and these pauses occur only after that lock is released.
+File/directory durability operations remain unsliced. Neither setting changes
+version-16 payload bytes or store layout. Restart to change these settings.
+
+Each `stored` event retains `write_ms`, `gather_ms`, `file_write_ms`, `hash_ms`,
+and `fsync_ms`, and adds `trigger=write_through|evict|idle|shutdown`,
+`slice_yields`, and `slice_wait_ms`. Gather time excludes deliberate slice
+pauses. Shutdown logs `event=disk_cache_writer_summary` with successful capture offers (`captures_seen`),
+persisted counts per trigger, skip events, and persisted payload bytes written.
+Skip counts include preflight refusals; they are not unique capture counts.
+
+The opt-in policy reduces SSD wear from repeatedly writing 0.5–1.2 GB prompt
+snapshots after each capture. Eviction preserves displaced prompts, while
+idle/shutdown persistence keeps long system prompts available after restart.
+Measure actual write bytes, warm TTFT and decode time before deployment:
+write-through phase timings determine how much hash/write slicing helps, and
+unsliced gather/fsync can still contend with an arriving request.
+
 `--cache-disk-staging-bytes 0` (the default) selects the smaller of one eighth
 of available host RAM after model/session loading (including cgroup limits) and
 the disk budget. This bounds queued captures/writes and each disk read

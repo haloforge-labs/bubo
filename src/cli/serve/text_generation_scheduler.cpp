@@ -107,6 +107,9 @@ struct ScheduledRequest {
   std::atomic<bool> cancellation_requested{false};
   std::atomic<TextRequestPhase> phase{TextRequestPhase::kQueued};
 
+  // Empty unless eviction/idle persistence is enabled. Covers queued/scoring
+  // work before a runner lease exists; reset at terminal, even if handle lives.
+  std::shared_ptr<const void> disk_admission;
   TextRunnerPool::Request runner_request;
   TextGenerationScheduler::Result result;
   std::optional<TextGenerationScheduler::Clock::time_point> previous_token;
@@ -192,6 +195,7 @@ void PublishTerminal(const std::shared_ptr<ScheduledRequest>& request,
     }
     request->failure = std::move(failure);
     request->terminal = true;
+    request->disk_admission.reset();
     if (std::exchange(request->counted_processing, false)) {
       if (request->session != kNoSession) {
         const std::lock_guard<std::mutex> sessions_lock(
@@ -2288,6 +2292,7 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
         "stop sequences require exact incremental token decoding");
 
   auto request = std::make_shared<ScheduledRequest>();
+  request->disk_admission = impl_->runner_pool->TrackPendingAdmission();
   request->stop_filter = StopSequenceFilter(std::move(metadata.stop_sequences));
   request->id = impl_->next_request_id.fetch_add(1, std::memory_order_relaxed);
   request->client_id =

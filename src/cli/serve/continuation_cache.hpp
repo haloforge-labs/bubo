@@ -1,6 +1,7 @@
 #ifndef GUFO_SERVER_CONTINUATION_CACHE_HPP_
 #define GUFO_SERVER_CONTINUATION_CACHE_HPP_
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -49,6 +50,25 @@ public:
   virtual void Invalidate() noexcept = 0;
 };
 
+/// Optional persistence bookkeeping, installed before RAM publication.
+/// Failed entries retry on eviction/shutdown; abandoned entries are logged.
+struct SnapshotPersistence {
+  enum State : unsigned { kDirty, kQueued, kPersisted, kFailed, kAbandoned };
+  std::vector<ContinuationToken> tokens;
+  std::vector<std::uint8_t> input_identity;
+  bool shared_prefix{false};
+  std::atomic<unsigned> state{kDirty};
+  std::function<void()> on_discard;
+  ~SnapshotPersistence() noexcept {
+    if (state.load() == kDirty && on_discard) {
+      try {
+        on_discard();
+      } catch (...) {
+      }
+    }
+  }
+};
+
 /// Immutable model-private continuation payload.
 class ContinuationSnapshot {
 public:
@@ -60,6 +80,8 @@ public:
   ContinuationSnapshot(ContinuationSnapshot&&) = delete;
   ContinuationSnapshot& operator=(ContinuationSnapshot&&) = delete;
 
+  // Set once, before publication; workers mutate only the atomic state.
+  mutable std::shared_ptr<SnapshotPersistence> persistence;
   [[nodiscard]] virtual std::size_t PayloadBytes() const noexcept = 0;
   /// Prefer an available state that still holds this snapshot's borrowed rows.
   /// This is an allocation hint; every state must remain able to restore it.
@@ -129,6 +151,8 @@ public:
     SnapshotRestore restore;
     SnapshotCapacity capacity_bytes;
     SnapshotEventSink on_event;
+    // Invoked outside the cache mutex, before the removed reference is freed.
+    std::function<void(std::shared_ptr<const ContinuationSnapshot>)> on_evict;
   };
 
   class Lease {
@@ -266,6 +290,14 @@ public:
       std::span<const ContinuationToken> prompt,
       std::span<const std::uint8_t> input_identity = {},
       std::span<const ContinuationInputPrefix> input_prefixes = {}) const;
+
+  /// Configured only at startup by the optional disk policy.
+  void SetPersistenceEvictionHook(
+      std::function<void(std::shared_ptr<const ContinuationSnapshot>)> hook);
+
+  /// Newest eligible checkpoint, using the existing metadata mutex.
+  [[nodiscard]] std::shared_ptr<const ContinuationSnapshot>
+  NextPendingPersistence(bool include_failed = false) const;
 
   [[nodiscard]] std::size_t capacity() const noexcept;
   /// Immutable checkpoint records, independent of execution capacity().

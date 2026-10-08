@@ -578,6 +578,10 @@ public:
       bool stop_at_eos = true, std::shared_ptr<DebugTimeline> timeline = {});
   [[nodiscard]] Request Acquire(std::vector<TextRunnerToken> prompt,
                                 const CancellationCheck& is_cancelled = {});
+  /// Optional lock-free disk idle signal held from submission to completion.
+  /// Empty with the persistence policy disabled; allocates only when enabled.
+  [[nodiscard]] std::shared_ptr<const void> TrackPendingAdmission() const;
+
   /// Longest RAM-retained prefix of prompt that Acquire could reuse, without
   /// leasing a state. An upper bound: Acquire may still prefer a shorter one.
   [[nodiscard]] std::size_t CachedPrefixTokens(
