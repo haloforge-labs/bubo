@@ -2897,6 +2897,8 @@ public:
     step.draft_rounds = stats_after.cycles - stats_before.cycles;
     step.draft_tokens = stats_after.drafted - stats_before.drafted;
     step.draft_accepted_tokens = stats_after.accepted - stats_before.accepted;
+    step.policy_chosen_length = stats_after.policy_width - stats_before.policy_width;
+    step.policy_survival = stats_after.survival_cycles != stats_before.survival_cycles;
     step.lookup_tokens = stats_after.lookup - stats_before.lookup;
     step.lookup_accepted_tokens =
         stats_after.lookup_accepted - stats_before.lookup_accepted;

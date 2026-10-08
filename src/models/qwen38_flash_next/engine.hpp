@@ -241,6 +241,9 @@ public:
     std::uint64_t cycles{0};
     std::uint64_t drafted{0};
     std::uint64_t accepted{0};
+    /// Initial policy budget before survival/lookup rewrites the chain width.
+    std::uint64_t policy_width{0};
+    std::uint64_t survival_cycles{0};
     /// Of drafted/accepted: proposals copied from the context.
     std::uint64_t lookup{0};
     std::uint64_t lookup_accepted{0};

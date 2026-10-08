@@ -149,11 +149,8 @@ inline constexpr DebugSettingsIrrelevantEnvironment
 // Resolve per-request switches in the hook 1 builder, using the sampler's
 // configured values rather than reparsing request fields or environment text.
 [[nodiscard]] inline json::Value BuildEffectiveSettings(
-    json::Value resolved, std::string_view version, std::string_view revision,
-    std::string_view build_id, const sampling::SamplingConfig& request_sampling,
+    json::Value settings, const sampling::SamplingConfig& request_sampling,
     bool cache_prompt) {
-  auto settings = BuildEffectiveSettings(std::move(resolved), version, revision,
-                                         build_id);
   settings["resolved"]["cache_prompt"] = cache_prompt;
   auto& behaviour = settings["resolved"]["behaviour"];
   sampling::BehaviourConfig inactive;
@@ -185,8 +182,8 @@ inline constexpr DebugSettingsIrrelevantEnvironment
 
 // This is a projection of hook 1's builder, never a second environment parser.
 [[nodiscard]] inline json::Value BuildTimelineBundle(
-    json::Value resolved, const sampling::SamplingConfig& sampling, bool cache_prompt) {
-  const auto settings = BuildEffectiveSettings(std::move(resolved), "", "", "",
+    json::Value cached_settings, const sampling::SamplingConfig& sampling, bool cache_prompt) {
+  const auto settings = BuildEffectiveSettings(std::move(cached_settings),
                                                sampling, cache_prompt);
   const auto& effective = *settings.find("resolved");
   auto bundle = json::Value::object();
@@ -198,8 +195,10 @@ inline constexpr DebugSettingsIrrelevantEnvironment
   if (bundle.contains("mtp_policy")) {
     auto* policy = &bundle["mtp_policy"];
     (*policy)["name"] =
-        policy->find("survival") && policy->find("survival")->as_bool()
-            ? "survival" : "length";
+        !policy->find("enabled") || !policy->find("enabled")->as_bool()
+            ? "none"
+            : policy->find("survival") && policy->find("survival")->as_bool()
+                  ? "survival" : "length";
     if (const auto* cap = policy->find("runner_max_draft_tokens"))
       (*policy)["cap"] = *cap;
   }

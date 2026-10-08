@@ -64,13 +64,18 @@ The additional cycle fields are:
 | `draft_sources.mtp_head`, `draft_sources.prompt_lookup` | Draft tokens actually sent to verification from each source, excluding the anchor. Their sum equals `drafts`. Omitted with `draft_source`; AR cycles have two measured zero counts. |
 | `accepted_length` | Alias of the existing `accepted`: draft tokens kept by verification, excluding the anchor. |
 | `partial_accept` | Whether `accepted < drafts`. A stop can also shorten the chain; this does not assert a rejection or a physical rollback. |
-| `policy.name`, `policy.cap` | Effective `length` or `survival` policy and configured runner draft-token cap. Survival applies only to sampled, single-session cycles; deterministic serial cycles report `length`. `name` is omitted on the batch adapter path because its serial retries are not reported. These are not the actual chosen width. |
+| `policy_effective` | Actual serial engine decision: `length`, `survival`, or `none` for a cycle without drafts. Omitted for speculative batch cycles, whose serial retries are not attributed. |
+| `policy_chosen_length` | Initial serial draft budget, excluding the anchor, before survival cuts or prompt lookup rewrites the chain width. Comes from the session policy-width counter delta. Zero for an AR step on the serial Flash-Next adapter; omitted on adapters that do not expose the counter. The configured cap is `admission.bundle.mtp_policy.cap`. |
 
 `index`, `verify_width`, `drafts`, `accepted`, and `ms` retain their existing
-meaning. `policy` also carries hook 1's `mtp_policy` fields: `model_has_mtp`,
+meaning. Only `admission.bundle.mtp_policy` carries hook 1's policy fields: `model_has_mtp`,
 `enabled`, `runner_max_draft_tokens`, `model_max_draft_tokens`, `survival`,
 `prompt_lookup`, and `draft_vocabulary`. `survival` describes configuration;
-`name` describes the policy used by that work unit.
+`name` describes configured policy (`none` when MTP is disabled);
+`policy_effective` describes the work unit. The full policy object is not copied
+into each cycle. Resolved `prompt_lookup` and `draft_vocabulary` (`full` or
+`latin_text`) expose `--prompt-lookup` and `--mtp-draft-vocab`; `survival`
+and `name` expose `--mtp-policy survival`.
 
 `bundle` is projected from hook 1's `BuildEffectiveSettings` builder after
 request sampling resolution. Its exact members are:
@@ -106,15 +111,18 @@ The `finish.summary` fields are:
 | `restore_ms`, `restores` | Measured restore duration and records with `kind`, `ms`, `bytes`. Kinds are `RAM`, `disk`, `live_slot`, or `none`; the latter two do no snapshot restore and report measured zero restore cost/bytes. No record is fabricated if admission did not complete. |
 | `queue_ms` | Sum of queue events' `wait_ms`, excluding render and cache-admission work. The older event `queue_ms` includes admission and must not be added again. |
 | `wall_ms` | Existing timeline origin through the finish event timestamp, not HTTP transport completion. |
-| `unattributed_ms` | `wall_ms - (cycle_ms + prefill_ms + restore_ms + queue_ms)`. Includes render, lookup overhead, snapshots, scheduling, and other unassigned work. Signed: overlapping work or elapsed batch measurements can produce a negative residual. |
+| `residual_ms` | Raw signed `wall_ms - (cycle_ms + prefill_ms + restore_ms + queue_ms)`. Independent elapsed phase sums can overlap; a negative residual remains visible. |
+| `unattributed_ms` | `max(0, residual_ms)`: net unassigned wall time (render, lookup overhead, scheduling, and other work). |
+| `overlap_ms` | `max(0, -residual_ms)`: phase sums exceeding wall time. This is net excess, not a measurement of every overlapping interval; gaps can offset overlaps. |
 
-The identity `cycle_ms + prefill_ms + restore_ms + queue_ms + unattributed_ms =
-wall_ms` holds apart from floating-point rounding. These are elapsed serving
-measurements, not an exclusive device utilization profile.
+Phase sums and wall are reported independently. The raw residual is diagnostic;
+a clamped gap alone must not be used as proof that phases reconcile. Restore
+can be nested in admission, and batch cycle elapsed intervals can overlap.
+These are elapsed serving measurements, not an exclusive device utilization profile.
 
 Not available and omitted: `proposed_length` before the policy,
-`policy_chosen_length`, `filter_changed`, `filter_rejected`, physical `rollback`,
-effective `policy.name` on the batch adapter path, and restore
+`filter_changed`, `filter_rejected`, physical `rollback`,
+effective `policy_effective` and `policy_chosen_length` on the batch adapter path, and restore
 `capture_origin`/a distinct `in_pass_checkpoint` restore kind.
 The current cache retains the tier but loses how a snapshot was captured;
 `RAM` therefore also covers restoration of an in-pass checkpoint. Its earlier
@@ -123,7 +131,16 @@ capture still reports `snapshot.in_pass=true`, and its prefill pass reports
 GPU candidate set; no unrestricted proposal exists for a cheap before/after
 comparison. Lenient acceptance statistics are global atomics, not attributable
 to an interleaved request. Missing fields must not be interpreted as zero.
-No counter was added to engine loops or per-cycle bookkeeping in this round.
+The serial session now adds two integers to its existing cycle statistics: the
+initial policy draft budget and whether survival was selected. They run even
+without a timeline; no new decode branch, allocation, lock or atomic is added.
+Resolved settings are cached on first diagnostic use (normally startup with
+`--debug-hooks`); timeline requests only overlay request behaviour/cache permission.
+
+On a backend without token-logprob support, Responses `include` is accepted
+and ignored exactly as in the base implementation, including malformed include
+values. `top_logprobs` on such a backend retains the original unsupported-field
+error. Include validation and scoring apply only when the backend supports them.
 
 Read-only cache inspection is **not implemented**. The caches do not retain
 exact successful-hit counts or distinct last-hit time. The existing logical LRU

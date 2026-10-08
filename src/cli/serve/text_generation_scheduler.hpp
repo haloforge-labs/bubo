@@ -174,6 +174,7 @@ public:
       const CancellationCheck& is_cancelled, RequestMetadata metadata);
 
 private:
+  [[nodiscard]] const json::Value& CachedDebugSettings() const;
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };

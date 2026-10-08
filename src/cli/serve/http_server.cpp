@@ -1172,7 +1172,8 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
     for (const auto& item : include->items())
       output_logprobs |= item.is_string() && item.str() == "message.output_text.logprobs";
   }
-  if (output_logprobs || top_logprobs) {
+  // Base accepts and ignores include on runners without this capability.
+  if ((output_logprobs || top_logprobs) && b.supports_logprobs()) {
     if (!include || !include->is_array())
       return InvalidCompatibilityRequest("logprobs require 'include' to be an array");
     for (const auto& item : include->items()) {
@@ -1199,8 +1200,6 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
         return InvalidCompatibilityRequest("'top_logprobs' must be an integer in [0,20]");
       sampling_config.logprobs = static_cast<std::int32_t>(top_logprobs->as_double());
     }
-    if (!b.supports_logprobs())
-      return InvalidCompatibilityRequest("token logprobs are not supported for this model");
   }
 
   std::vector<tokenization::ChatMessage> messages;

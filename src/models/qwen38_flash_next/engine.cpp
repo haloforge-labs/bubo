@@ -1137,6 +1137,9 @@ bool Session::PrepareDecode(const DecodeRequest& request,
   pending->chain = {anchor};
   pending->draft = draft_token_;
   pending->width = width;
+  // Count the decision while its original width is still available.
+  stats_.policy_width += width - 1;
+  stats_.survival_cycles += survival;
   pending->base = base;
   pending->speculative = true;
   pending->sampled = sampled;

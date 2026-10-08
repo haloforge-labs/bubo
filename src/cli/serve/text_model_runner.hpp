@@ -189,6 +189,9 @@ struct TextDecodeStep {
   /// Of draft_tokens: proposals copied from the context (prompt lookup).
   std::size_t lookup_tokens{0};
   std::size_t lookup_accepted_tokens{0};
+  /// Absent when the adapter cannot attribute the engine policy decision.
+  std::optional<std::size_t> policy_chosen_length;
+  std::optional<bool> policy_survival;
 };
 
 /// Model-private state driven only through TextModelRunner work units.

@@ -2382,7 +2382,11 @@ void DebugHooksHttpTestResponsesLogprobs() {
       R"({"input":"x","max_output_tokens":2,"temperature":0,
           "reasoning":{"effort":"none"},
           "include":["message.output_text.logprobs"],"top_logprobs":2})");
-  ExpectStatus(server.Post("/v1/responses", input.dump()), 400);
+  // Base ReadCompatibilityOptions rejects top_logprobs before examining include.
+  const auto unsupported = server.Post("/v1/responses", input.dump());
+  ExpectStatus(unsupported, 400);
+  assert(unsupported.substr(unsupported.find("\r\n\r\n") + 4) ==
+         R"({"error":{"message":"request field 'top_logprobs' is not supported on this endpoint","type":"invalid_request_error","code":"invalid_request"}})");
   assert(server.backend->calls == 0);
   server.backend->logprob_support = true;
   server.backend->initial_output_state_override = TextGenerationBackend::InitialOutputState::kContent;
@@ -2687,6 +2691,27 @@ void DebugHooksBaseGoldenBytesAndExposure() {
           R"(' is not supported on this endpoint","type":"invalid_request_error","code":"invalid_request"}})";
       assert(response.substr(response.find("\r\n\r\n") + 4) == expected);
     }
+  }
+  // Base OpenAiResponses ignores every include value. ResponsesOutput::Part
+  // supplies these exact deterministic bytes (IDs/time are independently random).
+  for (const auto* include : {
+           R"(["message.output_text.logprobs"])",
+           R"(["message.output_text.logprobs",1,"unknown"])",
+           R"("message.output_text.logprobs")", "null", "42", "{}"}) {
+    const auto response = off.Post("/v1/responses",
+        std::string(R"({"input":"x","reasoning":{"effort":"none"},"include":)") + include + "}");
+    ExpectStatus(response, 200);
+    const auto body = DebugHooksHttpResponseBody(response);
+    const auto& output = body.find("output")->items();
+    assert(output.size() == 1 && output[0].member_str("type") == "message");
+    assert(output[0].find("content")->dump() ==
+           R"([{"type":"output_text","text":"ok","annotations":[],"logprobs":[]}])");
+    assert(off.backend->LastCall().sampling.logprobs == -1);
+    const auto error = off.Post("/v1/responses",
+        std::string(R"({"include":)") + include + "}");
+    ExpectStatus(error, 400);
+    assert(error.substr(error.find("\r\n\r\n") + 4) ==
+           R"({"error":{"message":"'input' must contain text, message items with text/images, reasoning items, function calls or function outputs","type":"invalid_request_error","code":"invalid_request"}})");
   }
   // Full generation body transcribed from 35c386a LlamaCompletion,
   // UsageJson, GenerationTimings and the original FakeBackend fixed result.

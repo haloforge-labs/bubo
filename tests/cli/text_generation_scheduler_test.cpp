@@ -172,6 +172,7 @@ struct FakeControl {
   bool incremental_text_is_exact{false};
   bool multi_token_decode{false};
   bool timeline_mixed_drafts{false};
+  std::atomic<std::size_t> debug_settings_calls{0};
   bool batched_multi_token_decode{false};
   std::size_t actual_batch_width{4};
   bool prefix_reuse{true};
@@ -566,9 +567,12 @@ public:
   }
 
   [[nodiscard]] gufo::json::Value DebugSettings() const override {
+    ++control_->debug_settings_calls;
     auto settings = gufo::json::Value::object();
     if (control_->timeline_mixed_drafts) {
       auto policy = gufo::json::Value::object();
+      policy["enabled"] = true;
+      policy["prompt_lookup"] = true;
       policy["survival"] = true;
       policy["runner_max_draft_tokens"] = 4;
       policy["draft_vocabulary"] = "latin_text";
@@ -605,8 +609,12 @@ public:
     step.draft_tokens = count + 1;
     step.draft_accepted_tokens = count;
     if (control_->timeline_mixed_drafts) {
+      step.policy_chosen_length = 4;
+      step.policy_survival = sampler.config().uses_random_sampling();
       step.lookup_tokens = fake.decode_count <= 3 ? 2 : 0;
       step.draft_accepted_tokens = count - 1;
+      // The second scripted survival cycle stops drafting below its budget.
+      step.draft_tokens = fake.decode_count <= 3 ? count + 1 : count;
     }
     return step;
   }
@@ -2882,9 +2890,14 @@ void TestDebugTimelineOrderCountsAndOffPath() {
          "summary totals reconcile against independently accumulated event measurements");
   const double accounted = summary->member_double("cycle_ms") +
       summary->member_double("prefill_ms") + summary->member_double("restore_ms") +
-      summary->member_double("queue_ms") + summary->member_double("unattributed_ms");
+      summary->member_double("queue_ms") + summary->member_double("residual_ms");
   Expect(std::abs(accounted - summary->member_double("wall_ms")) < 1e-8,
-         "cycle + prefill + restore + queue + unattributed equals wall");
+         "raw residual preserves elapsed accounting without hiding overlaps");
+  Expect(summary->member_double("unattributed_ms") ==
+             std::max(0.0, summary->member_double("residual_ms")) &&
+             summary->member_double("overlap_ms") ==
+             std::max(0.0, -summary->member_double("residual_ms")),
+         "gap and overlap retain the sign of independent phase accounting");
   Expect(!result.debug_timeline->truncated(), "short request is untruncated");
   metadata.debug_timeline = false;
   const auto off = scheduler->Submit({1, 2, 3, 4, 5, 6}, 4, 0.0F, {}, false,
@@ -2903,8 +2916,12 @@ void TestDebugTimelineMixedSourcesAndPolicy() {
   control->timeline_mixed_drafts = true;
   auto scheduler = MakeScheduler(control, 1);
   TextRequestMetadata metadata;
-  metadata.debug_timeline = true;
   metadata.cache_prompt = false;
+  const auto initial_off = scheduler->Submit({1, 2, 3}, 3, 0.0F, {}, false,
+                                             metadata).Wait();
+  Expect(!initial_off.debug_timeline && control->debug_settings_calls == 0,
+         "initial OFF request does not build settings");
+  metadata.debug_timeline = true;
   gufo::sampling::SamplingConfig config;
   config.temperature = 1.0F;
   auto behaviour = std::make_shared<gufo::sampling::BehaviourConfig>();
@@ -2927,21 +2944,43 @@ void TestDebugTimelineMixedSourcesAndPolicy() {
       continue;
     const auto* sources = event.find("draft_sources");
     Expect(sources && sources->member_size("prompt_lookup") == (cycles == 0 ? 2 : 0) &&
-               sources->member_size("mtp_head") == (cycles == 0 ? 2 : 4) &&
+               sources->member_size("mtp_head") == (cycles == 0 ? 2 : 3) &&
                event.member_str("draft_source") == (cycles == 0 ? "mixed" : "mtp_head") &&
-               event.member_size("drafts") == 4 && event.member_size("accepted_length") == 2 &&
+               event.member_size("drafts") == (cycles == 0 ? 4 : 3) &&
+               event.member_size("verify_width") == (cycles == 0 ? 5 : 4) &&
+               event.member_size("accepted_length") == 2 &&
                event.find("partial_accept")->as_bool() &&
-               event.find("policy")->member_size("cap") == 4 &&
-               event.find("policy")->member_str("name") == "survival" &&
+               event.member_size("policy_chosen_length") == 4 &&
+               !event.contains("policy") &&
+               event.member_str("policy_effective") == "survival" &&
                event.member_size("accepted_length") + 1 == 3,
-           "scripted mixed and head-only cycles retain exact source and verify counts");
-    Expect(!event.find("proposed_length") && !event.find("policy_chosen_length") &&
+           "scripted mixed and survival-shortened head cycles retain exact budget/source/verify counts");
+    Expect(!event.find("proposed_length") &&
                !event.find("filter_changed") && !event.find("filter_rejected") &&
                !event.find("rollback"),
            "unavailable pre-policy, filter and rollback counters are omitted even with latin vocabulary");
     ++cycles;
   }
   Expect(cycles == 2, "scripted multi-token request has two cycles");
+  Expect(bundle->find("mtp_policy")->find("prompt_lookup")->as_bool() &&
+             bundle->find("mtp_policy")->member_str("draft_vocabulary") == "latin_text",
+         "default stack settings are resolved in the bundle");
+  config.temperature = 0.0F;
+  const auto deterministic = scheduler->Submit({1, 2, 3}, 3, config, {}, false,
+                                                metadata).Wait();
+  const auto deterministic_events = deterministic.debug_timeline->Serialize();
+  for (const auto& event : deterministic_events.items()) {
+    if (event.member_str("event") == "decode_cycle")
+      Expect(event.member_str("policy_effective") == "length" &&
+                 event.member_size("policy_chosen_length") == 4,
+             "scripted deterministic policy decision reports length and initial budget");
+  }
+  metadata.debug_timeline = false;
+  const auto off = scheduler->Submit({1, 2, 3}, 3, config, {}, false, metadata).Wait();
+  auto response = gufo::json::Value::object();
+  gufo::server::AddDebugTimeline(response, off);
+  Expect(!response.contains("gufo") && control->debug_settings_calls == 1,
+         "settings are built once and all diagnostic fields are absent OFF");
 }
 
 void TestDebugTimelineRamAndLiveRestoreKinds() {
@@ -3004,22 +3043,58 @@ void TestDebugTimelineBatchOmissionsAndAccounting() {
   pass["start_depth"] = 3;
   pass["end_reason"] = "cap";
   timeline.Add("prefill", start, pass);
-  timeline.Cycle(start, 5, 5, 4, 2, std::nullopt, std::nullopt, true);
+  timeline.Cycle(start, 5, 5, 4, 2, std::nullopt);
+  timeline.Cycle(start + std::chrono::milliseconds(5), 0, 1, 0, 0);
   timeline.Add("finish", start + std::chrono::milliseconds(20));
   const auto events = timeline.Serialize();
   const auto& cycle = events.items()[4];
   Expect(!cycle.find("draft_sources") && !cycle.find("draft_source") &&
-             !cycle.find("policy")->find("name") &&
-             cycle.find("policy")->member_size("cap") == 4,
+             !cycle.contains("policy_effective") && !cycle.contains("policy") &&
+             !cycle.contains("policy_chosen_length") &&
+             events.items()[0].find("bundle")->find("mtp_policy")->member_size("cap") == 4,
          "batch path omits unavailable source and effective-policy names while retaining the configured cap");
+  Expect(events.items()[5].member_str("policy_effective") == "none",
+         "non-MTP cycle policy is none");
   const auto* summary = events.items().back().find("summary");
-  Expect(summary->member_double("cycle_ms") == 5 &&
+  Expect(summary->member_double("residual_ms") == 6 &&
+             summary->member_double("overlap_ms") == 0 &&
+             summary->member_double("cycle_ms") == 5 &&
              summary->member_double("prefill_ms") == 2 &&
              summary->member_double("restore_ms") == 3 &&
              summary->member_double("queue_ms") == 4 &&
              summary->member_double("unattributed_ms") == 6 &&
              summary->member_double("wall_ms") == 20,
          "accounting uses queue wait rather than admission duration, excluding duplicate restore/render time");
+}
+
+void TestDebugTimelineOverlappingPhases() {
+  const auto start = TextGenerationScheduler::Clock::time_point{};
+  gufo::server::DebugTimeline timeline(start);
+  auto queue = gufo::json::Value::object();
+  queue["wait_ms"] = 4.0;
+  timeline.Add("queue", start, queue);
+  auto restore = gufo::json::Value::object();
+  restore["source"] = "RAM";
+  restore["restore_ms"] = 3.0;
+  restore["bytes"] = 128;
+  timeline.Add("cache_lookup", start + std::chrono::milliseconds(4), restore);
+  auto pass = gufo::json::Value::object();
+  pass["ms"] = 8.0;
+  timeline.Add("prefill", start + std::chrono::milliseconds(4), pass);
+  timeline.Cycle(start + std::chrono::milliseconds(7), 5, 5, 4, 2,
+                 0, 4, true);
+  timeline.Add("finish", start + std::chrono::milliseconds(12));
+  const auto events = timeline.Serialize();
+  const auto& summary = *events.items().back().find("summary");
+  Expect(summary.member_double("cycle_ms") == 5 &&
+             summary.member_double("prefill_ms") == 8 &&
+             summary.member_double("restore_ms") == 3 &&
+             summary.member_double("queue_ms") == 4 &&
+             summary.member_double("wall_ms") == 12 &&
+             summary.member_double("residual_ms") == -8 &&
+             summary.member_double("overlap_ms") == 8 &&
+             summary.member_double("unattributed_ms") == 0,
+         "overlapping script retains raw negative residual independently of clamping");
 }
 
 void TestDebugTimelineDiskRestoreKind() {
@@ -3333,6 +3408,7 @@ int main(int argc, char** argv) {
     TestDebugTimelineRamAndLiveRestoreKinds();
     TestDebugTimelineDiskRestoreKind();
     TestDebugTimelineBatchOmissionsAndAccounting();
+    TestDebugTimelineOverlappingPhases();
     TestDebugTimelineSnapshotsAndCycleCap();
     TestDebugTimelineInPassCheckpoint();
     TestDebugTimelineRequestTruncation();
@@ -3348,6 +3424,7 @@ int main(int argc, char** argv) {
   TestDebugTimelineRamAndLiveRestoreKinds();
   TestDebugTimelineDiskRestoreKind();
   TestDebugTimelineBatchOmissionsAndAccounting();
+  TestDebugTimelineOverlappingPhases();
   TestDebugTimelineSnapshotsAndCycleCap();
   TestDebugTimelineRequestTruncation();
   TestDebugTimelineInPassCheckpoint();

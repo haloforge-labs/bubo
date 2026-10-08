@@ -1431,7 +1431,8 @@ struct TextGenerationScheduler::Impl {
       if (request->result.debug_timeline)
         request->result.debug_timeline->Cycle(decode_start, elapsed,
             step.draft_tokens + 1, step.draft_tokens, step.draft_accepted_tokens,
-            step.lookup_tokens, false, request->sampling.uses_random_sampling());
+            step.lookup_tokens,
+            step.policy_chosen_length, step.policy_survival);
       LogDecodeProgress(request);
       if (request->stop_filter.stopped()) {
         CompleteSuccess(request,
@@ -1761,7 +1762,7 @@ struct TextGenerationScheduler::Impl {
       if (item.request->result.debug_timeline)
         item.request->result.debug_timeline->Cycle(item.decode_start, elapsed,
             step.draft_tokens + 1, step.draft_tokens, step.draft_accepted_tokens,
-            std::nullopt, std::nullopt, item.request->sampling.uses_random_sampling());
+            std::nullopt);
       LogDecodeProgress(item.request);
       if (!published || IsTerminal(item.request)) {
         continue;
@@ -2000,6 +2001,8 @@ struct TextGenerationScheduler::Impl {
   }
 
   std::shared_ptr<TextRunnerPool> runner_pool;
+  std::once_flag debug_settings_once;
+  json::Value cached_debug_settings;
   TextPrefillPolicy prefill_policy;
   TextSchedulerPolicy scheduler_policy;
   std::shared_ptr<OutputBudget> output_budget;
@@ -2207,22 +2210,29 @@ std::size_t TextGenerationScheduler::capacity() const noexcept {
   return impl_->runner_pool->capacity();
 }
 
+const json::Value& TextGenerationScheduler::CachedDebugSettings() const {
+  std::call_once(impl_->debug_settings_once, [&] {
+    auto settings = impl_->runner_pool->DebugSettings();
+    settings["prefill_decode_active_tokens"] = impl_->prefill_policy.decode_active_tokens;
+    const auto& policy = impl_->scheduler_policy;
+    auto scheduler = json::Value::object();
+    scheduler["device_probe_interval_ms"] = policy.device_probe_interval.count();
+    scheduler["stream_start_delay_ms"] = policy.stream_start_delay.count();
+    scheduler["max_pending_requests"] = policy.max_pending_requests;
+    scheduler["max_pending_requests_per_client"] = policy.max_pending_requests_per_client;
+    scheduler["max_output_bytes_per_request"] = policy.max_output_bytes_per_request;
+    scheduler["max_buffered_output_bytes_per_request"] = policy.max_buffered_output_bytes_per_request;
+    scheduler["max_buffered_output_bytes_total"] = policy.max_buffered_output_bytes_total;
+    scheduler["request_timeout_ms"] = policy.request_timeout.count();
+    scheduler["log_progress"] = policy.log_progress;
+    settings["scheduler"] = std::move(scheduler);
+    impl_->cached_debug_settings = BuildEffectiveSettings(std::move(settings), "", "", "");
+  });
+  return impl_->cached_debug_settings;
+}
+
 json::Value TextGenerationScheduler::DebugSettings() const {
-  auto settings = impl_->runner_pool->DebugSettings();
-  settings["prefill_decode_active_tokens"] = impl_->prefill_policy.decode_active_tokens;
-  const auto& policy = impl_->scheduler_policy;
-  auto scheduler = json::Value::object();
-  scheduler["device_probe_interval_ms"] = policy.device_probe_interval.count();
-  scheduler["stream_start_delay_ms"] = policy.stream_start_delay.count();
-  scheduler["max_pending_requests"] = policy.max_pending_requests;
-  scheduler["max_pending_requests_per_client"] = policy.max_pending_requests_per_client;
-  scheduler["max_output_bytes_per_request"] = policy.max_output_bytes_per_request;
-  scheduler["max_buffered_output_bytes_per_request"] = policy.max_buffered_output_bytes_per_request;
-  scheduler["max_buffered_output_bytes_total"] = policy.max_buffered_output_bytes_total;
-  scheduler["request_timeout_ms"] = policy.request_timeout.count();
-  scheduler["log_progress"] = policy.log_progress;
-  settings["scheduler"] = std::move(scheduler);
-  return settings;
+  return *CachedDebugSettings().find("resolved");
 }
 
 bool TextGenerationScheduler::device_lost() const noexcept {
@@ -2322,7 +2332,7 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
     if (!has_render_timeline)
       request->result.debug_timeline->Add("admission", request->request_start);
     request->result.debug_timeline->Header(
-        BuildTimelineBundle(DebugSettings(), sampling, metadata.cache_prompt));
+        BuildTimelineBundle(CachedDebugSettings(), sampling, metadata.cache_prompt));
     request->result.debug_timeline->Bind(request->id);
   }
   request->stream_start_deadline =

@@ -79,8 +79,11 @@ public:
         summary["restore_ms"] = restore_ms_;
         summary["queue_ms"] = queue_ms_;
         summary["wall_ms"] = wall;
-        summary["unattributed_ms"] =
+        const double residual =
             wall - (cycle_ms_ + prefill_ms_ + restore_ms_ + queue_ms_);
+        summary["residual_ms"] = residual;
+        summary["unattributed_ms"] = std::max(0.0, residual);
+        summary["overlap_ms"] = std::max(0.0, -residual);
         summary["prefill_passes"] = prefill_passes_;
         summary["restores"] = restores_;
         fields["summary"] = std::move(summary);
@@ -99,7 +102,8 @@ public:
   void Cycle(Clock::time_point when, double ms, std::size_t verify_width,
              std::size_t drafts, std::size_t accepted,
              std::optional<std::size_t> lookup = std::size_t{0},
-             std::optional<bool> batched = false, bool sampled = false) noexcept {
+             std::optional<std::size_t> chosen = std::nullopt,
+             std::optional<bool> survival = std::nullopt) noexcept {
     cycle_ms_ += ms;
     if (cycles_++ >= kMaxDecodeCycles) {
       truncated_ = true;
@@ -125,20 +129,14 @@ public:
             : *lookup == 0 ? "mtp_head"
             : *lookup == drafts ? "prompt_lookup" : "mixed";
       }
-      if (const auto* policy = bundle_.find("mtp_policy")) {
-        auto cycle_policy = json::Value::object();
-        for (const auto& [key, value] : policy->members()) {
-          if (key != "name")
-            cycle_policy[key] = value;
-        }
-        // The batch adapter can retry a peer serially without reporting it.
-        // Omit the effective name when that engine decision is unavailable.
-        if (batched)
-          cycle_policy["name"] = policy->member_str("name") == "survival" &&
-                                         sampled && !*batched
-                                     ? "survival" : "length";
-        fields["policy"] = std::move(cycle_policy);
-      }
+      if (chosen)
+        fields["policy_chosen_length"] = *chosen;
+      // Configuration lives once in the admission bundle. Do not infer the
+      // engine's decision from random sampling: defer_head also disables it.
+      if (drafts == 0)
+        fields["policy_effective"] = "none";
+      else if (survival)
+        fields["policy_effective"] = *survival ? "survival" : "length";
       Add("decode_cycle", when, std::move(fields));
     } catch (...) {
       Failed(std::current_exception());
