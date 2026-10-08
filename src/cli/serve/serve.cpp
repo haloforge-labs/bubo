@@ -86,6 +86,10 @@ public:
         gufo::platform::DeviceMemoryInfo(&free, &total) == hipSuccess) {
       out << " gpu_device_used_mib=" << (total - free) / (1024 * 1024)
           << " gpu_device_total_mib=" << total / (1024 * 1024);
+    // DXGI split of the same numbers: LOCAL (the dedicated carve-out) vs NON_LOCAL (shared system memory); the combined figures above sum both.
+    if (const auto split = gufo::platform::QueryDeviceMemorySplit(); split.valid)
+      out << " gpu_local_used_mib=" << split.local_used / (1024 * 1024) << " gpu_local_budget_mib=" << split.local_budget / (1024 * 1024)
+          << " gpu_nonlocal_used_mib=" << split.nonlocal_used / (1024 * 1024) << " gpu_nonlocal_budget_mib=" << split.nonlocal_budget / (1024 * 1024);
     }
 #else
     (void)gpu_loaded;

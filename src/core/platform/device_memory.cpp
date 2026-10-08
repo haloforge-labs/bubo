@@ -66,4 +66,22 @@ hipError_t DeviceMemoryInfo(std::size_t* free_bytes,
   return hipSuccess;
 }
 
+DeviceMemorySplit QueryDeviceMemorySplit() noexcept {
+  static IDXGIAdapter3* const adapter = AdapterForCurrentDevice();
+  DeviceMemorySplit split;
+  if (adapter == nullptr)
+    return split;
+  DXGI_QUERY_VIDEO_MEMORY_INFO local{};
+  DXGI_QUERY_VIDEO_MEMORY_INFO shared{};
+  if (FAILED(adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local)) ||
+      FAILED(adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &shared)))
+    return split;
+  split.valid = true;
+  split.local_used = static_cast<std::size_t>(local.CurrentUsage);
+  split.local_budget = static_cast<std::size_t>(local.Budget);
+  split.nonlocal_used = static_cast<std::size_t>(shared.CurrentUsage);
+  split.nonlocal_budget = static_cast<std::size_t>(shared.Budget);
+  return split;
+}
+
 }  // namespace gufo::platform

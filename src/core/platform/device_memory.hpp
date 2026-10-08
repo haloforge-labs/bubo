@@ -27,6 +27,18 @@ inline hipError_t DeviceMemoryInfo(std::size_t* free_bytes,
 }
 #endif
 
+/// Per DXGI segment group usage and budget (diagnostics; prefill thread 2026-10-08: the load line sums LOCAL and NON_LOCAL, this splits them).
+/// `valid` is false on non-Windows builds or when the adapter cannot be matched.
+struct DeviceMemorySplit {
+  bool valid{false};
+  std::size_t local_used{0}, local_budget{0}, nonlocal_used{0}, nonlocal_budget{0};
+};
+#ifdef _WIN32
+DeviceMemorySplit QueryDeviceMemorySplit() noexcept;
+#else
+inline DeviceMemorySplit QueryDeviceMemorySplit() noexcept { return {}; }
+#endif
+
 }  // namespace gufo::platform
 
 #endif  // GUFO_CORE_PLATFORM_DEVICE_MEMORY_HPP_
