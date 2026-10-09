@@ -419,6 +419,35 @@ if (BUILD_TESTING)
   add_test(NAME behaviour_test COMMAND behaviour_test)
   set_tests_properties(behaviour_test PROPERTIES LABELS "cpu;sampling;behaviour")
 
+  # Separate executables avoid all old/new sampler symbol and type collisions.
+  # The baseline source/header/behaviour header are exact a40d37f Git blobs.
+  add_executable(behaviour_fast_test
+    tests/core/behaviour_fast_test.cpp src/core/sampling.cpp)
+  target_link_libraries(behaviour_fast_test PRIVATE gufo_core)
+  add_executable(behaviour_fast_baseline
+    tests/core/behaviour_fast_test.cpp
+    tests/fixtures/behaviour_fast_baseline/src/core/sampling.cpp)
+  target_include_directories(behaviour_fast_baseline BEFORE PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/behaviour_fast_baseline)
+  target_link_libraries(behaviour_fast_baseline PRIVATE gufo_core)
+  file(SHA256 ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/behaviour_fast_baseline/src/core/sampling.cpp
+    GUFO_BEHAVIOUR_BASELINE_SHA)
+  target_compile_definitions(behaviour_fast_baseline PRIVATE
+    GUFO_BEHAVIOUR_BASELINE_SHA="${GUFO_BEHAVIOUR_BASELINE_SHA}")
+  # gufo_core is created before the directory's test-only -UNDEBUG option.
+  # Compile the frozen sampler with the same effective NDEBUG as the candidate.
+  set_source_files_properties(
+    src/core/sampling.cpp tests/fixtures/behaviour_fast_baseline/src/core/sampling.cpp
+    PROPERTIES COMPILE_OPTIONS "-DNDEBUG")
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  add_test(NAME behaviour_fast_equivalence
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/core/behaviour_fast_compare.py
+      $<TARGET_FILE:behaviour_fast_baseline> $<TARGET_FILE:behaviour_fast_test>
+      ${CMAKE_CURRENT_BINARY_DIR}/behaviour-fast-equivalence)
+  set_tests_properties(behaviour_fast_equivalence PROPERTIES
+    LABELS "cpu;sampling;behaviour" RUN_SERIAL TRUE)
+
   add_executable(json_constraint_test tests/core/json_constraint_test.cpp)
   target_link_libraries(json_constraint_test PRIVATE gufo_core)
   target_compile_definitions(json_constraint_test PRIVATE
