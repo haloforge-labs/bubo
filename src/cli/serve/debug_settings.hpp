@@ -53,6 +53,8 @@ inline constexpr const char* kDebugSettingsEnvironment[] = {
     "GUFO_ROUTED_LANEROW",
     "GUFO_SURVIVAL_FLOOR",
     "GUFO_DRAFT_VOCAB_AUTO",
+    "GUFO_DISK_EVICT_SKIP_TOKENS",
+    "GUFO_DISK_EVICT_DOMINATED",
     "GUFO_DENSE_TWIN_MODEL",
     "GUFO_DENSE_TWIN_MAX_N",
     "GUFO_DENSE_TWIN_SHADOW",

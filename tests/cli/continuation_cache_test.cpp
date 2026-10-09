@@ -1272,7 +1272,103 @@ void TestNewBranchPreservesSharedSourceUnderBytePressure() {
          "the oldest unrelated continuation yields to the shared branch point");
 }
 
+void TestEvictedEntryCoveredByRetainedLongerEntryIsNotOffered() {
+  // GUFO_DISK_EVICT_DOMINATED=1 (set in main before the first cache use): a pressure eviction of an entry that a retained, tagged, longer entry of the
+  // same conversation extends resolves as superseded; an unrelated eviction is still offered.
+  using gufo::server::ContinuationToken;
+  using gufo::server::SnapshotPersistence;
+  using gufo::server::SnapshotPurpose;
+  std::vector<std::size_t> invalidations(1);
+  std::vector<std::vector<ContinuationToken>> offered;
+  std::size_t superseded = 0;
+  gufo::server::ContinuationCache cache(
+      1, [&] { return std::make_unique<FakeState>(0, &invalidations); },
+      {.restore = [](auto&, const auto&) {},
+       .capacity_bytes = [] { return 16; },
+       .on_event = {},
+       .on_evict = [&](std::shared_ptr<const gufo::server::ContinuationSnapshot> snapshot) {
+         if (snapshot->persistence) offered.push_back(snapshot->persistence->tokens);
+       }},
+      8);
+  const auto save = [&](std::vector<ContinuationToken> tokens, bool preserve_source) {
+    auto lease = cache.Acquire(tokens);
+    Expect(lease.TryReserveSnapshot(8, tokens.size(), preserve_source, SnapshotPurpose::kContinuation, tokens),
+           "checkpoint admitted");
+    auto snapshot = std::make_unique<FakeSnapshot>(tokens.size(), 8);
+    snapshot->persistence = std::make_shared<SnapshotPersistence>();
+    snapshot->persistence->tokens = tokens;
+    snapshot->persistence->on_superseded = [&] { ++superseded; };
+    lease.Commit(tokens, std::move(snapshot));
+  };
+  save({1, 2}, false);
+  save({1, 2, 3}, true);   // keeps {1,2} as the preserved source: both retained, {1,2} is dominated by {1,2,3}
+  save({9}, false);        // pressure: {1,2} is the legal victim and is covered by the retained {1,2,3}
+  Expect(offered.empty() && superseded == 1,
+         "the dominated eviction is resolved as superseded, not offered for persistence");
+  save({8}, false);        // pressure again: the next victim has no retained extension and is offered
+  Expect(!offered.empty(), "an eviction without a retained extension is still offered");
+  // Negative case (review F1): a whole-prompt kRetry copy does NOT cover its shorter prefix (the client may rewrite the tail).
+  offered.clear(); superseded = 0;
+  {
+    std::vector<std::size_t> inv2(1);
+    gufo::server::ContinuationCache retry_cache(
+        1, [&] { return std::make_unique<FakeState>(0, &inv2); },
+        {.restore = [](auto&, const auto&) {},
+         .capacity_bytes = [] { return 16; },
+         .on_event = {},
+         .on_evict = [&](std::shared_ptr<const gufo::server::ContinuationSnapshot> snapshot) {
+           if (snapshot->persistence) offered.push_back(snapshot->persistence->tokens);
+         }},
+        8);
+    const auto save2 = [&](std::vector<ContinuationToken> tokens, bool preserve_source, SnapshotPurpose purpose) {
+      auto lease = retry_cache.Acquire(tokens);
+      Expect(lease.TryReserveSnapshot(8, tokens.size(), preserve_source, purpose, tokens), "checkpoint admitted");
+      auto snapshot = std::make_unique<FakeSnapshot>(tokens.size(), 8);
+      snapshot->persistence = std::make_shared<SnapshotPersistence>();
+      snapshot->persistence->tokens = tokens;
+      snapshot->persistence->on_superseded = [&] { ++superseded; };
+      lease.Commit(tokens, std::move(snapshot));
+    };
+    save2({1, 2}, false, SnapshotPurpose::kContinuation);
+    save2({1, 2, 3}, true, SnapshotPurpose::kRetry);
+    save2({9}, false, SnapshotPurpose::kContinuation);
+    Expect(superseded == 0 && offered.size() == 1 && offered[0] == (std::vector<ContinuationToken>{1, 2}),
+           "an eviction whose only longer peer is a kRetry copy is offered (rewind point stays persistable)");
+  }
+  // Negative case (pre-data amendment 10-09): a whole-prompt entry (stable_prefix_tokens != 0, the live frontier of a client that re-renders the
+  // previous assistant turn) does NOT cover the shorter stable-prefix record: it ends past the next prompt's divergence.
+  offered.clear(); superseded = 0;
+  {
+    std::vector<std::size_t> inv3(1);
+    gufo::server::ContinuationCache stable_cache(
+        1, [&] { return std::make_unique<FakeState>(0, &inv3); },
+        {.restore = [](auto&, const auto&) {},
+         .capacity_bytes = [] { return 16; },
+         .on_event = {},
+         .on_evict = [&](std::shared_ptr<const gufo::server::ContinuationSnapshot> snapshot) {
+           if (snapshot->persistence) offered.push_back(snapshot->persistence->tokens);
+         }},
+        8);
+    const auto save3 = [&](std::vector<ContinuationToken> tokens, bool preserve_source, std::size_t stable) {
+      auto lease = stable_cache.Acquire(tokens, {}, {}, {}, true, stable);
+      Expect(lease.TryReserveSnapshot(8, tokens.size(), preserve_source, SnapshotPurpose::kContinuation, tokens), "checkpoint admitted");
+      auto snapshot = std::make_unique<FakeSnapshot>(tokens.size(), 8);
+      snapshot->persistence = std::make_shared<SnapshotPersistence>();
+      snapshot->persistence->tokens = tokens;
+      snapshot->persistence->on_superseded = [&] { ++superseded; };
+      lease.Commit(tokens, std::move(snapshot));
+    };
+    save3({1, 2}, false, 0);
+    save3({1, 2, 3}, true, 2);   // whole prompt with stable boundary 2: carries stable_prefix_tokens = 2
+    save3({9}, false, 0);
+    Expect(superseded == 0 && offered.size() == 1 && offered[0] == (std::vector<ContinuationToken>{1, 2}),
+           "an eviction whose only longer peer is a whole-prompt (stable_prefix_tokens != 0) entry is offered");
+  }
+}
+
 int main() {
+  ::setenv("GUFO_DISK_EVICT_DOMINATED", "1", 1);
+  TestEvictedEntryCoveredByRetainedLongerEntryIsNotOffered();
   TestAppendedImagesReuseOnlyCompatiblePrefixes();
   TestImageIdentityIsolation();
   TestColdMissThenExactExtensionHit();

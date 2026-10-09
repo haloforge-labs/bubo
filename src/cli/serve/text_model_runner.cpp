@@ -427,6 +427,8 @@ std::string_view DiskEventReasonName(
       return "writer_stopped";
     case ContinuationDiskEventReason::kSuperseded:
       return "superseded";
+    case ContinuationDiskEventReason::kPrefixPersisted:
+      return "prefix_persisted";
     case ContinuationDiskEventReason::kAlreadyPersisted:
       return "already_persisted";
     case ContinuationDiskEventReason::kRamNotRetained:
@@ -462,6 +464,8 @@ void EmitDiskEvent(const ContinuationDiskEvent& event) noexcept {
          << " capacity_bytes=" << event.capacity_bytes
          << " staging_capacity_bytes=" << event.staging_capacity_bytes
          << " staging_used_bytes=" << event.staging_used_bytes;
+    if (event.reason == ContinuationDiskEventReason::kPrefixPersisted)
+      line << " covering_tokens=" << event.covering_tokens << " gap_tokens=" << event.gap_tokens;
     if (event.reason == ContinuationDiskEventReason::kSaved) {
       line << " trigger=" << event.trigger << " write_ms=" << event.elapsed_ms;
       line << " slice_yields=" << event.slice_yields
@@ -934,6 +938,16 @@ struct TextRunnerPool::Request::Impl {
       try {
         if (!disk_store)
           return;
+        // evict_idle persists what the RAM tier DROPS. An optional whole-prompt
+        // retry copy that RAM refused was never retained, so it is not a drop:
+        // writing it is write-through for the newest checkpoint of every turn
+        // (admission trace 2026-10-09: all 10 D3F stores, 9.6 GB, no restore
+        // changed). Stable boundaries and branch points are still persisted.
+        if (disk_store->persist_on_evict_idle() && retain_fallback &&
+            snapshot_tokens.size() == prompt.size()) {
+          disk_store->NoteOptionalCopyRefused(snapshot_tokens.size());
+          return;
+        }
         // Copying device state only for disk is costly on the request path.
         // Skip it when the disk store would discard the checkpoint anyway.
         if (disk_store->WithinCheckpointStep(

@@ -490,6 +490,13 @@ per active lease). Budget peak memory for RAM tier + staging + backlog +
 active leases' pinned frontiers; measure peak RSS and device usage. Failed
 captures offer the removed candidates rather than silently losing persistence.
 
+`GUFO_DISK_EVICT_SKIP_TOKENS` (read once, default 0 = off, accepted 0..1000000) bounds writes when the working set exceeds the RAM tier. With it set to N, an
+evicted snapshot whose already-persisted strict prefix (same compatibility identity) is at most N tokens shorter is NOT written again: restore uses the persisted
+prefix and prefills the tail (at about 1,200 tokens/s, N = 8192 costs at most about 7 s on the first turn after the eviction). The skip is logged as
+`action=already_persisted reason=prefix_persisted`, counted in `already_persisted`, and never silent. It only applies to `trigger=evict`; idle and shutdown
+flushes still persist the latest entry. Without it a rotating working set larger than the RAM tier persists about one snapshot (about 1 GB) per turn
+(measured 29.8 GB for the 36-turn six-session replay).
+
 While no request is generating or waiting for runner admission,
 `GUFO_DISK_IDLE_MS` (0..600000, default 30000, read once) starts newest-first
 persistence, one entry at a time. A newly admitted request stops further idle

@@ -2094,6 +2094,62 @@ void TestWriterGrowingConversationAndRealDrops() {
   writer.store.Shutdown();
 }
 
+void TestWriterEvictSkipCoveredByPersistedPrefix() {
+  // GUFO_DISK_EVICT_SKIP_TOKENS policy: an evicted snapshot whose persisted strict prefix is within N tokens is not written again.
+  for (const std::size_t skip : {std::size_t{0}, std::size_t{4}, std::size_t{1}}) {
+    TemporaryDirectory directory;
+    std::atomic<std::size_t> writes{0}, covered{0}, already{0}, covering{0}, gap{0};
+    auto options = WriterOptions(directory.path());
+    options.evict_skip_tokens = skip;
+    WriterHarness writer(options, [&](const auto& event) {
+      if (event.action == ContinuationDiskEventAction::kStored) ++writes;
+      if (event.action == ContinuationDiskEventAction::kAlreadyPersisted) {
+        ++already;
+        if (event.reason == ContinuationDiskEventReason::kPrefixPersisted) {
+          ++covered;
+          covering = event.covering_tokens;
+          gap = event.gap_tokens;
+        }
+      }
+    }, 1, 64);
+    writer.Capture({1}, 1);        // RAM: {1}
+    writer.Capture({2}, 2);        // evicts {1}: persisted (nothing covers it)
+    writer.store.Flush();
+    writer.Capture({1, 5, 5}, 3);  // evicts {2}: persisted
+    writer.store.Flush();
+    Expect(writes == 2, "two unrelated evictions persist");
+    writer.Capture({3}, 4);        // evicts {1,5,5}: its persisted prefix {1} is 2 tokens shorter
+    writer.store.Flush();
+    if (skip >= 2) {
+      Expect(writes == 2 && covered == 1 && already == 1,
+             "an eviction covered by a persisted prefix within the bound is skipped and logged");
+      Expect(covering == 1 && gap == 2,
+             "the skip event reports the covering prefix length and the gap");
+    } else {
+      Expect(writes == 3 && covered == 0,
+             "bound smaller than the gap (or off) still persists the eviction");
+    }
+    writer.store.Shutdown();
+  }
+}
+
+void TestWriterOptionalCopyRefusedIsNotWritten() {
+  TemporaryDirectory directory;
+  std::atomic<std::size_t> writes{0}, refused{0}, dropped{0};
+  WriterHarness writer(WriterOptions(directory.path()), [&](const auto& event) {
+    if (event.action == ContinuationDiskEventAction::kStored) ++writes;
+    if (event.action == ContinuationDiskEventAction::kDroppedEvict) ++dropped;
+    if (event.action == ContinuationDiskEventAction::kSkipped &&
+        event.reason == ContinuationDiskEventReason::kRamNotRetained &&
+        event.token_count == 7) ++refused;
+  }, 1, 64);
+  writer.store.NoteOptionalCopyRefused(7);
+  writer.store.Flush();
+  Expect(writes == 0 && dropped == 0 && refused == 1 && writer.store.entry_count() == 0,
+         "a RAM-refused optional copy is logged as skipped/ram_not_retained and never written");
+  writer.store.Shutdown();
+}
+
 void TestWriterFailedReplacementAndRamRefusal() {
   TemporaryDirectory directory;
   WriterHarness writer(WriterOptions(directory.path()), {}, 1, kFakePayloadBytes);
@@ -2212,6 +2268,8 @@ int main() {
   TestWriterExactReplacementSharedBoundary();
   TestWriterBatchEvictionsAndBacklogByteBound();
   TestWriterGrowingConversationAndRealDrops();
+  TestWriterEvictSkipCoveredByPersistedPrefix();
+  TestWriterOptionalCopyRefusedIsNotWritten();
   TestWriterFailedReplacementAndRamRefusal();
   TestWriterConcurrentTouchRestoreAndOffers();
   TestWriterShutdownExitOfferRace();
