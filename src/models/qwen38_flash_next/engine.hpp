@@ -1,6 +1,7 @@
 #ifndef GUFO_MODELS_QWEN38_FLASH_NEXT_ENGINE_HPP_
 #define GUFO_MODELS_QWEN38_FLASH_NEXT_ENGINE_HPP_
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -124,6 +125,18 @@ public:
   /// Worst-case private device state, including the configured rollback cap.
   [[nodiscard]] std::size_t SessionBytes(core::SessionMode mode,
                                          std::uint32_t context) const noexcept;
+  /// Worst-case per-request image state: the position table (12 B per context
+  /// token) plus the encoder embeddings of at most MaxImageTokens(context)
+  /// image tokens (hidden_size floats each). Zero when no vision encoder is
+  /// loaded. GUFO_MAX_IMAGE_TOKENS (read at load; unset = context) caps the
+  /// image tokens a request may carry, which bounds this reservation.
+  [[nodiscard]] std::size_t VisionSessionBytes(
+      std::uint32_t context) const noexcept;
+  [[nodiscard]] std::uint32_t MaxImageTokens(
+      std::uint32_t context) const noexcept {
+    return max_image_tokens_ == 0 ? context
+                                  : std::min(context, max_image_tokens_);
+  }
   [[nodiscard]] std::size_t DeferredScratchBytes() const;
   [[nodiscard]] std::string AccountingLine(core::SessionMode mode,
                                            std::uint32_t context) const;
@@ -145,6 +158,7 @@ private:
   std::unique_ptr<rocm::DeviceModel> device_;
   std::unique_ptr<rocm::Executor> executor_;
   std::shared_ptr<qwen::vision::Encoder> vision_;
+  std::uint32_t max_image_tokens_{0};  ///< GUFO_MAX_IMAGE_TOKENS; 0 = no cap beyond the context
   MtpBatchController batch_policy_;
   /// DraftVocabulary::kAuto: 1 for each token id in the latin draft set (the
   /// same list the executor's subset head is gathered from).

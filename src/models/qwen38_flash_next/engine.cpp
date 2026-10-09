@@ -159,6 +159,16 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     return nullptr;
   }
   m->options_ = options;
+  if (const char* cap = std::getenv("GUFO_MAX_IMAGE_TOKENS"); cap && *cap) {
+    char* end = nullptr;
+    const auto value = std::strtoul(cap, &end, 10);
+    if (end == cap || *end != 0 || value == 0 ||
+        value > std::numeric_limits<std::uint32_t>::max()) {
+      AssignError(error_msg, "GUFO_MAX_IMAGE_TOKENS must be a positive integer");
+      return nullptr;
+    }
+    m->max_image_tokens_ = static_cast<std::uint32_t>(value);
+  }
   m->reader_ = core::GgufReader::OpenFile(model_path, error_msg);
   if (!m->reader_) {
     return nullptr;
@@ -412,13 +422,18 @@ std::size_t Model::ResidentBytes() const noexcept {
   return device_->resident_bytes() + (vision_ ? vision_->ResidentBytes() : 0);
 }
 
+std::size_t Model::VisionSessionBytes(std::uint32_t context) const noexcept {
+  if (!vision_)
+    return 0;
+  return std::size_t{context} * 3 * sizeof(std::int32_t) +
+         std::size_t{MaxImageTokens(context)} * config().hidden_size *
+             sizeof(float) +
+         64;
+}
+
 std::size_t Model::SessionBytes(core::SessionMode mode,
                                 std::uint32_t context) const noexcept {
-  const std::size_t vision =
-      vision_ ? std::size_t{context} * (config().hidden_size * sizeof(float) +
-                                        3 * sizeof(std::int32_t)) +
-                    64
-              : 0;
+  const std::size_t vision = VisionSessionBytes(context);
   return executor_->SessionBytes(mode, context,
                                  mode == core::SessionMode::kSpeculative
                                      ? executor_->max_speculative() - 1
@@ -434,10 +449,7 @@ std::string Model::AccountingLine(core::SessionMode mode,
                 "resident_mib=%.1f vision_resident_mib=%.1f vision_session_mib=%.1f "
                 "deferred_scratch_mib=%.1f ",
                 mib(ResidentBytes()), mib(vision_ ? vision_->ResidentBytes() : 0),
-                mib(vision_ ? std::size_t{context} *
-                                  (config().hidden_size * sizeof(float) +
-                                   3 * sizeof(std::int32_t))
-                            : 0),
+                mib(VisionSessionBytes(context)),
                 mib(DeferredScratchBytes()));
   return std::string(buf) +
          executor_->SessionBytesBreakdown(
@@ -579,6 +591,14 @@ void Session::SetCancellationCheck(std::function<bool()> check) {
 
 void Session::ConfigureVision(
     std::shared_ptr<const qwen::vision::Prompt> prompt) {
+  if (prompt) {
+    // The admission reservation assumes at most MaxImageTokens image tokens per request.
+    std::uint64_t image_tokens = 0;
+    for (const auto& image : prompt->rope.images)
+      image_tokens += std::uint64_t{image.height} * image.width;
+    if (image_tokens > model_->MaxImageTokens(session_->max_context()))
+      throw std::invalid_argument("image tokens exceed the per-request limit (GUFO_MAX_IMAGE_TOKENS)");
+  }
   const auto identity = prompt ? prompt->IdentityForPrefix(tokens_.size())
                                : std::span<const std::uint8_t>{};
   if (!tokens_.empty() &&
