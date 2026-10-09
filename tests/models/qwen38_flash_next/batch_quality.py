@@ -129,7 +129,9 @@ def freeze(tokenized, out, positions=512, prefix=256):
 def smoke_source(out, text_out):
     path = sorted(PUBLIC.glob("*.jsonl"))[0]
     text = render_public(path)[:2048]
-    destination(text_out).write_text(text, encoding="utf-8")
+    # newline="": no Windows "\n" -> "\r\n" translation. gufo bench tokenizes this file and the
+    # probe tokenizes the JSON text; a translated newline became token 317 instead of 198.
+    destination(text_out).write_text(text, encoding="utf-8", newline="")
     write_json(destination(out), {"format": "GF-BATCH-QUALITY-1", "source_root": str(PUBLIC),
                                  "sessions": [{"name": path.stem, "source": str(path),
                                                "source_sha256": sha(path), "text": text}]})
