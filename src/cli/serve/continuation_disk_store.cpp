@@ -898,8 +898,13 @@ struct ContinuationDiskStore::Impl {
           if (!exists && record && job.trigger == "evict" &&
               options.evict_skip_tokens.value() > 0) {
             const ScopedOperationPermit permit(operation_gate);
-            const auto prefix = PersistedPrefixLength(*job.runner, job.tokens, job.identity);
-            covered = prefix > 0 && job.tokens.size() - prefix <= options.evict_skip_tokens.value();
+            const auto prefix = PersistedPrefixEntry(*job.runner, job.tokens, job.identity);
+            covered = prefix.has_value() &&
+                      job.tokens.size() - (*prefix)->tokens.size() <= options.evict_skip_tokens.value();
+            // The covering entry now stands in for this snapshot: refresh its LRU position (as the exact-dedup Touch does) so disk LRU does not
+            // evict it first and leave the session with nothing on disk (review F1).
+            if (covered)
+              TouchEntry(*prefix);
           }
           if (covered) {
             stored = true;
@@ -1876,23 +1881,22 @@ struct ContinuationDiskStore::Impl {
 
   // Length in tokens of the longest persisted entry (same compatibility identity) that is a STRICT prefix of `tokens`; 0 when none. Caller holds the
   // operation gate. Used by the evict-skip policy.
-  [[nodiscard]] std::size_t PersistedPrefixLength(
+  [[nodiscard]] std::optional<EntryIterator> PersistedPrefixEntry(
       const TextModelRunner& runner, std::span<const TextRunnerToken> tokens,
       std::span<const std::uint8_t> input_identity) {
     const auto descriptor = DescriptorForInput(runner, input_identity);
     if (!descriptor.persistence.has_value()) {
-      return 0;
+      return std::nullopt;
     }
     const auto found = prefixes.find(PrefixKey(*descriptor.persistence));
     if (found == prefixes.end()) {
-      return 0;
+      return std::nullopt;
     }
     const auto match = found->second.Find(tokens);
-    if (!match.longest) {
-      return 0;
+    if (!match.longest || (*match.longest)->tokens.size() >= tokens.size()) {
+      return std::nullopt;
     }
-    const auto length = (*match.longest)->tokens.size();
-    return length < tokens.size() ? length : 0;
+    return match.longest;
   }
 
   ContinuationDiskStoreOptions options;
