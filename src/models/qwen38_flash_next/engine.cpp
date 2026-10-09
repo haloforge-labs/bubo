@@ -426,6 +426,27 @@ std::size_t Model::SessionBytes(core::SessionMode mode,
          vision;
 }
 
+std::string Model::AccountingLine(core::SessionMode mode,
+                                  std::uint32_t context) const {
+  const auto mib = [](std::size_t b) { return b / (1024.0 * 1024.0); };
+  char buf[320];
+  std::snprintf(buf, sizeof(buf),
+                "resident_mib=%.1f vision_resident_mib=%.1f vision_session_mib=%.1f "
+                "deferred_scratch_mib=%.1f ",
+                mib(ResidentBytes()), mib(vision_ ? vision_->ResidentBytes() : 0),
+                mib(vision_ ? std::size_t{context} *
+                                  (config().hidden_size * sizeof(float) +
+                                   3 * sizeof(std::int32_t))
+                            : 0),
+                mib(DeferredScratchBytes()));
+  return std::string(buf) +
+         executor_->SessionBytesBreakdown(
+             mode, context,
+             mode == core::SessionMode::kSpeculative
+                 ? executor_->max_speculative() - 1
+                 : 0);
+}
+
 std::size_t Model::DeferredScratchBytes() const {
   return executor_->DeferredScratchBytes();
 }

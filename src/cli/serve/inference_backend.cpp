@@ -1,5 +1,6 @@
 #include "src/cli/serve/inference_backend.hpp"
 
+#include <atomic>
 #include <unistd.h>
 
 #include <algorithm>
@@ -2628,6 +2629,24 @@ public:
         hipSuccess) {
       const auto deferred = model_->DeferredScratchBytes();
       capacity = free_bytes > deferred ? free_bytes - deferred : 0;
+    }
+    if (std::getenv("GUFO_MEM_ACCOUNTING") != nullptr) {
+      static std::atomic<bool> logged{false};
+      if (!logged.exchange(true)) {
+        const auto mode = use_mtp_ ? gufo::core::SessionMode::kSpeculative
+                                   : gufo::core::SessionMode::kAutoregressive;
+        const auto per_request = model_->SessionBytes(mode, max_context_);
+        Logger::Info(
+            "loader",
+            "event=mem_accounting " + model_->AccountingLine(mode, max_context_) +
+                " admission_free_mib=" + std::to_string(free_bytes >> 20) +
+                " admission_capacity_mib=" +
+                std::to_string(capacity.value_or(0) >> 20) +
+                " per_request_mib=" + std::to_string(per_request >> 20) +
+                " capacity_div_per_request=" +
+                std::to_string(per_request ? capacity.value_or(0) / per_request : 0) +
+                " " + Logger::MemoryStatus());
+      }
     }
     // Admission charges complete snapshot payloads. Flash-Next can retain
     // mutable state and protected K/V rows in private device storage.

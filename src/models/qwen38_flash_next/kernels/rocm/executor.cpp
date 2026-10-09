@@ -1575,6 +1575,53 @@ std::size_t Executor::SessionBytes(
               : 0);
 }
 
+std::string Executor::SessionBytesBreakdown(
+    core::SessionMode mode, std::uint32_t max_context,
+    std::uint32_t rollback_depth) const {
+  const auto& c = config();
+  const std::size_t attention = c.num_layers / c.full_attention_interval;
+  const std::size_t linear = c.num_layers - attention;
+  const std::size_t conv =
+      std::size_t{c.ssm_conv_kernel - 1} * c.SsmConvChannels();
+  const std::size_t state =
+      std::size_t{c.ssm_num_v_heads} * c.ssm_head_dim * c.ssm_head_dim;
+  const std::size_t ple =
+      c.ple_layer >= 0 ? std::size_t{c.PleConvHistory()} * c.HcDim() : 0;
+  const std::size_t kv =
+      2 * std::size_t{max_context} * c.AttentionKvDim() * sizeof(__half);
+  const std::size_t index =
+      std::size_t{IndexerCapacity(c, options_.max_batch, max_context)} *
+          c.indexer_head_dim * sizeof(float) +
+      std::size_t{max_context / c.compress_ratio + 1} * c.indexer_head_dim *
+          sizeof(__half);
+  const bool spec = mode == core::SessionMode::kSpeculative;
+  const std::size_t target_kv = attention * kv;
+  const std::size_t indexer = attention * index;
+  const std::size_t mtp_state =
+      spec ? kv + index +
+                 std::size_t{options_.max_speculative + 1} * c.HcDim() *
+                     sizeof(float)
+           : 0;
+  const std::size_t recurrent = linear * (conv + state) * sizeof(float);
+  const std::size_t total = SessionBytes(mode, max_context, rollback_depth);
+  const std::size_t accounted = target_kv + indexer + mtp_state + recurrent +
+                                sizeof(Session::Control) +
+                                ple * sizeof(float);
+  const std::size_t rollback = total > accounted ? total - accounted : 0;
+  const auto mib = [](std::size_t b) { return b / (1024.0 * 1024.0); };
+  char buf[512];
+  std::snprintf(buf, sizeof(buf),
+                "mode=%s context=%u rollback_depth=%u total_mib=%.1f "
+                "target_kv_mib=%.1f indexer_keys_mib=%.1f mtp_state_mib=%.1f "
+                "recurrent_mib=%.1f rollback_mib=%.1f per_token_kib=%.2f",
+                spec ? "speculative" : "autoregressive", max_context,
+                rollback_depth, mib(total), mib(target_kv), mib(indexer),
+                mib(mtp_state), mib(recurrent), mib(rollback),
+                max_context ? static_cast<double>(total) / max_context / 1024.0
+                            : 0.0);
+  return buf;
+}
+
 std::size_t Executor::DeferredScratchBytes() const {
   const auto& c = config();
   std::size_t bytes = batch_logits_ == nullptr

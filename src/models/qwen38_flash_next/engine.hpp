@@ -125,6 +125,8 @@ public:
   [[nodiscard]] std::size_t SessionBytes(core::SessionMode mode,
                                          std::uint32_t context) const noexcept;
   [[nodiscard]] std::size_t DeferredScratchBytes() const;
+  [[nodiscard]] std::string AccountingLine(core::SessionMode mode,
+                                           std::uint32_t context) const;
   [[nodiscard]] const std::shared_ptr<qwen::vision::Encoder>& VisionEncoder()
       const noexcept {
     return vision_;

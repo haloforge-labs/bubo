@@ -267,6 +267,10 @@ public:
       core::SessionMode mode, std::uint32_t max_context,
       std::uint32_t rollback_depth) const noexcept;
   [[nodiscard]] std::size_t DeferredScratchBytes() const;
+  /// Load-time accounting text (GUFO_MEM_ACCOUNTING): SessionBytes split by component.
+  [[nodiscard]] std::string SessionBytesBreakdown(
+      core::SessionMode mode, std::uint32_t max_context,
+      std::uint32_t rollback_depth) const;
 
   enum class ForwardMode { kDecode, kVerify, kPrefill };
   [[nodiscard]] std::unique_ptr<PrefillCheckpoint> MakePrefillCheckpoint(
