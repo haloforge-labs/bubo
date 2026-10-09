@@ -2098,14 +2098,18 @@ void TestWriterEvictSkipCoveredByPersistedPrefix() {
   // GUFO_DISK_EVICT_SKIP_TOKENS policy: an evicted snapshot whose persisted strict prefix is within N tokens is not written again.
   for (const std::size_t skip : {std::size_t{0}, std::size_t{4}, std::size_t{1}}) {
     TemporaryDirectory directory;
-    std::atomic<std::size_t> writes{0}, covered{0}, already{0};
+    std::atomic<std::size_t> writes{0}, covered{0}, already{0}, covering{0}, gap{0};
     auto options = WriterOptions(directory.path());
     options.evict_skip_tokens = skip;
     WriterHarness writer(options, [&](const auto& event) {
       if (event.action == ContinuationDiskEventAction::kStored) ++writes;
       if (event.action == ContinuationDiskEventAction::kAlreadyPersisted) {
         ++already;
-        if (event.reason == ContinuationDiskEventReason::kPrefixPersisted) ++covered;
+        if (event.reason == ContinuationDiskEventReason::kPrefixPersisted) {
+          ++covered;
+          covering = event.covering_tokens;
+          gap = event.gap_tokens;
+        }
       }
     }, 1, 64);
     writer.Capture({1}, 1);        // RAM: {1}
@@ -2119,6 +2123,8 @@ void TestWriterEvictSkipCoveredByPersistedPrefix() {
     if (skip >= 2) {
       Expect(writes == 2 && covered == 1 && already == 1,
              "an eviction covered by a persisted prefix within the bound is skipped and logged");
+      Expect(covering == 1 && gap == 2,
+             "the skip event reports the covering prefix length and the gap");
     } else {
       Expect(writes == 3 && covered == 0,
              "bound smaller than the gap (or off) still persists the eviction");

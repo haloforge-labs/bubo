@@ -74,6 +74,8 @@ struct ContinuationDiskEvent {
   // Phase split of a completed write (prefill thread 2026-10-08, writer-fix diagnostics): serialize = device->host gather inside StreamPersistentSnapshot,
   // write = ::write time, hash = SHA-256 Update time, fsync = file fsync + rename + directory fsync. Zero for other events.
   double phase_gather_ms{0.0}, phase_write_ms{0.0}, phase_hash_ms{0.0}, phase_fsync_ms{0.0};
+  // reason == kPrefixPersisted only: length of the persisted prefix that covers the skipped snapshot and the tokens it does not cover (review F3).
+  std::size_t covering_tokens{0}, gap_tokens{0};
 };
 
 struct ContinuationDiskStoreOptions {

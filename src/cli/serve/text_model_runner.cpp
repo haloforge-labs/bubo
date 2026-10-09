@@ -464,6 +464,8 @@ void EmitDiskEvent(const ContinuationDiskEvent& event) noexcept {
          << " capacity_bytes=" << event.capacity_bytes
          << " staging_capacity_bytes=" << event.staging_capacity_bytes
          << " staging_used_bytes=" << event.staging_used_bytes;
+    if (event.reason == ContinuationDiskEventReason::kPrefixPersisted)
+      line << " covering_tokens=" << event.covering_tokens << " gap_tokens=" << event.gap_tokens;
     if (event.reason == ContinuationDiskEventReason::kSaved) {
       line << " trigger=" << event.trigger << " write_ms=" << event.elapsed_ms;
       line << " slice_yields=" << event.slice_yields

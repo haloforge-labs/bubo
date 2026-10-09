@@ -10,6 +10,7 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <cstdio>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
@@ -49,6 +50,7 @@ struct WriterSettings {
   // GUFO_DISK_EVICT_SKIP_TOKENS: an evicted snapshot whose persisted strict prefix (same compatibility identity) is at most this many tokens shorter is not
   // written again (restore uses the prefix and prefills the tail). 0 = off (every eviction is persisted).
   std::size_t evict_skip_tokens{0};
+  bool evict_skip_invalid{false};  // GUFO_DISK_EVICT_SKIP_TOKENS set but unusable: warned once, feature stays off, reported in the writer summary
 };
 const WriterSettings& DiskWriterSettings() {
   static const WriterSettings settings = [] {
@@ -77,9 +79,17 @@ const WriterSettings& DiskWriterSettings() {
       char* end = nullptr;
       errno = 0;
       const auto value = std::strtoull(skip, &end, 10);
-      if (!errno && end && !*end && value <= 1000000)
+      if (!errno && end && !*end && value <= 1000000) {
         result.evict_skip_tokens = static_cast<std::size_t>(value);
+      } else {
+        result.evict_skip_invalid = true;
+      }
+    } else if (skip && *skip) {
+      result.evict_skip_invalid = true;
     }
+    if (result.evict_skip_invalid)
+      std::fprintf(stderr, "[disk-cache] warning: unsupported GUFO_DISK_EVICT_SKIP_TOKENS value '%s' (accepted 0..1000000); using the default 0 (evict-skip off)
+", skip);
     return result;
   }();
   return settings;
@@ -688,6 +698,9 @@ struct ContinuationDiskStore::Impl {
            << " superseded=" << (superseded ? superseded->load() : 0)
            << " already_persisted=" << already_persisted.load()
            << " dropped_evict=" << dropped_evict.load()
+           << " prefix_persisted=" << prefix_covered.load()
+           << " evict_skip_tokens=" << options.evict_skip_tokens.value_or(0)
+           << " evict_skip_env_invalid=" << (DiskWriterSettings().evict_skip_invalid ? 1 : 0)
            << " skipped=" << skipped->load()
            << " bytes_written=" << bytes_written.load();
       Logger::Info("cache", line.str());
@@ -895,12 +908,14 @@ struct ContinuationDiskStore::Impl {
           // Evict-skip policy: a snapshot whose persisted strict prefix is within GUFO_DISK_EVICT_SKIP_TOKENS tokens is covered by it (restore uses the
           // prefix and prefills the tail), so the ~1 GB write is skipped; logged as already_persisted/prefix_persisted and counted.
           bool covered = false;
+          std::size_t covering_len = 0;
           if (!exists && record && job.trigger == "evict" &&
               options.evict_skip_tokens.value() > 0) {
             const ScopedOperationPermit permit(operation_gate);
             const auto prefix = PersistedPrefixEntry(*job.runner, job.tokens, job.identity);
+            covering_len = prefix.has_value() ? (*prefix)->tokens.size() : 0;
             covered = prefix.has_value() &&
-                      job.tokens.size() - (*prefix)->tokens.size() <= options.evict_skip_tokens.value();
+                      job.tokens.size() - covering_len <= options.evict_skip_tokens.value();
             // The covering entry now stands in for this snapshot: refresh its LRU position (as the exact-dedup Touch does) so disk LRU does not
             // evict it first and leave the session with nothing on disk (review F1).
             if (covered)
@@ -911,7 +926,7 @@ struct ContinuationDiskStore::Impl {
             Emit(ContinuationDiskEventAction::kAlreadyPersisted,
                  ContinuationDiskEventReason::kPrefixPersisted, 0,
                  job.snapshot->PayloadBytes(), job.tokens.size(), 0, 0,
-                 job.trigger);
+                 job.trigger, covering_len, job.tokens.size() - covering_len);
           } else if (exists) {
             stored = true;
           } else {
@@ -1017,7 +1032,10 @@ struct ContinuationDiskStore::Impl {
             ContinuationDiskEventReason reason, std::size_t file_bytes,
             std::size_t payload_bytes, std::size_t token_count,
             double elapsed_ms = 0.0, std::size_t staging_used_bytes = 0,
-            std::string_view trigger = "write_through") const noexcept {
+            std::string_view trigger = "write_through",
+            std::size_t covering_tokens = 0, std::size_t gap_tokens = 0) const noexcept {
+    if (reason == ContinuationDiskEventReason::kPrefixPersisted)
+      prefix_covered.fetch_add(1, std::memory_order_relaxed);
     if (action == ContinuationDiskEventAction::kSkipped &&
         (trigger == "evict" || trigger == "idle" || trigger == "shutdown") &&
         reason != ContinuationDiskEventReason::kExactReplacement)
@@ -1070,6 +1088,8 @@ struct ContinuationDiskStore::Impl {
           .phase_fsync_ms = action == ContinuationDiskEventAction::kStored
                                 ? phase_fsync_ms_
                                 : 0,
+          .covering_tokens = covering_tokens,
+          .gap_tokens = gap_tokens,
       });
     } catch (...) {
       return;
@@ -1935,7 +1955,7 @@ struct ContinuationDiskStore::Impl {
   mutable std::array<std::atomic<std::size_t>, 4> persisted{};
   mutable std::atomic<std::size_t> bytes_written{0};
   std::shared_ptr<std::atomic<std::size_t>> superseded;
-  mutable std::atomic<std::size_t> dropped_evict{0}, already_persisted{0};
+  mutable std::atomic<std::size_t> dropped_evict{0}, already_persisted{0}, prefix_covered{0};
   mutable std::size_t phase_slice_yields{0};
   mutable double phase_slice_wait_ms{0};
   std::size_t SaveAsync(std::shared_ptr<const TextModelRunner> runner,
