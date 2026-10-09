@@ -26,7 +26,6 @@ enum class ContinuationDiskEventAction : std::uint8_t {
   kDroppedEvict,
   kAlreadyPersisted,
   kSuperseded,
-  kPrefixPersisted,
 };
 
 enum class ContinuationDiskEventReason : std::uint8_t {
@@ -53,6 +52,7 @@ enum class ContinuationDiskEventReason : std::uint8_t {
   kWriterStopped,
   kAlreadyPersisted,
   kSuperseded,
+  kPrefixPersisted,
 };
 
 /// Sanitized disk-cache event. Prompt contents, token values, paths, model
