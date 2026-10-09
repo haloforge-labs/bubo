@@ -2094,6 +2094,39 @@ void TestWriterGrowingConversationAndRealDrops() {
   writer.store.Shutdown();
 }
 
+void TestWriterEvictSkipCoveredByPersistedPrefix() {
+  // GUFO_DISK_EVICT_SKIP_TOKENS policy: an evicted snapshot whose persisted strict prefix is within N tokens is not written again.
+  for (const std::size_t skip : {std::size_t{0}, std::size_t{4}, std::size_t{1}}) {
+    TemporaryDirectory directory;
+    std::atomic<std::size_t> writes{0}, covered{0}, already{0};
+    auto options = WriterOptions(directory.path());
+    options.evict_skip_tokens = skip;
+    WriterHarness writer(options, [&](const auto& event) {
+      if (event.action == ContinuationDiskEventAction::kStored) ++writes;
+      if (event.action == ContinuationDiskEventAction::kAlreadyPersisted) {
+        ++already;
+        if (event.reason == ContinuationDiskEventReason::kPrefixPersisted) ++covered;
+      }
+    }, 1, 64);
+    writer.Capture({1}, 1);        // RAM: {1}
+    writer.Capture({2}, 2);        // evicts {1}: persisted (nothing covers it)
+    writer.store.Flush();
+    writer.Capture({1, 5, 5}, 3);  // evicts {2}: persisted
+    writer.store.Flush();
+    Expect(writes == 2, "two unrelated evictions persist");
+    writer.Capture({3}, 4);        // evicts {1,5,5}: its persisted prefix {1} is 2 tokens shorter
+    writer.store.Flush();
+    if (skip >= 2) {
+      Expect(writes == 2 && covered == 1 && already == 1,
+             "an eviction covered by a persisted prefix within the bound is skipped and logged");
+    } else {
+      Expect(writes == 3 && covered == 0,
+             "bound smaller than the gap (or off) still persists the eviction");
+    }
+    writer.store.Shutdown();
+  }
+}
+
 void TestWriterFailedReplacementAndRamRefusal() {
   TemporaryDirectory directory;
   WriterHarness writer(WriterOptions(directory.path()), {}, 1, kFakePayloadBytes);
@@ -2212,6 +2245,7 @@ int main() {
   TestWriterExactReplacementSharedBoundary();
   TestWriterBatchEvictionsAndBacklogByteBound();
   TestWriterGrowingConversationAndRealDrops();
+  TestWriterEvictSkipCoveredByPersistedPrefix();
   TestWriterFailedReplacementAndRamRefusal();
   TestWriterConcurrentTouchRestoreAndOffers();
   TestWriterShutdownExitOfferRace();

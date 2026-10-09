@@ -46,6 +46,9 @@ struct WriterSettings {
   bool slice{false};
   std::chrono::milliseconds idle{30000};
   std::size_t evict_backlog_bytes{2ULL * 1024 * 1024 * 1024};
+  // GUFO_DISK_EVICT_SKIP_TOKENS: an evicted snapshot whose persisted strict prefix (same compatibility identity) is at most this many tokens shorter is not
+  // written again (restore uses the prefix and prefills the tail). 0 = off (every eviction is persisted).
+  std::size_t evict_skip_tokens{0};
 };
 const WriterSettings& DiskWriterSettings() {
   static const WriterSettings settings = [] {
@@ -68,6 +71,14 @@ const WriterSettings& DiskWriterSettings() {
       const auto value = std::strtoull(backlog, &end, 10);
       if (!errno && end && !*end && value <= SIZE_MAX)
         result.evict_backlog_bytes = static_cast<std::size_t>(value);
+    }
+    const auto* skip = std::getenv("GUFO_DISK_EVICT_SKIP_TOKENS");
+    if (skip && *skip && *skip != '-') {
+      char* end = nullptr;
+      errno = 0;
+      const auto value = std::strtoull(skip, &end, 10);
+      if (!errno && end && !*end && value <= 1000000)
+        result.evict_skip_tokens = static_cast<std::size_t>(value);
     }
     return result;
   }();
@@ -648,6 +659,8 @@ struct ContinuationDiskStore::Impl {
     options.idle_wait = options.idle_wait.value_or(DiskWriterSettings().idle);
     options.evict_backlog_bytes = options.evict_backlog_bytes.value_or(
         DiskWriterSettings().evict_backlog_bytes);
+    options.evict_skip_tokens = options.evict_skip_tokens.value_or(
+        DiskWriterSettings().evict_skip_tokens);
     if (options.persist_evict_idle.value())
       superseded = std::make_shared<std::atomic<std::size_t>>(0);
     ValidateOptions();
@@ -879,7 +892,22 @@ struct ContinuationDiskStore::Impl {
             const ScopedOperationPermit permit(operation_gate);
             exists = Touch(*job.runner, job.tokens, job.identity);
           }
-          if (exists) {
+          // Evict-skip policy: a snapshot whose persisted strict prefix is within GUFO_DISK_EVICT_SKIP_TOKENS tokens is covered by it (restore uses the
+          // prefix and prefills the tail), so the ~1 GB write is skipped; logged as already_persisted/prefix_persisted and counted.
+          bool covered = false;
+          if (!exists && record && job.trigger == "evict" &&
+              options.evict_skip_tokens.value() > 0) {
+            const ScopedOperationPermit permit(operation_gate);
+            const auto prefix = PersistedPrefixLength(*job.runner, job.tokens, job.identity);
+            covered = prefix > 0 && job.tokens.size() - prefix <= options.evict_skip_tokens.value();
+          }
+          if (covered) {
+            stored = true;
+            Emit(ContinuationDiskEventAction::kAlreadyPersisted,
+                 ContinuationDiskEventReason::kPrefixPersisted, 0,
+                 job.snapshot->PayloadBytes(), job.tokens.size(), 0, 0,
+                 job.trigger);
+          } else if (exists) {
             stored = true;
           } else {
             stored = Save(*job.runner, job.tokens, *job.snapshot, job.identity,
@@ -1844,6 +1872,27 @@ struct ContinuationDiskStore::Impl {
     }
     TouchEntry(entry);
     return true;
+  }
+
+  // Length in tokens of the longest persisted entry (same compatibility identity) that is a STRICT prefix of `tokens`; 0 when none. Caller holds the
+  // operation gate. Used by the evict-skip policy.
+  [[nodiscard]] std::size_t PersistedPrefixLength(
+      const TextModelRunner& runner, std::span<const TextRunnerToken> tokens,
+      std::span<const std::uint8_t> input_identity) {
+    const auto descriptor = DescriptorForInput(runner, input_identity);
+    if (!descriptor.persistence.has_value()) {
+      return 0;
+    }
+    const auto found = prefixes.find(PrefixKey(*descriptor.persistence));
+    if (found == prefixes.end()) {
+      return 0;
+    }
+    const auto match = found->second.Find(tokens);
+    if (!match.longest) {
+      return 0;
+    }
+    const auto length = (*match.longest)->tokens.size();
+    return length < tokens.size() ? length : 0;
   }
 
   ContinuationDiskStoreOptions options;

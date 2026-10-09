@@ -26,6 +26,7 @@ enum class ContinuationDiskEventAction : std::uint8_t {
   kDroppedEvict,
   kAlreadyPersisted,
   kSuperseded,
+  kPrefixPersisted,
 };
 
 enum class ContinuationDiskEventReason : std::uint8_t {
@@ -91,6 +92,8 @@ struct ContinuationDiskStoreOptions {
   std::optional<std::chrono::milliseconds> idle_wait;
   /// Additional pinned evicted storage, independent of the staging budget.
   std::optional<std::size_t> evict_backlog_bytes;
+  /// Evict-skip policy: skip persisting an evicted snapshot whose persisted strict prefix is at most this many tokens shorter (0 = off).
+  std::optional<std::size_t> evict_skip_tokens;
   /// Absolute safety guard for tiny snapshots; bytes are the primary bound.
   std::size_t evict_backlog_count{8};
   std::chrono::milliseconds shutdown_wait{std::chrono::seconds(30)};

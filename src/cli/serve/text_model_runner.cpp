@@ -427,6 +427,8 @@ std::string_view DiskEventReasonName(
       return "writer_stopped";
     case ContinuationDiskEventReason::kSuperseded:
       return "superseded";
+    case ContinuationDiskEventReason::kPrefixPersisted:
+      return "prefix_persisted";
     case ContinuationDiskEventReason::kAlreadyPersisted:
       return "already_persisted";
     case ContinuationDiskEventReason::kRamNotRetained:
