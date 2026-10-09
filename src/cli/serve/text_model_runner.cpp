@@ -934,6 +934,16 @@ struct TextRunnerPool::Request::Impl {
       try {
         if (!disk_store)
           return;
+        // evict_idle persists what the RAM tier DROPS. An optional whole-prompt
+        // retry copy that RAM refused was never retained, so it is not a drop:
+        // writing it is write-through for the newest checkpoint of every turn
+        // (admission trace 2026-10-09: all 10 D3F stores, 9.6 GB, no restore
+        // changed). Stable boundaries and branch points are still persisted.
+        if (disk_store->persist_on_evict_idle() && retain_fallback &&
+            snapshot_tokens.size() == prompt.size()) {
+          disk_store->NoteOptionalCopyRefused(snapshot_tokens.size());
+          return;
+        }
         // Copying device state only for disk is costly on the request path.
         // Skip it when the disk store would discard the checkpoint anyway.
         if (disk_store->WithinCheckpointStep(

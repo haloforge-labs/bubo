@@ -2133,6 +2133,23 @@ void TestWriterEvictSkipCoveredByPersistedPrefix() {
   }
 }
 
+void TestWriterOptionalCopyRefusedIsNotWritten() {
+  TemporaryDirectory directory;
+  std::atomic<std::size_t> writes{0}, refused{0}, dropped{0};
+  WriterHarness writer(WriterOptions(directory.path()), [&](const auto& event) {
+    if (event.action == ContinuationDiskEventAction::kStored) ++writes;
+    if (event.action == ContinuationDiskEventAction::kDroppedEvict) ++dropped;
+    if (event.action == ContinuationDiskEventAction::kSkipped &&
+        event.reason == ContinuationDiskEventReason::kRamNotRetained &&
+        event.token_count == 7) ++refused;
+  }, 1, 64);
+  writer.store.NoteOptionalCopyRefused(7);
+  writer.store.Flush();
+  Expect(writes == 0 && dropped == 0 && refused == 1 && writer.store.entry_count() == 0,
+         "a RAM-refused optional copy is logged as skipped/ram_not_retained and never written");
+  writer.store.Shutdown();
+}
+
 void TestWriterFailedReplacementAndRamRefusal() {
   TemporaryDirectory directory;
   WriterHarness writer(WriterOptions(directory.path()), {}, 1, kFakePayloadBytes);
@@ -2252,6 +2269,7 @@ int main() {
   TestWriterBatchEvictionsAndBacklogByteBound();
   TestWriterGrowingConversationAndRealDrops();
   TestWriterEvictSkipCoveredByPersistedPrefix();
+  TestWriterOptionalCopyRefusedIsNotWritten();
   TestWriterFailedReplacementAndRamRefusal();
   TestWriterConcurrentTouchRestoreAndOffers();
   TestWriterShutdownExitOfferRace();

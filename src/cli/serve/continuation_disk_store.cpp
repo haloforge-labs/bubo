@@ -2161,6 +2161,11 @@ void ContinuationDiskStore::SetPersistenceSource(
   impl_->persistence_source = std::move(source);
   impl_->queue_changed.notify_all();
 }
+void ContinuationDiskStore::NoteOptionalCopyRefused(
+    std::size_t token_count) noexcept {
+  impl_->Emit(ContinuationDiskEventAction::kSkipped,
+              ContinuationDiskEventReason::kRamNotRetained, 0, 0, token_count);
+}
 void ContinuationDiskStore::Shutdown() {
   impl_->Shutdown();
 }

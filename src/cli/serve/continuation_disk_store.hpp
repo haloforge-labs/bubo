@@ -204,6 +204,10 @@ public:
   /// Stops sourcing and joins the writer; deadline bounds new shutdown work.
   void Shutdown();
   [[nodiscard]] bool persist_on_evict_idle() const noexcept;
+  /// evict_idle policy: the RAM tier refused an OPTIONAL copy (the whole-prompt retry checkpoint); it was never retained, so it is not an eviction and is not
+  /// written. Logged as action=skipped reason=ram_not_retained and counted in `skipped` (admission trace 2026-10-09: these refused retry copies were the
+  /// whole 9.6 GB of the D3F run and changed no restore).
+  void NoteOptionalCopyRefused(std::size_t token_count) noexcept;
 
   /// Drains accepted writes. Shutdown also drains automatically.
   void Flush();
