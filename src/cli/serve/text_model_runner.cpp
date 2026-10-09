@@ -556,9 +556,13 @@ TextDecodeStep TextModelRunner::DecodeStep(
   }
   const TextRunnerToken token = selection.token;
   Advance(state, token);
-  return {
-      .selections = {std::move(selection)},
-  };
+  // The scheduler re-attaches scores from step.logprobs. Multi-token runners
+  // delegate one-token budgets here, so keep the selection's score.
+  TextDecodeStep step;
+  if (selection.logprob)
+    step.logprobs.push_back(*selection.logprob);
+  step.selections.push_back(std::move(selection));
+  return step;
 }
 
 std::vector<TextDecodeStep> TextModelRunner::DecodeBatch(
