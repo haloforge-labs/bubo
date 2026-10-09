@@ -266,6 +266,8 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     }
   }
   rocm::Executor::Options exec;
+  exec.multi_session_twin = ConfiguredMultiSessionTwin(
+      m->device_->has_twin(), TwinBatchEnabled(), options.decode_concurrency);
   exec.max_batch = m->PrefillThroughCapacity();
   exec.max_logit_rows =
       m->mtp_weights_
@@ -1016,7 +1018,7 @@ bool Session::TeacherForceBatch(std::span<const TeacherForceRequest> requests,
     if (!r.session->EnsureFrontier(error_msg))
       return false;
   }
-  if (requests.size() == 1) {
+  if (requests.size() == 1 && !model->executor_->UsesMultiSessionTwin()) {
     const auto& r = requests.front();
     return r.session->TeacherForce(r.tokens, r.rows, error_msg);
   }
@@ -1682,12 +1684,22 @@ bool Session::RunIsolatedBatch(std::span<const Request> requests,
           r.sampler->RestoreDrawState(draws[i]);
         }
         try {
-          if constexpr (std::is_same_v<Request, DecodeRequest>)
-            outcome.completed =
-                session.DecodeStep(r.max_tokens, *r.sampler, r.result,
-                                   &outcome.error, r.stop_at_eos);
-          else
-            outcome.completed = session.Evaluate(r.token, &outcome.error);
+          if (session.model_->executor_->UsesMultiSessionTwin()) {
+            auto retry = r;
+            retry.outcome = &outcome;
+            const std::span<const Request> singleton(&retry, 1);
+            if constexpr (std::is_same_v<Request, DecodeRequest>)
+              (void)DecodeBatchImpl(singleton, &outcome.error);
+            else
+              (void)EvaluateBatchImpl(singleton, &outcome.error);
+          } else {
+            if constexpr (std::is_same_v<Request, DecodeRequest>)
+              outcome.completed =
+                  session.DecodeStep(r.max_tokens, *r.sampler, r.result,
+                                     &outcome.error, r.stop_at_eos);
+            else
+              outcome.completed = session.Evaluate(r.token, &outcome.error);
+          }
         } catch (const std::exception& exception) {
           outcome.error = exception.what();
         }
@@ -1725,7 +1737,8 @@ bool Session::EvaluateBatch(std::span<const AdvanceRequest> requests,
 
 bool Session::DecodeBatchImpl(std::span<const DecodeRequest> requests,
                               std::string* error_msg) {
-  if (requests.size() == 1) {
+  if (requests.size() == 1 &&
+      !requests.front().session->model_->executor_->UsesMultiSessionTwin()) {
     const auto& r = requests.front();
     r.outcome->completed = r.session->DecodeStep(
         r.max_tokens, *r.sampler, r.result, &r.outcome->error, r.stop_at_eos);
@@ -1868,7 +1881,8 @@ bool Session::DecodeBatchImpl(std::span<const DecodeRequest> requests,
 
 bool Session::EvaluateBatchImpl(std::span<const AdvanceRequest> requests,
                                 std::string* error_msg) {
-  if (requests.size() == 1) {
+  if (requests.size() == 1 &&
+      !requests.front().session->model_->executor_->UsesMultiSessionTwin()) {
     const auto& r = requests.front();
     r.outcome->completed = r.session->Evaluate(r.token, &r.outcome->error);
     return r.outcome->completed;

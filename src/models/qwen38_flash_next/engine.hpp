@@ -189,7 +189,9 @@ public:
   };
   /// Numerical harness seam: external chains use the serving ForwardBatch
   /// verification arithmetic, retain every row, and never sample or draft.
-  /// One request delegates to TeacherForce, preserving its existing arithmetic.
+  /// One request delegates to TeacherForce unless the model was loaded with
+  /// an armed multi-session twin; that mode retains batch arithmetic even
+  /// when only one peer is active.
   /// On a device failure all included sessions become invalid.
   [[nodiscard]] static bool TeacherForceBatch(
       std::span<const TeacherForceRequest> requests,

@@ -171,7 +171,7 @@ void Executor::CombineBatch(float* res, const float* gamma,
 
 bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
                                std::string* error) const {
-  const bool multi_session = items.size() > 1;
+  const bool multi_session = UsesMultiSessionTwin() || items.size() > 1;
   if (!UsePrimaryStream(error)) {
     return false;
   }
@@ -211,7 +211,7 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
     return Fail(error, "MTP body batch exceeds executor capacity");
   if (!AnyActive(items))
     return true;
-  if (items.size() == 1) {
+  if (items.size() == 1 && !UsesMultiSessionTwin()) {
     const auto& item = items.front();
     return MtpForward(*item.session, item.tokens, item.hidden_row, {}, error);
   }
@@ -410,7 +410,7 @@ Executor::DraftOutputSelection Executor::BatchDraftOutput() const {
 }
 bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
                         std::string* error) const {
-  const bool multi_session = items.size() > 1;
+  const bool multi_session = UsesMultiSessionTwin() || items.size() > 1;
   if (!UsePrimaryStream(error)) {
     return false;
   }
@@ -437,7 +437,7 @@ bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
   const auto& head = model_->mtp().nextn_head;
   if (!AnyActive(items))
     return true;
-  if (items.size() == 1) {
+  if (items.size() == 1 && !UsesMultiSessionTwin()) {
     for (const auto& item : items) {
       if (!item.session->CheckCancellation(nullptr))
         continue;
@@ -750,7 +750,7 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
 
 bool Executor::ForwardBatch(std::span<const BatchItem> items,
                             std::string* error) const {
-  const bool multi_session = items.size() > 1;
+  const bool multi_session = UsesMultiSessionTwin() || items.size() > 1;
   if (!UsePrimaryStream(error)) {
     return false;
   }

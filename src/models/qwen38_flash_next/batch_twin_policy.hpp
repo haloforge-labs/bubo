@@ -29,6 +29,10 @@ inline bool TwinBatchEnabled() {
 inline bool BatchUsesTwin(bool armed, bool enabled, bool prefill) {
   return armed && enabled && !prefill;
 }
+inline bool ConfiguredMultiSessionTwin(bool armed, bool enabled,
+                                       std::uint32_t sessions) {
+  return armed && enabled && sessions >= 2;
+}
 inline bool TwinBatchCapacityValid(std::uint32_t sessions,
                                    std::uint32_t chain) {
   return sessions > 0 && sessions <= kBatchMaxSessions && chain > 0 &&

@@ -32,6 +32,28 @@ int main() {
             (value != nullptr && std::string(value) == "1"));
   }
   BatchEnv(had_env ? saved_env.c_str() : nullptr);
+  for (std::uint32_t configured = 1; configured <= 8; ++configured)
+    for (bool armed : {false, true})
+      for (bool enabled : {false, true}) {
+        const bool mode =
+            q::ConfiguredMultiSessionTwin(armed, enabled, configured);
+        Require(mode == (armed && enabled && configured >= 2));
+        // Active peers may drain to one session. The configured mode persists.
+        for (std::uint32_t active = 1; active <= configured; ++active)
+          for (std::uint32_t n = 1; n <= 64; ++n)
+            for (T t : {T::kIQ4_XS, T::kIQ4_NL}) {
+              const auto path = q::BatchDenseDispatch(t, n, armed && enabled,
+                                                      mode || active > 1);
+              if (armed && enabled && configured >= 2)
+                Require(path == q::BatchDensePath::kTwinMultiRow);
+              else if (n <= 8)
+                Require(path == q::BatchDensePath::kDense);
+              else if (armed && enabled)
+                Require(path == q::BatchDensePath::kTwinSlices);
+              else
+                Require(path == q::BatchDensePath::kSmallGemm);
+            }
+      }
   for (std::uint32_t n = 1; n <= q::kTwinBatchMax; ++n) {
     for (bool armed : {false, true})
       for (bool enabled : {false, true})
