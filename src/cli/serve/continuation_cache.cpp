@@ -909,6 +909,11 @@ bool ContinuationCache::ReserveSnapshot(
                     SnapshotPersistence::kFailed ||
                 peer.snapshot->persistence->state.load() ==
                     SnapshotPersistence::kAbandoned ||
+                // Pre-data amendment (operator 16:1x, multi-slot's L1 finding): agent clients re-render the previous assistant turn, so a
+                // whole-prompt (live-frontier) entry ends past the next prompt's divergence and cannot stand in for the shorter stable-prefix record.
+                // Whole-prompt entries carry stable_prefix_tokens != 0 (continuation_cache.cpp: only tokens.size() == prompt_tokens_ gets it); the
+                // covering peer must be a boundary entry (stable_prefix_tokens == 0).
+                peer.stable_prefix_tokens != 0 ||
                 peer.tokens.size() <= entry.tokens.size() ||
                 !std::ranges::equal(peer.input_identity, entry.input_identity) ||
                 !IsPrefix(entry.tokens, peer.tokens))

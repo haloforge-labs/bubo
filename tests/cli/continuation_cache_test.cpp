@@ -1335,6 +1335,35 @@ void TestEvictedEntryCoveredByRetainedLongerEntryIsNotOffered() {
     Expect(superseded == 0 && offered.size() == 1 && offered[0] == (std::vector<ContinuationToken>{1, 2}),
            "an eviction whose only longer peer is a kRetry copy is offered (rewind point stays persistable)");
   }
+  // Negative case (pre-data amendment 10-09): a whole-prompt entry (stable_prefix_tokens != 0, the live frontier of a client that re-renders the
+  // previous assistant turn) does NOT cover the shorter stable-prefix record: it ends past the next prompt's divergence.
+  offered.clear(); superseded = 0;
+  {
+    std::vector<std::size_t> inv3(1);
+    gufo::server::ContinuationCache stable_cache(
+        1, [&] { return std::make_unique<FakeState>(0, &inv3); },
+        {.restore = [](auto&, const auto&) {},
+         .capacity_bytes = [] { return 16; },
+         .on_event = {},
+         .on_evict = [&](std::shared_ptr<const gufo::server::ContinuationSnapshot> snapshot) {
+           if (snapshot->persistence) offered.push_back(snapshot->persistence->tokens);
+         }},
+        8);
+    const auto save3 = [&](std::vector<ContinuationToken> tokens, bool preserve_source, std::size_t stable) {
+      auto lease = stable_cache.Acquire(tokens, {}, {}, {}, true, stable);
+      Expect(lease.TryReserveSnapshot(8, tokens.size(), preserve_source, SnapshotPurpose::kContinuation, tokens), "checkpoint admitted");
+      auto snapshot = std::make_unique<FakeSnapshot>(tokens.size(), 8);
+      snapshot->persistence = std::make_shared<SnapshotPersistence>();
+      snapshot->persistence->tokens = tokens;
+      snapshot->persistence->on_superseded = [&] { ++superseded; };
+      lease.Commit(tokens, std::move(snapshot));
+    };
+    save3({1, 2}, false, 0);
+    save3({1, 2, 3}, true, 2);   // whole prompt with stable boundary 2: carries stable_prefix_tokens = 2
+    save3({9}, false, 0);
+    Expect(superseded == 0 && offered.size() == 1 && offered[0] == (std::vector<ContinuationToken>{1, 2}),
+           "an eviction whose only longer peer is a whole-prompt (stable_prefix_tokens != 0) entry is offered");
+  }
 }
 
 int main() {
