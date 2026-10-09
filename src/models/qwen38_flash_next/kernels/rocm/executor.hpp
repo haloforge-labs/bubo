@@ -343,7 +343,11 @@ public:
     const std::int32_t* map;
     BatchDraftHead head;
   };
-  [[nodiscard]] DraftOutputSelection BatchDraftOutput() const;
+  /// `items`: the cohort size (one item keeps the single-session head);
+  /// `full_head`: some session in the cohort drafts in DraftVocabulary::kAuto
+  /// full mode, so the cohort does not use the subset.
+  [[nodiscard]] DraftOutputSelection BatchDraftOutput(
+      std::uint32_t items = 2, bool full_head = false) const;
 
   struct MtpHeadItem {
     Session* session;
@@ -363,8 +367,11 @@ public:
                               std::string* error_msg) const;
   /// DraftVocabulary::kAuto: this session's single-session draft steps use
   /// the full draft head (true) or the Options::draft_vocab subset (false).
-  /// No effect without a subset, and none on the multi-session MtpHeads
-  /// branch, which drafts from the full main output head as before.
+  /// No effect without a subset. Multi-session MtpHeads cohorts of two or
+  /// more draft from the full main output head as before (unless
+  /// GUFO_BATCH_DRAFT_HEAD, whose subset needs every session in latin mode);
+  /// a singleton cohort, which twin batching routes through the batch path,
+  /// keeps this session's choice like the single-session path.
   void SetDraftHeadFull(Session& session, bool full) const noexcept {
     session.draft_head_full_ = full && draft_ids_ != nullptr;
   }

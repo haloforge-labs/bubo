@@ -21,6 +21,15 @@ inline BatchDraftHead SelectBatchDraftHead(bool enabled, bool subset,
   return draft ? BatchDraftHead::kDraft : BatchDraftHead::kPlain;
 }
 
+// A cohort's head: the subset only when every session in it drafts in latin
+// mode (`any_full`: some session is in DraftVocabulary::kAuto full mode).
+// One item then matches Executor::MtpHead (subset = has_subset && !full).
+inline BatchDraftHead SelectCohortDraftHead(bool enabled, bool has_subset,
+                                            bool any_full, bool draft,
+                                            std::uint32_t items) {
+  return SelectBatchDraftHead(enabled, has_subset && !any_full, draft, items);
+}
+
 inline bool BatchDraftSubset(BatchDraftHead head) {
   return head == BatchDraftHead::kSubset ||
          head == BatchDraftHead::kSubsetDraft;

@@ -43,6 +43,31 @@ int main() {
           }
           ++combinations;
         }
+  // Cohort heads (B5cand3): a singleton picks what Executor::MtpHead picks
+  // (subset = has_subset && !full; else draft_out if loaded, else output),
+  // with or without the batch switch; a cohort with any full-mode session
+  // never uses the subset; a plain cohort of two or more keeps kPlain.
+  unsigned cohort = 0;
+  for (bool enabled : {false, true})
+    for (bool has_subset : {false, true})
+      for (bool any_full : {false, true})
+        for (bool draft : {false, true})
+          for (unsigned items : {1u, 2u, 4u}) {
+            const auto head = q::SelectCohortDraftHead(enabled, has_subset,
+                                                       any_full, draft, items);
+            if (items == 1) {
+              const bool subset = has_subset && !any_full;
+              Require(head == (subset   ? (draft ? q::BatchDraftHead::kSubsetDraft
+                                                 : q::BatchDraftHead::kSubset)
+                               : draft ? q::BatchDraftHead::kDraft
+                                       : q::BatchDraftHead::kPlain));
+            }
+            if (any_full)
+              Require(!q::BatchDraftSubset(head));
+            if (!enabled && items >= 2)
+              Require(head == q::BatchDraftHead::kPlain);
+            ++cohort;
+          }
   // CPU replay of the existing RemapIdsKernel formula; GPU execution is G2.
   const std::int32_t map[] = {17, 502, 32000};
   for (auto head :
@@ -67,6 +92,7 @@ int main() {
   }
   std::cout
       << "PASS " << combinations
-      << " switch x latin x draft_out x items combinations; strict parser; "
+      << " switch x latin x draft_out x items combinations; " << cohort
+      << " cohort-head (auto full mode) combinations; strict parser; "
          "candidate/argmax remap, sentinels and OFF identity\n";
 }

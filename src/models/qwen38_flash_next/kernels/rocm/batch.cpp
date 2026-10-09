@@ -399,9 +399,13 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
   return true;
 }
 
-Executor::DraftOutputSelection Executor::BatchDraftOutput() const {
-  const auto head = SelectBatchDraftHead(
-      batch_draft_head_, draft_ids_ != nullptr, model_->has_draft_out(), 2);
+Executor::DraftOutputSelection Executor::BatchDraftOutput(std::uint32_t items,
+                                                          bool full_head) const {
+  // A singleton cohort (twin batching sends lone requests here) picks the
+  // head MtpHead would, including DraftVocabulary::kAuto's full mode.
+  const auto head =
+      SelectCohortDraftHead(batch_draft_head_, draft_ids_ != nullptr, full_head,
+                            model_->has_draft_out(), items);
   if (BatchDraftSubset(head))
     return {&draft_head_, draft_ids_, head};
   if (head == BatchDraftHead::kDraft)
@@ -457,7 +461,11 @@ bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
     }
     return true;
   }
-  const auto selected = BatchDraftOutput();
+  bool full_head = false;
+  for (const auto& item : items)
+    full_head = full_head || item.session->draft_head_full_;
+  const auto selected =
+      BatchDraftOutput(static_cast<std::uint32_t>(items.size()), full_head);
   const auto& output = *selected.tensor;
   if (!AllocateBatch(error)) {
     return false;
