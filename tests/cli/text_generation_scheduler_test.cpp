@@ -305,6 +305,8 @@ struct FakeControl {
   bool final_token_advance_required{true};
   bool incremental_text_is_exact{false};
   bool multi_token_decode{false};
+  // Mirrors the Flash-Next MTP runner: a one-token budget uses the base step.
+  bool base_single_token_decode{false};
   bool timeline_mixed_drafts{false};
   bool timeline_multi_cycle_step{false};
   std::atomic<std::size_t> debug_settings_calls{0};
@@ -720,7 +722,8 @@ public:
   [[nodiscard]] TextDecodeStep DecodeStep(
       TextRunnerState& state, std::size_t max_tokens,
       gufo::sampling::SamplerState& sampler) const override {
-    if (!control_->multi_token_decode) {
+    if (!control_->multi_token_decode ||
+        (control_->base_single_token_decode && max_tokens == 1)) {
       return TextModelRunner::DecodeStep(state, max_tokens, sampler);
     }
     auto& fake = RequireFakeState(state);
@@ -3616,6 +3619,60 @@ void TestScoredGenerationPreservesFakeOutputAndAlignment() {
   }
 }
 
+void TestOneTokenBudgetKeepsLogprobs() {
+  // A 4-token limit decodes 3 tokens, then a one-token budget that the
+  // runner delegates to TextModelRunner::DecodeStep.
+  for (const bool batched : {false, true}) {
+    auto control = std::make_shared<FakeControl>();
+    control->multi_token_decode = true;
+    control->base_single_token_decode = true;
+    control->prefix_reuse = false;
+    control->batched_multi_token_decode = batched;
+    control->supports_batched_advance = batched;
+    if (batched)
+      control->block_prefill_label = 1;
+    auto scheduler = MakeScheduler(control, batched ? 2 : 1);
+    TextRequestMetadata metadata;
+    metadata.cache_prompt = false;
+    gufo::sampling::SamplingConfig config;
+    config.seed = 123;
+    config.logprobs = 2;
+    std::vector<TextGenerationScheduler::Request> requests;
+    requests.push_back(scheduler->Submit({1, 10}, 4, config, {}, false, metadata));
+    if (batched) {
+      control->WaitForPrefill(1);
+      requests.push_back(scheduler->Submit({2, 20}, 4, config, {}, false, metadata));
+      control->ReleasePrefill();
+    }
+    for (std::size_t r = 0; r < requests.size(); ++r) {
+      std::string failure;
+      TextGenerationScheduler::Result result;
+      try {
+        result = requests[r].Wait();
+      } catch (const std::exception& error) {
+        failure = error.what();
+      }
+      Expect(failure.empty(),
+             "one-token budget with logprobs completes (" + failure + ")");
+      const auto label = static_cast<TextRunnerToken>(r + 1);
+      Expect(result.tokens == ExpectedTokens(label, 4) &&
+                 result.logprobs.size() == 4,
+             "one-token budget keeps one score per generated token");
+      for (std::size_t i = 0; i < result.tokens.size(); ++i) {
+        const auto token = result.tokens[i];
+        const double reference = 1.0 - std::log(double(token) + std::exp(1.0));
+        Expect(result.logprobs[i].token == token &&
+                   result.logprobs[i].top_logprobs.size() == 2 &&
+                   std::abs(result.logprobs[i].logprob - reference) < 1e-12,
+               "one-token budget score matches the raw-row reference");
+      }
+      if (batched)
+        Expect(result.execution_plan == "batched-w2",
+               "both one-token budgets ran in one batched decode");
+    }
+  }
+}
+
 void TestPromptScoreSerializationAndCancellation() {
   auto control = std::make_shared<FakeControl>();
   control->score_supported = true;
@@ -3806,6 +3863,7 @@ int main(int argc, char** argv) {
     TestDebugTimelineInPassCheckpoint();
     TestDebugTimelineRequestTruncation();
     TestScoredGenerationPreservesFakeOutputAndAlignment();
+    TestOneTokenBudgetKeepsLogprobs();
     TestPromptScoreDedicatedPathAndCpuReference();
     TestPromptScoreSerializationAndCancellation();
     return 0;
@@ -3825,6 +3883,7 @@ int main(int argc, char** argv) {
   TestPromptScoreDedicatedPathAndCpuReference();
   TestPromptScoreSerializationAndCancellation();
   TestScoredGenerationPreservesFakeOutputAndAlignment();
+  TestOneTokenBudgetKeepsLogprobs();
   // Log assertions in this binary match the plain "[LEVEL] [component]" text
   // captured from a redirected sink; a TTY stderr would tint the level tag.
   ::setenv("NO_COLOR", "1", 1);
