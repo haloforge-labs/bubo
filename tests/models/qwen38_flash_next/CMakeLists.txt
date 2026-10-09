@@ -12,11 +12,26 @@ function(add_qwen38_flash_next_test name library labels)
   add_dependencies(qwen38_flash_next_tests ${target})
 endfunction()
 
+add_qwen38_flash_next_test(batch_draft_head gufo_core "cpu")
 add_qwen38_flash_next_test(config gufo_qwen38_flash_next "cpu")
 add_qwen38_flash_next_test(ngram gufo_qwen38_flash_next "cpu")
 add_qwen38_flash_next_test(mtp_sampling gufo_core "cpu")
+add_qwen38_flash_next_test(batch_twin_policy gufo_core "cpu")
+add_qwen38_flash_next_test(iq4_wide_policy gufo_core "cpu")
+add_qwen38_flash_next_test(batch_twin_refusal gufo_core "cpu")
 add_qwen38_flash_next_test(prompt_lookup gufo_core "cpu")
 add_qwen38_flash_next_test(twin_weights gufo_qwen38_flash_next "cpu")
+
+# Tokenization and manifest preparation are CPU-buildable; actual forced
+# serving-batch execution is enabled only with the engine's HIP backend.
+add_executable(qwen38_flash_next_batch_quality_probe EXCLUDE_FROM_ALL
+  batch_quality_probe.cpp)
+target_link_libraries(qwen38_flash_next_batch_quality_probe PRIVATE
+  gufo_qwen38_flash_next)
+if(ENGINE_ENABLE_HIP)
+  target_compile_definitions(qwen38_flash_next_batch_quality_probe PRIVATE
+    GUFO_BATCH_QUALITY_HIP=1)
+endif()
 
 add_executable(qwen38_flash_next_reference_probe EXCLUDE_FROM_ALL reference_probe.cpp)
 target_link_libraries(qwen38_flash_next_reference_probe PRIVATE

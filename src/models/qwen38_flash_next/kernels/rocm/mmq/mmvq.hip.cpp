@@ -1,4 +1,5 @@
 #include "qfn_mmq_prelude.h"
+#include "src/models/qwen38_flash_next/iq4_wide_policy.hpp"
 namespace qfn_mmq {
 #include "mmvq.hpp"
 #include "unary.hpp"

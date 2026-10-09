@@ -13,6 +13,7 @@
 
 #include "src/core/gguf_reader.hpp"
 #include "src/core/platform/tuning.hpp"
+#include "src/models/qwen38_flash_next/batch_twin_policy.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
@@ -214,8 +215,16 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
   }
   // Decode twin (default OFF): GUFO_DENSE_TWIN_MODEL = path of the 4-bit dense twin GGUF (see TwinWeights). Every failure is fatal (no fallback to the 8-bit copy).
   if (const char* twin_path = std::getenv("GUFO_DENSE_TWIN_MODEL"); twin_path != nullptr && twin_path[0] != '\0') {
-    if (options.decode_concurrency > 1) {
-      AssignError(error_msg, "GUFO_DENSE_TWIN_MODEL supports one decode session (the batched decode loop is not twinned)");
+    static_assert(kMaxMtpDraftTokens + 1 == kBatchMaxChain);
+    const auto chain =
+        m->mtp_weights_ ? std::uint64_t{options.max_draft_tokens} + 1 : 1;
+    const bool batch_enabled = TwinBatchEnabled();
+    const auto max_n = batch_enabled && options.decode_concurrency > 1
+                           ? TwinMaxNValue(std::getenv("GUFO_DENSE_TWIN_MAX_N"))
+                           : kBatchMaxChain;
+    if (const char* failure = TwinBatchLoadError(
+            true, batch_enabled, options.decode_concurrency, chain, max_n)) {
+      AssignError(error_msg, failure);
       return nullptr;
     }
     auto twin_reader = core::GgufReader::OpenFile(twin_path, error_msg);
@@ -257,6 +266,8 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     }
   }
   rocm::Executor::Options exec;
+  exec.multi_session_twin = ConfiguredMultiSessionTwin(
+      m->device_->has_twin(), TwinBatchEnabled(), options.decode_concurrency);
   exec.max_batch = m->PrefillThroughCapacity();
   exec.max_logit_rows =
       m->mtp_weights_
@@ -1049,6 +1060,80 @@ bool Session::TeacherForce(std::span<const std::int32_t> tokens,
   return true;
 }
 
+bool Session::TeacherForceBatch(std::span<const TeacherForceRequest> requests,
+                                std::string* error_msg) {
+  if (requests.empty() || requests.size() > 8) {
+    AssignError(error_msg, "teacher-force batch needs 1..8 sessions");
+    return false;
+  }
+  const auto model = requests.front().session ? requests.front().session->model_
+                                              : std::shared_ptr<Model>{};
+  for (std::size_t i = 0; i < requests.size(); ++i) {
+    const auto& r = requests[i];
+    if (!r.session || !r.rows || r.session->model_ != model ||
+        !r.session->valid_ || r.session->tokens_.empty() || r.tokens.empty() ||
+        r.tokens.size() >
+            std::min<std::uint32_t>(8, r.session->MaxVerifyWidth()) ||
+        r.session->tokens_.size() + r.tokens.size() >
+            r.session->ContextSize()) {
+      AssignError(error_msg, "invalid teacher-force batch session or width");
+      return false;
+    }
+    for (std::size_t j = 0; j < i; ++j) {
+      if (requests[j].session == r.session || requests[j].rows == r.rows) {
+        AssignError(error_msg, "duplicate teacher-force session or output");
+        return false;
+      }
+    }
+    for (const auto token : r.tokens) {
+      if (token < 0 ||
+          static_cast<std::uint32_t>(token) >= model->VocabSize()) {
+        AssignError(error_msg, "teacher-force token out of range");
+        return false;
+      }
+    }
+    if (!r.session->EnsureFrontier(error_msg))
+      return false;
+  }
+  if (requests.size() == 1 && !model->executor_->UsesMultiSessionTwin()) {
+    const auto& r = requests.front();
+    return r.session->TeacherForce(r.tokens, r.rows, error_msg);
+  }
+  auto& exec = *model->executor_;
+  const auto vocab = model->VocabSize();
+  std::vector<rocm::Executor::BatchItem> items;
+  for (const auto& r : requests) {
+    r.rows->resize(r.tokens.size() * vocab);
+    items.push_back({r.session->session_.get(), r.tokens, r.tokens.size() > 1});
+  }
+  for (const auto& r : requests) {
+    r.session->valid_ = false;
+    r.session->anchor_candidates_valid_ = false;
+  }
+  if (!exec.ForwardBatch(items, error_msg))
+    return false;
+  std::uint32_t offset = 0;
+  for (const auto& r : requests) {
+    const auto n = static_cast<std::uint32_t>(r.tokens.size());
+    if (r.session->session_->Cancelled() ||
+        !exec.SelectBatchLogits(offset, n, r.rows->data(), error_msg) ||
+        (n > 1 && !exec.Rollback(*r.session->session_, n, error_msg))) {
+      if (r.session->session_->Cancelled())
+        AssignError(error_msg, "teacher-force batch cancelled");
+      return false;
+    }
+    offset += n;
+  }
+  for (const auto& r : requests) {
+    std::copy_n(r.rows->data() + (r.tokens.size() - 1) * vocab, vocab,
+                r.session->logits_.begin());
+    r.session->tokens_.insert(r.session->tokens_.end(), r.tokens.begin(),
+                              r.tokens.end());
+    r.session->valid_ = true;
+  }
+  return true;
+}
+
 struct Session::PendingDecode {
   std::vector<std::int32_t> chain;
   std::vector<MtpProposal> proposals;
@@ -1691,12 +1776,22 @@ bool Session::RunIsolatedBatch(std::span<const Request> requests,
           r.sampler->RestoreDrawState(draws[i]);
         }
         try {
-          if constexpr (std::is_same_v<Request, DecodeRequest>)
-            outcome.completed =
-                session.DecodeStep(r.max_tokens, *r.sampler, r.result,
-                                   &outcome.error, r.stop_at_eos);
-          else
-            outcome.completed = session.Evaluate(r.token, &outcome.error);
+          if (session.model_->executor_->UsesMultiSessionTwin()) {
+            auto retry = r;
+            retry.outcome = &outcome;
+            const std::span<const Request> singleton(&retry, 1);
+            if constexpr (std::is_same_v<Request, DecodeRequest>)
+              (void)DecodeBatchImpl(singleton, &outcome.error);
+            else
+              (void)EvaluateBatchImpl(singleton, &outcome.error);
+          } else {
+            if constexpr (std::is_same_v<Request, DecodeRequest>)
+              outcome.completed =
+                  session.DecodeStep(r.max_tokens, *r.sampler, r.result,
+                                     &outcome.error, r.stop_at_eos);
+            else
+              outcome.completed = session.Evaluate(r.token, &outcome.error);
+          }
         } catch (const std::exception& exception) {
           outcome.error = exception.what();
         }
@@ -1734,7 +1829,8 @@ bool Session::EvaluateBatch(std::span<const AdvanceRequest> requests,
 
 bool Session::DecodeBatchImpl(std::span<const DecodeRequest> requests,
                               std::string* error_msg) {
-  if (requests.size() == 1) {
+  if (requests.size() == 1 &&
+      !requests.front().session->model_->executor_->UsesMultiSessionTwin()) {
     const auto& r = requests.front();
     r.outcome->completed = r.session->DecodeStep(
         r.max_tokens, *r.sampler, r.result, &r.outcome->error, r.stop_at_eos);
@@ -1877,7 +1973,8 @@ bool Session::DecodeBatchImpl(std::span<const DecodeRequest> requests,
 
 bool Session::EvaluateBatchImpl(std::span<const AdvanceRequest> requests,
                                 std::string* error_msg) {
-  if (requests.size() == 1) {
+  if (requests.size() == 1 &&
+      !requests.front().session->model_->executor_->UsesMultiSessionTwin()) {
     const auto& r = requests.front();
     r.outcome->completed = r.session->Evaluate(r.token, &r.outcome->error);
     return r.outcome->completed;

@@ -25,6 +25,7 @@
 #include "qfn_mmq.h"
 #include "src/core/hip/snapshot_transfer.hpp"
 #include "src/core/platform/tuning.hpp"
+#include "src/models/qwen38_flash_next/batch_twin_policy.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/trace.hpp"
 #include "src/models/qwen38_flash_next/mtp_policy.hpp"
@@ -1048,6 +1049,8 @@ Executor::~Executor() {
   if (primary_stream_ != nullptr) {
     (void)hipStreamDestroy(primary_stream_);
   }
+  if (batch_draft_head_ && model_ != nullptr && !model_->has_draft_out())
+    PrintBatchDraftCounters("final");
 }
 
 std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
@@ -1352,6 +1355,13 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
                    "(%.0f MB)\n",
                    ids.size(), out.rows,
                    static_cast<double>(ids.size() * row_bytes) / 1e6);
+    }
+    e->batch_draft_head_ =
+        BatchDraftHeadSwitch(std::getenv("GUFO_BATCH_DRAFT_HEAD"));
+    if (e->batch_draft_head_) {
+      const auto selected = e->BatchDraftOutput();
+      std::fprintf(stderr, "[batchdraft] enabled head=%s rows=%u\n",
+                   BatchDraftHeadName(selected.head), selected.tensor->rows);
     }
     if (!Check(hipHostMalloc(&e->mtp_token_host_, sizeof(std::int32_t),
                              ResultHostFlags()),
@@ -3338,15 +3348,11 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
 }
 
 namespace {
-// GUFO_DENSE_TWIN_MAX_N (default 8 = every vector pass): the widest pass that reads the 4-bit twin; wider decode / verify passes read the 8-bit copy. Set it to the twin kernel's measured
-// DRAM break-even width (pass bench 10-07: Q4_K ~2, IQ4_XS / IQ4_NL map ~6).
+// The single-session cutoff retains its cached default/strtol/clamp behavior.
+// Only the opt-in batched twin requires this value to cover a full chain.
 std::uint32_t TwinMaxN() {
-  static const std::uint32_t v = [] {
-    const char* e = std::getenv("GUFO_DENSE_TWIN_MAX_N");
-    if (e == nullptr || *e == '\0') return std::uint32_t{8};
-    const long x = std::strtol(e, nullptr, 10);
-    return static_cast<std::uint32_t>(x < 1 ? 1 : (x > 8 ? 8 : x));
-  }();
+  static const std::uint32_t v =
+      TwinMaxNValue(std::getenv("GUFO_DENSE_TWIN_MAX_N"));
   return v;
 }
 }  // namespace
@@ -3354,6 +3360,26 @@ std::uint32_t TwinMaxN() {
 const std::vector<DeviceLayer>& Executor::PassLayers(std::uint32_t n) const {
   if (!model_->has_twin()) return model_->layers();
   return (MatrixRows(n) || n > TwinMaxN()) ? model_->layers() : model_->twin_layers();
+}
+
+const std::vector<DeviceLayer>& Executor::BatchPassLayers(
+    std::uint32_t rows) const {
+  const bool twin =
+      BatchUsesTwin(model_->has_twin(), TwinBatchEnabled(), prefill_phase);
+  if (model_->has_twin()) {
+    const unsigned copy = twin ? 1u : 0u;
+    twin_batch_passes_[copy].fetch_add(1, std::memory_order_relaxed);
+    twin_batch_rows_[copy].fetch_add(rows, std::memory_order_relaxed);
+    if (!prefill_phase && !twin)
+      twin_batch_mixed_.fetch_add(1, std::memory_order_relaxed);
+    const auto total = twin_batch_passes_[0].load(std::memory_order_relaxed) +
+                       twin_batch_passes_[1].load(std::memory_order_relaxed);
+    const char* trace = std::getenv("GUFO_DENSE_TWIN_TRACE");
+    if (total == 1 || (total & 0x3FF) == 0 ||
+        (trace != nullptr && trace[0] == '1' && trace[1] == '\0'))
+      PrintTwinCounters("batch", twin ? "4bit" : "8bit", rows);
+  }
+  return twin ? model_->twin_layers() : model_->layers();
 }
 
 bool Executor::ShadowCompare(const DeviceTensor& w, const Q8Input& q, const float* out, std::string* error_msg) const {
@@ -3406,7 +3432,23 @@ void Executor::PrintShadowStats() const {
   }
 }
 
+void Executor::PrintBatchDraftCounters(const char* tag) const {
+  if (!batch_draft_head_)
+    return;
+  std::fprintf(stderr, "[batchdraft] %s batched projection steps / rows:", tag);
+  for (unsigned i = 0; i < batch_draft_steps_.size(); ++i) {
+    std::fprintf(stderr, " %s=%llu/%llu",
+                 BatchDraftHeadName(static_cast<BatchDraftHead>(i)),
+                 static_cast<unsigned long long>(
+                     batch_draft_steps_[i].load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(
+                     batch_draft_rows_[i].load(std::memory_order_relaxed)));
+  }
+  std::fprintf(stderr, "\n");
+}
+
 void Executor::PrintDraftOutCounters(const char* tag) const {
+  PrintBatchDraftCounters(tag);
   std::fprintf(stderr, "[draftout] %s draft steps: 4-bit copy=%llu 8-bit trunk head=%llu (8-bit must stay 0 when the copy is armed; verify / trunk logits always read the 8-bit head)\n", tag,
                static_cast<unsigned long long>(draft_out_steps_[1].load(std::memory_order_relaxed)), static_cast<unsigned long long>(draft_out_steps_[0].load(std::memory_order_relaxed)));
 }
@@ -3416,6 +3458,21 @@ void Executor::PrintTwinCounters(const char* tag, const char* copy, std::uint32_
   std::fprintf(stderr,
                "[twin] %s copy=%s n=%u passes_total=%llu | 4bit decode=%llu verify=%llu wide=%llu (wide must stay 0) | 8bit decode=%llu verify=%llu (both must stay 0) wide=%llu | iq4_dense_launches=%llu\n", tag, copy, n,
                static_cast<unsigned long long>(twin_total_.load(std::memory_order_relaxed)), v(3), v(4), v(5), v(0), v(1), v(2), qfn_mmq_iq4_dense_launch_count());
+  if (!TwinBatchEnabled()) return;
+  const auto bp = [&](unsigned i) {
+    return static_cast<unsigned long long>(
+        twin_batch_passes_[i].load(std::memory_order_relaxed));
+  };
+  const auto br = [&](unsigned i) {
+    return static_cast<unsigned long long>(
+        twin_batch_rows_[i].load(std::memory_order_relaxed));
+  };
+  std::fprintf(stderr,
+               "[twin] batch 4bit_passes=%llu 8bit_passes=%llu 4bit_rows=%llu "
+               "8bit_rows=%llu armed_decode_8bit=%llu (must stay 0)\n",
+               bp(1), bp(0), br(1), br(0),
+               static_cast<unsigned long long>(
+                   twin_batch_mixed_.load(std::memory_order_relaxed)));
 }
 
 void Executor::CountTwinPass(std::uint32_t n) const {

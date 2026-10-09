@@ -17,6 +17,7 @@ namespace gufo::server {
 // Keep this catalog explicit: the source-completeness test rejects newly read
 // variables until their diagnostic meaning has been reviewed.
 inline constexpr const char* kDebugSettingsEnvironment[] = {
+    "GUFO_BATCH_DRAFT_HEAD",
     "GUFO_DEBUG_HOOKS",
     "GUFO_THINK_EOG_GUARD",
     "GUFO_EOG_BOUNDARY",
@@ -56,10 +57,13 @@ inline constexpr const char* kDebugSettingsEnvironment[] = {
     "GUFO_DISK_EVICT_SKIP_TOKENS",
     "GUFO_DISK_EVICT_DOMINATED",
     "GUFO_DENSE_TWIN_MODEL",
+    "GUFO_DENSE_TWIN_BATCH",
     "GUFO_DENSE_TWIN_MAX_N",
     "GUFO_DENSE_TWIN_SHADOW",
     "GUFO_DENSE_TWIN_ALLOW_Q8",
     "GUFO_DENSE_TWIN_TRACE",
+    "GUFO_IQ4_WIDE_VARIANT",
+    "GUFO_IQ4_WMMA_WAVES",
     "GUFO_DRAFT_OUT_MODEL",
     "GUFO_PREFILL_FORWARD_TOKENS",
     "GUFO_DISPATCH_TELEMETRY",
