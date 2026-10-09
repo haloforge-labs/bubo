@@ -377,11 +377,102 @@ void CheckSurvivalFloor() {
   Require(stable >= 8, "survival did not recover after acceptance returned");
 }
 
+void CheckDraftHeadSwitch() {
+  qfn::DraftHeadSwitchConfig config;
+  Require(qfn::ParseDraftHeadSwitch("", &config) && config.enter == 2 &&
+              config.window == 16 && config.leave == 64,
+          "empty setting changed the defaults");
+  Require(qfn::ParseDraftHeadSwitch("1,1,1", &config) && config.enter == 1 &&
+              config.window == 1 && config.leave == 1,
+          "minimal setting rejected");
+  Require(qfn::ParseDraftHeadSwitch("3,64,200", &config) &&
+              config.enter == 3 && config.window == 64 && config.leave == 200,
+          "64-token window rejected");
+  for (const char* bad : {"0,16,64", "17,16,64", "2,65,64", "2,16,0", "2,16",
+                          "2,16,64,1", ",16,64", "2,,64", "2,16,", "a,16,64",
+                          "2 ,16,64", "-1,16,64", "2,16,9999999999"}) {
+    qfn::DraftHeadSwitchConfig kept;
+    Require(!qfn::ParseDraftHeadSwitch(bad, &kept) && kept.enter == 2 &&
+                kept.window == 16 && kept.leave == 64,
+            "malformed GUFO_DRAFT_VOCAB_AUTO accepted or partially applied");
+  }
+
+  qfn::DraftHeadSwitch head;  // enter 2 of 16, leave after 64
+  for (int i = 0; i < 100; ++i)
+    Require(!head.Observe(true) && !head.full(), "latin output switched");
+  // A lone stray token (an accented name, an emoji) does not switch, and it
+  // ages out of the window.
+  Require(!head.Observe(false) && !head.full(), "one stray token switched");
+  for (int i = 0; i < 15; ++i)
+    Require(!head.Observe(true), "latin after a stray token switched");
+  Require(!head.Observe(false) && !head.full(),
+          "a stray token outside the window was still counted");
+  // Two non-latin tokens inside the window switch on the second one.
+  for (int i = 0; i < 14; ++i)
+    (void)head.Observe(true);
+  Require(head.Observe(false) && head.full() && head.to_full() == 1,
+          "two of the last 16 did not switch to full");
+  // Full mode: latin runs shorter than 64 keep it; 64 in a row leave.
+  for (int i = 0; i < 63; ++i)
+    Require(!head.Observe(true) && head.full(), "left full mode early");
+  Require(!head.Observe(false) && head.full(), "non-latin left full mode");
+  for (int i = 0; i < 63; ++i)
+    Require(!head.Observe(true), "latin run did not restart");
+  Require(head.Observe(true) && !head.full() && head.to_latin() == 1,
+          "64 latin tokens did not return to latin");
+  // Back on latin the window starts empty: one token cannot re-enter.
+  Require(!head.Observe(false) && !head.full(), "stale window re-entered");
+  Require(head.Observe(false) && head.full() && head.to_full() == 2,
+          "second switch to full missed");
+  // Alternating script: every second token non-latin stays in full.
+  for (int i = 0; i < 200; ++i)
+    Require(!head.Observe(i % 2 == 0), "alternating output flipped modes");
+  Require(head.full(), "alternating output left full mode");
+  head.Reset();
+  Require(!head.full() && head.to_full() == 2 && head.to_latin() == 1,
+          "reset changed the switch counters or kept full mode");
+  qfn::DraftHeadSwitch eager({.enter = 1, .window = 1, .leave = 1});
+  Require(eager.Observe(false) && eager.full() && eager.Observe(true) &&
+              !eager.full(),
+          "1,1,1 setting did not follow each token");
+  qfn::DraftHeadSwitch wide({.enter = 2, .window = 64, .leave = 64});
+  (void)wide.Observe(false);
+  for (int i = 0; i < 62; ++i)
+    (void)wide.Observe(true);
+  Require(wide.Observe(false) && wide.full(),
+          "64-token window lost its oldest token");
+
+  // Graph key: the latin / full (non-auto) keys are the pre-switch layout,
+  // and the full-head bit gives an auto session's full mode its own graph.
+  const auto old_key = [](std::uint32_t n, bool row, bool token,
+                          bool candidates, bool sparse, bool kv_only) {
+    return static_cast<std::uint64_t>(n) |
+           (static_cast<std::uint64_t>(row) << 32) | (std::uint64_t{1} << 40) |
+           (std::uint64_t{token} << 41) | (std::uint64_t{candidates} << 43) |
+           (std::uint64_t{sparse} << 44) | (std::uint64_t{kv_only} << 45);
+  };
+  for (std::uint32_t n = 1; n <= 8; ++n) {
+    for (unsigned bits = 0; bits < 32; ++bits) {
+      const bool row = bits & 1, token = bits & 2, candidates = bits & 4,
+                 sparse = bits & 8, kv_only = bits & 16;
+      const auto latin =
+          qfn::MtpGraphKey(n, row, token, candidates, sparse, kv_only, false);
+      const auto full =
+          qfn::MtpGraphKey(n, row, token, candidates, sparse, kv_only, true);
+      Require(latin == old_key(n, row, token, candidates, sparse, kv_only),
+              "graph key changed for latin / full sessions");
+      Require(full != latin && (full ^ latin) == (std::uint64_t{1} << 46),
+              "full-head graph key does not differ in its own bit");
+    }
+  }
+}
+
 int main() {
   try {
     CheckVerificationBoundaries();
     CheckLengthController();
     CheckSurvivalFloor();
+    CheckDraftHeadSwitch();
     CheckCalibratedCosts();
     CheckBatchProfitability();
     CheckCompactProposals();

@@ -706,8 +706,9 @@ void PrintServeHelp(std::string_view program_name,
         "Speculative", &mtp_policy);
     parser.AddOption(
         "", "--mtp-draft-vocab", "VOCAB",
-        "Qwen3.8-Flash-Next draft head vocabulary: full, or latin (special and "
-        "ASCII/Latin-script text tokens; half the output head per draft step) "
+        "Qwen3.8-Flash-Next draft head vocabulary: full, latin (special and "
+        "ASCII/Latin-script text tokens; half the output head per draft step), "
+        "or auto (latin until the output leaves that set, then full) "
         "(default: full)",
         "Speculative", &mtp_draft_vocab);
     parser.AddFlag(
@@ -1272,8 +1273,9 @@ int RunServe(std::span<const char* const> args) {
         "Speculative", &mtp_policy);
     llm_parser.AddOption(
         "", "--mtp-draft-vocab", "VOCAB",
-        "Qwen3.8-Flash-Next draft head vocabulary: full, or latin (special and "
-        "ASCII/Latin-script text tokens; half the output head per draft step) "
+        "Qwen3.8-Flash-Next draft head vocabulary: full, latin (special and "
+        "ASCII/Latin-script text tokens; half the output head per draft step), "
+        "or auto (latin until the output leaves that set, then full) "
         "(default: full)",
         "Speculative", &mtp_draft_vocab);
     llm_parser.AddFlag(
@@ -1446,13 +1448,15 @@ int RunServe(std::span<const char* const> args) {
       return 2;
     }
     if ((mtp_policy != "length" && mtp_policy != "survival") ||
-        (mtp_draft_vocab != "full" && mtp_draft_vocab != "latin")) {
+        (mtp_draft_vocab != "full" && mtp_draft_vocab != "latin" &&
+         mtp_draft_vocab != "auto")) {
       std::cerr << "Error: --mtp-policy is length or survival, "
-                   "--mtp-draft-vocab is full or latin\n";
+                   "--mtp-draft-vocab is full, latin or auto\n";
       return 2;
     }
     speculative_config.mtp_survival = mtp_policy == "survival";
     speculative_config.mtp_latin_draft_vocabulary = mtp_draft_vocab == "latin";
+    speculative_config.mtp_auto_draft_vocabulary = mtp_draft_vocab == "auto";
     speculative_config.prompt_lookup = prompt_lookup;
     std::string err;
     ModelLoadLog load_log("text", model);

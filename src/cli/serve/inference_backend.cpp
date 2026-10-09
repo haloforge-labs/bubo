@@ -2461,7 +2461,9 @@ public:
     mtp["prompt_lookup"] = options.prompt_lookup;
     mtp["draft_vocabulary"] =
         options.draft_vocabulary == models::qwen38_flash_next::DraftVocabulary::kLatinText
-            ? "latin_text" : "full";
+            ? "latin_text"
+        : options.draft_vocabulary == models::qwen38_flash_next::DraftVocabulary::kAuto
+            ? "auto" : "full";
     settings["mtp_policy"] = std::move(mtp);
     auto suppressed = json::Value::array();
     for (const auto token : suppress_tokens_)
@@ -3595,7 +3597,9 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
             .mtp_survival = speculative_config.mtp_survival,
             .prompt_lookup = speculative_config.prompt_lookup,
             .draft_vocabulary =
-                speculative_config.mtp_latin_draft_vocabulary
+                speculative_config.mtp_auto_draft_vocabulary
+                    ? models::qwen38_flash_next::DraftVocabulary::kAuto
+                : speculative_config.mtp_latin_draft_vocabulary
                     ? models::qwen38_flash_next::DraftVocabulary::kLatinText
                     : models::qwen38_flash_next::DraftVocabulary::kFull,
         },

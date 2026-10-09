@@ -265,8 +265,30 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
           : 1;
   exec.max_speculative = exec.max_logit_rows;
   if (m->mtp_weights_ &&
-      options.draft_vocabulary == DraftVocabulary::kLatinText) {
+      (options.draft_vocabulary == DraftVocabulary::kLatinText ||
+       options.draft_vocabulary == DraftVocabulary::kAuto)) {
     exec.draft_vocab = LatinTextVocabulary(*m->tokenizer_);
+  }
+  if (m->mtp_weights_ && options.draft_vocabulary == DraftVocabulary::kAuto) {
+    const char* e = std::getenv("GUFO_DRAFT_VOCAB_AUTO");
+    if (!ParseDraftHeadSwitch(e != nullptr ? e : "",
+                              &m->head_switch_config_)) {
+      AssignError(error_msg,
+                  "GUFO_DRAFT_VOCAB_AUTO must be enter,window,leave with "
+                  "1 <= enter <= window <= 64 and leave >= 1");
+      return nullptr;
+    }
+    m->latin_draft_.assign(m->VocabSize(), 0);
+    for (const std::int32_t id : exec.draft_vocab) {
+      if (id >= 0 && static_cast<std::size_t>(id) < m->latin_draft_.size())
+        m->latin_draft_[static_cast<std::size_t>(id)] = 1;
+    }
+    std::fprintf(stderr,
+                 "qwen38_flash_next: draft vocabulary auto (latin head until "
+                 "%u of the last %u committed tokens leave the latin set; "
+                 "back after %u latin tokens)\n",
+                 m->head_switch_config_.enter, m->head_switch_config_.window,
+                 m->head_switch_config_.leave);
   }
   m->executor_ =
       rocm::Executor::Create(*m->device_, m->ngram_.get(), exec, error_msg);
@@ -410,8 +432,41 @@ Session::Session(std::shared_ptr<Model> model,
     : model_(std::move(model)),
       session_(std::move(session)),
       draft_length_(model_->options_.max_draft_tokens,
-                    model_->DecodeConcurrency()) {
+                    model_->DecodeConcurrency()),
+      head_switch_(model_->head_switch_config_) {
   logits_.resize(model_->VocabSize());
+}
+
+void Session::UpdateDraftHead() {
+  if (model_->latin_draft_.empty() || !MtpEnabled())
+    return;
+  head_scanned_ = std::min(head_scanned_, tokens_.size());
+  for (; head_scanned_ < tokens_.size(); ++head_scanned_) {
+    const auto token = static_cast<std::size_t>(tokens_[head_scanned_]);
+    const bool latin =
+        token < model_->latin_draft_.size() && model_->latin_draft_[token] != 0;
+    if (!head_switch_.Observe(latin))
+      continue;
+    // The length history belongs to the other head (CJK under the latin head
+    // accepts ~3 %): start the new head from the optimistic prior.
+    draft_length_.Reset();
+    (head_switch_.full() ? stats_.head_to_full : stats_.head_to_latin) += 1;
+    std::fprintf(stderr,
+                 "qwen38_flash_next: DRAFT_VOCAB_AUTO head=%s position=%zu "
+                 "switches_to_full=%llu switches_to_latin=%llu "
+                 "full_cycles=%llu full_drafted=%llu full_accepted=%llu "
+                 "cycles=%llu drafted=%llu accepted=%llu\n",
+                 head_switch_.full() ? "full" : "latin", head_scanned_ + 1,
+                 static_cast<unsigned long long>(head_switch_.to_full()),
+                 static_cast<unsigned long long>(head_switch_.to_latin()),
+                 static_cast<unsigned long long>(stats_.full_head_cycles),
+                 static_cast<unsigned long long>(stats_.full_head_drafted),
+                 static_cast<unsigned long long>(stats_.full_head_accepted),
+                 static_cast<unsigned long long>(stats_.cycles),
+                 static_cast<unsigned long long>(stats_.drafted),
+                 static_cast<unsigned long long>(stats_.accepted));
+  }
+  model_->executor_->SetDraftHeadFull(*session_, head_switch_.full());
 }
 
 Session::~Session() = default;
@@ -480,6 +535,8 @@ void Session::Reset() {
   lookup_.Clear();
   hidden_base_ = 0;
   draft_length_.Reset();
+  head_switch_.Reset();
+  head_scanned_ = 0;
   model_->executor_->MtpRewind(*session_, 0);
   valid_ = true;
 }
@@ -685,6 +742,10 @@ bool Session::RestoreSnapshotImpl(std::span<const std::uint8_t> payload,
     return false;
   }
   tokens_ = std::move(tokens);
+  // The snapshot does not carry the draft-head mode: a restored session
+  // starts on the latin head and switches on its own output.
+  head_switch_.Reset();
+  head_scanned_ = tokens_.size();
   lookup_.Clear();
   logits_ = std::move(logits);
   anchor_candidates_valid_ = false;
@@ -838,6 +899,7 @@ bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
         tokens_.size() + n -
         std::min<std::size_t>(kept, exec.max_speculative()));
     tokens_.insert(tokens_.end(), chunk.begin(), chunk.end());
+    head_scanned_ = tokens_.size();  // prompt: never decides the draft head
     if (capture) {
       const auto started = std::chrono::steady_clock::now();
       if constexpr (CaptureStarted)
@@ -934,7 +996,11 @@ bool Session::Evaluate(std::int32_t token, std::string* error_msg) {
     return false;
   }
   valid_ = false;
+  // An evaluated token is committed output (runner Advance, batch fallback):
+  // unlike a prompt Feed it counts for DraftVocabulary::kAuto.
+  const std::size_t scanned = head_scanned_;
   const bool ok = Feed(std::span<const std::int32_t>(&token, 1), error_msg);
+  head_scanned_ = scanned;
   valid_ = ok;
   return ok;
 }
@@ -978,6 +1044,7 @@ bool Session::TeacherForce(std::span<const std::int32_t> tokens,
   }
   std::copy_n(rows->data() + (n - 1) * vocab, vocab, logits_.begin());
   tokens_.insert(tokens_.end(), tokens.begin(), tokens.end());
+  head_scanned_ = tokens_.size();  // forced context: not the session's output
   valid_ = true;
   return true;
 }
@@ -991,6 +1058,8 @@ struct Session::PendingDecode {
   bool gpu_greedy{false};
   bool gpu_verification{false};
   bool collect_logprobs{false};
+  /// DraftVocabulary::kAuto: this cycle drafts with the full head.
+  bool full_head{false};
   std::optional<sampling::TokenLogprob> anchor_logprob;
   // Sampled verification reads candidate lists, so the verified rows stay on
   // the GPU; FinishDecode fetches them only for a fallback.
@@ -1124,6 +1193,10 @@ bool Session::PrepareDecode(const DecodeRequest& request,
     return stop_at_eos && model_->IsStopToken(token);
   };
   rocm::Executor& exec = *model_->executor_;
+  // DraftVocabulary::kAuto: fix this cycle's draft head from the committed
+  // output (a switch resets the length history before width is chosen).
+  UpdateDraftHead();
+  pending->full_head = head_switch_.full();
   const std::size_t room = ContextSize() - tokens_.size();
   const std::size_t cap =
       std::min<std::size_t>({max_tokens, room, exec.max_speculative()});
@@ -1470,6 +1543,11 @@ bool Session::FinishDecode(const DecodeRequest& request,
   const std::uint32_t mtp_accepted = std::min(keep - 1, mtp_drafts);
   stats_.lookup += pending.lookup;
   stats_.lookup_accepted += keep - 1 - mtp_accepted;
+  if (pending.full_head) {
+    ++stats_.full_head_cycles;
+    stats_.full_head_drafted += mtp_drafts;
+    stats_.full_head_accepted += mtp_accepted;
+  }
   // A target stop ends the request; it does not classify the remaining
   // proposals as failed predictions.
   draft_length_.Observe(mtp_accepted, result->stop ? mtp_accepted : mtp_drafts,

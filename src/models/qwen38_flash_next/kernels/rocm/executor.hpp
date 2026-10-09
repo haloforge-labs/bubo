@@ -182,6 +182,9 @@ private:
   qwen::vision::DeviceInput vision_input_;
   std::uint32_t max_context_{0};
   bool mtp_enabled_{false};
+  /// DraftVocabulary::kAuto: draft with the full head instead of the
+  /// Options::draft_vocab subset (set by Executor::SetDraftHeadFull).
+  bool draft_head_full_{false};
   std::uint32_t index_capacity_{0};  ///< power-of-two raw indexer ring rows
   std::uint32_t position_{0};
   std::vector<LinearState> linear_;
@@ -345,6 +348,13 @@ public:
   /// Projects each session's carried draft hidden state with shared weights.
   [[nodiscard]] bool MtpHeads(std::span<const MtpHeadItem> items,
                               std::string* error_msg) const;
+  /// DraftVocabulary::kAuto: this session's single-session draft steps use
+  /// the full draft head (true) or the Options::draft_vocab subset (false).
+  /// No effect without a subset, and none on the multi-session MtpHeads
+  /// branch, which drafts from the full main output head as before.
+  void SetDraftHeadFull(Session& session, bool full) const noexcept {
+    session.draft_head_full_ = full && draft_ids_ != nullptr;
+  }
   [[nodiscard]] bool MtpForward(Session& session,
                                 std::span<const std::int32_t> tokens,
                                 std::int32_t hidden_row, MtpOutput output,
@@ -530,7 +540,8 @@ private:
                 std::uint32_t rows, std::string* error) const;
   /// Selects the greedy token or compact candidates from full MTP logits.
   bool MtpHead(const DeviceMixer& head, const float* res, bool token,
-               bool candidates, std::string* error_msg) const;
+               bool candidates, std::string* error_msg,
+               bool full_head = false) const;
   /// Enqueues one trunk batch (control and token upload through logits).
   template<bool Diagnostic>
   bool ForwardBody(Session& session, std::uint32_t n, std::uint32_t n_logits,

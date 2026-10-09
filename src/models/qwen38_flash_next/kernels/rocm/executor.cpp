@@ -27,6 +27,7 @@
 #include "src/core/platform/tuning.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/trace.hpp"
+#include "src/models/qwen38_flash_next/mtp_policy.hpp"
 
 namespace gufo::models::qwen38_flash_next::rocm {
 namespace {
@@ -2975,10 +2976,12 @@ bool Executor::CopyTrunkHidden(const Session& session, std::span<float> hidden,
 }
 
 bool Executor::MtpHead(const DeviceMixer& head, const float* res, bool token,
-                       bool candidates, std::string* error_msg) const {
+                       bool candidates, std::string* error_msg,
+                       bool full_head) const {
   // A draft vocabulary scores its subset rows; selected rows map back to
-  // token ids before the host reads them.
-  const bool subset = draft_ids_ != nullptr;
+  // token ids before the host reads them. full_head (DraftVocabulary::kAuto
+  // in full mode) drafts from the whole draft head instead.
+  const bool subset = draft_ids_ != nullptr && !full_head;
   const DeviceTensor& output = subset ? draft_head_ : (model_->has_draft_out() ? model_->draft_out() : model_->output());
   if (model_->has_draft_out()) {
     const auto n = draft_out_steps_[IsTwinDenseType(output.type) ? 1 : 0].fetch_add(1, std::memory_order_relaxed) + 1;
@@ -4636,13 +4639,10 @@ bool Executor::MtpForward(Session& session,
   const bool graph = output.trace == nullptr && hidden_source == nullptr &&
                      n <= kVecBatch && pool <= graph_pool &&
                      pos + 1 >= session.VisionLayout().PrefixLength();
-  const std::uint64_t key =
-      static_cast<std::uint64_t>(n) |
-      (static_cast<std::uint64_t>(hidden_row < 0) << 32) |
-      (std::uint64_t{1} << 40) |
-      (std::uint64_t{output.token != nullptr} << 41) |
-      (std::uint64_t{output.candidates != nullptr} << 43) |
-      (std::uint64_t{sparse} << 44) | (std::uint64_t{output.kv_only} << 45);
+  const std::uint64_t key = MtpGraphKey(
+      n, hidden_row < 0, output.token != nullptr,
+      output.candidates != nullptr, sparse, output.kv_only,
+      session.draft_head_full_);
   const auto body = [&] {
     return MtpBody(session, n, pos, output.token != nullptr,
                    output.candidates != nullptr, error_msg,
@@ -4873,7 +4873,8 @@ bool Executor::MtpBody(Session& session, std::uint32_t n, std::uint32_t pos,
     return false;
   }
   return (!token && !candidates) ||
-         MtpHead(l.nextn_head, last, token, candidates, error_msg);
+         MtpHead(l.nextn_head, last, token, candidates, error_msg,
+                 session.draft_head_full_);
 }
 
 }  // namespace gufo::models::qwen38_flash_next::rocm

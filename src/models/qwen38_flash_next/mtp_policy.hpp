@@ -3,10 +3,12 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string_view>
 
 #include "src/models/qwen38_flash_next/mtp_costs.hpp"
 
@@ -292,6 +294,105 @@ private:
   if (floor && controller.Choose(budget, context) == 0)
     return 0;
   return std::min(kMaxMtpDraftTokens, budget);
+}
+
+// DraftVocabulary::kAuto: per session, draft with the latin head until the
+// COMMITTED output leaves the latin set, then with the full head. Enter full
+// when `enter` of the last `window` committed tokens are outside the latin set
+// (one stray accented name does not switch); return to latin after `leave`
+// consecutive latin tokens. Only the drafting head changes; verification uses
+// the full target head, so outputs keep the target distribution.
+struct DraftHeadSwitchConfig {
+  std::uint32_t enter{2};
+  std::uint32_t window{16};
+  std::uint32_t leave{64};
+};
+
+// GUFO_DRAFT_VOCAB_AUTO="enter,window,leave": 1 <= enter <= window <= 64,
+// leave >= 1. Empty keeps the defaults.
+[[nodiscard]] inline bool ParseDraftHeadSwitch(std::string_view text,
+                                               DraftHeadSwitchConfig* config) {
+  if (text.empty())
+    return true;
+  std::array<std::uint32_t, 3> values{};
+  std::size_t field = 0;
+  bool digit = false;
+  for (const char c : text) {
+    if (c == ',') {
+      if (!digit || ++field == values.size())
+        return false;
+      digit = false;
+    } else if (c >= '0' && c <= '9' && values[field] <= 100000) {
+      values[field] = values[field] * 10 + static_cast<std::uint32_t>(c - '0');
+      digit = true;
+    } else {
+      return false;
+    }
+  }
+  if (!digit || field != 2 || values[0] < 1 || values[0] > values[1] ||
+      values[1] > 64 || values[2] < 1)
+    return false;
+  *config = {.enter = values[0], .window = values[1], .leave = values[2]};
+  return true;
+}
+
+class DraftHeadSwitch {
+public:
+  explicit DraftHeadSwitch(DraftHeadSwitchConfig config = {}) noexcept
+      : config_(config) {}
+
+  /// One committed token; true when the mode changed.
+  bool Observe(bool latin) noexcept {
+    const std::uint64_t mask = config_.window >= 64
+                                   ? ~std::uint64_t{0}
+                                   : (std::uint64_t{1} << config_.window) - 1;
+    recent_ = ((recent_ << 1) | (latin ? 0U : 1U)) & mask;
+    if (!full_) {
+      if (static_cast<std::uint32_t>(std::popcount(recent_)) < config_.enter)
+        return false;
+      full_ = true;
+      latin_run_ = 0;
+      ++to_full_;
+      return true;
+    }
+    latin_run_ = latin ? latin_run_ + 1 : 0;
+    if (latin_run_ < config_.leave)
+      return false;
+    full_ = false;
+    recent_ = 0;
+    latin_run_ = 0;
+    ++to_latin_;
+    return true;
+  }
+  void Reset() noexcept {
+    full_ = false;
+    recent_ = 0;
+    latin_run_ = 0;
+  }
+  [[nodiscard]] bool full() const noexcept { return full_; }
+  [[nodiscard]] std::uint64_t to_full() const noexcept { return to_full_; }
+  [[nodiscard]] std::uint64_t to_latin() const noexcept { return to_latin_; }
+
+private:
+  DraftHeadSwitchConfig config_;
+  std::uint64_t recent_{0};
+  std::uint32_t latin_run_{0};
+  bool full_{false};
+  std::uint64_t to_full_{0};
+  std::uint64_t to_latin_{0};
+};
+
+// Graph-cache key of one MTP forward (Executor::MtpForward). full_head = a
+// session in kAuto drafting with the full head while a latin subset exists:
+// the head is baked into the captured graph, so it is part of the key.
+[[nodiscard]] constexpr std::uint64_t MtpGraphKey(
+    std::uint32_t n, bool hidden_row_negative, bool token, bool candidates,
+    bool sparse, bool kv_only, bool full_head) noexcept {
+  return static_cast<std::uint64_t>(n) |
+         (static_cast<std::uint64_t>(hidden_row_negative) << 32) |
+         (std::uint64_t{1} << 40) | (std::uint64_t{token} << 41) |
+         (std::uint64_t{candidates} << 43) | (std::uint64_t{sparse} << 44) |
+         (std::uint64_t{kv_only} << 45) | (std::uint64_t{full_head} << 46);
 }
 
 }  // namespace gufo::models::qwen38_flash_next

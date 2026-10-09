@@ -47,6 +47,10 @@ enum class DraftVocabulary {
   /// or ASCII with common typographic marks: about half of the vocabulary,
   /// so each draft step reads half of the output head.
   kLatinText,
+  /// Script-aware: kLatinText while the session's committed output stays in
+  /// that set, the full draft head while it leaves it (DraftHeadSwitch in
+  /// mtp_policy.hpp; GUFO_DRAFT_VOCAB_AUTO="enter,window,leave").
+  kAuto,
 };
 
 struct ModelOptions {
@@ -140,6 +144,10 @@ private:
   std::unique_ptr<rocm::Executor> executor_;
   std::shared_ptr<qwen::vision::Encoder> vision_;
   MtpBatchController batch_policy_;
+  /// DraftVocabulary::kAuto: 1 for each token id in the latin draft set (the
+  /// same list the executor's subset head is gathered from).
+  std::vector<std::uint8_t> latin_draft_;
+  DraftHeadSwitchConfig head_switch_config_;
 
   friend class Session;
 };
@@ -255,6 +263,13 @@ public:
     /// Of drafted/accepted: proposals copied from the context.
     std::uint64_t lookup{0};
     std::uint64_t lookup_accepted{0};
+    /// DraftVocabulary::kAuto: switches, and the MTP cycles / drafts /
+    /// accepted drafts produced by the full head (the rest used latin).
+    std::uint64_t head_to_full{0};
+    std::uint64_t head_to_latin{0};
+    std::uint64_t full_head_cycles{0};
+    std::uint64_t full_head_drafted{0};
+    std::uint64_t full_head_accepted{0};
   };
   [[nodiscard]] const SpeculativeStats& Statistics() const noexcept {
     return stats_;
@@ -353,6 +368,11 @@ private:
   std::vector<float> verify_logits_;
   std::uint32_t hidden_base_{0};  ///< first position whose hidden row is kept
   MtpLengthController draft_length_;
+  /// DraftVocabulary::kAuto: mode from committed output; tokens_ before
+  /// head_scanned_ are observed or are prompt / teacher-forced context.
+  DraftHeadSwitch head_switch_;
+  std::size_t head_scanned_{0};
+  void UpdateDraftHead();
   /// Index of tokens_ for ModelOptions::prompt_lookup.
   PromptLookup lookup_;
   SpeculativeStats stats_;
