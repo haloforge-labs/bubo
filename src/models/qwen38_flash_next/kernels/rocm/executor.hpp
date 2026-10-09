@@ -21,6 +21,7 @@
 #include "src/core/session_mode.hpp"
 #include "src/models/qwen/hip/ops/token.hpp"
 #include "src/models/qwen/vision/device_input.hpp"
+#include "src/models/qwen38_flash_next/batch_draft_head.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/blaslt.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
@@ -234,6 +235,8 @@ class Executor {
 public:
   struct Options {
     std::uint32_t max_batch{1};
+    /// Keep twin batch arithmetic when a configured cohort drains to one row.
+    bool multi_session_twin{false};
     /// Rows of logits (and hidden states) a Forward call may return.
     std::uint32_t max_logit_rows{1};
     /// Longest speculative batch; bounds the recurrent snapshot storage.
@@ -245,6 +248,9 @@ public:
 
   ~Executor();
   [[nodiscard]] hipStream_t stream() const noexcept { return primary_stream_; }
+  [[nodiscard]] bool UsesMultiSessionTwin() const noexcept {
+    return options_.multi_session_twin;
+  }
   Executor(const Executor&) = delete;
   Executor& operator=(const Executor&) = delete;
 
@@ -332,6 +338,13 @@ public:
     /// known trunk hidden rows is required before heads/recursive proposals.
     bool kv_only{false};
   };
+  struct DraftOutputSelection {
+    const DeviceTensor* tensor;
+    const std::int32_t* map;
+    BatchDraftHead head;
+  };
+  [[nodiscard]] DraftOutputSelection BatchDraftOutput() const;
+
   struct MtpHeadItem {
     Session* session;
     MtpOutput output;
@@ -492,7 +505,7 @@ private:
   /// prefill arithmetic. Injection rows are compact across the whole batch.
   bool HcMixBatch(const DeviceMixer& m, const float* res, bool normed,
                   float* mixed, float* inject, std::uint32_t rows,
-                  std::string* error) const;
+                  std::string* error, bool multi_session = false) const;
   void CombineBatch(float* res, const float* gamma, std::uint32_t rows) const;
   /// Residual update by the block output plus the grouped norm for the next
   /// mixer (`gamma`); wide batches write it as F16 and tiled Q8.
@@ -537,7 +550,8 @@ private:
   bool MoeExperts(const DeviceLayer& l, const float* x, float* out,
                   std::uint32_t n_tokens, std::string* error_msg) const;
   bool MoeBatch(const DeviceLayer& l, const float* x, float* out,
-                std::uint32_t rows, std::string* error) const;
+                std::uint32_t rows, std::string* error,
+                bool multi_session = false) const;
   /// Selects the greedy token or compact candidates from full MTP logits.
   bool MtpHead(const DeviceMixer& head, const float* res, bool token,
                bool candidates, std::string* error_msg,
@@ -550,27 +564,45 @@ private:
                    std::uint32_t first_layer, std::uint32_t end_layer,
                    std::string* error_msg,
                    PrefillCheckpoint* checkpoint = nullptr) const;
-  /// Decode twin: the layer table a pass of n rows reads. The 4-bit copy serves exactly the vector-path passes (!MatrixRows(n): n <= 8 outside prefill),
-  /// the 8-bit trunk serves everything else; without a twin this is model_->layers().
+  /// Decode twin: the layer table a pass of n rows reads. The 4-bit copy serves
+  /// exactly the vector-path passes (!MatrixRows(n): n <= 8 outside prefill),
+  /// the 8-bit trunk serves everything else; without a twin this is
+  /// model_->layers().
   const std::vector<DeviceLayer>& PassLayers(std::uint32_t n) const;
-  /// Per-pass counters (every Forward call, graph replays included) and their log lines; no-ops without a twin.
+  const std::vector<DeviceLayer>& BatchPassLayers(std::uint32_t rows) const;
+  /// Per-pass counters (every Forward call, graph replays included) and their
+  /// log lines; no-ops without a twin.
   void CountTwinPass(std::uint32_t n) const;
-  void PrintTwinCounters(const char* tag, const char* copy, std::uint32_t n) const;
-  /// Draft output head counters: [0] draft steps that read the 8-bit trunk head, [1] draft steps that read the 4-bit draft copy.
+  void PrintTwinCounters(const char* tag, const char* copy,
+                         std::uint32_t n) const;
+  /// Draft output head counters: [0] draft steps that read the 8-bit trunk
+  /// head, [1] draft steps that read the 4-bit draft copy.
   mutable std::array<std::atomic<std::uint64_t>, 2> draft_out_steps_{};
   void PrintDraftOutCounters(const char* tag) const;
-  /// DEBUG shadow check (GUFO_DENSE_TWIN_SHADOW): re-runs a 4-bit dense projection through the fake-quant Q8_0 copy on the same quantized activations and accumulates the difference per tensor.
+  bool batch_draft_head_{false};
+  mutable std::array<std::atomic<std::uint64_t>, 4> batch_draft_steps_{};
+  mutable std::array<std::atomic<std::uint64_t>, 4> batch_draft_rows_{};
+  void PrintBatchDraftCounters(const char* tag) const;
+  /// DEBUG shadow check (GUFO_DENSE_TWIN_SHADOW): re-runs a 4-bit dense
+  /// projection through the fake-quant Q8_0 copy on the same quantized
+  /// activations and accumulates the difference per tensor.
   struct ShadowStat {
     std::string label;
     double d2{0}, r2{0}, maxabs{0};
     std::uint64_t passes{0};
   };
-  bool ShadowCompare(const DeviceTensor& w, const Q8Input& q, const float* out, std::string* error_msg) const;
+  bool ShadowCompare(const DeviceTensor& w, const Q8Input& q, const float* out,
+                     std::string* error_msg) const;
   void PrintShadowStats() const;
   mutable std::mutex shadow_mutex_;
   mutable std::unordered_map<const void*, ShadowStat> shadow_stats_;
-  mutable std::array<std::atomic<std::uint64_t>, 6> twin_passes_{};  ///< [copy * 3 + kind], copy 0 = 8-bit, 1 = 4-bit; kind 0 decode (n = 1), 1 verify (2..8), 2 wide / prefill
+  mutable std::array<std::atomic<std::uint64_t>, 6>
+      twin_passes_{};  ///< [copy * 3 + kind], copy 0 = 8-bit, 1 = 4-bit; kind 0
+                       ///< decode (n = 1), 1 verify (2..8), 2 wide / prefill
   mutable std::atomic<std::uint64_t> twin_total_{0};
+  mutable std::array<std::atomic<std::uint64_t>, 2> twin_batch_passes_{};
+  mutable std::array<std::atomic<std::uint64_t>, 2> twin_batch_rows_{};
+  mutable std::atomic<std::uint64_t> twin_batch_mixed_{0};
   bool MtpBody(Session& session, std::uint32_t n, std::uint32_t pos, bool token,
                bool candidates, std::string* error_msg, std::uint32_t pool_grid,
                const float* hidden_source, MtpTrace* trace, bool kv_only) const;
@@ -615,8 +647,11 @@ private:
     void* x_half;   ///< activations narrowed to the weight's 16-bit type
     void* x_q8[2];  ///< Q8_1 activations of a decode batch, alternating
     void* x_q8t;    ///< tiled Q8 activations of a wide batch (W8A8 route)
-    float* shadow_out{nullptr};  ///< DEBUG shadow check output (16384 x 8 floats)
-    std::int32_t* zero_ids{nullptr};  ///< 8 zeros: expert ids of a dense 4-bit tensor run as a one-expert vector projection (decode twin only)
+    float* shadow_out{
+        nullptr};  ///< DEBUG shadow check output (16384 x 8 floats)
+    std::int32_t* zero_ids{
+        nullptr};  ///< 8 zeros: expert ids of a dense 4-bit tensor run as a
+                   ///< one-expert vector projection (decode twin only)
     float* res;
     float* xn;
     __half* xn_half;  ///< xn as F16 on the F16 mixer input route
@@ -696,10 +731,11 @@ private:
                                    std::uint32_t offset) const;
   void UseScratch(const Scratch& scratch) const;
   bool DenseBatch(const DeviceTensor& w, const float* x, float* out,
-                  std::uint32_t rows, std::string* error_msg) const;
+                  std::uint32_t rows, std::string* error_msg,
+                  bool multi_session = false) const;
   bool GatedDenseBatch(const DeviceTensor& up, const DeviceTensor& gate,
                        const float* x, float* out, std::uint32_t rows,
-                       std::string* error) const;
+                       std::string* error, bool multi_session = false) const;
   bool QuantizeBatch(const float* x, std::uint32_t rows, std::uint32_t cols,
                      std::string* error) const;
   bool AllocateBatch(std::string* error_msg) const;

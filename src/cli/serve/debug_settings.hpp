@@ -17,6 +17,7 @@ namespace gufo::server {
 // Keep this catalog explicit: the source-completeness test rejects newly read
 // variables until their diagnostic meaning has been reviewed.
 inline constexpr const char* kDebugSettingsEnvironment[] = {
+    "GUFO_BATCH_DRAFT_HEAD",
     "GUFO_DEBUG_HOOKS",
     "GUFO_THINK_EOG_GUARD",
     "GUFO_EOG_BOUNDARY",
@@ -54,6 +55,7 @@ inline constexpr const char* kDebugSettingsEnvironment[] = {
     "GUFO_SURVIVAL_FLOOR",
     "GUFO_DRAFT_VOCAB_AUTO",
     "GUFO_DENSE_TWIN_MODEL",
+    "GUFO_DENSE_TWIN_BATCH",
     "GUFO_DENSE_TWIN_MAX_N",
     "GUFO_DENSE_TWIN_SHADOW",
     "GUFO_DENSE_TWIN_ALLOW_Q8",
