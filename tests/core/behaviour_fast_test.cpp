@@ -585,6 +585,16 @@ int Dump(const char* path) {
       std::vector<float> row(256, -10);
       row[2] = 10;
       row[6] = 9;
+      if (effort == 3 && temperature == 0) {
+        // Removing the last behaviour switch changes NeedsConstraintMask's
+        // thinking exemption. Never lazify a guard's grammar evaluation.
+        b->eog_boundary = false;
+        b->eog_min_prob = b->eog_defer_p = 0;
+        b->spec_eog_stop = b->loop_breaker = b->loop_eog_close = false;
+        b->marker_bias = 0;
+        b->marker_bias_by_effort.clear();
+        row[0] = row[1] = -INFINITY;
+      }
       steps += Run(out, cases++, c, row, 24, 10);
     }
   for (const auto name :

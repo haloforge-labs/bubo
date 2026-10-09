@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cmath>
 #include <limits>
 #include <random>
@@ -1226,7 +1227,14 @@ BehaviourLogits TransformBehaviour(std::span<const float> raw,
   const auto stage=[&](std::string name,std::string reason){
     result.stages.push_back({std::move(name),std::move(reason)});
   };
-  const auto mask=[&](TokenId token){for(std::size_t i=0;i<current.size();++i)if(id(i)==token)current[i]=-std::numeric_limits<float>::infinity();};
+  const auto mask = [&](TokenId token) {
+    if (ids.empty()) {
+      if (token < current.size()) current[token] = -INFINITY;
+    } else {
+      for (std::size_t i = 0; i < current.size(); ++i)
+        if (id(i) == token) current[i] = -INFINITY;
+    }
+  };
   const auto exempt=[&](TokenId token){return b.logit_bias_enabled&&std::ranges::any_of(b.logit_bias,[&](auto v){return v.first==token;});};
   // raw top-k is independent of a device list's capacity, and identical on AR
   // and every target verification row. This subset defines the conservative
@@ -1251,6 +1259,12 @@ BehaviourLogits TransformBehaviour(std::span<const float> raw,
     denominator_ready = true;
   };
   const auto raw_probability = [&](TokenId token) {
+    if (ids.empty()) {
+      if (token >= raw.size() || !std::isfinite(raw[token])) return 0.0;
+      ensure_denominator();
+      if (sum <= 0) return 0.0;
+      return std::min(1.0, std::exp(static_cast<double>(raw[token]) - maximum) / sum);
+    }
     for (std::size_t i = 0; i < raw.size(); ++i) {
       if (id(i) == token && std::isfinite(raw[i])) {
         ensure_denominator();
@@ -1272,8 +1286,16 @@ BehaviourLogits TransformBehaviour(std::span<const float> raw,
     stage("model_suppress_tokens","gguf_model_suppressed_token_changed_choice");
   }
   if(st.thinking&&b.marker_bias!=0&&!b.marker_ids.empty()&&!st.forcing()) {
-    for(std::size_t i=0;i<current.size();++i)
-      if(Contains(b.marker_ids,id(i))) current[i]+=static_cast<float>(b.marker_bias);
+    if (ids.empty()) {
+      // The request builder creates this list from a std::set: once per token.
+      assert(std::unordered_set<TokenId>(b.marker_ids.begin(), b.marker_ids.end()).size() ==
+             b.marker_ids.size());
+      for (auto token : b.marker_ids)
+        if (token < current.size()) current[token] += static_cast<float>(b.marker_bias);
+    } else {
+      for (std::size_t i = 0; i < current.size(); ++i)
+        if (Contains(b.marker_ids, id(i))) current[i] += static_cast<float>(b.marker_bias);
+    }
     stage("marker_bias","thinking_marker_bias_changed_choice");
   }
   if(!st.thinking && !st.forcing() && !grammar_active) {
@@ -1285,10 +1307,27 @@ BehaviourLogits TransformBehaviour(std::span<const float> raw,
       stage("eog_boundary","visible_text_not_at_boundary");
     }
     if(boundary_ok&&st.boundary.deferred_stop&&!b.eog_ids.empty() &&
-       [&]{for(std::size_t i=0;i<current.size();++i)if(Contains(b.eog_ids,id(i))&&std::isfinite(current[i]))return true;return false;}()) {
-      for(std::size_t i=0;i<current.size();++i) {
-        if(!Contains(b.eog_ids,id(i)))current[i]=-INFINITY;
-
+       [&] {
+         if (ids.empty()) {
+           for (auto token : b.eog_ids)
+             if (token < current.size() && std::isfinite(current[token])) return true;
+         } else {
+           for (std::size_t i = 0; i < current.size(); ++i)
+             if (Contains(b.eog_ids, id(i)) && std::isfinite(current[i])) return true;
+         }
+         return false;
+       }()) {
+      if (ids.empty()) {
+        // Save before filling; duplicates are restored from the same original
+        // value. Non-finite EOG bits, including NaNs, survive unchanged.
+        std::vector<std::pair<TokenId, float>> saved;
+        for (auto token : b.eog_ids)
+          if (token < current.size()) saved.push_back({token, current[token]});
+        std::ranges::fill(current, -INFINITY);
+        for (auto [token, value] : saved) current[token] = value;
+      } else {
+        for (std::size_t i = 0; i < current.size(); ++i)
+          if (!Contains(b.eog_ids, id(i))) current[i] = -INFINITY;
       }
       stage("eog_defer","confident_eog_reached_visible_boundary");
     } else if(b.eog_min_prob>0) {
