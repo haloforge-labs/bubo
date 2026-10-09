@@ -507,8 +507,9 @@ int Dump(const char* path) {
             mode = 4;
             break;
           case 1:
-            row[0] = 40;
-            row[1] = 39;
+            // A pending stop forces low-ranked EOG at the visible boundary;
+            // its counterfactual instead picks token 2. Exercise taken > 0.
+            row[2] = 40;
             mode = 2;
             break;
           case 2:
@@ -611,7 +612,7 @@ int Dump(const char* path) {
               << " max_fallback=" << out.fallback_max[name] << '\n';
   }
   if (!out.fast_top || !out.residual || !out.accepted ||
-      !out.fallback_max["candidate_path"] ||
+      !out.taken_max["eog_defer"] || !out.fallback_max["candidate_path"] ||
       std::ranges::any_of(out.draft_decisions,
                           [](unsigned n) { return n == 0; }))
     throw std::runtime_error(

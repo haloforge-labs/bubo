@@ -1208,7 +1208,10 @@ bool Contains(std::span<const TokenId> ids,TokenId id) {
   return std::ranges::find(ids,id)!=ids.end();
 }
 struct BehaviourLogits {
-  struct Stage { std::string name,reason; };
+  struct Stage {
+    std::string name, reason;
+    bool counterfactual_identical{false};
+  };
   std::vector<Stage> stages;
   std::vector<float> logits;
   float temperature{0};
@@ -1224,16 +1227,22 @@ BehaviourLogits TransformBehaviour(std::span<const float> raw,
   float temperature=c.temperature;
   const auto id=[&](std::size_t i){return ids.empty()?static_cast<TokenId>(i):ids[i];};
   BehaviourLogits result;
-  const auto stage=[&](std::string name,std::string reason){
-    result.stages.push_back({std::move(name),std::move(reason)});
+  const auto stage = [&](std::string name, std::string reason, bool identical = false) {
+    result.stages.push_back({std::move(name), std::move(reason), identical});
   };
   const auto mask = [&](TokenId token) {
+    bool changed_finite = false;
+    const auto at = [&](std::size_t i) {
+      changed_finite |= std::isfinite(current[i]);
+      current[i] = -INFINITY;
+    };
     if (ids.empty()) {
-      if (token < current.size()) current[token] = -INFINITY;
+      if (token < current.size()) at(token);
     } else {
       for (std::size_t i = 0; i < current.size(); ++i)
-        if (id(i) == token) current[i] = -INFINITY;
+        if (id(i) == token) at(i);
     }
+    return changed_finite;
   };
   const auto exempt=[&](TokenId token){return b.logit_bias_enabled&&std::ranges::any_of(b.logit_bias,[&](auto v){return v.first==token;});};
   // raw top-k is independent of a device list's capacity, and identical on AR
@@ -1303,8 +1312,12 @@ BehaviourLogits TransformBehaviour(std::span<const float> raw,
     if(b.eog_boundary&&!boundary_ok) {
       if(b.eog_defer_p>0&&!st.boundary.deferred_stop)
         for(auto token:b.eog_ids)if(!exempt(token)&&raw_probability(token)>=b.eog_defer_p)result.defer=true;
-      for(auto token:b.eog_ids)if(!exempt(token))mask(token);
-      stage("eog_boundary","visible_text_not_at_boundary");
+      bool changed_finite = false;
+      for (auto token : b.eog_ids)
+        if (!exempt(token)) changed_finite |= mask(token);
+      // Removing boundary can activate eog_defer when a stop is pending.
+      stage("eog_boundary", "visible_text_not_at_boundary",
+            !changed_finite && !st.boundary.deferred_stop);
     }
     if(boundary_ok&&st.boundary.deferred_stop&&!b.eog_ids.empty() &&
        [&] {
@@ -1331,13 +1344,18 @@ BehaviourLogits TransformBehaviour(std::span<const float> raw,
       }
       stage("eog_defer","confident_eog_reached_visible_boundary");
     } else if(b.eog_min_prob>0) {
-      for(auto token:b.eog_ids)if(!exempt(token)&&raw_probability(token)<b.eog_min_prob)mask(token);
-      stage("eog_min_prob",b.eog_min_prob_exact?"raw_full_probability_below_threshold":"raw_topk_upper_bound_below_threshold");
+      bool changed_finite = false;
+      for (auto token : b.eog_ids)
+        if (!exempt(token) && raw_probability(token) < b.eog_min_prob)
+          changed_finite |= mask(token);
+      stage("eog_min_prob", b.eog_min_prob_exact ? "raw_full_probability_below_threshold" :
+            "raw_topk_upper_bound_below_threshold", !changed_finite);
     }
   }
   if(st.thinking&&b.think_eog_guard&&!st.forcing()&&!(b.loop_eog_close&&st.prefix_used)) {
-    for(auto token:b.eog_ids)mask(token);
-    stage("think_eog_guard","eog_inside_open_think");
+    bool changed_finite = false;
+    for (auto token : b.eog_ids) changed_finite |= mask(token);
+    stage("think_eog_guard", "eog_inside_open_think", !changed_finite);
   }
   if(b.loop_breaker&&st.loop.nudging()&&!c.constraint&&!b.loop_exempt&&!st.forcing()) {
     temperature=c.temperature+0.5F;
@@ -1506,6 +1524,19 @@ SamplingDistribution SamplerState::BehaviourDistributionFor(
     // with precisely this intervention removed, with every other gate/bias
     // retained. An earlier intermediate choice does not establish engagement.
     for(auto& stage:metadata->stages) {
+      const bool identical = std::ranges::any_of(transforms.stages, [&](const auto& transform) {
+        return transform.name == stage.name && transform.counterfactual_identical;
+      });
+      if (identical && (stage.name != "think_eog_guard" || !config_.constraint)) {
+        // Finite support and every subsequent operation are unchanged. Keep
+        // the stage and its exact before/after distributions for observation.
+        stage.before = current;
+        stage.before.behaviour_.reset();
+        stage.before_random = metadata->random;
+        stage.after = current;
+        stage.after_random = metadata->random;
+        continue;
+      }
       auto variant=BehaviourWithoutIntervention(stage.name);
       try {
         stage.before=variant.BehaviourDistributionFor(logits,ids,vocab);
