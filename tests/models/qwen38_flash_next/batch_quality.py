@@ -186,6 +186,28 @@ def run_arm(args):
         raise ValueError("quality arm failed; inspect " + str(out) + ".log")
 
 
+INT_FIELDS = ("c", "K", "N", "position", "target", "vocab", "offset")
+
+
+def as_int(value):
+    # The probe's JSON writer emits the shortest number form, so an integral
+    # double such as token 100000 arrives as 1e+05 (float). Accept only exact
+    # integral values.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("non-numeric integer field")
+    if isinstance(value, float) and (not math.isfinite(value) or value != int(value)):
+        raise ValueError("non-integral integer field")
+    return int(value)
+
+
+def normalize_row(r):
+    for k in INT_FIELDS:
+        if k in r:
+            r[k] = as_int(r[k])
+    r["top"] = [[as_int(i), v] for i, v in r["top"]]
+    return r
+
+
 class Dump:
     def __init__(self, prefix):
         self.prefix = str(prefix)
@@ -197,7 +219,7 @@ class Dump:
         self.meta = meta
         self.rows = {}
         for line in Path(self.prefix + ".jsonl").read_text().splitlines():
-            r = json.loads(line)
+            r = normalize_row(json.loads(line))
             key = (r["session"], r["position"])
             if key in self.rows or r["manifest_sha256"] != meta["manifest_sha256"]:
                 raise ValueError("duplicate position or manifest mismatch")
@@ -402,7 +424,7 @@ def score(args):
 
 def smoke(gfle, compact):
     """Compare existing gufo bench --logit-eval GFLE rows to c1 probe rows."""
-    rows = [json.loads(x) for x in Path(compact).read_text().splitlines()]
+    rows = [normalize_row(json.loads(x)) for x in Path(compact).read_text().splitlines()]
     by_position = {r["position"]: r for r in rows}
     count = 0
     with open(gfle, "rb") as f:

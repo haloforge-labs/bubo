@@ -114,5 +114,46 @@ class QualityTest(unittest.TestCase):
             q.expected_rows(manifest, 2)
 
 
+    def test_dump_reads_shortest_form_integers(self):
+        # The probe's JSON writer prints the integral double 100000 as 1e+05 (2026-10-09:
+        # the c2 Q8 dump had two such top ids and the scorer crashed). A tiny synthetic
+        # dump with that spelling must read, and a non-integral id must be rejected.
+        import array
+        import hashlib
+        import json
+        import os
+        import tempfile
+        vocab = 100001
+        values = array.array("f", [float(-(i % 97)) for i in range(vocab)])
+        values[100000] = 7.0
+        top = [100000] + list(range(511))
+        top_text = ",".join("[%s,%r]" % ("1e+05" if i == 100000 else str(i), float(values[i])) for i in top)
+        line = ('{"arm":"q8","c":2,"session":"s","manifest_sha256":"m","K":1,"N":2,"position":1,'
+                '"lse":%r,"target":1e+05,"target_logit":%r,"vocab":%d,"offset":0,"top":[%s]}'
+                % (10.0, float(values[100000]), vocab, top_text))
+        with tempfile.TemporaryDirectory() as d:
+            prefix = os.path.join(d, "dump")
+            with open(prefix + ".jsonl", "w", encoding="utf-8", newline="\n") as f:
+                f.write(line + "\n")
+            with open(prefix + ".f32", "wb") as f:
+                f.write(values.tobytes())
+            digest = lambda p: hashlib.sha256(open(p, "rb").read()).hexdigest()
+            with open(prefix + ".run.json", "w", encoding="utf-8") as f:
+                json.dump({"complete": True, "manifest_sha256": "m", "compact_sha256": digest(prefix + ".jsonl"),
+                           "full_sha256": digest(prefix + ".f32")}, f)
+            dump = q.Dump(prefix)
+            r, logits, _ = dump.read(("s", 1))
+            dump.close()
+            self.assertEqual((r["target"], r["top"][0][0]), (100000, 100000))
+            self.assertEqual(logits[r["target"]], r["target_logit"])
+            with open(prefix + ".jsonl", "w", encoding="utf-8", newline="\n") as f:
+                f.write(line.replace("[1e+05,", "[100000.5,", 1) + "\n")
+            with open(prefix + ".run.json", "w", encoding="utf-8") as f:
+                json.dump({"complete": True, "manifest_sha256": "m", "compact_sha256": digest(prefix + ".jsonl"),
+                           "full_sha256": digest(prefix + ".f32")}, f)
+            with self.assertRaises(ValueError):
+                q.Dump(prefix)
+
+
 if __name__ == "__main__":
     unittest.main()
