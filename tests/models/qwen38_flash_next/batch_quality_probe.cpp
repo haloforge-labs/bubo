@@ -100,13 +100,26 @@ int Run(const std::unordered_map<std::string, std::string>& args) {
   } else {
     Require(!Env("GUFO_DENSE_TWIN_MODEL").empty(),
             "twin arm needs a twin model");
+    // GUFO_QUALITY_V0_CONTROL=1 (diagnostic, 2026-10-09): the same multi-session
+    // batch path with the dp4a variant 0 (row-identical to narrow), to separate
+    // the multi-session path from the WMMA kernel. Not a gate arm.
+    const bool v0_control = Env("GUFO_QUALITY_V0_CONTROL") == "1";
     if (!narrow && c > 1)
       Require(Env("GUFO_DENSE_TWIN_BATCH") == "1" &&
-                  Env("GUFO_IQ4_WIDE_VARIANT") == "4",
-              "WMMA requires batch=1 and variant=4");
+                  (Env("GUFO_IQ4_WIDE_VARIANT") == "4" ||
+                   (v0_control && Env("GUFO_IQ4_WIDE_VARIANT") == "0")),
+              "WMMA requires batch=1 and variant=4 (variant=0 only with "
+              "GUFO_QUALITY_V0_CONTROL=1)");
     if (narrow || c == 1)
       Require(Env("GUFO_DENSE_TWIN_BATCH") != "1",
               "c1 narrow must disable batch");
+  }
+  if (args.contains("--validate-only")) {
+    std::cout << "VALIDATE OK arm=" << arm << " c=" << c << " batch="
+              << Env("GUFO_DENSE_TWIN_BATCH") << " variant="
+              << Env("GUFO_IQ4_WIDE_VARIANT") << " v0_control="
+              << Env("GUFO_QUALITY_V0_CONTROL") << "\n";
+    return 0;
   }
   qfn::ModelOptions options;
   options.max_context =
