@@ -1207,13 +1207,42 @@ namespace {
 bool Contains(std::span<const TokenId> ids,TokenId id) {
   return std::ranges::find(ids,id)!=ids.end();
 }
-struct BehaviourLogits {
+// A lease owns its vector until all users of that row are finished. Nested
+// counterfactual / candidate evaluations borrow separate buffers. No scratch
+// is copied with a sampler or shared between threads or speculative states.
+struct BehaviourScratch {
+  static std::vector<std::vector<float>>& Pool() {
+    thread_local std::vector<std::vector<float>> pool;
+    return pool;
+  }
+  std::vector<float> logits;
+  BehaviourScratch() {
+    auto& pool = Pool();
+    if (!pool.empty()) {
+      logits = std::move(pool.back());
+      pool.pop_back();
+    }
+  }
+  BehaviourScratch(const BehaviourScratch&) = delete;
+  BehaviourScratch& operator=(const BehaviourScratch&) = delete;
+  BehaviourScratch(BehaviourScratch&&) noexcept = default;
+  BehaviourScratch& operator=(BehaviourScratch&& other) noexcept {
+    logits.swap(other.logits);
+    return *this;
+  }
+  ~BehaviourScratch() {
+    if (logits.capacity() == 0) return;
+    logits.clear();
+    // Recycling must never change exception behaviour (including unwinding).
+    try { Pool().push_back(std::move(logits)); } catch (...) {}
+  }
+};
+struct BehaviourLogits : BehaviourScratch {
   struct Stage {
     std::string name, reason;
     bool counterfactual_identical{false};
   };
   std::vector<Stage> stages;
-  std::vector<float> logits;
   float temperature{0};
   bool defer{false};
 };
@@ -1223,10 +1252,11 @@ BehaviourLogits TransformBehaviour(std::span<const float> raw,
     std::span<const TokenId> ids,const SamplingConfig& c,
     const BehaviourState& st,bool grammar_active) {
   const auto& b=*c.behaviour;
-  std::vector<float> current(raw.begin(),raw.end());
+  BehaviourLogits result;
+  auto& current = result.logits;
+  current.assign(raw.begin(), raw.end());
   float temperature=c.temperature;
   const auto id=[&](std::size_t i){return ids.empty()?static_cast<TokenId>(i):ids[i];};
-  BehaviourLogits result;
   const auto stage = [&](std::string name, std::string reason, bool identical = false) {
     result.stages.push_back({std::move(name), std::move(reason), identical});
   };
@@ -1248,7 +1278,8 @@ BehaviourLogits TransformBehaviour(std::span<const float> raw,
   // raw top-k is independent of a device list's capacity, and identical on AR
   // and every target verification row. This subset defines the conservative
   // upper-bound policy; exact mode uses the complete raw vocabulary instead.
-  std::vector<float> denom;
+  BehaviourScratch denominator;
+  auto& denom = denominator.logits;
   bool denominator_ready = false;
   double maximum = -INFINITY, sum = 0;
   // Nothing else consumes this raw denominator. Preserve its arithmetic and
@@ -1366,7 +1397,7 @@ BehaviourLogits TransformBehaviour(std::span<const float> raw,
     for(std::size_t i=0;i<current.size();++i)current[i]=id(i)==forced?0.0F:-INFINITY;
     stage(st.force_reason,"forced_transition_token_"+std::to_string(forced));
   }
-  result.logits=std::move(current);result.temperature=temperature;
+  result.temperature=temperature;
   return result;
 }
 }
@@ -1375,13 +1406,13 @@ TokenLogprob SamplerState::RawLogprobs(std::span<const float> logits,
   if (logits.empty() || token >= logits.size() || top_n > 20)
     throw std::invalid_argument("invalid logprob vocabulary or top_logprobs");
   auto native = WithoutBehaviour();
-  std::vector<float> transformed;
+  std::optional<BehaviourLogits> transformed;
   if (BehaviourEnabled()) {
     if (behaviour_state_.thinking)
       native.config_.constraint.reset();
-    transformed = TransformBehaviour(logits, {}, config_, behaviour_state_,
-                                    NeedsConstraintMask()).logits;
-    logits = transformed;
+    transformed.emplace(TransformBehaviour(logits, {}, config_, behaviour_state_,
+                                           NeedsConstraintMask()));
+    logits = transformed->logits;
   }
   const auto mask = native.config_.constraint
                         ? native.config_.constraint->Allowed(constraint_state_)
