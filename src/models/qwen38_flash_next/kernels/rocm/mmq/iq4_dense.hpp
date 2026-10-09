@@ -217,14 +217,176 @@ static void launch_iq4_dense_batch(const void* weights, const block_q8_1* input,
                                           input_stride, n_valid, stream);
 }
 
+// Copy packed weights exactly once from global memory for all token groups.
+// The padded LDS row pitch is word-aligned even for the 18-byte NL blocks.
+// memcpy permits NL's two-byte global alignment and the final half-word tail.
+template<ggml_type type, int row_waves, int groups>
+__device__ __forceinline__ void stage_iq4_wide_weights(
+    unsigned int* dst, const void* weights, int tile, int blocks, int rows) {
+  constexpr int qi = ggml_hip_type_traits<type>::qi;
+  constexpr int vdr = type == GGML_TYPE_IQ4_XS ? VDR_IQ4_XS_Q8_1_MMVQ : VDR_IQ4_NL_Q8_1_MMVQ;
+  constexpr int step = vdr * 32 / qi;
+  constexpr int bytes = type == GGML_TYPE_IQ4_XS ? sizeof(block_iq4_xs) : sizeof(block_iq4_nl);
+  constexpr int words = step * bytes / 4;
+  constexpr int block_rows = 2 * row_waves;
+  for (int i = threadIdx.x; i < block_rows * words;
+       i += 32 * row_waves * groups) {
+    const int r = i / words;
+    const int pos = (i % words) * 4;
+    const int row = blockIdx.x * block_rows + r;
+    const int available = min(step, blocks - tile) * bytes;
+    unsigned int value = 0;
+    if (row < rows && pos < available) {
+      const auto* src = static_cast<const unsigned char*>(weights) +
+          (static_cast<size_t>(row) * blocks + tile) * bytes + pos;
+      if (pos + 4 <= available) {
+        __builtin_memcpy(&value, src, 4);
+      } else {
+        unsigned short tail;
+        __builtin_memcpy(&tail, src, 2);
+        value = tail;
+      }
+    }
+    dst[i] = value;
+  }
+}
+
+// Eight tokens per wave, two output rows per wave: only sixteen accumulators.
+// Every token group decodes the shared packed fragment; global weight reads
+// are owned by the cooperative loader, never repeated by token groups.
+// Activations remain in the cache hierarchy, eliminating N*K LDS re-staging.
+template<ggml_type type, int groups, int row_waves, bool double_buffer>
+__launch_bounds__(32 * groups * row_waves)
+static __global__ void mul_mat_vec_iq4_wide(
+    const void* __restrict__ weights, const block_q8_1* __restrict__ input,
+    float* __restrict__ output, int k, int rows, int input_stride, int n_valid) {
+  constexpr int qk = ggml_hip_type_traits<type>::qk;
+  constexpr int qi = ggml_hip_type_traits<type>::qi;
+  constexpr int vdr = type == GGML_TYPE_IQ4_XS ? VDR_IQ4_XS_Q8_1_MMVQ : VDR_IQ4_NL_Q8_1_MMVQ;
+  constexpr int step = vdr * 32 / qi;
+  constexpr int bytes = type == GGML_TYPE_IQ4_XS ? sizeof(block_iq4_xs) : sizeof(block_iq4_nl);
+  constexpr int row_words = step * bytes / 4;
+  constexpr int tile_words = 2 * row_waves * row_words;
+  __shared__ unsigned int staged[double_buffer ? 2 : 1][tile_words];
+  const int lane = threadIdx.x % 32;
+  const int wave = threadIdx.x / 32;
+  const int row_wave = wave % row_waves;
+  const int token0 = (wave / row_waves) * 8;
+  const int row0 = (blockIdx.x * row_waves + row_wave) * 2;
+  const int blocks = k / qk;
+  const int local_kb = lane / (qi / vdr);
+  const int iqs = vdr * (lane % (qi / vdr));
+  float sum[8][2]{};
+  int buffer = 0;
+  if constexpr (double_buffer) {
+    stage_iq4_wide_weights<type, row_waves, groups>(
+        staged[0], weights, 0, blocks, rows);
+    __syncthreads();
+  }
+  for (int tile = 0; tile < blocks; tile += step) {
+    if constexpr (double_buffer) {
+      // The alternate buffer is free after the preceding tile's barrier.
+      if (tile + step < blocks)
+        stage_iq4_wide_weights<type, row_waves, groups>(
+            staged[buffer ^ 1], weights, tile + step, blocks, rows);
+    } else {
+      stage_iq4_wide_weights<type, row_waves, groups>(
+          staged[0], weights, tile, blocks, rows);
+      __syncthreads();
+    }
+    const int kb = tile + local_kb;
+    if (kb < blocks) {
+#pragma unroll
+      for (int r = 0; r < 2; ++r) {
+        if (row0 + r < rows) {
+          const IQ4DenseFragment<type> w(
+              staged[buffer] + (2 * row_wave + r) * row_words,
+              local_kb, iqs);
+#pragma unroll
+          for (int t = 0; t < 8; ++t) {
+            if (token0 + t < n_valid)
+              sum[t][r] = w.Accumulate(
+                  input + (token0 + t) * input_stride + kb * (qk / QK8_1),
+                  iqs, sum[t][r]);
+          }
+        }
+      }
+    }
+    // Completes both current-buffer readers and next-buffer writers. No wave
+    // returns early, including an empty output wave or partial token group.
+    __syncthreads();
+    if constexpr (double_buffer)
+      buffer ^= 1;
+  }
+#pragma unroll
+  for (int t = 0; t < 8; ++t) {
+    if (token0 + t < n_valid) {
+#pragma unroll
+      for (int r = 0; r < 2; ++r)
+        sum[t][r] = warp_reduce_sum<32>(sum[t][r]);
+      if (lane < 2 && row0 + lane < rows) {
+        const float value = lane == 0 ? sum[t][0] : sum[t][1];
+        output[(token0 + t) * rows + row0 + lane] = isfinite(value) ? value : 0.0f;
+      }
+    }
+  }
+}
+
+template<ggml_type type, int groups, int row_waves, bool double_buffer>
+static void launch_iq4_wide_tile(const void* weights, const block_q8_1* input,
+    float* output, int k, int rows, int n, int input_stride, hipStream_t stream) {
+  mul_mat_vec_iq4_wide<type, groups, row_waves, double_buffer>
+      <<<(rows + 2 * row_waves - 1) / (2 * row_waves),
+         32 * groups * row_waves, 0, stream>>>(
+          weights, input, output, k, rows, input_stride, n);
+}
+
+template<ggml_type type, int row_waves, bool double_buffer>
+static void launch_iq4_wide(const void* weights, const block_q8_1* input,
+    float* output, int k, int rows, int n, int input_stride, hipStream_t stream) {
+  if (n <= 16)
+    launch_iq4_wide_tile<type, 2, row_waves, double_buffer>(
+        weights, input, output, k, rows, n, input_stride, stream);
+  else if (n <= 24)
+    launch_iq4_wide_tile<type, 3, row_waves, double_buffer>(
+        weights, input, output, k, rows, n, input_stride, stream);
+  else
+    launch_iq4_wide_tile<type, 4, row_waves, double_buffer>(
+        weights, input, output, k, rows, n, input_stride, stream);
+}
+
+template<ggml_type type>
+static void launch_iq4_wide_variant(const void* weights, const block_q8_1* input,
+    float* output, int k, int rows, int n, int input_stride, hipStream_t stream) {
+  using namespace gufo::models::qwen38_flash_next;
+  if (n <= 8) {
+    launch_iq4_dense<type>(weights, input, output, k, rows, n, input_stride, stream);
+    return;
+  }
+  const int variant = Iq4WideVariant();
+  if (variant == 0) {
+    launch_iq4_dense_batch<type>(weights, input, output, k, rows, n, input_stride, stream);
+  } else if (variant == 3) {
+    if (Iq4WideRowsPerBlock(variant, rows) == 16)
+      launch_iq4_wide<type, 8, true>(weights, input, output, k, rows, n, input_stride, stream);
+    else
+      launch_iq4_wide<type, 4, true>(weights, input, output, k, rows, n, input_stride, stream);
+  } else {
+    if (Iq4WideRowsPerBlock(variant, rows) == 16)
+      launch_iq4_wide<type, 8, false>(weights, input, output, k, rows, n, input_stride, stream);
+    else
+      launch_iq4_wide<type, 4, false>(weights, input, output, k, rows, n, input_stride, stream);
+  }
+}
+
 void mul_mat_vec_iq4_dense_batch_dispatch(const void* weights, ggml_type type,
     const block_q8_1* input, float* output, int k, int rows, int n_valid,
     int input_stride, hipStream_t stream) {
   if (type == GGML_TYPE_IQ4_XS)
-    launch_iq4_dense_batch<GGML_TYPE_IQ4_XS>(weights, input, output, k, rows,
+    launch_iq4_wide_variant<GGML_TYPE_IQ4_XS>(weights, input, output, k, rows,
                                              n_valid, input_stride, stream);
   else
-    launch_iq4_dense_batch<GGML_TYPE_IQ4_NL>(weights, input, output, k, rows,
+    launch_iq4_wide_variant<GGML_TYPE_IQ4_NL>(weights, input, output, k, rows,
                                              n_valid, input_stride, stream);
 }
 

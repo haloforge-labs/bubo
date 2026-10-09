@@ -31,6 +31,7 @@
 
 #include "src/core/gguf_reader.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
+#include "src/models/qwen38_flash_next/iq4_wide_policy.hpp"
 
 extern "C" {
 int qfn_mmq_iq4_dense_batch_preq(int type, const void* W, const void* X,
@@ -284,9 +285,12 @@ int SliceTypes() {
     const bool small_block =
         type == core::GgmlType::kIQ4_NL || type == core::GgmlType::kQ5_1;
     // K=640 reproduces the IQ4_NL half-quantum tail in real HC-up weights.
-    const int shapes[] = {512, 2560, 10240, small_block ? 640 : 768};
+    const int tail_k = small_block ? 96 : 256;
+    const int shapes[] = {512, 2560, 10240, small_block ? 640 : 768, tail_k};
     for (const int K : shapes) {
-      constexpr int M = 65;  // output tile tail, beyond one 32/64-row block
+      // The large ragged fixture selects sixteen rows/block for V2/V3;
+      // NL K=96 also tests an odd packed block count / final half-word load.
+      const int M = K == tail_k ? 1281 : 65;
       const std::size_t block_cols = small_block ? 32 : 256;
       const std::size_t rb = RowBytes(type, K);
       const std::size_t block_bytes = rb / (K / block_cols);
@@ -373,6 +377,42 @@ int SliceTypes() {
         const auto d = Diff(sliced, ref);
         const auto one = Diff(alone, ref);
         failures += different != 0 || d.rel_rms > 2e-3 || one.rel_rms > 2e-3;
+        if (type == core::GgmlType::kIQ4_XS ||
+            type == core::GgmlType::kIQ4_NL) {
+          Dev batchq;
+          HIPCHECK(hipMalloc(&batchq.p, qfn_mmq_q8_1_bytes(N, K)));
+          if (qfn_mmq_quantize_q8_1(static_cast<const float*>(dx.p), batchq.p,
+                                    N, K, stream) != 0)
+            return 2;
+          HIPCHECK(hipMemsetAsync(out.p, 0xA5, N * M * sizeof(float) + kTail,
+                                  stream));
+          if (qfn_mmq_iq4_dense_batch_preq(int(type), w.p, batchq.p,
+                                           static_cast<float*>(out.p), M, N, K,
+                                           stream) != 0)
+            return 2;
+          std::vector<float> wide(N * M);
+          HIPCHECK(hipMemcpy(wide.data(), out.p, N * M * sizeof(float),
+                             hipMemcpyDeviceToHost));
+          HIPCHECK(hipMemcpy(
+              guard.data(),
+              static_cast<const std::uint8_t*>(out.p) + N * M * sizeof(float),
+              guard.size(), hipMemcpyDeviceToHost));
+          const bool wide_guard =
+              std::none_of(guard.begin(), guard.end(),
+                           [](std::uint8_t b) { return b != 0xA5; });
+          std::size_t row_diff = 0, slice_diff = 0;
+          for (std::size_t i = 0; i < wide.size(); ++i) {
+            row_diff += std::memcmp(&wide[i], &alone[i], sizeof(float)) != 0;
+            slice_diff += std::memcmp(&wide[i], &sliced[i], sizeof(float)) != 0;
+          }
+          failures += row_diff != 0 || slice_diff != 0 || !wide_guard;
+          std::printf(
+              "WIDE_SYNTHETIC_ROW_IDENTITY type=%s K=%d M=%d N=%d "
+              "different=%zu/%zu sliced_different=%zu/%zu guard=%s\n",
+              std::string(core::ToString(type)).c_str(), K, M, N, row_diff,
+              wide.size(), slice_diff, wide.size(),
+              wide_guard ? "PASS" : "FAIL");
+        }
         std::printf(
             "SYNTHETIC_ROW_IDENTITY type=%s K=%d M=%d N=%d slices=%d "
             "last=%d different=%zu/%zu guard=%s cpu_relRMS=%.9e "
@@ -390,6 +430,24 @@ int SliceTypes() {
               failures);
   return failures ? 1 : 0;
 }
+
+struct WideVariantEnvironment {
+  const char* original = std::getenv("GUFO_IQ4_WIDE_VARIANT");
+  bool present = original != nullptr;
+  std::string saved = present ? original : "";
+
+  void Set(const char* value) {
+#ifdef _WIN32
+    _putenv_s("GUFO_IQ4_WIDE_VARIANT", value ? value : "");
+#else
+    if (value)
+      setenv("GUFO_IQ4_WIDE_VARIANT", value, 1);
+    else
+      unsetenv("GUFO_IQ4_WIDE_VARIANT");
+#endif
+  }
+  ~WideVariantEnvironment() { Set(present ? saved.c_str() : nullptr); }
+};
 
 // --pass-bench: DRAM-regime timing. Every twin tensor and its Q8_0 trunk tensor
 // stay resident (about 6 GB); one timed "pass" launches all of them back to
@@ -463,43 +521,53 @@ int PassBench(const core::GgufReader& trunk, const core::GgufReader& twin,
   // ABAB: per N, 10 rounds of (one Q8_0 pass, one 4-bit pass), each pass timed
   // alone after a sync; launch errors checked after every pass; min / median /
   // max per path.
-  for (int N = batch ? 9 : 1; N <= (batch ? 32 : 8); ++N) {
-    std::vector<double> v[2];
-    for (int round = -1; round < 10; ++round) {
-      for (int which = 0; which < 2; ++which) {
-        HIPCHECK(hipStreamSynchronize(stream));
-        HIPCHECK(hipEventRecord(e0, stream));
-        int rc = 0;
-        for (const auto& x : ts) {
-          const void* q = act[x->K]->p;
-          rc |= Project(which == 0 ? int(core::GgmlType::kQ8_0) : int(x->ty4),
-                        which == 0 ? x->w8.p : x->w4.p, q,
-                        static_cast<const std::int32_t*>(zero_ids.p),
-                        static_cast<float*>(out.p), static_cast<int>(x->M), N,
-                        static_cast<int>(x->K), stream);
-        }
-        HIPCHECK(hipEventRecord(e1, stream));
-        HIPCHECK(hipEventSynchronize(e1));
-        if (rc != 0 || hipGetLastError() != hipSuccess) {
-          std::fprintf(stderr, "launch error in pass (N=%d, %s)\n", N,
-                       which ? "4-bit" : "Q8_0");
-          return 2;
-        }
-        float f = 0;
-        HIPCHECK(hipEventElapsedTime(&f, e0, e1));
-        if (round >= 0)
-          v[which].push_back(f);
-      }
+  WideVariantEnvironment variant_env;
+  for (int variant = 0; variant < (batch ? 4 : 1); ++variant) {
+    if (batch) {
+      const char value[] = {char('0' + variant), '\0'};
+      variant_env.Set(value);
+      std::printf("WIDE_VARIANT_BEGIN %d\n", variant);
     }
-    for (auto& x : v)
-      std::sort(x.begin(), x.end());
-    const double m8 = v[0][v[0].size() / 2], m4 = v[1][v[1].size() / 2];
-    std::printf(
-        "PASS N=%d | Q8_0 median %.6f ms (min %.6f max %.6f, %5.1f GB/s) | "
-        "4-bit median %.6f ms (min %.6f max %.6f, %5.1f GB/s) | 4-bit/Q8 "
-        "time %.9f\n",
-        N, m8, v[0].front(), v[0].back(), bytes8 / (m8 * 1e6), m4, v[1].front(),
-        v[1].back(), bytes4 / (m4 * 1e6), m4 / m8);
+    for (int N = batch ? 9 : 1; N <= (batch ? 32 : 8); ++N) {
+      std::vector<double> v[2];
+      for (int round = -1; round < 10; ++round) {
+        for (int which = 0; which < 2; ++which) {
+          HIPCHECK(hipStreamSynchronize(stream));
+          HIPCHECK(hipEventRecord(e0, stream));
+          int rc = 0;
+          for (const auto& x : ts) {
+            const void* q = act[x->K]->p;
+            rc |= Project(which == 0 ? int(core::GgmlType::kQ8_0) : int(x->ty4),
+                          which == 0 ? x->w8.p : x->w4.p, q,
+                          static_cast<const std::int32_t*>(zero_ids.p),
+                          static_cast<float*>(out.p), static_cast<int>(x->M), N,
+                          static_cast<int>(x->K), stream);
+          }
+          HIPCHECK(hipEventRecord(e1, stream));
+          HIPCHECK(hipEventSynchronize(e1));
+          if (rc != 0 || hipGetLastError() != hipSuccess) {
+            std::fprintf(stderr, "launch error in pass (N=%d, %s)\n", N,
+                         which ? "4-bit" : "Q8_0");
+            return 2;
+          }
+          float f = 0;
+          HIPCHECK(hipEventElapsedTime(&f, e0, e1));
+          if (round >= 0)
+            v[which].push_back(f);
+        }
+      }
+      for (auto& x : v)
+        std::sort(x.begin(), x.end());
+      const double m8 = v[0][v[0].size() / 2], m4 = v[1][v[1].size() / 2];
+      std::printf(
+          "PASS N=%d | Q8_0 median %.6f ms (min %.6f max %.6f, %5.1f GB/s) | "
+          "4-bit median %.6f ms (min %.6f max %.6f, %5.1f GB/s) | 4-bit/Q8 "
+          "time %.9f\n",
+          N, m8, v[0].front(), v[0].back(), bytes8 / (m8 * 1e6), m4,
+          v[1].front(), v[1].back(), bytes4 / (m4 * 1e6), m4 / m8);
+    }
+    if (batch)
+      std::printf("WIDE_VARIANT_END %d\n", variant);
   }
   std::printf("iq4_dense_launches=%llu\n", qfn_mmq_iq4_dense_launch_count());
   return 0;
@@ -507,6 +575,8 @@ int PassBench(const core::GgufReader& trunk, const core::GgufReader& twin,
 }  // namespace
 
 int main(int argc, char** argv) {
+  std::printf("IQ4_WIDE_VARIANT=%d\n",
+              gufo::models::qwen38_flash_next::Iq4WideVariant());
   if (argc == 2 && std::string(argv[1]) == "--slice-types")
     return SliceTypes();
   if (argc < 3) {
@@ -705,8 +775,8 @@ int main(int argc, char** argv) {
       }
       std::vector<float> candidate = k4;
       if (iq4) {
-        // Exercise the wide adapter even at N<=8: its eight-row instance
-        // serves the final chunk of 33..40-row decode batches. Tight input
+        // Exercise the wide adapter even at N<=8: it dispatches the unchanged
+        // narrow kernel for the final chunk of 33..40-row batches. Tight input
         // allocation and an output sentinel expose invalid padded accesses.
         Dev tightq;
         HIPCHECK(hipMalloc(&tightq.p, qbytes));
@@ -759,7 +829,7 @@ int main(int argc, char** argv) {
             std::memcmp(&alone[i], &candidate[i], sizeof(float)) != 0;
       for (std::size_t i = 0; i < alone.size(); ++i)
         slice_differences +=
-            std::memcmp(&alone[i], &sliced[i], sizeof(float)) != 0;
+            std::memcmp(&candidate[i], &sliced[i], sizeof(float)) != 0;
       std::printf("ROW_IDENTITY %s N=%d different=%zu/%zu\n", name.c_str(), N,
                   row_differences, alone.size());
       std::printf(
