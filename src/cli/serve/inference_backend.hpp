@@ -50,6 +50,8 @@ struct TextSpeculativeConfig {
   /// default.
   bool mtp_survival{false};
   bool mtp_latin_draft_vocabulary{false};
+  /// --mtp-draft-vocab auto (Qwen3.8-Flash-Next DraftVocabulary::kAuto).
+  bool mtp_auto_draft_vocabulary{false};
   bool prompt_lookup{false};
 };
 

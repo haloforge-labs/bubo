@@ -52,6 +52,7 @@ inline constexpr const char* kDebugSettingsEnvironment[] = {
     "GUFO_MOE_BENCH",
     "GUFO_ROUTED_LANEROW",
     "GUFO_SURVIVAL_FLOOR",
+    "GUFO_DRAFT_VOCAB_AUTO",
     "GUFO_DENSE_TWIN_MODEL",
     "GUFO_DENSE_TWIN_MAX_N",
     "GUFO_DENSE_TWIN_SHADOW",
@@ -218,7 +219,9 @@ inline constexpr DebugSettingsIrrelevantEnvironment
     // The engine installs the latin table only when MTP weights exist (engine.cpp:219-221): report the property only for an enabled policy.
     if (const auto* vocab = policy->find("draft_vocabulary");
         vocab && policy->find("enabled") && policy->find("enabled")->as_bool())
-      (*policy)["latin_vocab"] = vocab->str() == "latin_text" ? "latin" : "full";
+      (*policy)["latin_vocab"] = vocab->str() == "latin_text" ? "latin"
+                                 : vocab->str() == "auto"     ? "auto"
+                                                              : "full";
     if (const auto* cap = policy->find("runner_max_draft_tokens"))
       (*policy)["cap"] = *cap;
   }
