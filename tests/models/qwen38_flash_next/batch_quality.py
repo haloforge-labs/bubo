@@ -417,6 +417,8 @@ def smoke(gfle, compact):
             f32 = lambda x: struct.unpack("<f", struct.pack("<f", x))[0]
             if not r or r["target"] != target or r["K"] != width or r["vocab"] != vocab:
                 raise ValueError("smoke positions, width or target mismatch")
+            if top1 != r["top"][0][0]:
+                raise ValueError("smoke top1 mismatch")
             if lse != f32(r["lse"]) or target_lp != f32(r["target_logit"] - r["lse"]):
                 raise ValueError("smoke LSE/target mismatch")
             if list(ids) != [i for i, v in r["top"][:64]] or list(lp) != [f32(v - r["lse"]) for i, v in r["top"][:64]]:
@@ -424,7 +426,7 @@ def smoke(gfle, compact):
             count += 1
     if count != len(rows) or not count:
         raise ValueError("smoke row count mismatch")
-    print(f"SMOKE PASS rows={count} existing_GFLE_different=0 self_KL=0")
+    print(f"SMOKE PASS rows={count} existing_GFLE_different=0")
 
 
 def main():
