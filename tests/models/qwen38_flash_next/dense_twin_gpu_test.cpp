@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <memory>
 #include <random>
@@ -189,12 +190,17 @@ struct Stats {
 Stats Diff(const std::vector<float>& a, const std::vector<float>& b) {
   double num = 0, den = 0, mx = 0;
   for (std::size_t i = 0; i < a.size(); ++i) {
+    if (!std::isfinite(a[i]) || !std::isfinite(b[i]))
+      return {std::numeric_limits<double>::infinity(),
+              std::numeric_limits<double>::infinity()};
     const double d = static_cast<double>(a[i]) - b[i];
     num += d * d;
     den += static_cast<double>(b[i]) * b[i];
     mx = std::max(mx, std::abs(d));
   }
-  return {mx, den > 0 ? std::sqrt(num / den) : 0.0};
+  return {mx, den > 0
+                  ? std::sqrt(num / den)
+                  : (num == 0 ? 0.0 : std::numeric_limits<double>::infinity())};
 }
 int Project(int type, const void* w, const void* q, const std::int32_t* zeros,
             float* out, int M, int N, int K, hipStream_t stream) {
@@ -236,6 +242,153 @@ int Project(int type, const void* w, const void* q, const std::int32_t* zeros,
       return rc;
   }
   return 0;
+}
+
+// DenseBatch's eight-row fallback calls Dense on each original FP32 slice.
+// Quantize each slice independently, including the unchanged N=1 kernel for
+// N=9/17/25's last row. Tight allocations end at the last valid activation.
+int ProjectSlices(int type, const void* w, const float* x,
+                  const std::int32_t* zeros, float* out, int M, int N, int K,
+                  hipStream_t stream) {
+  for (int r = 0; r < N; r += 8) {
+    const int n = std::min(8, N - r);
+    Dev q;
+    HIPCHECK(hipMalloc(&q.p, qfn_mmq_q8_1_bytes(n, K)));
+    if (qfn_mmq_quantize_q8_1(x + static_cast<std::size_t>(r) * K, q.p, n, K,
+                              stream) != 0 ||
+        qfn_mmq_dense_vec_preq(type, w, q.p, zeros,
+                               out + static_cast<std::size_t>(r) * M, M, n, K,
+                               stream) != 0)
+      return 2;
+    HIPCHECK(hipStreamSynchronize(stream));
+  }
+  return 0;
+}
+
+const core::GgmlType kSliceTypes[] = {
+    core::GgmlType::kIQ4_XS, core::GgmlType::kIQ4_NL, core::GgmlType::kQ4_K,
+    core::GgmlType::kQ5_K, core::GgmlType::kQ5_1};
+
+// Operator fixtures, explicitly synthetic: random packed integer payloads and
+// finite FP16 block scales. They cover types absent from the real twin file;
+// they do not claim model-level numerical or text qualification.
+int SliceTypes() {
+  hipStream_t stream = nullptr;
+  HIPCHECK(hipStreamCreate(&stream));
+  Dev zero_ids;
+  const std::int32_t zeros[8] = {};
+  if (!Upload(zero_ids, zeros, sizeof zeros))
+    return 2;
+  int failures = 0;
+  for (const auto type : kSliceTypes) {
+    const bool small_block =
+        type == core::GgmlType::kIQ4_NL || type == core::GgmlType::kQ5_1;
+    // K=640 reproduces the IQ4_NL half-quantum tail in real HC-up weights.
+    const int shapes[] = {512, 2560, 10240, small_block ? 640 : 768};
+    for (const int K : shapes) {
+      constexpr int M = 65;  // output tile tail, beyond one 32/64-row block
+      const std::size_t block_cols = small_block ? 32 : 256;
+      const std::size_t rb = RowBytes(type, K);
+      const std::size_t block_bytes = rb / (K / block_cols);
+      std::mt19937 rng(71 + static_cast<int>(type) * 13 + K);
+      std::vector<std::uint8_t> packed(rb * M);
+      for (auto& b : packed)
+        b = static_cast<std::uint8_t>(rng());
+      for (std::size_t b = 0; b < packed.size(); b += block_bytes) {
+        const std::uint16_t d = 0x1800;  // 2^-9: avoid saturated dot products
+        std::memcpy(packed.data() + b, &d, sizeof d);
+        if (type == core::GgmlType::kQ4_K || type == core::GgmlType::kQ5_K ||
+            type == core::GgmlType::kQ5_1) {
+          const std::uint16_t offset = 0x1400;  // finite dmin / m
+          std::memcpy(packed.data() + b + 2, &offset, sizeof offset);
+        }
+      }
+      Dev w;
+      if (!Upload(w, packed.data(), packed.size()))
+        return 2;
+      std::vector<float> weights(M * K);
+      for (int m = 0; m < M; ++m)
+        DequantRow(type, packed.data() + m * rb, weights.data() + m * K, K);
+      for (int N = 1; N <= 32; ++N) {
+        std::normal_distribution<float> gauss(0.0F, 0.125F);
+        std::vector<float> x(N * K);
+        for (auto& v : x)
+          v = gauss(rng);
+        Dev dx, out, oneq, oneout;
+        HIPCHECK(hipMalloc(&dx.p, x.size() * sizeof(float)));
+        HIPCHECK(hipMemcpyAsync(dx.p, x.data(), x.size() * sizeof(float),
+                                hipMemcpyHostToDevice, stream));
+        HIPCHECK(hipMalloc(&out.p, N * M * sizeof(float) + kTail));
+        HIPCHECK(
+            hipMemsetAsync(out.p, 0xA5, N * M * sizeof(float) + kTail, stream));
+        if (ProjectSlices(int(type), w.p, static_cast<const float*>(dx.p),
+                          static_cast<const std::int32_t*>(zero_ids.p),
+                          static_cast<float*>(out.p), M, N, K, stream) != 0)
+          return 2;
+        std::vector<float> sliced(N * M), alone(N * M), ref(N * M);
+        HIPCHECK(hipMemcpy(sliced.data(), out.p, N * M * sizeof(float),
+                           hipMemcpyDeviceToHost));
+        std::vector<std::uint8_t> guard(kTail);
+        HIPCHECK(hipMemcpy(
+            guard.data(),
+            static_cast<const std::uint8_t*>(out.p) + N * M * sizeof(float),
+            guard.size(), hipMemcpyDeviceToHost));
+        const bool guard_ok =
+            std::none_of(guard.begin(), guard.end(),
+                         [](std::uint8_t b) { return b != 0xA5; });
+        failures += !guard_ok;
+        const std::size_t qbytes = qfn_mmq_q8_1_bytes(1, K);
+        HIPCHECK(hipMalloc(&oneq.p, qbytes));
+        HIPCHECK(hipMalloc(&oneout.p, M * sizeof(float)));
+        std::vector<std::uint8_t> qhost(qbytes);
+        for (int n = 0; n < N; ++n) {
+          if (qfn_mmq_quantize_q8_1(static_cast<const float*>(dx.p) + n * K,
+                                    oneq.p, 1, K, stream) != 0 ||
+              qfn_mmq_dense_vec_preq(
+                  int(type), w.p, oneq.p,
+                  static_cast<const std::int32_t*>(zero_ids.p),
+                  static_cast<float*>(oneout.p), M, 1, K, stream) != 0)
+            return 2;
+          HIPCHECK(hipStreamSynchronize(stream));
+          HIPCHECK(hipMemcpy(alone.data() + n * M, oneout.p, M * sizeof(float),
+                             hipMemcpyDeviceToHost));
+          HIPCHECK(
+              hipMemcpy(qhost.data(), oneq.p, qbytes, hipMemcpyDeviceToHost));
+          // Independent FP64 CPU dot of dequantized weights and Q8_1 inputs.
+          for (int m = 0; m < M; ++m) {
+            double sum = 0;
+            for (int k = 0; k < K; ++k) {
+              const auto* b = qhost.data() + (k / 32) * 36;
+              const double a =
+                  Half(b) *
+                  static_cast<float>(static_cast<std::int8_t>(b[4 + k % 32]));
+              sum += a * weights[m * K + k];
+            }
+            ref[n * M + m] = static_cast<float>(sum);
+          }
+        }
+        std::size_t different = 0;
+        for (std::size_t i = 0; i < alone.size(); ++i)
+          different += std::memcmp(&alone[i], &sliced[i], sizeof(float)) != 0;
+        const auto d = Diff(sliced, ref);
+        const auto one = Diff(alone, ref);
+        failures += different != 0 || d.rel_rms > 2e-3 || one.rel_rms > 2e-3;
+        std::printf(
+            "SYNTHETIC_ROW_IDENTITY type=%s K=%d M=%d N=%d slices=%d "
+            "last=%d different=%zu/%zu guard=%s cpu_relRMS=%.9e "
+            "one_relRMS=%.9e\n",
+            std::string(core::ToString(type)).c_str(), K, M, N, (N + 7) / 8,
+            (N - 1) % 8 + 1, different, alone.size(),
+            guard_ok ? "PASS" : "FAIL", d.rel_rms, one.rel_rms);
+      }
+    }
+    std::printf("SYNTHETIC_TYPE_COVERAGE %s N=1..32 slices=8\n",
+                std::string(core::ToString(type)).c_str());
+  }
+  HIPCHECK(hipStreamDestroy(stream));
+  std::printf("slice-types: %s (%d failures)\n", failures ? "FAIL" : "PASS",
+              failures);
+  return failures ? 1 : 0;
 }
 
 // --pass-bench: DRAM-regime timing. Every twin tensor and its Q8_0 trunk tensor
@@ -342,9 +495,9 @@ int PassBench(const core::GgufReader& trunk, const core::GgufReader& twin,
       std::sort(x.begin(), x.end());
     const double m8 = v[0][v[0].size() / 2], m4 = v[1][v[1].size() / 2];
     std::printf(
-        "PASS N=%d | Q8_0 median %7.2f ms (min %6.2f max %6.2f, %5.1f GB/s) | "
-        "4-bit median %7.2f ms (min %6.2f max %6.2f, %5.1f GB/s) | 4-bit/Q8 "
-        "time %.2f\n",
+        "PASS N=%d | Q8_0 median %.6f ms (min %.6f max %.6f, %5.1f GB/s) | "
+        "4-bit median %.6f ms (min %.6f max %.6f, %5.1f GB/s) | 4-bit/Q8 "
+        "time %.9f\n",
         N, m8, v[0].front(), v[0].back(), bytes8 / (m8 * 1e6), m4, v[1].front(),
         v[1].back(), bytes4 / (m4 * 1e6), m4 / m8);
   }
@@ -354,10 +507,12 @@ int PassBench(const core::GgufReader& trunk, const core::GgufReader& twin,
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (argc == 2 && std::string(argv[1]) == "--slice-types")
+    return SliceTypes();
   if (argc < 3) {
     std::fprintf(stderr,
                  "usage: dense_twin_gpu_test TRUNK_SHARD1.gguf TWIN.gguf "
-                 "[tensor-name ...]\n");
+                 "[tensor-name ...] | --slice-types\n");
     return 2;
   }
   std::string err;
@@ -409,6 +564,7 @@ int main(int argc, char** argv) {
   if (!Upload(zero_ids, zeros, sizeof zeros))
     return 2;
   int failures = 0;
+  std::map<core::GgmlType, std::size_t> real_type_coverage;
   std::printf(
       "%-30s %-5s %2s | k4-vs-ref4 maxabs relRMS | k8-vs-ref8 maxabs relRMS | "
       "k4-vs-k8 maxabs relRMS top1\n",
@@ -432,6 +588,12 @@ int main(int argc, char** argv) {
     const auto ty4 = t4->type;
     const std::size_t rb8 = RowBytes(core::GgmlType::kQ8_0, K),
                       rb4 = RowBytes(ty4, K);
+    if (rb4 == 0) {
+      std::fprintf(stderr, "%s: unsupported twin type\n", name.c_str());
+      ++failures;
+      continue;
+    }
+    ++real_type_coverage[ty4];
     Dev w8, w4;
     if (!Upload(w8, t8->data, rb8 * M) || !Upload(w4, t4->data, rb4 * M)) {
       std::fprintf(stderr, "upload failed\n");
@@ -521,6 +683,26 @@ int main(int argc, char** argv) {
       }
       const bool iq4 =
           ty4 == core::GgmlType::kIQ4_XS || ty4 == core::GgmlType::kIQ4_NL;
+      Dev sliceout;
+      HIPCHECK(hipMalloc(&sliceout.p, N * M * sizeof(float) + kTail));
+      HIPCHECK(hipMemsetAsync(sliceout.p, 0xA5, N * M * sizeof(float) + kTail,
+                              stream));
+      if (ProjectSlices(int(ty4), w4.p, static_cast<const float*>(dx.p),
+                        static_cast<const std::int32_t*>(zero_ids.p),
+                        static_cast<float*>(sliceout.p), M, N, K, stream) != 0)
+        return 2;
+      std::vector<float> sliced(N * M);
+      HIPCHECK(hipMemcpy(sliced.data(), sliceout.p, N * M * sizeof(float),
+                         hipMemcpyDeviceToHost));
+      HIPCHECK(hipMemcpy(
+          output_guard.data(),
+          static_cast<const std::uint8_t*>(sliceout.p) + N * M * sizeof(float),
+          output_guard.size(), hipMemcpyDeviceToHost));
+      if (std::any_of(output_guard.begin(), output_guard.end(),
+                      [](std::uint8_t b) { return b != 0xA5; })) {
+        std::printf("FAIL SLICED_OUTPUT_GUARD %s N=%d\n", name.c_str(), N);
+        ++failures;
+      }
       std::vector<float> candidate = k4;
       if (iq4) {
         // Exercise the wide adapter even at N<=8: its eight-row instance
@@ -571,15 +753,22 @@ int main(int argc, char** argv) {
         HIPCHECK(hipStreamSynchronize(stream));
       }
       std::size_t row_differences = 0;
+      std::size_t slice_differences = 0;
       for (std::size_t i = 0; i < alone.size(); ++i)
         row_differences +=
             std::memcmp(&alone[i], &candidate[i], sizeof(float)) != 0;
+      for (std::size_t i = 0; i < alone.size(); ++i)
+        slice_differences +=
+            std::memcmp(&alone[i], &sliced[i], sizeof(float)) != 0;
       std::printf("ROW_IDENTITY %s N=%d different=%zu/%zu\n", name.c_str(), N,
                   row_differences, alone.size());
-      // Every valid row of each wide instance must match the unchanged N=1
-      // serving path. Legacy <=8 kernels are independently checked above.
-      if (iq4 || N > 8)
-        failures += row_differences != 0;
+      std::printf(
+          "SLICED_ROW_IDENTITY %s type=%s N=%d slices=%d last=%d "
+          "different=%zu/%zu\n",
+          name.c_str(), std::string(core::ToString(ty4)).c_str(), N,
+          (N + 7) / 8, (N - 1) % 8 + 1, slice_differences, alone.size());
+      // All five types, every N and every row: no tolerance on byte identity.
+      failures += row_differences != 0 || slice_differences != 0;
       // activations as the kernels read them: block_q8_1 = { half d; half s;
       // int8 qs[32] }, row stride GGML_PAD(K, 512) / 32 blocks
       std::vector<std::uint8_t> qh(qbytes);
@@ -664,6 +853,10 @@ int main(int argc, char** argv) {
       }
       const auto a = Diff(k4, ref4), b = Diff(k8, ref8), c = Diff(k4, k8);
       const auto wide = Diff(candidate, ref4);
+      const auto slice_ref = Diff(sliced, ref4);
+      std::printf("SLICED_CPU_REF %s N=%d maxabs=%.9e relRMS=%.9e\n",
+                  name.c_str(), N, slice_ref.max_abs, slice_ref.rel_rms);
+      failures += slice_ref.rel_rms > 2e-3;
       if (iq4) {
         std::printf("WIDE_CPU_REF %s N=%d maxabs=%.9e relRMS=%.9e\n",
                     name.c_str(), N, wide.max_abs, wide.rel_rms);
@@ -687,6 +880,13 @@ int main(int argc, char** argv) {
         ++failures;
       }
     }
+  }
+  for (const auto type : kSliceTypes) {
+    const auto count = real_type_coverage[type];
+    std::printf(
+        "REAL_TYPE_COVERAGE %s tensors=%zu N=1..32 %s\n",
+        std::string(core::ToString(type)).c_str(), count,
+        count ? "covered" : "GAP: absent; require synthetic --slice-types");
   }
   std::printf("iq4_dense_launches=%llu\n", qfn_mmq_iq4_dense_launch_count());
   std::printf("dense_twin_gpu_test: %s (%d failures)\n",

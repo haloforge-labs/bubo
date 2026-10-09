@@ -13,6 +13,15 @@ inline constexpr std::uint32_t kBatchMaxChain = 8;
 inline constexpr std::uint32_t kTwinBatchMax =
     kBatchMaxSessions * kBatchMaxChain;
 
+// Same default, strtol interpretation and clamp as the single-session cutoff.
+// Load and the cached serving cutoff share this parser.
+inline std::uint32_t TwinMaxNValue(const char* e) {
+  if (e == nullptr || *e == '\0')
+    return 8;
+  const long x = std::strtol(e, nullptr, 10);
+  return static_cast<std::uint32_t>(x < 1 ? 1 : (x > 8 ? 8 : x));
+}
+
 inline bool TwinBatchEnabled() {
   const char* e = std::getenv("GUFO_DENSE_TWIN_BATCH");
   return e != nullptr && e[0] == '1' && e[1] == '\0';
@@ -28,16 +37,23 @@ inline bool TwinBatchCapacityValid(std::uint32_t sessions,
 }
 inline const char* TwinBatchLoadError(bool armed, bool enabled,
                                       std::uint32_t sessions,
-                                      std::uint32_t chain, long max_n) {
+                                      std::uint64_t chain,
+                                      std::uint32_t max_n) {
   if (!armed)
     return nullptr;
   if (!enabled && sessions > 1)
     return "GUFO_DENSE_TWIN_MODEL supports one decode session (the batched "
            "decode loop is not twinned)";
-  if (max_n < 8)
+  // Single-session serving keeps the legacy cutoff, even with batch opt-in.
+  // The all-twin/full-chain contract applies to the multi-session loop.
+  if (!enabled || sessions == 1)
+    return nullptr;
+  if (max_n < kBatchMaxChain)
     return "decode twin requires GUFO_DENSE_TWIN_MAX_N >= 8 (no "
            "precision mixing)";
-  if (enabled && !TwinBatchCapacityValid(sessions, chain))
+  if (chain > kBatchMaxChain)
+    return "batched decode twin exceeds decode chain capacity";
+  if (!TwinBatchCapacityValid(sessions, static_cast<std::uint32_t>(chain)))
     return "batched decode twin exceeds kTwinBatchMax / decode chain capacity";
   return nullptr;
 }

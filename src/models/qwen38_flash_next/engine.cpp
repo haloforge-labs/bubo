@@ -215,20 +215,15 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
   }
   // Decode twin (default OFF): GUFO_DENSE_TWIN_MODEL = path of the 4-bit dense twin GGUF (see TwinWeights). Every failure is fatal (no fallback to the 8-bit copy).
   if (const char* twin_path = std::getenv("GUFO_DENSE_TWIN_MODEL"); twin_path != nullptr && twin_path[0] != '\0') {
-    const char* max_n_env = std::getenv("GUFO_DENSE_TWIN_MAX_N");
-    const long max_n = max_n_env == nullptr || *max_n_env == '\0'
-                           ? 8
-                           : std::strtol(max_n_env, nullptr, 10);
+    static_assert(kMaxMtpDraftTokens + 1 == kBatchMaxChain);
     const auto chain =
         m->mtp_weights_ ? std::uint64_t{options.max_draft_tokens} + 1 : 1;
-    if (chain > kBatchMaxChain && TwinBatchEnabled()) {
-      AssignError(error_msg,
-                  "batched decode twin exceeds decode chain capacity");
-      return nullptr;
-    }
+    const bool batch_enabled = TwinBatchEnabled();
+    const auto max_n = batch_enabled && options.decode_concurrency > 1
+                           ? TwinMaxNValue(std::getenv("GUFO_DENSE_TWIN_MAX_N"))
+                           : kBatchMaxChain;
     if (const char* failure = TwinBatchLoadError(
-            true, TwinBatchEnabled(), options.decode_concurrency,
-            static_cast<std::uint32_t>(chain), max_n)) {
+            true, batch_enabled, options.decode_concurrency, chain, max_n)) {
       AssignError(error_msg, failure);
       return nullptr;
     }

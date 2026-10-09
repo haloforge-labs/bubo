@@ -3345,17 +3345,11 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
 }
 
 namespace {
-// Legacy vector cutoff parser, retained unchanged. Armed twins reject MAX_N < 8
-// at load, so every decode/verify vector pass reads the same copy. The
-// historical IQ4 DRAM break-even (~6 rows) motivates the separate wide-kernel
-// pass bench; it must never become a per-pass precision fallback.
+// The single-session cutoff retains its cached default/strtol/clamp behavior.
+// Only the opt-in batched twin requires this value to cover a full chain.
 std::uint32_t TwinMaxN() {
-  static const std::uint32_t v = [] {
-    const char* e = std::getenv("GUFO_DENSE_TWIN_MAX_N");
-    if (e == nullptr || *e == '\0') return std::uint32_t{8};
-    const long x = std::strtol(e, nullptr, 10);
-    return static_cast<std::uint32_t>(x < 1 ? 1 : (x > 8 ? 8 : x));
-  }();
+  static const std::uint32_t v =
+      TwinMaxNValue(std::getenv("GUFO_DENSE_TWIN_MAX_N"));
   return v;
 }
 }  // namespace
