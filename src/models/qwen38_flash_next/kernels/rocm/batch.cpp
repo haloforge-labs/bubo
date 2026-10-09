@@ -424,8 +424,12 @@ bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
     for (const auto& item : items) {
       if (!item.session->CheckCancellation(nullptr))
         continue;
+      // A lone head request in a multi-session cycle honours the session's
+      // DraftVocabulary::kAuto mode like the single-session path (Hold C:
+      // without it, Chinese sessions drafted with the latin subset here).
       if (!MtpHead(head, item.session->mtp_.h, item.output.token != nullptr,
-                   item.output.candidates != nullptr, error) ||
+                   item.output.candidates != nullptr, error,
+                   item.session->draft_head_full_) ||
           !Check(hipStreamSynchronize(stream_), error)) {
         return false;
       }
