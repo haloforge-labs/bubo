@@ -1307,6 +1307,34 @@ void TestEvictedEntryCoveredByRetainedLongerEntryIsNotOffered() {
          "the dominated eviction is resolved as superseded, not offered for persistence");
   save({8}, false);        // pressure again: the next victim has no retained extension and is offered
   Expect(!offered.empty(), "an eviction without a retained extension is still offered");
+  // Negative case (review F1): a whole-prompt kRetry copy does NOT cover its shorter prefix (the client may rewrite the tail).
+  offered.clear(); superseded = 0;
+  {
+    std::vector<std::size_t> inv2(1);
+    gufo::server::ContinuationCache retry_cache(
+        1, [&] { return std::make_unique<FakeState>(0, &inv2); },
+        {.restore = [](auto&, const auto&) {},
+         .capacity_bytes = [] { return 16; },
+         .on_event = {},
+         .on_evict = [&](std::shared_ptr<const gufo::server::ContinuationSnapshot> snapshot) {
+           if (snapshot->persistence) offered.push_back(snapshot->persistence->tokens);
+         }},
+        8);
+    const auto save2 = [&](std::vector<ContinuationToken> tokens, bool preserve_source, SnapshotPurpose purpose) {
+      auto lease = retry_cache.Acquire(tokens);
+      Expect(lease.TryReserveSnapshot(8, tokens.size(), preserve_source, purpose, tokens), "checkpoint admitted");
+      auto snapshot = std::make_unique<FakeSnapshot>(tokens.size(), 8);
+      snapshot->persistence = std::make_shared<SnapshotPersistence>();
+      snapshot->persistence->tokens = tokens;
+      snapshot->persistence->on_superseded = [&] { ++superseded; };
+      lease.Commit(tokens, std::move(snapshot));
+    };
+    save2({1, 2}, false, SnapshotPurpose::kContinuation);
+    save2({1, 2, 3}, true, SnapshotPurpose::kRetry);
+    save2({9}, false, SnapshotPurpose::kContinuation);
+    Expect(superseded == 0 && offered.size() == 1 && offered[0] == (std::vector<ContinuationToken>{1, 2}),
+           "an eviction whose only longer peer is a kRetry copy is offered (rewind point stays persistable)");
+  }
 }
 
 int main() {

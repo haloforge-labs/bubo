@@ -891,13 +891,24 @@ bool ContinuationCache::ReserveSnapshot(
         const auto record = impl_->snapshot_support.on_evict
                                 ? entry.snapshot->persistence : nullptr;
         std::shared_ptr<const ContinuationSnapshot> dominator;
-        if (record && EvictDominatedEnabled() && !record->shared_prefix &&
-            entry.purpose != SnapshotPurpose::kBranchPoint) {
+        // Review fixes (REVIEW-DOMINATED.md): only PRESSURE evictions (kByteCapacity: an exact replacement keeps its persisted-state transfer),
+        // never a learned or dynamic branch point, and the covering peer must be a healthy kContinuation entry (not a whole-prompt kRetry copy, which
+        // ends in assistant framing the client may rewrite, not a shared-prefix boundary, not a Failed/Abandoned record).
+        if (record && reason == SnapshotEventReason::kByteCapacity &&
+            EvictDominatedEnabled() && !record->shared_prefix &&
+            entry.purpose != SnapshotPurpose::kBranchPoint &&
+            !impl_->IsBranchPoint(target)) {
           for (std::size_t other = impl_->state_count;
                other < impl_->entries.size(); ++other) {
             const auto& peer = *impl_->entries[other];
             if (other == target || !peer.valid || peer.snapshot == nullptr ||
                 peer.snapshot->persistence == nullptr ||
+                peer.purpose != SnapshotPurpose::kContinuation ||
+                peer.snapshot->persistence->shared_prefix ||
+                peer.snapshot->persistence->state.load() ==
+                    SnapshotPersistence::kFailed ||
+                peer.snapshot->persistence->state.load() ==
+                    SnapshotPersistence::kAbandoned ||
                 peer.tokens.size() <= entry.tokens.size() ||
                 !std::ranges::equal(peer.input_identity, entry.input_identity) ||
                 !IsPrefix(entry.tokens, peer.tokens))
