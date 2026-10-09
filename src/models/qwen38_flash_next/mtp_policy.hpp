@@ -277,6 +277,23 @@ private:
   unsigned stable_cycles_{0};
 };
 
+// Survival-mode draft count with a FLOOR. The survival policy drafts up to its
+// upper bound and cuts each chain by its survival estimate, but it never chose
+// plain decoding: when drafts almost never land (CJK output under the latin
+// draft vocabulary accepted 2.5 %) every token still paid a verify pass. With
+// the floor on, survival defers to the length controller's back-off: while
+// Choose() is 0 (unprofitable acceptance; 16 AR tokens, then a probe) the step
+// drafts nothing. Verification is unchanged, so outputs are exactly the same.
+[[nodiscard]] inline std::uint32_t SurvivalDrafts(
+    const MtpLengthController& controller, std::uint32_t budget,
+    std::uint32_t context, bool floor) noexcept {
+  if (budget == 0)
+    return 0;
+  if (floor && controller.Choose(budget, context) == 0)
+    return 0;
+  return std::min(kMaxMtpDraftTokens, budget);
+}
+
 }  // namespace gufo::models::qwen38_flash_next
 
 #endif  // GUFO_MODELS_QWEN38_FLASH_NEXT_MTP_POLICY_HPP_
