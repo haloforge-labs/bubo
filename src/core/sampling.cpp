@@ -1231,17 +1231,33 @@ BehaviourLogits TransformBehaviour(std::span<const float> raw,
   // raw top-k is independent of a device list's capacity, and identical on AR
   // and every target verification row. This subset defines the conservative
   // upper-bound policy; exact mode uses the complete raw vocabulary instead.
-  std::vector<float> denom(raw.begin(),raw.end());
-  std::erase_if(denom,[](float v){return !std::isfinite(v);});
-  if(!b.eog_min_prob_exact&&c.top_k>0&&denom.size()>static_cast<std::size_t>(c.top_k)) {
-    std::partial_sort(denom.begin(),denom.begin()+c.top_k,denom.end(),std::greater<>{});
-    denom.resize(c.top_k);
-  } else std::ranges::sort(denom,std::greater<>{});
-  double maximum=denom.empty()?-INFINITY:denom.front(),sum=0;
-  for(auto v:denom)sum+=std::exp(static_cast<double>(v)-maximum);
-  const auto raw_probability=[&](TokenId token){
-    for(std::size_t i=0;i<raw.size();++i)if(id(i)==token&&std::isfinite(raw[i])&&sum>0)
-      return std::min(1.0,std::exp(static_cast<double>(raw[i])-maximum)/sum);
+  std::vector<float> denom;
+  bool denominator_ready = false;
+  double maximum = -INFINITY, sum = 0;
+  // Nothing else consumes this raw denominator. Preserve its arithmetic and
+  // ordering, but materialize it only on the first finite probability query.
+  const auto ensure_denominator = [&] {
+    if (denominator_ready) return;
+    denom.assign(raw.begin(), raw.end());
+    std::erase_if(denom, [](float v) { return !std::isfinite(v); });
+    if (!b.eog_min_prob_exact && c.top_k > 0 &&
+        denom.size() > static_cast<std::size_t>(c.top_k)) {
+      std::partial_sort(denom.begin(), denom.begin() + c.top_k, denom.end(),
+                        std::greater<>{});
+      denom.resize(c.top_k);
+    } else std::ranges::sort(denom, std::greater<>{});
+    maximum = denom.empty() ? -INFINITY : denom.front();
+    for (auto v : denom) sum += std::exp(static_cast<double>(v) - maximum);
+    denominator_ready = true;
+  };
+  const auto raw_probability = [&](TokenId token) {
+    for (std::size_t i = 0; i < raw.size(); ++i) {
+      if (id(i) == token && std::isfinite(raw[i])) {
+        ensure_denominator();
+        if (sum > 0)
+          return std::min(1.0, std::exp(static_cast<double>(raw[i]) - maximum) / sum);
+      }
+    }
     return 0.0;
   };
   if(b.logit_bias_enabled && !b.logit_bias.empty()) {
