@@ -330,10 +330,58 @@ void CheckVerificationBoundaries() {
   }
 }
 
+// Survival floor (decode thread 2026-10-09): zero acceptance drives the
+// controller into its back-off; survival then takes plain steps (0 drafts) for
+// the 16-token AR interval and probes periodically; healthy acceptance and the
+// floor switched off keep the old upper-bound width.
+void CheckSurvivalFloor() {
+  qfn::MtpLengthController controller(7);
+  Require(qfn::SurvivalDrafts(controller, 7, 0, true) == 7,
+          "healthy survival width changed");
+  Require(qfn::SurvivalDrafts(controller, 3, 0, true) == 3,
+          "survival ignored the remaining budget");
+  Require(qfn::SurvivalDrafts(controller, 0, 0, true) == 0,
+          "empty budget drafted");
+  unsigned cycles = 0;
+  while (qfn::SurvivalDrafts(controller, 7, 0, true) != 0 && cycles < 32) {
+    controller.Observe(0, qfn::SurvivalDrafts(controller, 7, 0, true));
+    ++cycles;
+  }
+  Require(cycles < 32, "zero acceptance never reached the survival floor");
+  Require(qfn::SurvivalDrafts(controller, 7, 0, false) == 7,
+          "floor off changed the survival width");
+  for (unsigned round = 0; round < 3; ++round) {
+    for (unsigned i = 0; i < 16; ++i) {
+      Require(qfn::SurvivalDrafts(controller, 7, 0, true) == 0,
+              "plain interval ended early");
+      controller.ObserveArToken();
+    }
+    const auto probe = qfn::SurvivalDrafts(controller, 7, 0, true);
+    Require(probe >= 1, "no periodic probe after the plain interval");
+    controller.Observe(0, probe);
+    Require(qfn::SurvivalDrafts(controller, 7, 0, true) == 0,
+            "a failed probe did not restore the plain interval");
+  }
+  // Recovery: once proposals land again, survival returns to its width.
+  unsigned stable = 0;
+  for (unsigned i = 0; i < 200 && stable < 8; ++i) {
+    const auto drafts = qfn::SurvivalDrafts(controller, 7, 0, true);
+    if (drafts == 0) {
+      controller.ObserveArToken();
+      stable = 0;
+      continue;
+    }
+    controller.Observe(drafts, drafts);
+    stable = drafts == 7 ? stable + 1 : 0;
+  }
+  Require(stable >= 8, "survival did not recover after acceptance returned");
+}
+
 int main() {
   try {
     CheckVerificationBoundaries();
     CheckLengthController();
+    CheckSurvivalFloor();
     CheckCalibratedCosts();
     CheckBatchProfitability();
     CheckCompactProposals();

@@ -438,6 +438,16 @@ static bool MtpCycleTraceEnabled() {
   }();
   return on;
 }
+// GUFO_SURVIVAL_FLOOR (default ON; only the literal '0' disables): survival-mode
+// decoding takes a plain step while the length controller's back-off is active
+// (see SurvivalDrafts in mtp_policy.hpp). Read once.
+static bool SurvivalFloorEnabled() {
+  static const bool on = [] {
+    const char* e = std::getenv("GUFO_SURVIVAL_FLOOR");
+    return !(e != nullptr && e[0] == '0' && e[1] == '\0');
+  }();
+  return on;
+}
 static double MtpTraceNowMs() {
   return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
@@ -1119,15 +1129,19 @@ bool Session::PrepareDecode(const DecodeRequest& request,
       std::min<std::size_t>({max_tokens, room, exec.max_speculative()});
   // ModelOptions::mtp_survival: sampled single-session decoding drafts up to
   // the limit and stops on the survival estimate (see kMtpSurvivalFloor);
-  // the width is an upper bound.
+  // the width is an upper bound. SurvivalDrafts adds the floor: while the
+  // length controller's back-off is active the survival step drafts nothing
+  // (GUFO_SURVIVAL_FLOOR=0 restores the old unconditional width).
   const bool survival = model_->options_.mtp_survival && !batch_drafts &&
                         !defer_head && sampler.config().uses_random_sampling();
   const std::size_t width =
       MtpEnabled() && cap > 1
           ? 1 + (batch_drafts ? std::min<std::uint32_t>(*batch_drafts, cap - 1)
-                 : survival   ? std::min<std::uint32_t>(
-                                    kMaxMtpDraftTokens,
-                                    static_cast<std::uint32_t>(cap - 1))
+                 : survival   ? SurvivalDrafts(
+                                    draft_length_,
+                                    static_cast<std::uint32_t>(cap - 1),
+                                    static_cast<std::uint32_t>(tokens_.size()),
+                                    SurvivalFloorEnabled())
                               : draft_length_.Choose(
                                     static_cast<std::uint32_t>(cap - 1),
                                     static_cast<std::uint32_t>(tokens_.size())))
