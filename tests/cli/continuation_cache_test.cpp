@@ -1272,7 +1272,46 @@ void TestNewBranchPreservesSharedSourceUnderBytePressure() {
          "the oldest unrelated continuation yields to the shared branch point");
 }
 
+void TestEvictedEntryCoveredByRetainedLongerEntryIsNotOffered() {
+  // GUFO_DISK_EVICT_DOMINATED=1 (set in main before the first cache use): a pressure eviction of an entry that a retained, tagged, longer entry of the
+  // same conversation extends resolves as superseded; an unrelated eviction is still offered.
+  using gufo::server::ContinuationToken;
+  using gufo::server::SnapshotPersistence;
+  using gufo::server::SnapshotPurpose;
+  std::vector<std::size_t> invalidations(1);
+  std::vector<std::vector<ContinuationToken>> offered;
+  std::size_t superseded = 0;
+  gufo::server::ContinuationCache cache(
+      1, [&] { return std::make_unique<FakeState>(0, &invalidations); },
+      {.restore = [](auto&, const auto&) {},
+       .capacity_bytes = [] { return 16; },
+       .on_event = {},
+       .on_evict = [&](std::shared_ptr<const gufo::server::ContinuationSnapshot> snapshot) {
+         if (snapshot->persistence) offered.push_back(snapshot->persistence->tokens);
+       }},
+      8);
+  const auto save = [&](std::vector<ContinuationToken> tokens, bool preserve_source) {
+    auto lease = cache.Acquire(tokens);
+    Expect(lease.TryReserveSnapshot(8, tokens.size(), preserve_source, SnapshotPurpose::kContinuation, tokens),
+           "checkpoint admitted");
+    auto snapshot = std::make_unique<FakeSnapshot>(tokens.size(), 8);
+    snapshot->persistence = std::make_shared<SnapshotPersistence>();
+    snapshot->persistence->tokens = tokens;
+    snapshot->persistence->on_superseded = [&] { ++superseded; };
+    lease.Commit(tokens, std::move(snapshot));
+  };
+  save({1, 2}, false);
+  save({1, 2, 3}, true);   // keeps {1,2} as the preserved source: both retained, {1,2} is dominated by {1,2,3}
+  save({9}, false);        // pressure: {1,2} is the legal victim and is covered by the retained {1,2,3}
+  Expect(offered.empty() && superseded == 1,
+         "the dominated eviction is resolved as superseded, not offered for persistence");
+  save({8}, false);        // pressure again: the next victim has no retained extension and is offered
+  Expect(!offered.empty(), "an eviction without a retained extension is still offered");
+}
+
 int main() {
+  ::setenv("GUFO_DISK_EVICT_DOMINATED", "1", 1);
+  TestEvictedEntryCoveredByRetainedLongerEntryIsNotOffered();
   TestAppendedImagesReuseOnlyCompatiblePrefixes();
   TestImageIdentityIsolation();
   TestColdMissThenExactExtensionHit();

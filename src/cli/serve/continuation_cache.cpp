@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -27,6 +28,17 @@ bool IsPrefix(std::span<const ContinuationToken> prefix,
 bool IsContinuation(SnapshotPurpose purpose) {
   return purpose == SnapshotPurpose::kContinuation ||
          purpose == SnapshotPurpose::kBranchPoint;
+}
+
+// GUFO_DISK_EVICT_DOMINATED=1 (read once): a snapshot the RAM tier evicts under pressure while a longer retained, tagged entry of the same conversation
+// (same input identity) extends it is covered by that entry: it is resolved as superseded instead of being offered for persistence. Shared-prefix
+// boundaries and branch points are never treated this way. Off by default.
+bool EvictDominatedEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("GUFO_DISK_EVICT_DOMINATED");
+    return value && value[0] == '1' && value[1] == '\0';
+  }();
+  return enabled;
 }
 
 int MaxRemovalPriority(SnapshotPurpose purpose) {
@@ -764,6 +776,10 @@ bool ContinuationCache::ReserveSnapshot(
     std::span<const std::uint8_t> input_identity,
     std::vector<std::shared_ptr<const ContinuationSnapshot>>& superseded) {
   std::vector<std::shared_ptr<const ContinuationSnapshot>> removed_snapshots;
+  // (evicted snapshot, retained longer entry that extends it): see EvictDominatedEnabled.
+  std::vector<std::pair<std::shared_ptr<const ContinuationSnapshot>,
+                        std::shared_ptr<const ContinuationSnapshot>>>
+      dominated_snapshots;
   std::vector<SnapshotEvent> events;
   bool admitted = false;
   const int max_priority = MaxRemovalPriority(purpose);
@@ -874,7 +890,26 @@ bool ContinuationCache::ReserveSnapshot(
         // Failed captures must still persist these real drops.
         const auto record = impl_->snapshot_support.on_evict
                                 ? entry.snapshot->persistence : nullptr;
-        if (impl_->snapshot_support.on_evict && record &&
+        std::shared_ptr<const ContinuationSnapshot> dominator;
+        if (record && EvictDominatedEnabled() && !record->shared_prefix &&
+            entry.purpose != SnapshotPurpose::kBranchPoint) {
+          for (std::size_t other = impl_->state_count;
+               other < impl_->entries.size(); ++other) {
+            const auto& peer = *impl_->entries[other];
+            if (other == target || !peer.valid || peer.snapshot == nullptr ||
+                peer.snapshot->persistence == nullptr ||
+                peer.tokens.size() <= entry.tokens.size() ||
+                !std::ranges::equal(peer.input_identity, entry.input_identity) ||
+                !IsPrefix(entry.tokens, peer.tokens))
+              continue;
+            dominator = peer.snapshot;
+            break;
+          }
+        }
+        if (dominator) {
+          dominated_snapshots.emplace_back(std::move(entry.snapshot),
+                                           std::move(dominator));
+        } else if (impl_->snapshot_support.on_evict && record &&
             std::ranges::equal(entry.input_identity, input_identity) &&
             IsPrefix(entry.tokens, replacement_prefix) &&
             (!record->shared_prefix || entry.tokens.size() == token_count))
@@ -920,6 +955,11 @@ bool ContinuationCache::ReserveSnapshot(
                                     snapshot_bytes, token_count));
       }
     }
+  }
+  for (auto& [old, survivor] : dominated_snapshots) {
+    std::vector<std::shared_ptr<const ContinuationSnapshot>> one;
+    one.push_back(std::move(old));
+    ResolveRemoved(one, survivor);
   }
   ResolveRemoved(removed_snapshots);
   EmitSnapshotEvents(impl_->snapshot_support.on_event, events);
