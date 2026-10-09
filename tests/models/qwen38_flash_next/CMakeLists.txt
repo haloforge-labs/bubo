@@ -12,6 +12,7 @@ function(add_qwen38_flash_next_test name library labels)
   add_dependencies(qwen38_flash_next_tests ${target})
 endfunction()
 
+add_qwen38_flash_next_test(batch_draft_head gufo_core "cpu")
 add_qwen38_flash_next_test(config gufo_qwen38_flash_next "cpu")
 add_qwen38_flash_next_test(ngram gufo_qwen38_flash_next "cpu")
 add_qwen38_flash_next_test(mtp_sampling gufo_core "cpu")

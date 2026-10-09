@@ -21,6 +21,7 @@
 #include "src/core/session_mode.hpp"
 #include "src/models/qwen/hip/ops/token.hpp"
 #include "src/models/qwen/vision/device_input.hpp"
+#include "src/models/qwen38_flash_next/batch_draft_head.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/blaslt.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
@@ -329,6 +330,13 @@ public:
     /// known trunk hidden rows is required before heads/recursive proposals.
     bool kv_only{false};
   };
+  struct DraftOutputSelection {
+    const DeviceTensor* tensor;
+    const std::int32_t* map;
+    BatchDraftHead head;
+  };
+  [[nodiscard]] DraftOutputSelection BatchDraftOutput() const;
+
   struct MtpHeadItem {
     Session* session;
     MtpOutput output;
@@ -548,6 +556,10 @@ private:
   /// Draft output head counters: [0] draft steps that read the 8-bit trunk head, [1] draft steps that read the 4-bit draft copy.
   mutable std::array<std::atomic<std::uint64_t>, 2> draft_out_steps_{};
   void PrintDraftOutCounters(const char* tag) const;
+  bool batch_draft_head_{false};
+  mutable std::array<std::atomic<std::uint64_t>, 4> batch_draft_steps_{};
+  mutable std::array<std::atomic<std::uint64_t>, 4> batch_draft_rows_{};
+  void PrintBatchDraftCounters(const char* tag) const;
   /// DEBUG shadow check (GUFO_DENSE_TWIN_SHADOW): re-runs a 4-bit dense projection through the fake-quant Q8_0 copy on the same quantized activations and accumulates the difference per tensor.
   struct ShadowStat {
     std::string label;

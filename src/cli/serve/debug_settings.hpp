@@ -17,6 +17,7 @@ namespace gufo::server {
 // Keep this catalog explicit: the source-completeness test rejects newly read
 // variables until their diagnostic meaning has been reviewed.
 inline constexpr const char* kDebugSettingsEnvironment[] = {
+    "GUFO_BATCH_DRAFT_HEAD",
     "GUFO_DEBUG_HOOKS",
     "GUFO_THINK_EOG_GUARD",
     "GUFO_EOG_BOUNDARY",

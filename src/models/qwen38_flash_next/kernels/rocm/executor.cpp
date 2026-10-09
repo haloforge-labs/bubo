@@ -1047,6 +1047,8 @@ Executor::~Executor() {
   if (primary_stream_ != nullptr) {
     (void)hipStreamDestroy(primary_stream_);
   }
+  if (batch_draft_head_ && model_ != nullptr && !model_->has_draft_out())
+    PrintBatchDraftCounters("final");
 }
 
 std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
@@ -1351,6 +1353,13 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
                    "(%.0f MB)\n",
                    ids.size(), out.rows,
                    static_cast<double>(ids.size() * row_bytes) / 1e6);
+    }
+    e->batch_draft_head_ =
+        BatchDraftHeadSwitch(std::getenv("GUFO_BATCH_DRAFT_HEAD"));
+    if (e->batch_draft_head_) {
+      const auto selected = e->BatchDraftOutput();
+      std::fprintf(stderr, "[batchdraft] enabled head=%s rows=%u\n",
+                   BatchDraftHeadName(selected.head), selected.tensor->rows);
     }
     if (!Check(hipHostMalloc(&e->mtp_token_host_, sizeof(std::int32_t),
                              ResultHostFlags()),
@@ -3403,7 +3412,23 @@ void Executor::PrintShadowStats() const {
   }
 }
 
+void Executor::PrintBatchDraftCounters(const char* tag) const {
+  if (!batch_draft_head_)
+    return;
+  std::fprintf(stderr, "[batchdraft] %s batched projection steps / rows:", tag);
+  for (unsigned i = 0; i < batch_draft_steps_.size(); ++i) {
+    std::fprintf(stderr, " %s=%llu/%llu",
+                 BatchDraftHeadName(static_cast<BatchDraftHead>(i)),
+                 static_cast<unsigned long long>(
+                     batch_draft_steps_[i].load(std::memory_order_relaxed)),
+                 static_cast<unsigned long long>(
+                     batch_draft_rows_[i].load(std::memory_order_relaxed)));
+  }
+  std::fprintf(stderr, "\n");
+}
+
 void Executor::PrintDraftOutCounters(const char* tag) const {
+  PrintBatchDraftCounters(tag);
   std::fprintf(stderr, "[draftout] %s draft steps: 4-bit copy=%llu 8-bit trunk head=%llu (8-bit must stay 0 when the copy is armed; verify / trunk logits always read the 8-bit head)\n", tag,
                static_cast<unsigned long long>(draft_out_steps_[1].load(std::memory_order_relaxed)), static_cast<unsigned long long>(draft_out_steps_[0].load(std::memory_order_relaxed)));
 }

@@ -391,6 +391,15 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
   return true;
 }
 
+Executor::DraftOutputSelection Executor::BatchDraftOutput() const {
+  const auto head = SelectBatchDraftHead(
+      batch_draft_head_, draft_ids_ != nullptr, model_->has_draft_out(), 2);
+  if (BatchDraftSubset(head))
+    return {&draft_head_, draft_ids_, head};
+  if (head == BatchDraftHead::kDraft)
+    return {&model_->draft_out(), nullptr, head};
+  return {&model_->output(), nullptr, head};
+}
 bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
                         std::string* error) const {
   if (!UsePrimaryStream(error)) {
@@ -416,7 +425,6 @@ bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
       }
     }
   }
-  const auto& output = model_->output();
   const auto& head = model_->mtp().nextn_head;
   if (!AnyActive(items))
     return true;
@@ -436,6 +444,8 @@ bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
     }
     return true;
   }
+  const auto selected = BatchDraftOutput();
+  const auto& output = *selected.tensor;
   if (!AllocateBatch(error)) {
     return false;
   }
@@ -466,12 +476,28 @@ bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
       return true;
     if (!DenseBatch(output, base.mixed, batch_logits_, n, error))
       return false;
+    if (batch_draft_head_) {
+      const auto index = static_cast<unsigned>(selected.head);
+      const auto steps =
+          batch_draft_steps_[index].fetch_add(1, std::memory_order_relaxed) + 1;
+      batch_draft_rows_[index].fetch_add(n, std::memory_order_relaxed);
+      if (steps == 1 || (steps & 0x1FF) == 0) {
+        if (model_->has_draft_out())
+          PrintDraftOutCounters("batch");
+        else
+          PrintBatchDraftCounters("batch");
+      }
+    }
     for (std::uint32_t i = 0; i < n; ++i) {
       if (!items[i].session->CheckCancellation(nullptr))
         continue;
       if (items[i].output.candidates == nullptr) {
         Argmax(batch_logits_ + std::size_t(i) * output.rows, s_.mtp_argmax,
                s_.mtp_token, 1, output.rows, stream_);
+        if (const auto remap = DraftRemapCount(selected.head, output.rows,
+                                               kMtpCandidates, true))
+          RemapIds(reinterpret_cast<std::uint32_t*>(s_.mtp_token), remap,
+                   selected.map, stream_);
         if (!Check(hipMemcpyAsync(batch_candidates_host_[i].ids.data(),
                                   s_.mtp_token, sizeof(std::int32_t),
                                   hipMemcpyDeviceToHost, stream_),
@@ -481,6 +507,9 @@ bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
       }
       MtpTopCandidates(batch_logits_ + std::size_t(i) * output.rows, s_.mtp_ids,
                        s_.mtp_scratch_ids, s_.mtp_scores, output.rows, stream_);
+      if (const auto remap = DraftRemapCount(selected.head, output.rows,
+                                             kMtpCandidates, false))
+        RemapIds(s_.mtp_ids, remap, selected.map, stream_);
       if (!Check(hipMemcpyAsync(batch_candidates_host_ + i, s_.mtp_ids,
                                 offsetof(MtpCandidateLogits, logits) +
                                     count * sizeof(float),
