@@ -981,6 +981,80 @@ bool Session::TeacherForce(std::span<const std::int32_t> tokens,
   return true;
 }
 
+bool Session::TeacherForceBatch(std::span<const TeacherForceRequest> requests,
+                                std::string* error_msg) {
+  if (requests.empty() || requests.size() > 8) {
+    AssignError(error_msg, "teacher-force batch needs 1..8 sessions");
+    return false;
+  }
+  const auto model = requests.front().session ? requests.front().session->model_
+                                              : std::shared_ptr<Model>{};
+  for (std::size_t i = 0; i < requests.size(); ++i) {
+    const auto& r = requests[i];
+    if (!r.session || !r.rows || r.session->model_ != model ||
+        !r.session->valid_ || r.session->tokens_.empty() || r.tokens.empty() ||
+        r.tokens.size() >
+            std::min<std::uint32_t>(8, r.session->MaxVerifyWidth()) ||
+        r.session->tokens_.size() + r.tokens.size() >
+            r.session->ContextSize()) {
+      AssignError(error_msg, "invalid teacher-force batch session or width");
+      return false;
+    }
+    for (std::size_t j = 0; j < i; ++j) {
+      if (requests[j].session == r.session || requests[j].rows == r.rows) {
+        AssignError(error_msg, "duplicate teacher-force session or output");
+        return false;
+      }
+    }
+    for (const auto token : r.tokens) {
+      if (token < 0 ||
+          static_cast<std::uint32_t>(token) >= model->VocabSize()) {
+        AssignError(error_msg, "teacher-force token out of range");
+        return false;
+      }
+    }
+    if (!r.session->EnsureFrontier(error_msg))
+      return false;
+  }
+  if (requests.size() == 1) {
+    const auto& r = requests.front();
+    return r.session->TeacherForce(r.tokens, r.rows, error_msg);
+  }
+  auto& exec = *model->executor_;
+  const auto vocab = model->VocabSize();
+  std::vector<rocm::Executor::BatchItem> items;
+  for (const auto& r : requests) {
+    r.rows->resize(r.tokens.size() * vocab);
+    items.push_back({r.session->session_.get(), r.tokens, r.tokens.size() > 1});
+  }
+  for (const auto& r : requests) {
+    r.session->valid_ = false;
+    r.session->anchor_candidates_valid_ = false;
+  }
+  if (!exec.ForwardBatch(items, error_msg))
+    return false;
+  std::uint32_t offset = 0;
+  for (const auto& r : requests) {
+    const auto n = static_cast<std::uint32_t>(r.tokens.size());
+    if (r.session->session_->Cancelled() ||
+        !exec.SelectBatchLogits(offset, n, r.rows->data(), error_msg) ||
+        (n > 1 && !exec.Rollback(*r.session->session_, n, error_msg))) {
+      if (r.session->session_->Cancelled())
+        AssignError(error_msg, "teacher-force batch cancelled");
+      return false;
+    }
+    offset += n;
+  }
+  for (const auto& r : requests) {
+    std::copy_n(r.rows->data() + (r.tokens.size() - 1) * vocab, vocab,
+                r.session->logits_.begin());
+    r.session->tokens_.insert(r.session->tokens_.end(), r.tokens.begin(),
+                              r.tokens.end());
+    r.session->valid_ = true;
+  }
+  return true;
+}
+
 struct Session::PendingDecode {
   std::vector<std::int32_t> chain;
   std::vector<MtpProposal> proposals;

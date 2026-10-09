@@ -70,11 +70,13 @@ enum class BatchDensePath {
   kSmallGemm
 };
 inline BatchDensePath BatchDenseDispatch(core::GgmlType t, std::uint32_t rows,
-                                         bool armed) {
+                                         bool armed,
+                                         bool multi_session = false) {
+  if (armed && multi_session &&
+      (t == core::GgmlType::kIQ4_XS || t == core::GgmlType::kIQ4_NL))
+    return BatchDensePath::kTwinMultiRow;
   if (rows <= kBatchMaxChain)
     return BatchDensePath::kDense;
-  if (armed && (t == core::GgmlType::kIQ4_XS || t == core::GgmlType::kIQ4_NL))
-    return BatchDensePath::kTwinMultiRow;
   if (armed && TwinDenseType(t))
     return BatchDensePath::kTwinSlices;
   return t == core::GgmlType::kQ8_0 ? BatchDensePath::kQ8

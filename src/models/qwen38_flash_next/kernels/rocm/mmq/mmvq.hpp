@@ -44,7 +44,7 @@ void mul_mat_vec_iq4_dense_dispatch(const void* weights, ggml_type type,
                                     int k, int rows, int tokens, int input_stride,
                                     hipStream_t stream);
 
-// Separate wide adapter; the original dense dispatch remains N<=8 only.
+// Separate wide adapter: WMMA N<=64; original dense dispatch remains N<=8.
 void mul_mat_vec_iq4_dense_batch_dispatch(const void* weights, ggml_type type,
     const block_q8_1* input, float* output, int k, int rows, int n_valid,
     int input_stride, hipStream_t stream);

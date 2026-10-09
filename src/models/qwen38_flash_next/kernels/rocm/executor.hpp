@@ -490,7 +490,7 @@ private:
   /// prefill arithmetic. Injection rows are compact across the whole batch.
   bool HcMixBatch(const DeviceMixer& m, const float* res, bool normed,
                   float* mixed, float* inject, std::uint32_t rows,
-                  std::string* error) const;
+                  std::string* error, bool multi_session = false) const;
   void CombineBatch(float* res, const float* gamma, std::uint32_t rows) const;
   /// Residual update by the block output plus the grouped norm for the next
   /// mixer (`gamma`); wide batches write it as F16 and tiled Q8.
@@ -535,7 +535,8 @@ private:
   bool MoeExperts(const DeviceLayer& l, const float* x, float* out,
                   std::uint32_t n_tokens, std::string* error_msg) const;
   bool MoeBatch(const DeviceLayer& l, const float* x, float* out,
-                std::uint32_t rows, std::string* error) const;
+                std::uint32_t rows, std::string* error,
+                bool multi_session = false) const;
   /// Selects the greedy token or compact candidates from full MTP logits.
   bool MtpHead(const DeviceMixer& head, const float* res, bool token,
                bool candidates, std::string* error_msg) const;
@@ -701,10 +702,11 @@ private:
                                    std::uint32_t offset) const;
   void UseScratch(const Scratch& scratch) const;
   bool DenseBatch(const DeviceTensor& w, const float* x, float* out,
-                  std::uint32_t rows, std::string* error_msg) const;
+                  std::uint32_t rows, std::string* error_msg,
+                  bool multi_session = false) const;
   bool GatedDenseBatch(const DeviceTensor& up, const DeviceTensor& gate,
                        const float* x, float* out, std::uint32_t rows,
-                       std::string* error) const;
+                       std::string* error, bool multi_session = false) const;
   bool QuantizeBatch(const float* x, std::uint32_t rows, std::uint32_t cols,
                      std::string* error) const;
   bool AllocateBatch(std::string* error_msg) const;

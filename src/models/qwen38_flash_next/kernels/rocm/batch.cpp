@@ -134,17 +134,17 @@ bool Executor::AllocateBatch(std::string* error) const {
 
 bool Executor::HcMixBatch(const DeviceMixer& m, const float* res, bool normed,
                           float* mixed, float* inject, std::uint32_t rows,
-                          std::string* error) const {
+                          std::string* error, bool multi_session) const {
   const auto& c = config();
   xn_half_ = false;
   if (!normed)
     RmsNormRows(res, m.norm.f32(), s_.xn, rows, c.HcDim(), c.hc_count,
                 c.rms_eps, stream_);
-  if (!DenseBatch(m.down, s_.xn, s_.lo, rows, error))
+  if (!DenseBatch(m.down, s_.xn, s_.lo, rows, error, multi_session))
     return false;
   SiluScale(s_.lo, 1.0F / static_cast<float>(c.hc_count),
             std::size_t{rows} * c.hc_low_rank, stream_);
-  if (!DenseBatch(m.up, s_.lo, s_.hc_gate, rows, error))
+  if (!DenseBatch(m.up, s_.lo, s_.hc_gate, rows, error, multi_session))
     return false;
   const bool fused_inject = inject != nullptr && !m.inject.empty() &&
                             m.inject.type == core::GgmlType::kF32;
@@ -156,7 +156,7 @@ bool Executor::HcMixBatch(const DeviceMixer& m, const float* res, bool normed,
                 mixed, inject, rows, c.hidden_size, c.hc_count, stream_);
   inject_parts_ = fused_inject ? HcInjectParts(c.hidden_size) : 1;
   if (inject != nullptr && !m.inject.empty() && !fused_inject) {
-    if (!DenseBatch(m.inject, s_.xn, inject, rows, error))
+    if (!DenseBatch(m.inject, s_.xn, inject, rows, error, multi_session))
       return false;
   }
   return true;
@@ -171,6 +171,7 @@ void Executor::CombineBatch(float* res, const float* gamma,
 
 bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
                                std::string* error) const {
+  const bool multi_session = items.size() > 1;
   if (!UsePrimaryStream(error)) {
     return false;
   }
@@ -267,21 +268,25 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
     // Persistent draft KV uses the same projections for every prompt split,
     // catch-up length and number of independent sessions.
     if (!DenseBatch(l.nextn_fc_embedding, base.mtp_embd, base.mtp_eproj, rows,
-                    error) ||
+                    error, multi_session) ||
         !DenseBatch(l.nextn_fc_hidden, base.mtp_h, base.mtp_res,
-                    rows * c.hc_count, error))
+                    rows * c.hc_count, error, multi_session))
       return false;
     MtpAddEmbedding(base.mtp_eproj, base.mtp_res, rows, c.hidden_size,
                     c.hc_count, stream_);
     if (!HcMixBatch(l.hc_attn, base.mtp_res, false, base.mixed, base.inject,
-                    rows, error))
+                    rows, error, multi_session))
       return false;
     if (!l.attn_qkv.empty()) {
-      if (!DenseBatch(l.attn_qkv, base.mixed, base.qg, rows, error))
+      if (!DenseBatch(l.attn_qkv, base.mixed, base.qg, rows, error,
+                      multi_session))
         return false;
-    } else if (!DenseBatch(l.attn_q, base.mixed, base.qg, rows, error) ||
-               !DenseBatch(l.attn_k, base.mixed, base.k, rows, error) ||
-               !DenseBatch(l.attn_v, base.mixed, base.v, rows, error)) {
+    } else if (!DenseBatch(l.attn_q, base.mixed, base.qg, rows, error,
+                           multi_session) ||
+               !DenseBatch(l.attn_k, base.mixed, base.k, rows, error,
+                           multi_session) ||
+               !DenseBatch(l.attn_v, base.mixed, base.v, rows, error,
+                           multi_session)) {
       return false;
     }
     for (std::size_t i = 0; i < items.size(); ++i) {
@@ -344,15 +349,17 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
     const auto tail_rows =
         compact_tail ? static_cast<std::uint32_t>(items.size()) : rows;
     UseScratch(tail);
-    if (!DenseBatch(l.attn_out, tail.ctx, tail.block_out, tail_rows, error))
+    if (!DenseBatch(l.attn_out, tail.ctx, tail.block_out, tail_rows, error,
+                    multi_session))
       return false;
     CombineBatch(tail.mtp_res, l.hc_ffn.norm.f32(), tail_rows);
     if (!HcMixBatch(l.hc_ffn, tail.mtp_res, true, tail.mixed, tail.inject,
-                    tail_rows, error))
+                    tail_rows, error, multi_session))
       return false;
     if (!AnyActive(items))
       return true;
-    if (!MoeBatch(l, tail.mixed, tail.block_out, tail_rows, error))
+    if (!MoeBatch(l, tail.mixed, tail.block_out, tail_rows, error,
+                  multi_session))
       return false;
     CombineBatch(tail.mtp_res, nullptr, tail_rows);
     for (std::size_t i = 0; i < items.size(); ++i) {
@@ -403,6 +410,7 @@ Executor::DraftOutputSelection Executor::BatchDraftOutput() const {
 }
 bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
                         std::string* error) const {
+  const bool multi_session = items.size() > 1;
   if (!UsePrimaryStream(error)) {
     return false;
   }
@@ -471,11 +479,12 @@ bool Executor::MtpHeads(std::span<const MtpHeadItem> items,
                   stream_);
     }
     UseScratch(base);
-    if (!HcMixBatch(head, nullptr, true, base.mixed, nullptr, n, error))
+    if (!HcMixBatch(head, nullptr, true, base.mixed, nullptr, n, error,
+                    multi_session))
       return false;
     if (!AnyActive(items))
       return true;
-    if (!DenseBatch(output, base.mixed, batch_logits_, n, error))
+    if (!DenseBatch(output, base.mixed, batch_logits_, n, error, multi_session))
       return false;
     if (batch_draft_head_) {
       const auto index = static_cast<unsigned>(selected.head);
@@ -567,21 +576,22 @@ bool Executor::QuantizeBatch(const float* x, std::uint32_t rows,
 }
 
 bool Executor::DenseBatch(const DeviceTensor& w, const float* x, float* out,
-                          std::uint32_t rows, std::string* error) const {
-  if (rows <= kDecodeRows)
-    return Dense(w, x, out, rows, error);
+                          std::uint32_t rows, std::string* error,
+                          bool multi_session) const {
   const bool armed = model_->has_twin() && TwinBatchEnabled();
-  const auto path = BatchDenseDispatch(w.type, rows, armed);
+  const auto path = BatchDenseDispatch(w.type, rows, armed, multi_session);
+  if (path == BatchDensePath::kDense)
+    return Dense(w, x, out, rows, error);
   if (path == BatchDensePath::kTwinMultiRow) {
     if (!QuantizeBatch(x, rows, w.cols, error))
       return false;
-    for (std::uint32_t r = 0; r < rows; r += 32) {
+    for (std::uint32_t r = 0; r < rows; r += kTwinBatchMax) {
       const auto* input = static_cast<const std::uint8_t*>(s_.x_q8t) +
                           qfn_mmq_q8_1_bytes(r, w.cols);
       if (qfn_mmq_iq4_dense_batch_preq(static_cast<int>(w.type), w.data, input,
                                        out + std::size_t{r} * w.rows, w.rows,
-                                       std::min(32u, rows - r), w.cols,
-                                       stream_) != 0)
+                                       std::min(kTwinBatchMax, rows - r),
+                                       w.cols, stream_) != 0)
         return Fail(error, "batched IQ4 projection failed (no fallback)");
     }
     return true;
@@ -637,21 +647,20 @@ bool Executor::DenseBatch(const DeviceTensor& w, const float* x, float* out,
 
 bool Executor::GatedDenseBatch(const DeviceTensor& up, const DeviceTensor& gate,
                                const float* x, float* out, std::uint32_t rows,
-                               std::string* error) const {
+                               std::string* error, bool multi_session) const {
   const Scratch base = s_;
   const auto iq4 = [](core::GgmlType t) {
     return t == core::GgmlType::kIQ4_XS || t == core::GgmlType::kIQ4_NL;
   };
   const bool iq4_pair = iq4(up.type) && iq4(gate.type) &&
                         up.rows == gate.rows && up.cols == gate.cols;
-  if (rows > kDecodeRows && iq4_pair && model_->has_twin() &&
-      TwinBatchEnabled()) {
+  if (multi_session && iq4_pair && model_->has_twin() && TwinBatchEnabled()) {
     if (!QuantizeBatch(x, rows, up.cols, error))
       return false;
-    for (std::uint32_t r = 0; r < rows; r += 32) {
+    for (std::uint32_t r = 0; r < rows; r += kTwinBatchMax) {
       const auto* input = static_cast<const std::uint8_t*>(base.x_q8t) +
                           qfn_mmq_q8_1_bytes(r, up.cols);
-      const auto n = std::min(32u, rows - r);
+      const auto n = std::min(kTwinBatchMax, rows - r);
       if (qfn_mmq_iq4_dense_batch_preq(static_cast<int>(gate.type), gate.data,
                                        input, out + std::size_t{r} * up.rows,
                                        up.rows, n, up.cols, stream_) != 0 ||
@@ -692,18 +701,21 @@ bool Executor::GatedDenseBatch(const DeviceTensor& up, const DeviceTensor& gate,
 }
 
 bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
-                        std::uint32_t rows, std::string* error) const {
-  if (rows <= kDecodeRows)
+                        std::uint32_t rows, std::string* error,
+                        bool multi_session) const {
+  if (rows <= kDecodeRows &&
+      !(multi_session && model_->has_twin() && TwinBatchEnabled()))
     return Moe(l, x, out, rows, error);
   const auto& c = config();
   const Scratch base = s_;
-  if (!DenseBatch(l.router, x, base.router, rows, error))
+  if (!DenseBatch(l.router, x, base.router, rows, error, multi_session))
     return false;
   RouterTopK(base.router, c.num_experts + 1, base.ids, base.weights, rows,
              c.num_experts, c.num_experts_used, stream_);
-  if (!GatedDenseBatch(l.shexp_up, l.shexp_gate, x, base.shexp_up, rows,
-                       error) ||
-      !DenseBatch(l.shexp_down, base.shexp_up, base.shexp_out, rows, error))
+  if (!GatedDenseBatch(l.shexp_up, l.shexp_gate, x, base.shexp_up, rows, error,
+                       multi_session) ||
+      !DenseBatch(l.shexp_down, base.shexp_up, base.shexp_out, rows, error,
+                  multi_session))
     return false;
   if (l.ffn_gate_exps.type == core::GgmlType::kQ4_K &&
       l.ffn_up_exps.type == core::GgmlType::kQ4_K) {
@@ -738,6 +750,7 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
 
 bool Executor::ForwardBatch(std::span<const BatchItem> items,
                             std::string* error) const {
+  const bool multi_session = items.size() > 1;
   if (!UsePrimaryStream(error)) {
     return false;
   }
@@ -910,28 +923,33 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
       }
       UseScratch(base);
       if (!HcMixBatch(l.hc_attn, base.res, normed, base.mixed, base.inject,
-                      rows, error))
+                      rows, error, multi_session))
         return false;
       if (l.linear) {
-        if ((!l.ssm_in.empty()
-                 ? !DenseBatch(l.ssm_in, base.mixed, base.qkvz, rows, error)
-                 : (!DenseBatch(l.ssm_qkv, base.mixed, base.qkv, rows, error) ||
-                    !DenseBatch(l.ssm_gate, base.mixed, base.z, rows,
-                                error))) ||
+        if ((!l.ssm_in.empty() ? !DenseBatch(l.ssm_in, base.mixed, base.qkvz,
+                                             rows, error, multi_session)
+                               : (!DenseBatch(l.ssm_qkv, base.mixed, base.qkv,
+                                              rows, error, multi_session) ||
+                                  !DenseBatch(l.ssm_gate, base.mixed, base.z,
+                                              rows, error, multi_session))) ||
             !DenseBatch(l.ssm_alpha_beta, base.mixed, base.alpha_beta, rows,
-                        error)) {
+                        error, multi_session)) {
           return false;
         }
       } else if (!l.attn_qkv.empty()) {
-        if (!DenseBatch(l.attn_qkv, base.mixed, base.qg, rows, error)) {
+        if (!DenseBatch(l.attn_qkv, base.mixed, base.qg, rows, error,
+                        multi_session)) {
           return false;
         }
       } else {
         // Separate Q/gate has a shorter row stride than the stacked buffer.
         // This model normally stacks QKV; keep the separate shape explicit.
-        if (!DenseBatch(l.attn_q, base.mixed, base.qg, rows, error) ||
-            !DenseBatch(l.attn_k, base.mixed, base.k, rows, error) ||
-            !DenseBatch(l.attn_v, base.mixed, base.v, rows, error)) {
+        if (!DenseBatch(l.attn_q, base.mixed, base.qg, rows, error,
+                        multi_session) ||
+            !DenseBatch(l.attn_k, base.mixed, base.k, rows, error,
+                        multi_session) ||
+            !DenseBatch(l.attn_v, base.mixed, base.v, rows, error,
+                        multi_session)) {
           return false;
         }
       }
@@ -1002,14 +1020,14 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
       UseScratch(base);
       if (!DenseBatch(l.linear ? l.ssm_out : l.attn_out,
                       l.linear ? base.gdn_out : base.ctx, base.block_out, rows,
-                      error)) {
+                      error, multi_session)) {
         return false;
       }
       CombineBatch(base.res, l.hc_ffn.norm.f32(), rows);
       if (!HcMixBatch(l.hc_ffn, base.res, true, base.mixed, base.inject, rows,
-                      error))
+                      error, multi_session))
         return false;
-      if (!MoeBatch(l, base.mixed, base.block_out, rows, error))
+      if (!MoeBatch(l, base.mixed, base.block_out, rows, error, multi_session))
         return false;
       const float* next_norm =
           il + 1 < c.num_layers
@@ -1034,8 +1052,9 @@ bool Executor::ForwardBatch(std::span<const BatchItem> items,
     }
     UseScratch(base);
     return HcMixBatch(model_->hc_head(), base.res, false, base.mixed, nullptr,
-                      rows, error) &&
-           DenseBatch(model_->output(), base.mixed, batch_logits_, rows, error);
+                      rows, error, multi_session) &&
+           DenseBatch(model_->output(), base.mixed, batch_logits_, rows, error,
+                      multi_session);
   };
   bool ok = false;
   try {

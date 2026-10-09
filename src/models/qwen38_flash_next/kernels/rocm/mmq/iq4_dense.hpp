@@ -130,6 +130,150 @@ static void launch_iq4_dense(const void* weights, const block_q8_1* input,
   }
 }
 
+// Both IQ4 formats pack K0..15 in low nibbles, K16..31 in high nibbles.
+// Decode directly from global memory; chain two full K16 WMMA operations
+// in int32 before one FP32 scale/FMA. No LDS weight or activation tile.
+template<ggml_type type, int token_tiles, bool ragged, int waves>
+__launch_bounds__(32 * waves) static __global__ void mul_mat_iq4_decode_batch(
+    const void* __restrict__ weights, const block_q8_1* __restrict__ input,
+    float* __restrict__ output, int k, int rows, int input_stride, int tokens) {
+  using Int4 = __attribute__((ext_vector_type(4))) int;
+  using Int8 = __attribute__((ext_vector_type(8))) int;
+  static_assert(waves == 4 || waves == 8 || waves == 16);
+  __shared__ float partial[16 * 16 * waves];
+  const int wave = threadIdx.x / 32;
+  const int lane = threadIdx.x % 32;
+  const int sub = lane % 16;
+  const int half = lane / 16;
+  const int first_row = blockIdx.x * 16;
+  const int row = min(first_row + sub, rows - 1);
+  const int blocks = k / QK8_1;
+  float acc[token_tiles][8]{};
+  for (int kb = wave; kb < blocks; kb += waves) {
+    Int4 low, high;
+    float scale;
+    if constexpr (type == GGML_TYPE_IQ4_XS) {
+      const auto* w = static_cast<const block_iq4_xs*>(weights) +
+          row * (blocks / 8) + kb / 8;
+      const int block = kb % 8;
+      const int ls = ((w->scales_l[block / 2] >> (4 * (block % 2))) & 15) |
+          (((w->scales_h >> (2 * block)) & 3) << 4);
+      // FP16 significand times a six-bit integer is exact in FP32.
+      scale = __fmul_rn(__half2float(w->d), float(ls - 32));
+#pragma unroll
+      for (int j = 0; j < 4; ++j) {
+        const int2 codes = get_int_from_table_16(
+            get_int_b4(w->qs, 4 * block + j), kvalues_iq4nl);
+        low[j] = codes.x;
+        high[j] = codes.y;
+      }
+    } else {
+      const auto* w = static_cast<const block_iq4_nl*>(weights) +
+          row * blocks + kb;
+      scale = __half2float(w->d);
+#pragma unroll
+      for (int j = 0; j < 4; ++j) {
+        // NL qs is only two-byte aligned, including the final packed block.
+        const int2 codes = get_int_from_table_16(
+            get_int_b2(w->qs, j), kvalues_iq4nl);
+        low[j] = codes.x;
+        high[j] = codes.y;
+      }
+    }
+    float scales[8];
+#pragma unroll
+    for (int i = 0; i < 8; ++i)
+      scales[i] = __shfl(scale, 2 * i + half, 32);
+#pragma unroll
+    for (int tile = 0; tile < token_tiles; ++tile) {
+      const int token = ragged && tile == token_tiles - 1
+                            ? min(tile * 16 + sub, tokens - 1)
+                            : tile * 16 + sub;
+      const auto* x = input + token * input_stride + kb;
+      const float x_scale = __low2float(x->ds);
+      const Int4 values0 = {get_int_b4(x->qs, 0), get_int_b4(x->qs, 1),
+                            get_int_b4(x->qs, 2), get_int_b4(x->qs, 3)};
+      const Int4 values1 = {get_int_b4(x->qs, 4), get_int_b4(x->qs, 5),
+                            get_int_b4(x->qs, 6), get_int_b4(x->qs, 7)};
+      Int8 dots{};
+      dots = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(
+          true, low, true, values0, dots, false);
+      dots = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(
+          true, high, true, values1, dots, false);
+#pragma unroll
+      for (int i = 0; i < 8; ++i)
+        acc[tile][i] =
+            __fmaf_rn(x_scale, __fmul_rn(scales[i], float(dots[i])), acc[tile][i]);
+    }
+  }
+  // Reuse the 4/8/16 KiB output transpose for each tile. Every valid
+  // (row, token) has the same wave K traversal and descending-delta sum tree.
+#pragma unroll
+  for (int tile = 0; tile < token_tiles; ++tile) {
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+      const int out = sub * 16 + 2 * i + half;
+      const int swizzle = (out ^ (out >> 4)) & (waves - 1);
+      partial[out * waves + (wave ^ swizzle)] = acc[tile][i];
+    }
+    __syncthreads();
+    // Four waves assign two outputs/thread; sixteen waves leave half idle
+    // during reduction only. All threads still participate in barriers.
+    for (int out = threadIdx.x; out < 256; out += 32 * waves) {
+      const int swizzle = (out ^ (out >> 4)) & (waves - 1);
+      float sums[waves];
+#pragma unroll
+      for (int i = 0; i < waves; ++i)
+        sums[i] = partial[out * waves + (i ^ swizzle)];
+#pragma unroll
+      for (int delta = waves / 2; delta; delta /= 2) {
+#pragma unroll
+        for (int i = 0; i < delta; ++i)
+          sums[i] = __fadd_rn(sums[i], sums[i + delta]);
+      }
+      const int out_row = first_row + out % 16;
+      const int token = tile * 16 + out / 16;
+      if (out_row < rows && (!ragged || token < tokens)) {
+        const float value = sums[0];
+        output[token * rows + out_row] = isfinite(value) ? value : 0.0f;
+      }
+    }
+    __syncthreads();
+  }
+}
+
+template<ggml_type type, int token_tiles, int waves>
+static void launch_iq4_matrix_tile(const void* weights, const block_q8_1* input,
+    float* output, int k, int rows, int tokens, int input_stride,
+    hipStream_t stream) {
+  if (tokens == 16 * token_tiles)
+    mul_mat_iq4_decode_batch<type, token_tiles, false, waves>
+        <<<(rows + 15) / 16, 32 * waves, 0, stream>>>(
+            weights, input, output, k, rows, input_stride, tokens);
+  else
+    mul_mat_iq4_decode_batch<type, token_tiles, true, waves>
+        <<<(rows + 15) / 16, 32 * waves, 0, stream>>>(
+            weights, input, output, k, rows, input_stride, tokens);
+}
+
+template<ggml_type type, int waves>
+static void launch_iq4_matrix(const void* weights, const block_q8_1* input,
+    float* output, int k, int rows, int n, int input_stride, hipStream_t stream) {
+  if (n <= 16)
+    launch_iq4_matrix_tile<type, 1, waves>(
+        weights, input, output, k, rows, n, input_stride, stream);
+  else if (n <= 32)
+    launch_iq4_matrix_tile<type, 2, waves>(
+        weights, input, output, k, rows, n, input_stride, stream);
+  else if (n <= 48)
+    launch_iq4_matrix_tile<type, 3, waves>(
+        weights, input, output, k, rows, n, input_stride, stream);
+  else
+    launch_iq4_matrix_tile<type, 4, waves>(
+        weights, input, output, k, rows, n, input_stride, stream);
+}
+
+
 // Wide tiles are separate: the 1..8 kernels and launch recursion above stay
 // unchanged. Stage each K tile once through LDS for all four output waves.
 // The lane's K traversal, FP32 fragment arithmetic and XOR sum tree match N=1.
@@ -359,11 +503,28 @@ template<ggml_type type>
 static void launch_iq4_wide_variant(const void* weights, const block_q8_1* input,
     float* output, int k, int rows, int n, int input_stride, hipStream_t stream) {
   using namespace gufo::models::qwen38_flash_next;
+  const int variant = Iq4WideVariant();
+  if (variant == 4) {
+    const int waves = Iq4WmmaWaves();
+    if (waves == 4)
+      launch_iq4_matrix<type, 4>(weights, input, output, k, rows, n, input_stride, stream);
+    else if (waves == 16)
+      launch_iq4_matrix<type, 16>(weights, input, output, k, rows, n, input_stride, stream);
+    else
+      launch_iq4_matrix<type, 8>(weights, input, output, k, rows, n, input_stride, stream);
+    return;
+  }
+  // Legacy A/B variants retain their <=32 geometry and arithmetic.
+  if (n > 32) {
+    launch_iq4_wide_variant<type>(weights, input, output, k, rows, 32, input_stride, stream);
+    launch_iq4_wide_variant<type>(weights, input + 32 * input_stride, output + 32 * rows,
+        k, rows, n - 32, input_stride, stream);
+    return;
+  }
   if (n <= 8) {
     launch_iq4_dense<type>(weights, input, output, k, rows, n, input_stride, stream);
     return;
   }
-  const int variant = Iq4WideVariant();
   if (variant == 0) {
     launch_iq4_dense_batch<type>(weights, input, output, k, rows, n, input_stride, stream);
   } else if (variant == 3) {

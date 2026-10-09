@@ -74,7 +74,7 @@ int qfn_mmq_dense_vec_preq(int weight_type, const void* W, const void* X_q8,
                            const int32_t* zero_ids, float* out_f32, int M, int N,
                            int K, hipStream_t stream);
 
-/// Batched-only IQ4, N=1..32 valid rows; loads/stores never touch padded rows.
+/// Batched-only IQ4, N=1..64 valid rows; loads/stores never touch padded rows.
 /// Single-session callers retain qfn_mmq_dense_vec_preq unchanged.
 int qfn_mmq_iq4_dense_batch_preq(int weight_type, const void* W,
     const void* X_q8, float* out, int M, int N, int K, hipStream_t stream);

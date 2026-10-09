@@ -182,6 +182,18 @@ public:
                                   std::vector<float>* rows,
                                   std::string* error_msg = nullptr,
                                   bool prefill = false);
+  struct TeacherForceRequest {
+    Session* session;
+    std::span<const std::int32_t> tokens;
+    std::vector<float>* rows;
+  };
+  /// Numerical harness seam: external chains use the serving ForwardBatch
+  /// verification arithmetic, retain every row, and never sample or draft.
+  /// One request delegates to TeacherForce, preserving its existing arithmetic.
+  /// On a device failure all included sessions become invalid.
+  [[nodiscard]] static bool TeacherForceBatch(
+      std::span<const TeacherForceRequest> requests,
+      std::string* error_msg = nullptr);
   [[nodiscard]] std::uint32_t MaxVerifyWidth() const noexcept;
   struct DecodeResult {
     std::vector<std::int32_t> tokens;

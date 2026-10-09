@@ -38,21 +38,24 @@ int main() {
         for (bool prefill : {false, true}) {
           Require(q::BatchUsesTwin(armed, enabled, prefill) ==
                   (armed && enabled && !prefill));
-          for (T t : {T::kQ8_0, T::kF16, T::kF32, T::kBF16, T::kIQ4_XS,
-                      T::kIQ4_NL, T::kQ4_K, T::kQ5_K, T::kQ5_1}) {
-            const auto p = q::BatchDenseDispatch(t, n, armed && enabled);
-            if (n <= 8)
-              Require(p == q::BatchDensePath::kDense);
-            else if (armed && enabled && q::TwinDenseType(t))
-              Require(p == ((t == T::kIQ4_XS || t == T::kIQ4_NL)
-                                ? q::BatchDensePath::kTwinMultiRow
-                                : q::BatchDensePath::kTwinSlices));
-            else
-              Require(p == (t == T::kQ8_0 ? q::BatchDensePath::kQ8
-                                          : q::BatchDensePath::kSmallGemm));
-            Require(!(armed && enabled && q::TwinDenseType(t) &&
-                      p == q::BatchDensePath::kSmallGemm));
-          }
+          for (bool multi_session : {false, true})
+            for (T t : {T::kQ8_0, T::kF16, T::kF32, T::kBF16, T::kIQ4_XS,
+                        T::kIQ4_NL, T::kQ4_K, T::kQ5_K, T::kQ5_1}) {
+              const auto p =
+                  q::BatchDenseDispatch(t, n, armed && enabled, multi_session);
+              if (armed && enabled && multi_session &&
+                  (t == T::kIQ4_XS || t == T::kIQ4_NL))
+                Require(p == q::BatchDensePath::kTwinMultiRow);
+              else if (n <= 8)
+                Require(p == q::BatchDensePath::kDense);
+              else if (armed && enabled && q::TwinDenseType(t))
+                Require(p == q::BatchDensePath::kTwinSlices);
+              else
+                Require(p == (t == T::kQ8_0 ? q::BatchDensePath::kQ8
+                                            : q::BatchDensePath::kSmallGemm));
+              Require(!(armed && enabled && q::TwinDenseType(t) &&
+                        p == q::BatchDensePath::kSmallGemm));
+            }
         }
   }
   for (std::uint32_t c = 1; c <= 8; ++c)
@@ -68,6 +71,7 @@ int main() {
   Require(q::TwinBatchLoadError(true, false, 2, 8, 8) != nullptr);
   Require(q::TwinBatchLoadError(true, false, 1, 8, 6) == nullptr);
   Require(q::TwinBatchLoadError(false, true, 9, 9, 1) == nullptr);
-  std::cout << "PASS batch layer selector 1..64; dispatch type x rows; load "
+  std::cout << "PASS batch layer selector 1..64; dispatch type x rows x "
+               "session flag; load "
                "refusal; OFF contract\n";
 }
