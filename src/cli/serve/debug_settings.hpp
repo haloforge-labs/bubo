@@ -60,6 +60,8 @@ inline constexpr const char* kDebugSettingsEnvironment[] = {
     "GUFO_DENSE_TWIN_SHADOW",
     "GUFO_DENSE_TWIN_ALLOW_Q8",
     "GUFO_DENSE_TWIN_TRACE",
+    "GUFO_IQ4_WIDE_VARIANT",
+    "GUFO_IQ4_WMMA_WAVES",
     "GUFO_DRAFT_OUT_MODEL",
     "GUFO_PREFILL_FORWARD_TOKENS",
     "GUFO_DISPATCH_TELEMETRY",
