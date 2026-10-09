@@ -88,8 +88,7 @@ const WriterSettings& DiskWriterSettings() {
       result.evict_skip_invalid = true;
     }
     if (result.evict_skip_invalid)
-      std::fprintf(stderr, "[disk-cache] warning: unsupported GUFO_DISK_EVICT_SKIP_TOKENS value '%s' (accepted 0..1000000); using the default 0 (evict-skip off)
-", skip);
+      std::fprintf(stderr, "[disk-cache] warning: unsupported GUFO_DISK_EVICT_SKIP_TOKENS value '%s' (accepted 0..1000000); using the default 0 (evict-skip off)\n", skip);
     return result;
   }();
   return settings;
