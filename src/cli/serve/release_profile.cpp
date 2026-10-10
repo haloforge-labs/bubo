@@ -436,7 +436,8 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
       try {
         ValidateValue(row, *setting.value);
       } catch (const std::invalid_argument& error) {
-        if (match && inputs.profile != "stock")
+        if (match && inputs.profile != "stock" &&
+            inputs.model_family == "qwen3.8-flash-next")
           throw;
         result.logs.push_back("warning: " + std::string(error.what()));
       }
@@ -522,7 +523,8 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
         }
         if (met)
           continue;
-        if (!Matches(row, inputs) || inputs.profile == "stock") {
+        if (!Matches(row, inputs) || inputs.profile == "stock" ||
+            inputs.model_family != "qwen3.8-flash-next") {
           if (candidate)
             result.logs.push_back("warning: " + setting.name + ": needs " +
                                   req.str());
