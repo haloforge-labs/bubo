@@ -9,7 +9,8 @@
     "GUFO_LOOP_BREAKER": "1",
     "GUFO_LOOP_BREAKER_EOG_CLOSE": "1",
     "GUFO_THINK_MARKER_BIAS_BY_EFFORT": "low:-2,medium:-1,xhigh:0",
-    "GUFO_LENIENT": "bounded"
+    "GUFO_LENIENT": "bounded",
+    "GUFO_THINK_GUARD_ESCALATE": "16"
   },
   "args": {
     "--sessions": "1",

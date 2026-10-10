@@ -2648,6 +2648,56 @@ void TestDiskWriterPoolEvictionShutdownAndRestore() {
          "RAM refusal falls back to disk-only capture and persistence");
 }
 
+void TestServerCacheDisabledHasColdGeometry() {
+  auto stats = std::make_shared<FakeStats>();
+  auto runner = std::make_shared<PersistentSnapshotRunner>(
+      stats, "no-cache-test", 4096, 32768);
+  // A supplied disk directory must never be opened with server cache disabled.
+  const auto directory =
+      std::filesystem::current_path() / "no-cache-must-not-exist";
+  Expect(!std::filesystem::exists(directory),
+         "disabled disk fixture starts absent");
+  TextRunnerPool pool(
+      runner, 1, TextRunnerDiskCacheOptions{.directory = directory},
+      gufo::server::TextRunnerRamCacheOptions{.disabled = true});
+  const auto settings = pool.DebugSettings();
+  Expect(!settings.find("disk_cache")->find("enabled")->as_bool() &&
+             settings.find("ram_cache")->member_size("capacity_bytes") == 0,
+         "server disables both cache tiers");
+  for (const std::size_t length : {4095, 4096, 4097, 10000}) {
+    std::vector<TextRunnerToken> prompt(length, 1);
+    for (int repeat = 0; repeat < 2; ++repeat) {
+      stats->prefill_spans.clear();
+      auto request = pool.Acquire(prompt, {}, {}, {}, true, length - 37);
+      Expect(!request.cache_hit() && request.cached_prompt_tokens() == 0,
+             "server overrides request cache_prompt true with cold prefill");
+      Expect(request.ShareCheckpoint(2048) == 0,
+             "server disables scheduler shared checkpoints");
+      while (!request.prefill_complete())
+        (void)request.Prefill(4096);
+      std::vector<std::size_t> expected;
+      for (std::size_t remaining = length; remaining != 0;) {
+        const auto step = std::min<std::size_t>(4096, remaining);
+        expected.push_back(step);
+        remaining -= step;
+      }
+      Expect(stats->prefill_spans == expected,
+             "cold pass boundaries depend only on prompt length");
+      if (repeat == 0)
+        request.Commit();
+      else
+        request.Cancel();
+      Expect(pool.CachedPrefixTokens(prompt) == 0,
+             "completion and cancellation retain no prefix");
+    }
+  }
+  Expect(stats->snapshot_captures == 0 && stats->snapshot_restores == 0,
+         "server disables all snapshot captures and restores");
+  Expect(!std::filesystem::exists(directory),
+         "disabled disk cache performs no filesystem writes");
+  std::cout << "PASS: TestServerCacheDisabledHasColdGeometry\n";
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -2667,6 +2717,11 @@ int main(int argc, char** argv) {
     std::cout << "disk defer request tests passed\n";
     return 0;
   }
+  if (argc == 2 && std::string_view(argv[1]) == "--no-cache-only") {
+    TestServerCacheDisabledHasColdGeometry();
+    return 0;
+  }
+  TestServerCacheDisabledHasColdGeometry();
   TestServerInstructionsAreFraming();
   // The cache warning assertion in this binary matches the plain "[WARN]
   // [cache]" text captured from a redirected sink; a TTY stderr tints it.

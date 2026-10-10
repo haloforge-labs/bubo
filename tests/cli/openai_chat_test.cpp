@@ -2093,6 +2093,9 @@ void DebugHooksSettingsTest() {
          "debug settings identify the exact executable");
   const auto* raw = unset.find("environment");
   Expect(raw && raw->is_object(), "settings contain an explicit environment catalog");
+  for (const auto* name : {"GUFO_EVAL_API_KEY", "PATH", "TEMP"})
+    Expect(!raw->contains(name),
+           std::string("settings exclude unsafe environment: ") + name);
   for (const auto* name : gufo::server::kDebugSettingsEnvironment)
     Expect(raw->find(name) && raw->find(name)->is_null(),
            std::string("unset environment is visible: ") + name);
@@ -2169,6 +2172,8 @@ void DebugHooksSettingsEnvironmentTest() {
     const auto source = root / directory;
     Expect(fs::is_directory(source), "environment completeness source root exists");
     for (const auto& entry : fs::recursive_directory_iterator(source)) {
+      if (entry.path() == root / "src/cli/serve/release_switches.inc")
+        continue;
       if (!entry.is_regular_file())
         continue;
       const auto extension = entry.path().extension().string();
@@ -2187,8 +2192,16 @@ void DebugHooksSettingsEnvironmentTest() {
         std::smatch name;
         if (std::regex_search(argument, name, literal)) {
           ++literal_reads;
-          Expect(gufo::server::DebugSettingsListsEnvironment(name[1].str()),
-                 path + ": environment missing from echo/allow-list: " + name[1].str());
+          const auto& catalog = gufo::server::ReleaseSwitchTable();
+          const bool catalogued =
+              std::any_of(catalog.begin(), catalog.end(), [&](const auto& row) {
+                return row.member_str("name") == name[1].str() &&
+                       row.member_str("class") != "REMOVED";
+              });
+          Expect(catalogued ||
+                     gufo::server::DebugSettingsListsEnvironment(name[1].str()),
+                 path + ": environment missing from echo/allow-list: " +
+                     name[1].str());
         } else if (function == "std::getenv" || function == "getenv") {
           Expect(argument == "name" &&
                      (path == "src/cli/serve/behaviour_options.hpp" ||
@@ -2227,7 +2240,19 @@ void DebugHooksSettingsEnvironmentTest() {
     std::ifstream input(entry.path(), std::ios::binary);
     std::string text((std::istreambuf_iterator<char>(input)), {});
     if (entry.path() == root / "src/cli/serve/release_switches.inc")
-      text = text.substr(text.find("#elif defined(GUFO_RELEASE_SNAPSHOT)"));
+      continue;
+    const std::regex getenv_literal(
+        R"debug((?:std::getenv|\bgetenv)\s*\(\s*"([A-Za-z_][A-Za-z_0-9]*)")debug");
+    for (std::sregex_iterator match(text.begin(), text.end(), getenv_literal),
+         end;
+         match != end; ++match) {
+      const auto name = (*match)[1].str();
+      Expect(classes.contains(name) || name == "NO_COLOR",
+             entry.path().string() +
+                 ": literal getenv missing from catalog: " + name);
+      Expect(!classes.contains(name) || classes[name] != "REMOVED",
+             "removed getenv has a reader: " + name);
+    }
     for (std::sregex_iterator match(text.begin(), text.end(), all_names), end;
          match != end; ++match) {
       const auto name = (*match)[1].str();

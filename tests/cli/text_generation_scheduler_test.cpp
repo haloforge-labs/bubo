@@ -2020,6 +2020,15 @@ void TestFifoReplacementAdmissionWithOneSlot() {
   }
   Expect(prefill_order == std::vector<TextRunnerToken>({1, 2, 3}),
          "replacement admission preserves FIFO order");
+  TextRunnerToken last = 1;
+  for (const auto& event : control->Events()) {
+    Expect(
+        event.label >= last,
+        "one session never interleaves prefill or decode of a queued request");
+    last = event.label;
+  }
+  std::cout
+      << "PASS: TestFifoReplacementAdmissionWithOneSlot serial execution\n";
 }
 
 void TestServerMetricsAreLive() {

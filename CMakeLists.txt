@@ -441,7 +441,7 @@ if (BUILD_TESTING)
     GUFO_PRODUCTION_ENV_SPEC="${GUFO_PRODUCTION_ENV_SPEC_PATH}"
     GUFO_RELEASE_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
   add_test(NAME release_profile_test COMMAND release_profile_test)
-  set_tests_properties(release_profile_test PROPERTIES LABELS "cpu;cli;release")
+  set_tests_properties(release_profile_test PROPERTIES LABELS "cpu;cli;release;check-pr")
 
   add_executable(arg_parser_test
     tests/cli/arg_parser_test.cpp

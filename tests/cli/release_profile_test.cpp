@@ -10,6 +10,8 @@
 #include <stdexcept>
 #include <string>
 
+#include "src/cli/serve/debug_settings.hpp"
+
 using namespace gufo::server;
 namespace {
 std::size_t passed = 0;
@@ -32,6 +34,8 @@ ReleaseInputs Inputs(const std::string& profile = "default") {
   ReleaseInputs inputs;
   inputs.model_family = "qwen3.8-flash-next";
   inputs.profile = profile;
+  // Synthetic sidecar path: resolver tests never load tensors.
+  inputs.explicit_flags["--mtp-model"] = "mtp-test.gguf";
   return inputs;
 }
 const ReleaseSetting& Find(const ReleaseResolution& result,
@@ -79,6 +83,14 @@ void CheckSpec(const std::filesystem::path& path) {
              "production parity: " + name);
     }
   }
+  for (const auto& row : result.injections) {
+    bool listed = false;
+    for (const auto* section : {"env", "env_defaults"})
+      if (const auto* values = spec.find(section))
+        listed |= values->contains(row.name);
+    Expect(listed || site.contains(row.name) || noops.contains(row.name),
+           "production reverse parity: extra injected env " + row.name);
+  }
   std::cout << "PASS: production comparison " << path.filename().string()
             << " (site/manifest keys excluded)\n";
 }
@@ -89,6 +101,9 @@ void AuditCatalog() {
   for (const auto& row : ReleaseSwitchTable())
     names.insert(row.member_str("name"));
   const std::regex literal(R"audit("(GUFO_[A-Z0-9_]+)")audit");
+  const std::regex getenv_literal(
+      R"audit((?:std::getenv|\bgetenv)\s*\(\s*"([A-Za-z_][A-Za-z_0-9]*)")audit");
+  const std::set<std::string> irrelevant = {"NO_COLOR"};
   for (const auto& file :
        std::filesystem::recursive_directory_iterator(root / "src")) {
     const auto ext = file.path().extension().string();
@@ -96,7 +111,16 @@ void AuditCatalog() {
         (ext != ".cpp" && ext != ".hpp" && ext != ".hip" && ext != ".h" &&
          ext != ".cc" && ext != ".c"))
       continue;
+    // Generated reads are metadata, never independent source evidence.
+    if (file.path() == root / "src/cli/serve/release_switches.inc")
+      continue;
     const auto text = Read(file.path());
+    for (std::sregex_iterator match(text.begin(), text.end(), getenv_literal),
+         end;
+         match != end; ++match)
+      if (!names.contains((*match)[1].str()) &&
+          !irrelevant.contains((*match)[1].str()))
+        missing.insert((*match)[1].str());
     for (std::sregex_iterator match(text.begin(), text.end(), literal), end;
          match != end; ++match)
       if (!names.contains((*match)[1].str()))
@@ -106,6 +130,206 @@ void AuditCatalog() {
     std::cerr << "MISSING: " << name << '\n';
   Expect(missing.empty(), "source literal catalog completeness");
 }
+
+void ReviewRegression(int finding) {
+  if (finding == 1) {
+    auto inputs = Inputs();
+    inputs.explicit_flags.clear();
+    const auto result = ResolveReleaseSettings(inputs);
+    Expect(!Find(result, "--speculative").value,
+           "default without MTP does not inject speculation");
+    for (const auto* name :
+         {"GUFO_LENIENT", "GUFO_DRAFT_OUT_MODEL", "--mtp-policy",
+          "--mtp-draft-vocab", "--prompt-lookup"})
+      Expect(!Find(result, name).value &&
+                 !Find(result, name).skipped_reason.empty(),
+             "dependent default follows missing MTP: " + std::string(name));
+    for (const auto* source : {"flag", "env", "manifest"}) {
+      inputs = Inputs();
+      inputs.explicit_flags.clear();
+      if (std::string_view(source) == "flag")
+        inputs.explicit_flags["--mtp-model"] = "mtp-test.gguf";
+      else if (std::string_view(source) == "env")
+        inputs.environment["--mtp-model"] = "mtp-test.gguf";
+      else
+        inputs.manifest_defaults["--mtp-model"] = "mtp-test.gguf";
+      Expect(Find(ResolveReleaseSettings(inputs), "GUFO_LENIENT").value ==
+                 std::optional<std::string>("bounded"),
+             "resolved MTP artefact satisfies requirements from " +
+                 std::string(source));
+    }
+  } else if (finding == 2) {
+    auto inputs = Inputs();
+    inputs.explicit_flags["--no-behaviour"] = "1";
+    const auto result = ResolveReleaseSettings(inputs);
+    Expect(Find(result, "GUFO_THINK_GUARD_ESCALATE").value ==
+               std::optional<std::string>("0"),
+           "no-behaviour turns guard escalation off");
+    // The full resolver test checks all nine rows and every unchanged row.
+  } else if (finding == 3) {
+    for (const auto* name :
+         {"GUFO_EVAL_API_KEY", "PATH", "GUFO_EVAL_MODEL", "TEMP"})
+      Expect(!DebugSettingsListsEnvironment(name),
+             "echo excludes unsafe row: " + std::string(name));
+    const auto settings =
+        BuildEffectiveSettings(gufo::json::Value::object(), "v", "r", "b");
+    Expect(!settings.find("environment")->contains("GUFO_EVAL_API_KEY"),
+           "debug echo never contains a secret row");
+  } else if (finding == 4) {
+    const auto text = Read(std::filesystem::path(GUFO_RELEASE_SOURCE_ROOT) /
+                           "cmake/Checks.cmake");
+    Expect(text.substr(0, text.find("set(gufo_pr_tests"))
+                   .find("release_profile_test") != std::string::npos,
+           "check-pr builds and runs release_profile_test");
+  } else if (finding == 5) {
+    for (const auto* profile : {"stock", "default", "exact"}) {
+      auto inputs = Inputs(profile);
+      if (std::string_view(profile) != "stock")
+        inputs.model_family = "other";
+      inputs.environment["GUFO_DISK_IDLE_MS"] = "700000";
+      inputs.environment["GUFO_PREFILL_FORWARD_TOKENS"] = "32768";
+      inputs.environment["GUFO_LENIENT"] = "bounded";
+      inputs.explicit_flags["--speculative"] = "off";
+      const auto result = ResolveReleaseSettings(inputs);
+      Expect(result.injections.empty(), "unowned settings inject nothing");
+      Expect(std::any_of(
+                 result.logs.begin(), result.logs.end(),
+                 [](const auto& line) { return line.starts_with("warning:"); }),
+             "unowned validation or requires produces warnings");
+    }
+  } else if (finding == 6) {
+    AuditCatalog();
+  } else if (finding == 7) {
+    for (const auto* value : {"2147483648", "3000000000", "-1", "+1", "1x"}) {
+      auto inputs = Inputs();
+      inputs.environment["GUFO_THINK_GUARD_ESCALATE"] = value;
+      Reject([&] { (void)ResolveReleaseSettings(inputs); },
+             "int31 rejects reader-invalid value");
+    }
+    for (const auto* value : {"0", "16", "2147483647"}) {
+      auto inputs = Inputs();
+      inputs.environment["GUFO_THINK_GUARD_ESCALATE"] = value;
+      Expect(Find(ResolveReleaseSettings(inputs), "GUFO_THINK_GUARD_ESCALATE")
+                     .value == std::optional<std::string>(value),
+             "int31 accepts reader boundary");
+    }
+    const auto prior =
+        SnapshotReleaseEnvironment().at("GUFO_THINK_GUARD_ESCALATE");
+#ifdef _WIN32
+    _putenv_s("GUFO_THINK_GUARD_ESCALATE", "");
+#else
+    setenv("GUFO_THINK_GUARD_ESCALATE", "", 1);
+#endif
+    ApplyInjections(ResolveReleaseSettings(Inputs("stock")));
+    Expect(!SnapshotReleaseEnvironment().at("GUFO_THINK_GUARD_ESCALATE"),
+           "empty real catalog value is removed in stock");
+#ifdef _WIN32
+    _putenv_s("GUFO_THINK_GUARD_ESCALATE", prior ? prior->c_str() : "");
+#else
+    if (prior)
+      setenv("GUFO_THINK_GUARD_ESCALATE", prior->c_str(), 1);
+    else
+      unsetenv("GUFO_THINK_GUARD_ESCALATE");
+#endif
+  } else if (finding == 8) {
+    for (const auto* name : {"GUFO_WEIGHT_UPLOAD_READERS",
+                             "GUFO_PREFILL_STEP_LOG", "GUFO_PREFILL_TARGET_MS"})
+      Expect(Find(ResolveReleaseSettings(Inputs()), name).release_class ==
+                 "REMOVED",
+             "unread row is REMOVED: " + std::string(name));
+  } else if (finding == 10) {
+    const char* args[] = {"--future-option", "video",
+                          "--print-effective-settings"};
+    const auto prior = SnapshotReleaseEnvironment();
+    const auto startup = PrepareReleaseSettings(args);
+    for (const auto& [name, value] : prior) {
+#ifdef _WIN32
+      _putenv_s(name.c_str(), value ? value->c_str() : "");
+#else
+      if (value)
+        setenv(name.c_str(), value->c_str(), 1);
+      else
+        unsetenv(name.c_str());
+#endif
+    }
+    Expect(startup.active && startup.error.empty(),
+           "modality stops at first non-server token");
+    CheckSpec(std::filesystem::path(GUFO_RELEASE_SOURCE_ROOT) /
+              "tests/fixtures/release_spec_fixture.json");
+  } else if (finding == 16) {
+    const std::map<std::string, std::optional<std::string>> off = {
+        {"GUFO_THINK_EOG_GUARD", "0"},
+        {"GUFO_EOG_BOUNDARY", "0"},
+        {"GUFO_EOG_MIN_PROB", "-1"},
+        {"GUFO_EOG_DEFER_P", "0"},
+        {"GUFO_SPEC_EOG_STOP", "0"},
+        {"GUFO_LOOP_BREAKER", "0"},
+        {"GUFO_LOOP_BREAKER_EOG_CLOSE", "0"},
+        {"GUFO_THINK_MARKER_BIAS_BY_EFFORT", std::nullopt},
+        {"GUFO_THINK_GUARD_ESCALATE", "0"},
+        {"GUFO_LENIENT", "off"},
+        {"GUFO_DENSE_TWIN_MODEL", std::nullopt},
+        {"GUFO_DENSE_TWIN_BATCH", "0"},
+        {"GUFO_DENSE_TWIN_MAX_N", std::nullopt},
+        {"GUFO_DRAFT_OUT_MODEL", std::nullopt},
+        {"--speculative", "off"}};
+    const auto exact = ResolveReleaseSettings(Inputs("exact"));
+    for (const auto& [name, value] : off) {
+      Expect(Find(exact, name).value == value, "byte-exact off value: " + name);
+      Expect(std::find(exact.turned_off.begin(), exact.turned_off.end(),
+                       name) != exact.turned_off.end(),
+             "exact lists the full byte-exact set: " + name);
+      auto inputs = Inputs("exact");
+      const auto on = name == "GUFO_LENIENT"                       ? "bounded"
+                      : name == "--speculative"                    ? "mtp"
+                      : name == "GUFO_EOG_MIN_PROB"                ? "0.2"
+                      : name == "GUFO_EOG_DEFER_P"                 ? "0.9"
+                      : name == "GUFO_THINK_MARKER_BIAS_BY_EFFORT" ? "medium:-1"
+                      : name == "GUFO_DENSE_TWIN_MAX_N"            ? "8"
+                      : name.find("MODEL") != std::string::npos ? "sidecar.gguf"
+                                                                : "1";
+      if (name.starts_with("--"))
+        inputs.explicit_flags[name] = on;
+      else
+        inputs.environment[name] = on;
+      Reject([&] { (void)ResolveReleaseSettings(inputs); },
+             "exact rejects re-enabling: " + name);
+      inputs = Inputs("exact");
+      inputs.manifest_defaults[name] = on;
+      Expect(Find(ResolveReleaseSettings(inputs), name).value == value,
+             "manifest cannot re-enable: " + name);
+    }
+    {
+      auto inputs = Inputs("exact");
+      inputs.explicit_flags["--no-mtp"] = "1";
+      inputs.explicit_flags["--speculative"] = "mtp";
+      Reject([&] { (void)ResolveReleaseSettings(inputs); },
+             "exact refuses explicit MTP even with no-mtp");
+    }
+    for (const auto* backend : {"mtp", "dspark", "dflash2"}) {
+      auto inputs = Inputs("exact");
+      inputs.explicit_flags["--speculative"] = backend;
+      Reject([&] { (void)ResolveReleaseSettings(inputs); },
+             "exact refuses every speculative backend");
+    }
+    Expect(Find(exact, "--no-cache").value == std::optional<std::string>("1"),
+           "exact injects no-cache");
+    gufo::cli::ArgParser parser("test");
+    bool disabled = false;
+    parser.AddFlag("", "--no-cache", "Disable caches", "Cache", &disabled);
+    PrefillReleaseFlags(exact, parser);
+    Expect(disabled, "no-cache effective setting reaches the parser sink");
+    Expect(Find(ResolveReleaseSettings(Inputs()), "--no-cache").origin ==
+                   "built-in" &&
+               Find(ResolveReleaseSettings(Inputs("stock")), "--no-cache")
+                       .origin == "built-in",
+           "stock and default do not inject no-cache");
+  } else {
+    throw std::invalid_argument("unknown regression");
+  }
+  std::cout << "PASS: ReviewRegression" << finding << '\n';
+}
+
 void HeaderTest() {
   // A synthetic metadata-only GGUF needs no model or GPU. split.count proves
   // header inspection does not require a sibling shard.
@@ -167,15 +391,13 @@ void TestResolver() {
   const auto baseline = ResolveReleaseSettings(Inputs());
   {
     auto inputs = Inputs("exact");
-    inputs.explicit_flags["GUFO_LENIENT"] = "bounded";
+    inputs.environment["GUFO_LENIENT"] = "bounded";
     Reject([&] { (void)ResolveReleaseSettings(inputs); },
            "exact refuses a flag that enables an approximation");
     inputs = Inputs("exact");
     inputs.manifest_defaults["GUFO_DRAFT_OUT_MODEL"] = "draft-head.gguf";
-    Expect(
-        Find(ResolveReleaseSettings(inputs), "GUFO_DRAFT_OUT_MODEL").origin ==
-            "manifest",
-        "exact keeps the draft-only head");
+    Expect(!Find(ResolveReleaseSettings(inputs), "GUFO_DRAFT_OUT_MODEL").value,
+           "exact suppresses the manifest draft head");
     inputs = Inputs("subagents");
     inputs.explicit_flags["--context"] = "0";
     inputs.native_context = 262144;
@@ -268,14 +490,16 @@ void TestResolver() {
       Expect(std::find(exact.turned_off.begin(), exact.turned_off.end(),
                        name) != exact.turned_off.end(),
              "exact lists every approximation");
-      Expect(name == "GUFO_LENIENT"
-                 ? Find(exact, name).value == std::optional<std::string>("off")
-                 : !Find(exact, name).value,
-             "exact off value");
+      const auto* expected = row.find("values")->find("exact");
+      Expect(expected->is_null()
+                 ? !Find(exact, name).value
+                 : Find(exact, name).value ==
+                       std::optional<std::string>(expected->str()),
+             "exact off value: " + name);
     }
   Expect(Find(exact, "GUFO_THINK_EOG_GUARD").value ==
-             std::optional<std::string>("1"),
-         "exact keeps behaviour");
+             std::optional<std::string>("0"),
+         "exact disables behaviour");
   Expect(exact.effective_flags.at("--seed") == "1", "exact seed pin");
   Expect(Find(exact, "GUFO_PREFILL_FORWARD_TOKENS").value ==
              std::optional<std::string>("4096"),
@@ -289,10 +513,10 @@ void TestResolver() {
   }
   inputs = Inputs("exact");
   inputs.environment["GUFO_PREFILL_FORWARD_TOKENS"] = "2048";
-  Expect(Find(ResolveReleaseSettings(inputs), "GUFO_PREFILL_FORWARD_TOKENS")
-                 .origin == "env",
-         "real pin wins");
+  Reject([&] { (void)ResolveReleaseSettings(inputs); },
+         "exact refuses a different prefill geometry");
   const std::map<std::string, std::optional<std::string>> off = {
+      {"GUFO_THINK_GUARD_ESCALATE", "0"},
       {"GUFO_THINK_EOG_GUARD", "0"},
       {"GUFO_EOG_BOUNDARY", "0"},
       {"GUFO_EOG_MIN_PROB", "-1"},
@@ -310,7 +534,7 @@ void TestResolver() {
              "behaviour off: " + setting.name);
     else if (setting.name != "--no-behaviour")
       Expect(Find(disabled, setting.name).value == setting.value,
-             "no-behaviour changes only eight rows");
+             "no-behaviour changes only nine rows");
   }
   inputs.environment["GUFO_THINK_EOG_GUARD"] = "1";
   Expect(Find(ResolveReleaseSettings(inputs), "GUFO_THINK_EOG_GUARD").origin ==
@@ -391,6 +615,7 @@ void TestResolver() {
   Reject([&] { (void)ResolveReleaseSettings(inputs); },
          "unknown profile refuses");
   for (const auto& [name, value] : std::map<std::string, std::string>{
+           {"GUFO_THINK_GUARD_ESCALATE", "3000000000"},
            {"GUFO_THINK_EOG_GUARD", "01"},
            {"GUFO_EOG_MIN_PROB", "2"},
            {"GUFO_EOG_DEFER_P", "nan"},
@@ -489,6 +714,12 @@ int main(int argc, char** argv) {
       AuditCatalog();
       return 0;
     }
+    if (argc == 3 && std::string_view(argv[1]) == "--regression") {
+      ReviewRegression(std::stoi(argv[2]));
+      return 0;
+    }
+    for (const int finding : {1, 2, 3, 4, 5, 6, 7, 8, 10, 16})
+      ReviewRegression(finding);
     TestResolver();
     HeaderTest();
     AuditCatalog();
