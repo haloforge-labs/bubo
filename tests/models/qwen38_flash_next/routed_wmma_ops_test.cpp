@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -60,10 +61,37 @@ std::vector<T> Download(const T* device, std::size_t count) {
   return host;
 }
 
-/// Packed expert weights plus their dequantized values [e][m][k].
+/// The F16 value nearest to `v` (ties to even): one rounding, as one fused
+/// F16 FMA gives. Converting through float could round twice.
+__half NearestHalf(double v) {
+  const __half first = __float2half(static_cast<float>(v));
+  std::uint16_t bits = 0;
+  std::memcpy(&bits, &first, 2);
+  __half best = first;
+  double best_error = std::abs(static_cast<double>(__half2float(first)) - v);
+  for (const int step : {-1, 1}) {
+    const auto next = static_cast<std::uint16_t>(bits + step);
+    // Stay finite and on the same side of zero.
+    if ((next & 0x7C00U) == 0x7C00U || ((next ^ bits) & 0x8000U) != 0)
+      continue;
+    __half candidate;
+    std::memcpy(&candidate, &next, 2);
+    const double error =
+        std::abs(static_cast<double>(__half2float(candidate)) - v);
+    if (error < best_error || (error == best_error && (next & 1U) == 0)) {
+      best = candidate;
+      best_error = error;
+    }
+  }
+  return best;
+}
+
+/// Packed expert weights plus their dequantized values [e][m][k], and (Q4_K,
+/// Q5_1, Q8_0) the F16 weights exactly as the routed F16 kernels stage them.
 struct Experts {
   std::vector<std::uint8_t> packed;
   std::vector<float> values;
+  std::vector<__half> staged;
 };
 
 /// Random Q4_K blocks with the real 6-bit scale/min packing.
@@ -73,6 +101,7 @@ Experts MakeQ4K(std::size_t e, std::size_t m, std::size_t k,
   const std::size_t blocks = e * m * (k / 256);
   w.packed.resize(blocks * 144);
   w.values.resize(e * m * k);
+  w.staged.resize(e * m * k);
   for (std::size_t b = 0; b < blocks; ++b) {
     std::uint8_t* blk = w.packed.data() + b * 144;
     const __half d = __float2half(Uniform(&seed, 0.02F) + 0.03F);
@@ -107,6 +136,13 @@ Experts MakeQ4K(std::size_t e, std::size_t m, std::size_t k,
       w.values[b * 256 + j] =
           df * static_cast<float>(sc[sb32]) * static_cast<float>(code) -
           mf * static_cast<float>(mn[sb32]);
+      // Staging: the sub-block scale and bias round to F16, then one fused
+      // F16 FMA per weight.
+      const __half scale = __float2half(df * static_cast<float>(sc[sb32]));
+      const __half bias = __float2half(-(mf * static_cast<float>(mn[sb32])));
+      w.staged[b * 256 + j] =
+          NearestHalf(static_cast<double>(code) * __half2float(scale) +
+                      __half2float(bias));
     }
   }
   return w;
@@ -170,6 +206,7 @@ Experts MakeQ5_1(std::size_t e, std::size_t m, std::size_t k,
   const std::size_t blocks = e * m * (k / 32);
   w.packed.resize(blocks * 24);
   w.values.resize(e * m * k);
+  w.staged.resize(e * m * k);
   for (std::size_t b = 0; b < blocks; ++b) {
     std::uint8_t* blk = w.packed.data() + b * 24;
     const __half d = __float2half(Uniform(&seed, 0.02F) + 0.03F);
@@ -188,6 +225,8 @@ Experts MakeQ5_1(std::size_t e, std::size_t m, std::size_t k,
       const int low = j < 16 ? (qs[j] & 0xF) : (qs[j - 16] >> 4);
       const int code = low | (static_cast<int>((qh >> j) & 1U) << 4);
       w.values[b * 32 + j] = df * static_cast<float>(code) + mf;
+      // d and m are already F16: one fused F16 FMA per weight.
+      w.staged[b * 32 + j] = NearestHalf(static_cast<double>(code) * df + mf);
     }
   }
   return w;
@@ -200,6 +239,7 @@ Experts MakeQ8_0(std::size_t e, std::size_t m, std::size_t k,
   const std::size_t blocks = e * m * (k / 32);
   w.packed.resize(blocks * 34);
   w.values.resize(e * m * k);
+  w.staged.resize(e * m * k);
   for (std::size_t b = 0; b < blocks; ++b) {
     std::uint8_t* blk = w.packed.data() + b * 34;
     const __half d = __float2half(Uniform(&seed, 0.02F) + 0.03F);
@@ -209,6 +249,7 @@ Experts MakeQ8_0(std::size_t e, std::size_t m, std::size_t k,
       const auto q = static_cast<std::int8_t>(NextRandom(&seed) & 0xFF);
       blk[2 + j] = static_cast<std::uint8_t>(q);
       w.values[b * 32 + j] = df * static_cast<float>(q);
+      w.staged[b * 32 + j] = NearestHalf(static_cast<double>(q) * df);
     }
   }
   return w;
@@ -750,6 +791,45 @@ void CheckRmsError(const std::vector<__half>& actual,
     throw std::runtime_error(std::string(label) + " RMS-scale error exceeded");
 }
 
+/// Spacing of F16 values at |r|: 2^(e - 10) for normals, 2^-24 below.
+double F16Ulp(float r) {
+  if (r == 0.0F)
+    return std::ldexp(1.0, -24);
+  int exponent = 0;
+  std::frexp(std::abs(r), &exponent);  // |r| = f * 2^exponent, f in [0.5, 1)
+  return std::ldexp(1.0, std::max(exponent - 11, -24));
+}
+
+// The routed F16 kernels stage weights to F16 (scale and bias rounded to
+// F16, one fused F16 FMA per weight), read F16 activations, accumulate in
+// F32 and store F16. Against a CPU reference staged the same way, the only
+// legitimate differences are the F16 output rounding (up to one ulp when
+// accumulation order moves a value across a rounding boundary) and F32
+// accumulation order. After one F16 ulp per element the residual must stay
+// under 0.1% of the reference RMS; layout, padding and staging defects leave
+// errors of the order of the values. A bare max-error/RMS bound against an
+// F32 reference cannot separate these: on the lanerow data one F16 ulp at
+// the largest output is 4% of the RMS, and staging alone moves it by 2.3%.
+void CheckStagedError(const std::vector<__half>& actual,
+                      const std::vector<float>& reference, const char* label) {
+  constexpr double kTolerance = 1e-3;
+  double squares = 0.0, worst = 0.0;
+  for (std::size_t i = 0; i < reference.size(); ++i) {
+    const float a = __half2float(actual[i]);
+    if (!std::isfinite(a) || !std::isfinite(reference[i]))
+      throw std::runtime_error(std::string(label) + " nonfinite output");
+    squares += static_cast<double>(reference[i]) * reference[i];
+    worst = std::max(worst, std::abs(static_cast<double>(a) - reference[i]) -
+                                F16Ulp(reference[i]));
+  }
+  const double rms = std::sqrt(squares / reference.size());
+  const double error = worst / std::max(rms, 1e-12);
+  std::cout << label << " (max_error - 1 F16 ulp)/reference_rms=" << error
+            << " limit=" << kTolerance << '\n';
+  if (error > kTolerance)
+    throw std::runtime_error(std::string(label) + " staged error exceeded");
+}
+
 std::vector<float> FloatValues(const std::vector<__half>& values) {
   std::vector<float> result(values.size());
   std::transform(values.begin(), values.end(), result.begin(),
@@ -802,24 +882,45 @@ void CheckLanerowDispatch() {
     x[i] = __float2half(Uniform(&seed, (i / hidden) % 2 ? 0.004F : 0.04F));
   const auto gate = MakeQ4K(experts, ff, hidden, 11);
   const auto up = MakeQ4K(experts, ff, hidden, 23);
-  std::vector<float> ref_up(slots * ff, 0.0F);
+  // ref_up: F32 weights (information only); staged_up: F16-staged weights,
+  // F32 gate kept unrounded as the kernel keeps it, the contract.
+  std::vector<float> ref_up(slots * ff, 0.0F), staged_up(slots * ff, 0.0F);
   for (std::size_t slot = 0; slot < slots; ++slot) {
     if (ids[slot] < 0)
       continue;
     for (std::size_t row = 0; row < ff; ++row) {
-      float g = 0.0F, u = 0.0F;
+      float g = 0.0F, u = 0.0F, gs = 0.0F, us = 0.0F;
       const auto w = (static_cast<std::size_t>(ids[slot]) * ff + row) * hidden;
       for (std::size_t k = 0; k < hidden; ++k) {
         const float activation = __half2float(x[(slot / used) * hidden + k]);
         g = std::fma(gate.values[w + k], activation, g);
         u = std::fma(up.values[w + k], activation, u);
+        gs = std::fma(__half2float(gate.staged[w + k]), activation, gs);
+        us = std::fma(__half2float(up.staged[w + k]), activation, us);
       }
       ref_up[slot * ff + row] = (u * g) / (1.0F + std::exp(-g));
+      staged_up[slot * ff + row] = (us * gs) / (1.0F + std::exp(-gs));
     }
   }
-  std::vector<__half> ref_up_half(ref_up.size());
-  std::transform(ref_up.begin(), ref_up.end(), ref_up_half.begin(),
-                 [](float value) { return __float2half(value); });
+  // Down reference on the exact F16 activations the kernel reads.
+  const auto staged_down = [&](const Experts& down,
+                               const std::vector<__half>& input) {
+    std::vector<float> out(slots * down_rows, 0.0F);
+    for (std::size_t slot = 0; slot < slots; ++slot) {
+      if (ids[slot] < 0)
+        continue;
+      for (std::size_t row = 0; row < down_rows; ++row) {
+        float sum = 0.0F;
+        const auto w =
+            (static_cast<std::size_t>(ids[slot]) * down_rows + row) * ff;
+        for (std::size_t k = 0; k < ff; ++k)
+          sum = std::fma(__half2float(down.staged[w + k]),
+                         __half2float(input[slot * ff + k]), sum);
+        out[slot * down_rows + row] = sum;
+      }
+    }
+    return out;
+  };
 
   auto* dg = Upload(gate.packed);
   auto* du = Upload(up.packed);
@@ -862,9 +963,11 @@ void CheckLanerowDispatch() {
                         old_up, ff, hidden, nullptr))
     throw std::runtime_error("legacy stage-1 gate/up reference launch failed");
   const auto old_up_host = Download(old_up, slots * ff);
-  // 1% max error/reference RMS allows F16 activations, affine weight
-  // rounding and nonlinear amplification, but detects layout/padding errors.
-  CheckRmsError(old_up_host, ref_up, 0.01, "old gate/up vs CPU F32");
+  // The F32 gap is F16 staging plus output rounding (0.0228 on this data, an
+  // F16 ulp at the peak is 0.042): printed, not bounded. See CheckStagedError.
+  CheckRmsError(old_up_host, ref_up, std::numeric_limits<double>::infinity(),
+                "old gate/up vs CPU F32 (information)");
+  CheckStagedError(old_up_host, staged_up, "old gate/up vs CPU F16-staged");
   const __half poison = __float2half(-123.0F);
   std::vector<__half> dirty((slots + 1) * ff + guard, poison);
   std::fill(dirty.begin(), dirty.begin() + slots * ff, __float2half(0.0F));
@@ -890,33 +993,22 @@ void CheckLanerowDispatch() {
                                       hidden, nullptr))
       throw std::runtime_error("stage-1 paired launch failed");
     const auto result = Download(new_up, slots * ff);
-    CheckRmsError(result, ref_up, 0.01, "new gate/up vs CPU F32");
-    CheckRmsError(result, FloatValues(old_up_host), 0.006,
-                  "new vs old gate/up");
+    CheckStagedError(result, staged_up, "new gate/up vs CPU F16-staged");
+    CheckStagedError(result, FloatValues(old_up_host), "new vs old gate/up");
     for (__half h : Download(new_up + slots * ff, ff + guard))
       if (__half2float(h) != __half2float(poison))
         throw std::runtime_error("stage-1 paired padding wrote guard");
     CheckHip(hipFree(dt), "stage-1 pair map free");
   }
+  // The complete pipeline reads the paired output (the last width above).
+  const auto new_up_host = Download(new_up, slots * ff);
 
   for (q::WeightType type : {q::WeightType::kQ5_1, q::WeightType::kQ8_0}) {
     const auto down = type == q::WeightType::kQ5_1
                           ? MakeQ5_1(experts, down_rows, ff, 41)
                           : MakeQ8_0(experts, down_rows, ff, 43);
-    std::vector<float> ref_down(slots * down_rows, 0.0F);
-    for (std::size_t slot = 0; slot < slots; ++slot) {
-      if (ids[slot] < 0)
-        continue;
-      for (std::size_t row = 0; row < down_rows; ++row) {
-        float sum = 0.0F;
-        const auto w =
-            (static_cast<std::size_t>(ids[slot]) * down_rows + row) * ff;
-        for (std::size_t k = 0; k < ff; ++k)
-          sum = std::fma(down.values[w + k],
-                         __half2float(ref_up_half[slot * ff + k]), sum);
-        ref_down[slot * down_rows + row] = sum;
-      }
-    }
+    const auto ref_down = staged_down(down, old_up_host);
+    const auto ref_pipeline = staged_down(down, new_up_host);
     auto* dw = Upload(down.packed);
     auto* old_down = Upload(std::vector<__half>(slots * down_rows));
     if (!q::RoutedF16Gemm(dw, type, old_up, old_tiles, tiles_for(16).size(), 16,
@@ -924,7 +1016,7 @@ void CheckLanerowDispatch() {
                           nullptr))
       throw std::runtime_error("legacy stage-1 down reference failed");
     const auto old_down_host = Download(old_down, slots * down_rows);
-    CheckRmsError(old_down_host, ref_down, 0.02, "old down vs CPU F32");
+    CheckStagedError(old_down_host, ref_down, "old down vs CPU F16-staged");
     std::vector<__half> down_dirty((slots + 1) * down_rows + guard, poison);
     std::fill(down_dirty.begin(), down_dirty.begin() + slots * down_rows,
               __float2half(0.0F));
@@ -939,18 +1031,20 @@ void CheckLanerowDispatch() {
                                    down_rows, ff, nullptr))
         throw std::runtime_error("stage-1 down live launch failed");
       const auto result = Download(new_down, slots * down_rows);
-      CheckRmsError(result, FloatValues(old_down_host), 0.006,
-                    "new vs old down (same F16 input)");
-      CheckRmsError(result, ref_down, 0.02, "new down vs CPU F32");
+      CheckStagedError(result, FloatValues(old_down_host),
+                       "new vs old down (same F16 input)");
+      CheckStagedError(result, ref_down, "new down vs CPU F16-staged");
       if (width == 64) {
         if (!q::RoutedLanerowF16Gemm(dw, type, new_up, dt, tiles.size(), width,
                                      db, dc, dirty_rs, dirty_rs, new_down,
                                      down_rows, ff, nullptr))
           throw std::runtime_error("stage-1 complete pipeline launch failed");
         const auto pipeline = Download(new_down, slots * down_rows);
-        CheckRmsError(pipeline, ref_down, 0.02, "new pipeline vs CPU F32");
-        CheckRmsError(pipeline, FloatValues(old_down_host), 0.006,
-                      "new pipeline vs old pipeline");
+        // Its input may differ from old_up by an output ulp (checked above),
+        // which a down sum spreads over several ulps: compare against the
+        // staged reference on its own input, not against the old pipeline.
+        CheckStagedError(pipeline, ref_pipeline,
+                         "new pipeline vs CPU F16-staged");
       }
       for (__half h : Download(new_down + slots * down_rows, down_rows + guard))
         if (__half2float(h) != __half2float(poison))
