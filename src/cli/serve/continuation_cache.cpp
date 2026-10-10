@@ -998,9 +998,21 @@ bool ContinuationCache::ReserveSnapshot(
         impl_->reserved_snapshot_bytes += snapshot_bytes;
         admitted = true;
       } else {
-        events.push_back(make_event(SnapshotEventAction::kSkipped,
-                                    SnapshotEventReason::kByteCapacity,
-                                    snapshot_bytes, token_count));
+        auto skipped_event = make_event(SnapshotEventAction::kSkipped,
+                                        SnapshotEventReason::kByteCapacity,
+                                        snapshot_bytes, token_count);
+        // Why it was refused (GUFO_CACHE_REMOVAL_LOG): the incoming purpose bounds which retained entries it may displace (retry 0, history 1,
+        // continuation / branch point 3); rank = that bound; stable_prefix_tokens carries the number of retained entries it was allowed to evict.
+        skipped_event.incoming_tokens = token_count;
+        skipped_event.incoming_purpose = static_cast<int>(purpose);
+        skipped_event.incoming_family = FamilyHash(replacement_prefix);
+        skipped_event.preserve_source = preserve_source;
+        skipped_event.rank = max_priority;
+        std::size_t evictable = 0;
+        for (std::size_t i = impl_->state_count; i < impl_->entries.size(); ++i)
+          if (impl_->entries[i]->valid && impl_->entries[i]->snapshot != nullptr && priority_for(i) <= max_priority) ++evictable;
+        skipped_event.stable_prefix_tokens = evictable;
+        events.push_back(skipped_event);
       }
     }
   }
