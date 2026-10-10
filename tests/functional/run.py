@@ -28,10 +28,10 @@ import zlib
 from metrics import compare, comparison_status, join_server_timings, timing_measurement
 
 TESTS = Path(__file__).resolve().parent
-SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "image-count", "structured", "structured-limits",
+SUITES = ("discovery", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "structured", "structured-limits",
           "tool-reasoning", "reasoning-separator",
-          "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
-          "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix", "cache-bridge", "system-injection", "cache")
+          "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
+          "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "system-injection", "cache")
 SAMPLING = {
     "--temperature": ("temperature", float), "--top-p": ("top_p", float),
     "--top-k": ("top_k", int), "--min-p": ("min_p", float),
@@ -50,7 +50,8 @@ def provenance():
     source = hashlib.sha256()
     for name in ("run.py", "metrics.py", "progress.py", "stream_start.py", "prefill_scheduling.py", "server_metrics.py", "openai_sdk.py", "continuation.py",
                  "tool_reasoning.py", "tool_agent.py", "tool_native.py", "discovery.py", "image_inputs.py", "cache_edits.py", "cache_growth.py", "cache_depth.py", "cache_rotation.py", "cache_concurrency.py", "cache_shared_prefix.py", "cache_bridge.py", "system_injection.py",
-                 "cache_disk_spacing.py"):
+                 "cache_compaction.py", "cache_workloads.py", "cache_messages_loop.py",
+                 "cache_disk_spacing.py", "tool_images.py"):
         source.update((TESTS / name).read_bytes())
     lock = TESTS.parents[1] / "flake.lock"
     kernel_command = Path("/proc/cmdline")
@@ -153,7 +154,7 @@ def compare_runs(baseline_dir, candidate_dir):
 
 
 @contextlib.contextmanager
-def server(command, log_path, startup_timeout):
+def server(command, log_path, startup_timeout, environment=None):
     def interrupt(signum, frame):
         raise KeyboardInterrupt(f"signal {signum}")
 
@@ -166,7 +167,7 @@ def server(command, log_path, startup_timeout):
             previous_handlers = {signum: signal.signal(signum, interrupt)
                                  for signum in shutdown_signals}
             process = subprocess.Popen(
-                command, stdout=log, stderr=subprocess.STDOUT,
+                command, stdout=log, stderr=subprocess.STDOUT, env=environment,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0)
             deadline = time.monotonic() + startup_timeout
             while time.monotonic() < deadline:
@@ -249,14 +250,14 @@ def main():
             parser.error(f"the test runner owns {reserved}; omit it from the server command")
     if option(command, "--api-key") is not None:
         parser.error("omit --api-key for the isolated loopback test server")
-    if set(args.suite) & {"image-inputs", "image-count"} and option(command, "--mmproj") is None:
-        parser.error("image-inputs and image-count require --mmproj in the server command")
+    if set(args.suite) & {"image-inputs", "image-count", "tool-images"} and option(command, "--mmproj") is None:
+        parser.error("image-inputs, image-count and tool-images require --mmproj in the server command")
     selected = args.suite
     if "all" in selected:
         if len(selected) != 1:
             parser.error("all cannot be combined with other suites")
-        selected = [suite for suite in SUITES if suite not in ("auto-tools", "tool-native-types", "cache-bridge", "prefill-scheduling")
-                    and (suite not in ("image-inputs", "image-count")
+        selected = [suite for suite in SUITES if suite not in ("auto-tools", "tool-native-types", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "prefill-scheduling")
+                    and (suite not in ("image-inputs", "image-count", "tool-images")
                          or option(command, "--mmproj") is not None)]
     selected = list(dict.fromkeys(selected))
     disk_enabled = bool(set(selected) & {"cache", "image-count"})
@@ -385,7 +386,7 @@ def main():
                 report["snapshot_budget"] = check_snapshot_budget(
                     (output / "server.log").read_text(), available_before_load,
                     int(option(command, "--cache-ram-bytes", "0")), sessions)
-            configured = "cache-bridge" in selected and re.search(
+            configured = bool(set(selected) & {"cache-bridge", "cache-pressure"}) and re.search(
                 r"event=snapshot_cache_configured .*?\bcapacity_bytes=(\d+)\b",
                 (output / "server.log").read_text())
             for suite in selected:
@@ -404,7 +405,7 @@ def main():
                     sdk_args += ["--expected-input-modalities", args.expected_input_modalities]
                 if option(command, "--think") is not None:
                     sdk_args += ["--server-thinking", option(command, "--think")]
-                if suite == "cache-bridge" and configured:
+                if suite in ("cache-bridge", "cache-pressure") and configured:
                     sdk_args += ["--snapshot-capacity-bytes", configured[1]]
                 if suite == through_suite:
                     sdk_args += ["--through-case", through_case]

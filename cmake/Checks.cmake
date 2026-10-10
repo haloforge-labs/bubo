@@ -1,6 +1,15 @@
 # Hosted CPU regression suite. Other tests remain available through CTest and
 # explicit targets; adding a model oracle must not make every PR expensive.
 set(gufo_pr_targets
+  cache_adapter_test
+  cache_adapter_lifecycle_test
+  cache_ledger_test
+  cache_checkpoint_test
+  cache_prefix_index_test
+  cache_slot_test
+  cache_idle_spill_test
+  cache_disk_test
+  cache_retention_test
   arg_parser_test json_test json_constraint_test gguf_reader_test gguf_identity_test
   logit_sampler_test ggml_dequant_test
   quote_tracker_test
@@ -23,10 +32,12 @@ list(APPEND gufo_pr_tests
   "qwen38_flash_next\\.config" "qwen38_flash_next\\.mtp_sampling"
   "ds4\\.sampling" "ds4\\.template" "ds4\\.cli"
   gufo_version gufo_help serve_cli_test eval_http_test functional_runner_test
+  cache_workloads_test cache_disk_faults_test
+  cache_boundary_test
   kernel_resources_parser_test)
 list(JOIN gufo_pr_tests "|" gufo_pr_pattern)
 add_custom_target(check-pr
   COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure --no-tests=error
     --timeout 60 -R "^(${gufo_pr_pattern})$"
-  DEPENDS gufo ${gufo_pr_targets}
+  DEPENDS gufo ${gufo_pr_targets} cache_disk_faults
   USES_TERMINAL VERBATIM)

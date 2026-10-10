@@ -139,6 +139,34 @@ struct ContinuationCache::Impl {
     return learned;
   }
 
+  /// A prompt that restores `source` and then differs from a deeper retained
+  /// checkpoint or live frontier of the same family branches at `source`, as
+  /// conversations sharing a system prompt do. Later conversations restore
+  /// it as well, so it is learned like a published branch point; otherwise a
+  /// grid checkpoint stays history and yields to any frontier frozen later.
+  /// A prompt inside the deeper tokens retries it and teaches nothing.
+  [[nodiscard]] bool RestoreDiverges(
+      std::size_t source, std::span<const ContinuationToken> prompt) const {
+    const auto& entry = *entries[source];
+    if (entry.purpose != SnapshotPurpose::kHistory &&
+        entry.purpose != SnapshotPurpose::kContinuation)
+      return false;
+    const auto diverges = [&](const auto& tokens, const auto& identity) {
+      if (identity != entry.input_identity ||
+          tokens.size() <= entry.tokens.size() ||
+          !IsPrefix(entry.tokens, tokens))
+        return false;
+      const auto common = static_cast<std::size_t>(
+          std::ranges::mismatch(tokens, prompt).in1 - tokens.begin());
+      return common < std::min(tokens.size(), prompt.size());
+    };
+    return std::ranges::any_of(entries, [&](const auto& peer) {
+      return (peer->valid && peer->snapshot &&
+              diverges(peer->tokens, peer->input_identity)) ||
+             diverges(peer->live_tokens, peer->live_identity);
+    });
+  }
+
   [[nodiscard]] int RemovalPriority(
       std::size_t candidate, std::span<const ContinuationToken> incoming = {},
       std::span<const std::uint8_t> incoming_identity = {}) const {
@@ -564,7 +592,14 @@ ContinuationCache::Lease ContinuationCache::Acquire(
       std::uint64_t oldest = std::numeric_limits<std::uint64_t>::max();
       for (std::size_t index = 0; index < impl_->entries.size(); ++index) {
         const auto& entry = *impl_->entries[index];
-        if (entry.available && cache_hit && impl_->entries[source]->snapshot &&
+        // Borrowed rows save the restore a copy, never another
+        // conversation's live frontier, whose loss costs its whole prefill.
+        // A prompt inside the frontier retries that conversation and
+        // replaces the reply the frontier holds.
+        if (entry.available &&
+            (entry.live_tokens.empty() ||
+             IsPrefix(prompt, entry.live_tokens)) &&
+            cache_hit && impl_->entries[source]->snapshot &&
             impl_->entries[source]->snapshot->PrefersState(*entry.state)) {
           selected = index;
           break;
@@ -599,6 +634,8 @@ ContinuationCache::Lease ContinuationCache::Acquire(
           auto& source_entry = *impl_->entries[source];
           snapshot = source_entry.snapshot;
           source_entry.snapshot_last_used = ++impl_->clock;
+          if (impl_->RestoreDiverges(source, prompt))
+            source_entry.purpose = SnapshotPurpose::kBranchPoint;
         }
       } else {
         entry.valid = false;

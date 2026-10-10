@@ -78,6 +78,17 @@ must perform zero drafts. `state-edges` requires actual draft execution when
 enabled, so a loaded-but-unused sidecar cannot qualify that mode. Use the normal
 draft limit for this suite. Audio and image/video generation have separate tests.
 
+Card 01's new cache workloads stay outside routine functional runs until the
+new cache lands in card 19. Both `run.py --suite all` and
+`openai_sdk.py --suite all` exclude `cache-compaction`, `cache-transforms`,
+`cache-pressure` and `cache-messages-loop`. The disk lifecycle runner is
+standalone and is never invoked by `all`. Existing functional suites and the
+passing CPU workload/gate checks remain active. Explicitly selecting a new
+workload still runs its strict assertions and may fail on the legacy cache;
+use that selection only to record a baseline or develop the new cache.
+Card 19 enables these workloads in routine qualification with their required
+RAM, disk and restart settings once their contracts pass.
+
 | Suite | Checks |
 | --- | --- |
 | `discovery` | Health, readiness, model ID/context and advertised text/image inputs; no generation |
@@ -85,6 +96,7 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `stops` | Text, Unicode, reasoning and tool stops; peer isolation |
 | `conversation` | Thinking/efforts, images, cancellation and RAM reuse |
 | `image-inputs` | PNG, JPEG and WebP uploads in Chat and Responses; URL spellings, bad uploads and recovery |
+| `tool-images` | Chat/Responses function and custom-call image outputs; text/image order, image-only output, actual colors, streamed retries, changed pixels, continuation reuse, role/URL errors and unchanged text-only controls |
 | `image-count` | 17+ images in one message and across turns; Chat/Responses, sampled thinking/JSON, concurrent colors, limits, cancellation and RAM/disk replay |
 | `tools` | Required/named/auto, schemas, literal arguments and tool history |
 | `auto-tools` | Focused subset for optional tool calls |
@@ -94,6 +106,7 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `tool-agent` | Ordinary nested agent schemas, edit/read/finish turns, no protocol switch, limits, stops/retry, images and sampled peers |
 | `tool-agent-loop` | Bounded autonomous read/edit/verify loop; each turn checks cache reuse and detects repeated actions |
 | `tool-history` | Legacy names, result pairing, current-tool constraints, images, cached retry, stops/limits and sampled peers |
+| `messages-tools` | Messages `tool_use` call, `tool_result` replay with cache reuse, buffered and streamed events, and an uncached Chat control of the same prompt |
 | `tool-untyped` | Open/typed tools, refs and finite values: framing, arguments, streaming, turns, limits, stops/retry and sampled peers |
 | `tool-mixed` | JSON-only neighbors, annotated refs, extra keys, URI and nullable arguments across Chat/Responses; images, stops/retry and sampled peers; a union neighbor keeps native calls, so a replayed reasoning/call turn is reused in full |
 | `tool-native-schemas` | opencode's tool set beside each schema family that used to force a JSON envelope (pattern, oneOf, allOf, not, open objects), auto and required, strict: native calls, no prompt instruction, typed arguments and full reuse of the generated call; Chat/Responses |
@@ -115,6 +128,10 @@ draft limit for this suite. Audio and image/video generation have separate tests
 | `cache-rotation` | Check cache RAM limits and keep history across conversations and small side requests; compare answers with uncached controls |
 | `cache-shared-prefix` | New conversations under one system prompt, one after another, with long and short tasks: from the third on they restore the whole shared prefix; compare answers with uncached controls |
 | `cache-bridge` | A chat bridge sends each user message with metadata its history copy drops, under a full RAM budget with small unrelated requests between turns: from the third turn on, reuse reaches the user turn two back; compare answers with uncached controls. Not in `all` |
+| `cache-compaction` | A tool history grows near the context limit, then a summary replaces it while system/tools stay; check shared-boundary reuse, unchanged retries, continued growth and exact uncached answers. Requires context ≥ 16384. Not in `all` |
+| `cache-transforms` | Clear an old tool result, remove a few hundred late user tokens, or retry/edit after a 10K+ result; restore coherent pre-edit boundaries and compare uncached answers. Requires context ≥ 32768. Not in `all` |
+| `cache-pressure` | Fill the RAM budget, compact an abandoned history, resume idle conversations, send volatile headers/UI tasks, then fan out children and resume their parent. Requires a small explicit RAM budget. Not in `all` |
+| `cache-messages-loop` | Twelve streamed `/v1/messages` tool-call/result cycles with actual calls and growing history; each request checks reuse and has an uncached Chat control. Requires context ≥ 16384. Not in `all` |
 | `system-injection` | System/developer messages after the conversation start, in Chat and Responses: accepted, followed by the model and equal to uncached responses; the hoisted turn's reuse is recorded and the next turn must reuse it in full |
 | `cache-concurrency` | Concurrent identical prompts, shared-system fan-out with short and long tasks, short or no shared prefixes, a retained conversation beside a newcomer, and a cancelled leader; check waits, prefill work and uncached answers |
 
@@ -126,6 +143,12 @@ For `image-inputs` and `image-count`, pass the model's `--mmproj`. Both use smal
 fixed images and are included in `all` only with that option. `image-count`
 restarts the server for disk replay; its first four cases are 1/16-image timing
 controls usable on older main with `--through-case image-count:image_count_control_16_True`.
+
+`tool-images` also requires `--mmproj`. For matched existing-behavior timing
+controls on main, stop at
+`--through-case tool-images:tool_images_control_complete`; full candidate runs
+continue into the newly supported image-bearing tool outputs. A text-only
+model must not qualify the image suite by skipping its assertions.
 
 Repeat `--suite` to select affected tests; `--suite all` explicitly runs all. For long
 contexts, use server `--context 32768`; actual prompt depth is recorded. `cache`
@@ -177,6 +200,13 @@ commands in disposable fixtures using isolated Pi configuration. Use `--passes 1
 for a focused check; the default five passes matches the reported debug workload.
 `--conversation --context-file FILE` additionally tests retained long history.
 
+For image tool results, explicitly select `--case image-read --passes 1` with
+a vision-capable model. The task opens a fixture through Pi's real `read`
+tool and checks both the returned image pixels and the model's color answer.
+Run with `--api openai-responses` and `--api openai-completions` to check both
+client transports; retain the wire requests to inspect the image placement.
+This image task is excluded from the default text-task list.
+
 For a conversation that **actually grows past 200K tokens through tool results**,
 run `agent_long.py --agent pi|opencode --executable PATH --base-url URL
 --model NAME --output DIR --min-context 201000 --complex-tools --stress-turns 20`
@@ -218,6 +248,63 @@ Background requests fill the budget first; a larger budget fails as unqualified.
 requests sharing a long prefix must wait for one prefill and then prefill only
 their own tail; groups sharing little or nothing must not wait. With
 `--sessions 1` no request may wait.
+
+`cache-compaction` measures a small tool result to size a larger append for the
+loaded tokenizer. The measured history must reach 75–95% of the configured
+context, and compaction must drop at least half that capacity. Run explicitly
+with `--suite cache-compaction` and server `--context 32768 --sessions 1`.
+It preserves the declared tools and system text, replaces all other turns with
+a summary, checks reuse at or beyond a coherent system/tools checkpoint measured
+by a short warm branch before the large append, then retries
+and continues the compacted conversation. Cold controls run after every warm
+request. The seed is a genuine model reply; tool calls/results and the summary
+are deterministic client-authored fixtures. This covers compaction mechanics,
+not a real client's summary generation or retention under RAM/disk pressure.
+The [card 01 results](../../docs/cache-redesign/cards/01-functional-coverage.md#results)
+record all scenario families, including failures on the legacy cache.
+
+Run `cache-transforms` with a roomy RAM budget in its own invocation. The
+tool-bearing template can have a longer assistant opening than the plain
+conversation; the suite checks zero-prefill retries without adding pressure.
+`cache-pressure` instead runs explicitly with `--cache-ram-bytes 2147483648`,
+`--context 32768`, and `--sessions 2` (also supports one session, with sequential
+children). It verifies that background requests published at least twice the
+configured budget before the measured histories. UI prompts embed actual chat
+history, and volatile headers change the first system tokens. Warm histories
+and all children finish before cold controls start.
+
+`cache-messages-loop` streams actual model-authored `read_archive` calls and
+replays their IDs/typed arguments with deterministic tool results. Compaction
+is not performed in this loop. Its final prompt must exceed 10K tokens.
+Messages streams expose token usage but not full server phase timings;
+request TTFT and draft work are joined from the server log, while the buffered
+Chat controls expose full phase timings. Every streamed call/result is checked
+against the same uncached rendered prompt, after the entire warm loop.
+
+Disk workloads use a separate runner so their restarts and publication gate
+cannot affect other suites:
+
+```sh
+nix develop -c cmake --preset cpu-test
+nix develop -c cmake --build --preset cpu-test --target cache_disk_faults
+nix develop -c python3 tests/functional/cache_lifecycle.py \
+  --output /tmp/cache-lifecycle --fault-library build/cpu-test/libcache_disk_faults.so -- \
+  /path/to/production/gufo serve llm --model /path/to/model.gguf \
+  --context 32768 --sessions 1 --think off --speculative off
+```
+
+Repeat `--case restart|tiered|oversized|crash` to select cases. `restart` models
+llama-swap stopping and starting a server between turns. `tiered` first warms a
+short RAM prefix after restart, then requests a history with a deeper published
+disk checkpoint. `oversized` uses 1 MiB staging beneath an observed larger
+checkpoint. `crash` uses the CMake-built, child-only preload helper to hold a
+private-cache file at `fsync`, verifies queued bytes and the completed HTTP
+request, then SIGKILLs that child. Restart may restore only previously published
+boundaries. The helper is disarmed for initial publication and is covered by
+CPU process tests. Every case owns an 8 GiB disk budget, checks free space and
+deletes its cache on completion/failure. Reports and logs remain outside Git.
+Known cache-work failures exit nonzero and retain controls/evidence; they are
+not skipped, marked as expected passes, or fixed in this test-only card.
 
 Unchanged retries must reproduce the complete output with zero prefill. After a
 restart, disk restores may re-prefill less than one 2048-token disk step;

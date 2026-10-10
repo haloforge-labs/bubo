@@ -894,6 +894,17 @@ no native effect are accepted and ignored so conforming clients interoperate
 `store` and `background` must be false when present; server-side conversations
 and `previous_response_id` remain unsupported.
 
+Function-call output accepts either a text string or an array of `input_text`
+and `input_image` parts. Images stay inside the corresponding tool result;
+image-only output and interleaved text/images are supported. Historical
+`custom_tool_call` items and their `custom_tool_call_output` use the same
+association and output parts; the custom call's free-form `input` is retained
+as literal tool-history data. This does not enable custom-tool generation.
+Chat Completions also accepts `image_url` parts in `role:"tool"` content.
+Existing text-string outputs keep their prompt representation. Images remain
+unsupported in assistant/system/developer messages; only `detail:"auto"` is
+accepted, and file IDs and `input_file` parts remain unsupported.
+
 Responses report `incomplete` with reason `max_output_tokens` when generation
 hits its limit. Otherwise they report `completed`. `stream: true` sends typed
 SSE events with consecutive `sequence_number` values: lifecycle, output items,
@@ -923,12 +934,18 @@ The other compatibility routes are deliberately limited:
 | Route | Supported request | Output limit |
 | --- | --- | --- |
 | `/v1/completions` | One prompt string, buffered or SSE completion | `max_tokens` |
-| `/v1/messages` | Text messages and optional text system instructions | `max_tokens` |
+| `/v1/messages` | Text, thinking and tool blocks, optional text system instructions and custom tools; buffered or SSE | `max_tokens` |
 | `/completion` | One prompt string, non-streaming completion | `n_predict` |
 
 All four routes validate the loaded model, positive integer limits and shared
-sampling controls. Messages and `/completion` reject streaming; all reject
-multiple candidates. Responses and Messages honor the server's thinking defaults.
+sampling controls. `/completion` rejects streaming; all reject multiple
+candidates. Streamed Messages send Anthropic SSE events: `message_start`,
+`content_block_start`/`content_block_delta`/`content_block_stop` for
+`thinking` (`thinking_delta`), `text` (`text_delta`) and `tool_use`
+(`input_json_delta`) blocks, then `message_delta` with `stop_reason` and the
+complete usage, and `message_stop`. `message_start` reports zero usage because
+prompt accounting is final only at the end. A failure after the headers sends
+an `error` event. Responses and Messages honor the server's thinking defaults.
 Messages accepts `thinking.type` (`enabled`, `adaptive` or `disabled`);
 `adaptive` keeps the server's thinking default, and `budget_tokens` has no
 native equivalent, so the effort stays the server's unless
@@ -938,8 +955,13 @@ before the `text` block, with an empty `signature`, for every accepted
 `thinking` blocks unchanged so later turns reuse the cached prompt.
 `output_config.effort` (`low`, `medium`, `high`, `xhigh` or `max`) sets the
 reasoning effort used while thinking is on; it never enables thinking. Other
-`output_config` members are rejected. Messages rejects tools; use Chat
-Completions for tools. Completions routes accept `stop`;
+`output_config` members are rejected. Messages maps custom `tools`
+(`input_schema`) and `tool_choice` (`auto`, `any`, `tool`, `none`, with
+`disable_parallel_tool_use`) onto the Chat tool path, so framing, schema
+constraints and cache reuse match Chat Completions. Calls are returned as
+`tool_use` blocks with `stop_reason: "tool_use"`; replay them unchanged with
+the following `tool_result` blocks. Server tools such as `web_search` are
+rejected. Completions routes accept `stop`;
 Messages accepts `stop_sequences`. Responses has no stop-sequence field.
 `/infill` and `/v1/messages/count_tokens` return 501: suffix-conditioned infill
 and template-aware message counting are not implemented.

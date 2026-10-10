@@ -108,6 +108,24 @@ if (GUFO_ENABLE_SANITIZERS)
   add_link_options(-fsanitize=address,undefined)
 endif()
 
+add_subdirectory(src/cache)
+
+if (ENGINE_ENABLE_HIP)
+  add_library(gufo_cache_hip STATIC
+    src/core/hip/committed_backing.cpp
+    src/core/hip/transfer_pool.cpp)
+  target_link_libraries(gufo_cache_hip PUBLIC gufo_cache hip::host)
+  if (BUILD_TESTING)
+    target_compile_options(gufo_cache_hip PRIVATE -UNDEBUG)
+  endif()
+  if (GUFO_BUILD_TOOLS)
+    add_executable(cache_idle_spill_bench tests/cache/idle_spill_bench.cpp)
+    target_link_libraries(cache_idle_spill_bench PRIVATE gufo_cache_hip)
+    add_executable(cache_backing_bench tests/cache/backing_bench.cpp)
+    target_link_libraries(cache_backing_bench PRIVATE gufo_cache_hip)
+  endif()
+endif()
+
 add_library(gufo_diagnostics STATIC
   src/core/diagnostics/gpu_queues.cpp
   src/core/diagnostics/linux_sysfs.cpp
@@ -354,11 +372,16 @@ if (BUILD_TESTING)
   add_compile_options(-UNDEBUG)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
+  add_subdirectory(tests/cache)
+
   # Opt-in live process-failure checks, never preloaded into hosted tests or
   # production. No HIP headers are needed for these stable C ABI hooks.
   add_library(device_loss_faults SHARED EXCLUDE_FROM_ALL
     tests/functional/device_loss_faults.cpp)
   target_link_libraries(device_loss_faults PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
+  add_library(cache_disk_faults SHARED
+    tests/functional/cache_disk_faults.cpp)
+  target_link_libraries(cache_disk_faults PRIVATE ${CMAKE_DL_LIBS})
 
   add_subdirectory(tests/models/qwen)
   add_subdirectory(tests/models/qwen27b)
@@ -468,6 +491,7 @@ if (BUILD_TESTING)
     tests/cli/openai_chat_test.cpp
     src/cli/serve/logging.cpp
     src/cli/serve/openai_chat.cpp
+    src/models/deepseek_v4_flash/chat_template.cpp
   )
   target_link_libraries(openai_chat_test PRIVATE gufo_core)
   add_test(NAME openai_chat_test COMMAND openai_chat_test)
@@ -681,6 +705,15 @@ if (BUILD_TESTING)
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/functional/test_runner.py)
   set_tests_properties(functional_runner_test PROPERTIES LABELS "cpu;server;functional")
+  add_test(NAME cache_workloads_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/functional/test_cache_workloads.py)
+  set_tests_properties(cache_workloads_test PROPERTIES LABELS "cpu;server;functional")
+  add_test(NAME cache_disk_faults_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/functional/cache_disk_faults_test.py
+      $<TARGET_FILE:cache_disk_faults>)
+  set_tests_properties(cache_disk_faults_test PROPERTIES LABELS "cpu;server;functional")
 
   add_test(NAME speculative_corpus_test
     COMMAND ${Python3_EXECUTABLE}
