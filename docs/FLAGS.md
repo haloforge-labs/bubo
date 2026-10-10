@@ -14,7 +14,7 @@ Empty environment values count as unset and produce a warning.
 | `--allow-unmeasured-memory` | Allow subagent context above the measured token limit. | Unset | Select the required release policy. | any; generic; any |
 | `--api-key` | Control api key. | none | Inventory classification. | any; generic; any |
 | `--cache-disk` | Control cache disk. | Off | Default staging limits persistence and restores beyond about 70K tokens. | any; generic; any |
-| `--cache-disk-bytes` | Control cache disk bytes. | 8,589,934,592 | Inventory classification. | any; generic; any |
+| `--cache-disk-bytes` | Control cache disk bytes. | 8,589,934,592 | Keep the default. Increase it only when the disk cache must retain more prompt snapshots. | any; generic; any |
 | `--cache-disk-staging-bytes` | Control cache disk staging bytes. | 0 = auto (<= disk budget, <= 1/8 available RAM) | Inventory classification. | any; generic; any |
 | `--cache-ram-bytes` | Set the RAM snapshot cache budget. | 6442450944 | Keep the default. Change it only to fit the available host RAM. | any; strix-halo-tuned; qwen3.8-flash-next |
 | `--context` | Set the context token limit for each session. | 262144 | Follow-up: drop this default if the model's native context equals 262144. | any; strix-halo-tuned; qwen3.8-flash-next |
@@ -34,7 +34,7 @@ Empty environment values count as unset and produce a warning.
 | `--max-tokens` | Control max tokens. | -1 | Inventory classification. | any; generic; any |
 | `--min-draft-tokens` | Control min draft tokens. | 1 | Keep the default. Change it only to test the minimum speculative draft length. | any; generic; qwen3.8-flash-next |
 | `--min-keep` | Control min keep. | 0 | Inventory classification. | any; generic; any |
-| `--min-p` | Control min p. | 0.0 | Inventory classification. | any; generic; any |
+| `--min-p` | Control min p. | 0.0 | Keep zero. Change it only when the task needs minimum probability filtering. | any; generic; any |
 | `--mmproj` | Control mmproj. | Unset until the manifest job | Set the matching vision sidecar when the model must process images. | any; strix-halo-tuned; qwen3.8-flash-next |
 | `--mtp-draft-vocab` | Select the MTP draft head vocabulary. | auto | Keep auto for one session and latin for subagents. Change it only for draft vocabulary tests. | any; strix-halo-tuned; qwen3.8-flash-next |
 | `--mtp-model` | Control mtp model. | Unset until the manifest job | Set the matching MTP sidecar to enable speculative decoding. | any; strix-halo-tuned; qwen3.8-flash-next |
@@ -62,10 +62,10 @@ Empty environment values count as unset and produce a warning.
 | `--served-model-name` | Control served model name. | none | Inventory classification. | any; generic; any |
 | `--sessions` | Set the number of preallocated request sessions. | 1 | Keep one session. Use subagents when four requests must run concurrently. | any; strix-halo-tuned; qwen3.8-flash-next |
 | `--speculative` | Select the speculative draft backend. | mtp | Keep MTP when its sidecar is available. Use off for plain autoregressive decoding. | any; strix-halo-tuned; qwen3.8-flash-next |
-| `--temperature` | Control temperature. | preset (Qwen3.8: 1.0 thinking, 0.7 non-thinking) | Inventory classification. | any; generic; any |
+| `--temperature` | Control temperature. | preset (Qwen3.8: 1.0 thinking, 0.7 non-thinking) | Keep the default. Use zero only for greedy decoding, or change it for the task. | any; generic; any |
 | `--think` | Set the default reasoning mode. | on | Keep on. Change it only when the task does not need reasoning. | any; strix-halo-tuned; qwen3.8-flash-next |
-| `--top-k` | Control top k. | preset 20 (Qwen3.8) | Inventory classification. | any; generic; any |
-| `--top-p` | Control top p. | preset (0.95 thinking; 0.8 non-thinking unless GUFO_PRODUCTION_SAMPLING=1) | Inventory classification. | any; generic; any |
+| `--top-k` | Control top k. | preset 20 (Qwen3.8) | Keep the default. Change it only when the task needs a different sampling candidate limit. | any; generic; any |
+| `--top-p` | Control top p. | preset (0.95 thinking; 0.8 non-thinking unless GUFO_PRODUCTION_SAMPLING=1) | Keep the default. Change it only when the task needs a different cumulative probability cutoff. | any; generic; any |
 | `GUFO_CACHE_HOST_FLOOR_MB` | Control cache host floor mb. | 0 (off) | Inventory classification. | any; generic; any |
 | `GUFO_DENSE_TWIN_BATCH` | Enable dense twin decode with multiple sessions. | off | Subagents enables the measured batched twin path. | any; generic; qwen3.8-flash-next |
 | `GUFO_DENSE_TWIN_MAX_N` | Control dense twin max n. | 8 | Keep the default. Change it only for batched twin tests outside the exact profile. | any; generic; qwen3.8-flash-next |
