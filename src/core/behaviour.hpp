@@ -136,6 +136,7 @@ struct EogBoundaryState {
 struct LoopBreaker {
     enum channel { ANSWER, THINK };
     enum action { NONE, NUDGE, FORCE_THINK, STOP_ANSWER };
+    static constexpr int kMaxPeriod = 64;
 
     struct config {
         int think_repeats = 16;
@@ -151,8 +152,8 @@ struct LoopBreaker {
         int repeats = 0;
     };
 
-    std::array<int32_t, 16> tail {};
-    std::array<uint32_t, 16> matching {};
+    std::array<int32_t, kMaxPeriod> tail {};
+    std::array<uint32_t, kMaxPeriod> matching {};
     uint64_t count = 0;
     channel current = ANSWER;
     int nudge_left = 0;
@@ -198,7 +199,7 @@ struct LoopBreaker {
         int repeats = 0;
         const int min_repeats = where == THINK ? cfg.think_repeats : cfg.answer_repeats;
         const int min_tokens  = where == THINK ? cfg.think_tokens  : cfg.answer_tokens;
-        for (int p = 1; p <= 16; ++p) {
+        for (int p = 1; p <= kMaxPeriod; ++p) {
             auto & run = matching[p - 1];
             if (count >= (uint64_t) p && tail[(count - p) % tail.size()] == token) {
                 if (run != std::numeric_limits<uint32_t>::max()) ++run;

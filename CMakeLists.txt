@@ -455,6 +455,15 @@ if (BUILD_TESTING)
   add_test(NAME behaviour_test COMMAND behaviour_test)
   set_tests_properties(behaviour_test PROPERTIES LABELS "cpu;sampling;behaviour")
 
+  add_executable(loop_breaker_test tests/core/loop_breaker_test.cpp)
+  target_link_libraries(loop_breaker_test PRIVATE gufo_core)
+  add_test(NAME loop_breaker_test COMMAND loop_breaker_test)
+  set_tests_properties(loop_breaker_test PROPERTIES LABELS "cpu;sampling;behaviour")
+
+  # Local token-id replay only: no fixtures, default build or CTest/CI entry.
+  add_executable(loop_breaker_replay EXCLUDE_FROM_ALL tests/core/loop_breaker_replay.cpp)
+  target_link_libraries(loop_breaker_replay PRIVATE gufo_core)
+
   # Separate executables avoid all old/new sampler symbol and type collisions.
   # The baseline source/header/behaviour header are exact a40d37f Git blobs.
   add_executable(behaviour_fast_test
