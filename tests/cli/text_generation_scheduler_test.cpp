@@ -875,6 +875,52 @@ std::shared_ptr<FakeControl> SharedPrefixControl(bool snapshots) {
   return control;
 }
 
+void TestDisabledCacheWithRealPool(bool disabled = true) {
+  auto control = SharedPrefixControl(true);
+  control->prefill_capacity = 4096;
+  control->in_pass_checkpoint = true;
+  std::atomic<std::size_t> captures{0};
+  control->snapshot_callback = [&] { ++captures; };
+  auto runner = std::make_shared<FakeRunner>(control);
+  // The runner is CPU-only; the pool and scheduler are the production classes.
+  auto pool = std::make_shared<TextRunnerPool>(
+      runner, 1, std::nullopt,
+      gufo::server::TextRunnerRamCacheOptions{.disabled = disabled});
+  TextGenerationScheduler scheduler(pool);
+  const auto prompt = SharedPrompt(1200, 7000, 100);
+  TextRequestMetadata metadata;
+  metadata.cache_prompt = true;
+  metadata.cache_prefix_tokens = 1200;
+  control->block_prefill_label = 1;
+  auto first = scheduler.Submit(prompt, 3, 0.0F, {}, false, metadata);
+  control->WaitForPrefill(1);
+  auto second = scheduler.Submit(prompt, 3, 0.0F, {}, false, metadata);
+  Expect(second.phase() == TextRequestPhase::kQueued,
+         "disabled cache single-session pool queues its neighbour");
+  control->ReleasePrefill();
+  const auto a = first.Wait();
+  const auto b = second.Wait();
+  const auto c = scheduler.Submit(prompt, 3, 0.0F, {}, false, metadata).Wait();
+  for (const auto* result : {&a, &b, &c})
+    Expect(result->tokens == ExpectedTokens(1, 3) &&
+               result->cached_prompt_tokens == 0 &&
+               result->prefill_tokens == prompt.size() &&
+               result->shared_prefix_wait_ms == 0,
+           "cache_prompt requests remain cold through the real scheduler pool");
+  Expect(captures.load() == 0 && control->invalidations.load() >= 2,
+         "disabled pool captures nothing and invalidates used state");
+  const auto events = control->Events();
+  std::size_t prefills = 0;
+  for (const auto& event : events)
+    if (event.kind == EventKind::kPrefill) {
+      ++prefills;
+      Expect(event.index == 0 && event.count == prompt.size(),
+             "each cold request uses the whole prompt without cache cuts");
+    }
+  Expect(prefills == 3, "all three requests do a full prefill");
+  std::cout << "PASS: TestDisabledCacheWithRealPool\n";
+}
+
 void TestConcurrentSharedPrefixesPrefillOnce() {
   auto control = SharedPrefixControl(true);
   control->block_prefill_label = 1;
@@ -3858,6 +3904,15 @@ int main(int argc, char** argv) {
     return 0;
   }
 
+  if (argc == 2 && std::string_view(argv[1]) == "--cache-enabled-control") {
+    TestDisabledCacheWithRealPool(false);
+    return 0;
+  }
+  if (argc == 2 && std::string_view(argv[1]) == "--disabled-cache-only") {
+    TestDisabledCacheWithRealPool();
+    return 0;
+  }
+  TestDisabledCacheWithRealPool();
   TestPrefillDiagnosticsHost();
   if (argc == 2 && std::string_view(argv[1]) == "--debug-hooks") {
     TestLiveScoredQueueAndMissingRecords();

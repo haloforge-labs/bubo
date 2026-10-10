@@ -7,6 +7,7 @@
 #include <map>
 #include <regex>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -168,9 +169,16 @@ void ReviewRegression(int finding) {
     // The full resolver test checks all nine rows and every unchanged row.
   } else if (finding == 3) {
     for (const auto* name :
-         {"GUFO_EVAL_API_KEY", "PATH", "GUFO_EVAL_MODEL", "TEMP"})
+         {"GUFO_EVAL_API_KEY", "GUFO_EVAL_ARTIFACT_ID",
+          "GUFO_EVAL_MODEL_REVISION", "GUFO_EVAL_SERVER_COMMIT",
+          "GUFO_EVAL_SERVER_CONFIG", "GUFO_EVAL_SERVER_LABEL", "PATH", "TEMP"})
       Expect(!DebugSettingsListsEnvironment(name),
              "echo excludes unsafe row: " + std::string(name));
+    for (const auto* name :
+         {"GUFO_EVAL_API_KEY", "GUFO_EVAL_ARTIFACT_ID",
+          "GUFO_EVAL_MODEL_REVISION", "GUFO_EVAL_SERVER_COMMIT",
+          "GUFO_EVAL_SERVER_CONFIG", "GUFO_EVAL_SERVER_LABEL"})
+      (void)Find(ResolveReleaseSettings(Inputs("stock")), name);
     const auto settings =
         BuildEffectiveSettings(gufo::json::Value::object(), "v", "r", "b");
     Expect(!settings.find("environment")->contains("GUFO_EVAL_API_KEY"),
@@ -259,6 +267,15 @@ void ReviewRegression(int finding) {
   } else if (finding == 16) {
     const std::map<std::string, std::optional<std::string>> off = {
         {"GUFO_THINK_EOG_GUARD", "0"},
+        {"GUFO_ROUTED_LANEROW", "0"},
+        {"GUFO_THINK_MARKER_BIAS", "0"},
+        {"GUFO_LOGIT_BIAS", "0"},
+        {"GUFO_MODEL_SUPPRESS_TOKENS", "0"},
+        {"GUFO_REASONING_BUDGET", "0"},
+        {"GUFO_PRODUCTION_SAMPLING", "0"},
+        {"GUFO_LENIENT_THINK_ONLY", std::nullopt},
+        {"GUFO_IQ4_WIDE_VARIANT", std::nullopt},
+        {"GUFO_IQ4_WMMA_WAVES", std::nullopt},
         {"GUFO_EOG_BOUNDARY", "0"},
         {"GUFO_EOG_MIN_PROB", "-1"},
         {"GUFO_EOG_DEFER_P", "0"},
@@ -299,6 +316,32 @@ void ReviewRegression(int finding) {
       Expect(Find(ResolveReleaseSettings(inputs), name).value == value,
              "manifest cannot re-enable: " + name);
     }
+    for (const auto* source : {"flag", "manifest"}) {
+      for (const auto* value :
+           {"-1", "-2", "+1", "1.5", "1x", "", " 1", "9223372036854775808"}) {
+        auto inputs = Inputs("exact");
+        if (std::string_view(source) == "flag")
+          inputs.explicit_flags["--seed"] = value;
+        else
+          inputs.manifest_defaults["--seed"] = value;
+        bool rejected = false;
+        try {
+          (void)ResolveReleaseSettings(inputs);
+        } catch (const std::invalid_argument& error) {
+          rejected = std::string_view(error.what()) ==
+                     "profile=exact: --seed must be 0 or more";
+        }
+        Expect(rejected,
+               "exact rejects invalid seed from " + std::string(source));
+      }
+    }
+    for (const auto* value : {"0", "1", "01", "9223372036854775807"}) {
+      auto inputs = Inputs("exact");
+      inputs.explicit_flags["--seed"] = value;
+      Expect(Find(ResolveReleaseSettings(inputs), "--seed").value ==
+                 std::optional<std::string>(value),
+             "exact accepts a fixed seed");
+    }
     {
       auto inputs = Inputs("exact");
       inputs.explicit_flags["--no-mtp"] = "1";
@@ -328,6 +371,143 @@ void ReviewRegression(int finding) {
     throw std::invalid_argument("unknown regression");
   }
   std::cout << "PASS: ReviewRegression" << finding << '\n';
+}
+
+void PlaceholderNotesCheck(std::span<const gufo::json::Value> rows) {
+  for (const auto& row : rows) {
+    if (row.member_str("class") != "OPTION" &&
+        row.member_str("class") != "DEFAULT")
+      continue;
+    for (const auto* key : {"purpose", "note", "default_text"}) {
+      const auto text = row.member_str(key);
+      Expect(text.find("Inventory classification.") == std::string::npos &&
+                 text.find("Control ") == std::string::npos,
+             "public row has user wording: " + row.member_str("name"));
+    }
+    const auto note = row.member_str("note");
+    std::istringstream words(note);
+    std::size_t count = 0;
+    for (std::string word; words >> word;)
+      ++count;
+    Expect(count > 0 && count <= 20 && note.ends_with('.') &&
+               std::count(note.begin(), note.end(), '.') == 1,
+           "public change note is one sentence of at most 20 words: " +
+               row.member_str("name"));
+  }
+}
+
+void Review2Regression(int finding) {
+  auto inputs = Inputs("exact");
+  if (finding == 1) {
+    Expect(Find(ResolveReleaseSettings(inputs), "GUFO_ROUTED_LANEROW").value ==
+               std::optional<std::string>("0"),
+           "exact uses the stock routed kernel");
+  } else if (finding == 2) {
+    inputs.explicit_flags["--seed"] = "-1";
+    Reject([&] { (void)ResolveReleaseSettings(inputs); },
+           "exact rejects random seed");
+  } else if (finding == 3) {
+    for (const auto* name :
+         {"GUFO_THINK_MARKER_BIAS", "GUFO_LOGIT_BIAS",
+          "GUFO_MODEL_SUPPRESS_TOKENS", "GUFO_REASONING_BUDGET",
+          "GUFO_PRODUCTION_SAMPLING", "GUFO_LENIENT_THINK_ONLY",
+          "GUFO_IQ4_WIDE_VARIANT", "GUFO_IQ4_WMMA_WAVES"}) {
+      inputs = Inputs("exact");
+      inputs.environment[name] = "1";
+      Reject([&] { (void)ResolveReleaseSettings(inputs); },
+             "exact rejects output control: " + std::string(name));
+      std::cout << "PASS: exact rejects " << name << '\n';
+    }
+    inputs = Inputs("exact");
+    inputs.environment["GUFO_HIPBLASLT_PLAN_CACHE"] = "0";
+    const auto result = ResolveReleaseSettings(inputs);
+    Expect(std::count(result.logs.begin(), result.logs.end(),
+                      "profile=exact: GUFO_HIPBLASLT_PLAN_CACHE=0 (internal "
+                      "control set)") == 1,
+           "exact logs the unread plan cache control once");
+  } else if (finding == 4) {
+    const auto docs = RenderReleaseDocs(ReleaseSwitchTable());
+    Expect(docs.find("identical to plain autoregressive decoding of that build "
+                     "with the same settings") != std::string::npos,
+           "docs qualify reference equality");
+    Expect(docs.find("--profile stock --speculative off --no-cache --sessions "
+                     "1 --seed 1 --think on --reasoning-effort medium") !=
+               std::string::npos,
+           "docs state the complete reference command");
+  } else if (finding == 5) {
+    PlaceholderNotesCheck(ReleaseSwitchTable());
+    for (const auto* classification : {"OPTION", "DEFAULT"}) {
+      for (const auto* placeholder :
+           {"Inventory classification.", "Control something."}) {
+        auto rows = ReleaseSwitchTable();
+        rows[0]["class"] = classification;
+        rows[0]["model_family"] = "any";
+        rows[0]["note"] = placeholder;
+        bool rejected = false;
+        try {
+          PlaceholderNotesCheck(rows);
+        } catch (const std::runtime_error&) {
+          rejected = true;
+        }
+        Expect(rejected, "placeholder lint rejects any-family public rows");
+      }
+    }
+    for (const auto& [name, value] : std::map<std::string, std::string>{
+             {"--request-timeout-ms", "0 (off)"},
+             {"--max-pending", "16"},
+             {"--max-pending-per-client", "Same as --max-pending"},
+             {"--max-output-bytes", "1048576 (1 MiB)"},
+             {"--max-buffered-output-bytes", "65536 (64 KiB)"},
+             {"--max-buffered-output-total", "262144 (256 KiB)"},
+             {"--repeat-last-n", "64"},
+             {"--repeat-penalty", "1.0 (off)"},
+             {"--frequency-penalty", "0.0 (off)"}}) {
+      const auto& rows = ReleaseSwitchTable();
+      auto row = std::find_if(rows.begin(), rows.end(), [&](const auto& r) {
+        return r.member_str("name") == name;
+      });
+      Expect(row != rows.end() && row->member_str("default_text") == value,
+             "parser default documented: " + name);
+    }
+  } else if (finding == 6) {
+    const auto docs = RenderReleaseDocs(ReleaseSwitchTable());
+    Expect(docs.find("manifest job") == std::string::npos,
+           "public docs omit internal manifest job wording");
+    Expect(docs.find("Sidecar files (MTP, vision, dense twin, draft head) are "
+                     "set with their own options.") != std::string::npos,
+           "public docs explain sidecar options");
+  } else if (finding == 7) {
+    inputs.model_family = "other";
+    const auto result = ResolveReleaseSettings(inputs);
+    Expect(std::count(result.logs.begin(), result.logs.end(),
+                      "profile=exact: byte-exact controls apply to Qwen3.8 "
+                      "Flash Next only; seed=1 applied") == 1,
+           "other family receives the exact scope message");
+    Expect(result.effective_flags.at("--seed") == "1",
+           "other family gets seed 1");
+  } else if (finding == 8) {
+    inputs = Inputs("default");
+    inputs.explicit_flags["--no-cache"] = "1";
+    inputs.explicit_flags["--cache-disk"] = "cache";
+    const auto result = ResolveReleaseSettings(inputs);
+    Expect(std::count(result.logs.begin(), result.logs.end(),
+                      "cache: --no-cache overrides --cache-disk") == 1,
+           "no-cache override logs once");
+    inputs.explicit_flags["--cache-disk"] = "0";
+    const auto zero_directory = ResolveReleaseSettings(inputs);
+    Expect(std::count(zero_directory.logs.begin(), zero_directory.logs.end(),
+                      "cache: --no-cache overrides --cache-disk") == 1,
+           "a directory named zero also produces the override log");
+    inputs.explicit_flags.erase("--no-cache");
+    const auto unchanged = ResolveReleaseSettings(inputs);
+    Expect(std::find(unchanged.logs.begin(), unchanged.logs.end(),
+                     "cache: --no-cache overrides --cache-disk") ==
+               unchanged.logs.end(),
+           "disk cache alone has no override log");
+  } else {
+    throw std::invalid_argument("unknown review 2 regression");
+  }
+  std::cout << "PASS: Review2Regression" << finding << '\n';
 }
 
 void HeaderTest() {
@@ -714,12 +894,26 @@ int main(int argc, char** argv) {
       AuditCatalog();
       return 0;
     }
+    if (argc == 3 && std::string_view(argv[1]) == "--review2-env") {
+      auto inputs = Inputs("exact");
+      inputs.environment[argv[2]] = "1";
+      Reject([&] { (void)ResolveReleaseSettings(inputs); },
+             "exact rejects output control: " + std::string(argv[2]));
+      std::cout << "PASS: exact rejects " << argv[2] << '\n';
+      return 0;
+    }
+    if (argc == 3 && std::string_view(argv[1]) == "--review2") {
+      Review2Regression(std::stoi(argv[2]));
+      return 0;
+    }
     if (argc == 3 && std::string_view(argv[1]) == "--regression") {
       ReviewRegression(std::stoi(argv[2]));
       return 0;
     }
     for (const int finding : {1, 2, 3, 4, 5, 6, 7, 8, 10, 16})
       ReviewRegression(finding);
+    for (int finding = 1; finding <= 8; ++finding)
+      Review2Regression(finding);
     TestResolver();
     HeaderTest();
     AuditCatalog();
