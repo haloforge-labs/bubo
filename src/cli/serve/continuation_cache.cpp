@@ -821,17 +821,19 @@ bool ContinuationCache::ReserveSnapshot(
       return snapshot_bytes != 0 && used <= impl_->snapshot_capacity_bytes &&
              snapshot_bytes <= impl_->snapshot_capacity_bytes - used;
     };
-    const bool host_floor_hit = [&] {
+    // Host-memory floor (GUFO_CACHE_HOST_FLOOR_MB): the admission needs host available bytes >= floor + this snapshot. The shortfall is evicted
+    // first, lowest removal priority first (the same victims a byte-capacity shortage would pick); the snapshot is refused (skipped /
+    // host_memory_floor) only if eviction cannot cover the shortfall. Freed bytes are counted from the removed entries, because the memory only
+    // returns to the host after the removed snapshots are released outside this lock.
+    const std::uint64_t floor_shortfall = [&]() -> std::uint64_t {
       const auto& support = impl_->snapshot_support;
-      if (support.host_floor_bytes == 0 || !support.host_available_bytes) return false;
+      if (support.host_floor_bytes == 0 || !support.host_available_bytes) return 0;
       const std::uint64_t available = support.host_available_bytes();
-      return available < support.host_floor_bytes + snapshot_bytes;
+      const std::uint64_t needed = support.host_floor_bytes + snapshot_bytes;
+      return available < needed ? needed - available : 0;
     }();
-    if (host_floor_hit) {
-      events.push_back(make_event(SnapshotEventAction::kSkipped,
-                                  SnapshotEventReason::kHostMemoryFloor,
-                                  snapshot_bytes, token_count));
-    } else if (!IsContinuation(purpose) &&
+    std::uint64_t floor_evicted = 0;
+    if (!IsContinuation(purpose) &&
         std::ranges::none_of(impl_->entries.begin() + impl_->state_count,
                              impl_->entries.end(),
                              [](const auto& entry) { return !entry->valid; }) &&
@@ -907,6 +909,7 @@ bool ContinuationCache::ReserveSnapshot(
         auto& entry = *impl_->entries[target];
         const std::size_t removed_bytes = entry.snapshot_bytes;
         const std::size_t removed_tokens = entry.tokens.size();
+        floor_evicted += removed_bytes;
         auto removal_event = make_event(SnapshotEventAction::kRemoved, reason,
                                         removed_bytes, removed_tokens);
         removal_event.purpose = static_cast<int>(entry.purpose);
@@ -971,7 +974,7 @@ bool ContinuationCache::ReserveSnapshot(
         impl_->retained_snapshot_bytes -= removed_bytes;
         events.push_back(removal_event);
       };
-      while (can_fit_after_eviction && !fits()) {
+      while (can_fit_after_eviction && (!fits() || floor_evicted < floor_shortfall)) {
         if (exact < impl_->entries.size() && impl_->entries[exact]->valid) {
           if (impl_->entries[exact]->purpose == SnapshotPurpose::kBranchPoint)
             purpose = SnapshotPurpose::kBranchPoint;
@@ -994,12 +997,13 @@ bool ContinuationCache::ReserveSnapshot(
         remove(target, SnapshotEventReason::kByteCapacity);
       }
 
-      if (fits()) {
+      if (fits() && floor_evicted >= floor_shortfall) {
         impl_->reserved_snapshot_bytes += snapshot_bytes;
         admitted = true;
       } else {
         auto skipped_event = make_event(SnapshotEventAction::kSkipped,
-                                        SnapshotEventReason::kByteCapacity,
+                                        fits() ? SnapshotEventReason::kHostMemoryFloor
+                                               : SnapshotEventReason::kByteCapacity,
                                         snapshot_bytes, token_count);
         // Why it was refused (GUFO_CACHE_REMOVAL_LOG): the incoming purpose bounds which retained entries it may displace (retry 0, history 1,
         // continuation / branch point 3); rank = that bound; stable_prefix_tokens carries the number of retained entries it was allowed to evict.
