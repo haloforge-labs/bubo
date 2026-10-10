@@ -9,10 +9,10 @@ from pathlib import Path
 CLASSES = {'DEFAULT', 'OPTION', 'DEBUG', 'INTERNAL', 'REMOVED', 'OTHER_MODEL'}
 FAMILIES = {'any', 'qwen3.8-flash-next', 'qwen3.8-27b', 'deepseek-v4-flash', 'minimax-h3', 'qwen-image-2.1', 'qwen3-tts', 'qwen3-asr'}
 REQUIRES = {'think!=off', 'sessions==1 or GUFO_DENSE_TWIN_BATCH==1', 'speculative==mtp', 'artefact:twin', 'artefact:draft_head', 'artefact:mtp', 'artefact:mmproj'}
-RULES = {'text', 'bool', 'min_prob', 'prob', 'lambda', 'transition', 'number', 'effort_map', 'lenient', 'forward', 'twin_width', 'uint', 'readers', 'tuning'}
-FIELDS = {'name', 'kind', 'class', 'model_family', 'platform', 'requires', 'values', 'exact_off', 'inject_with', 'suppressed_by', 'purpose', 'default_text', 'hardware_scope', 'note', 'built_in', 'value_rule', 'aliases', 'takes_value'}
+RULES = {'text', 'bool', 'min_prob', 'prob', 'lambda', 'transition', 'number', 'effort_map', 'lenient', 'forward', 'twin_width', 'uint', 'int31', 'readers', 'tuning'}
+FIELDS = {'name', 'kind', 'class', 'model_family', 'platform', 'requires', 'values', 'exact_off', 'inject_with', 'suppressed_by', 'purpose', 'default_text', 'hardware_scope', 'note', 'built_in', 'value_rule', 'aliases', 'takes_value', 'echo'}
 INTRO = '# Release switches\n\nGenerated from `src/cli/serve/release_switches.json`.\n\nProfile defaults apply to Qwen3.8 Flash Next.\nOther model families keep their existing defaults.\nExplicit flags and real environment values take precedence.\nEmpty environment values count as unset and produce a warning.\n\n'
-PROFILES = '## Profiles\n\n| Profile | Effect |\n| --- | --- |\n| default | Use production settings for one session. Use medium reasoning effort. |\n| subagents | Use four sessions with 131072 context tokens each and a 4 GiB RAM cache. |\n| exact | Disable lenient acceptance and the dense twin. Keep behaviour policies and the draft head. |\n| stock | Keep upstream defaults. Inject no environment values or flag defaults. |\n\nSubagents verifies up to 524288 total context tokens.\nUse `--allow-unmeasured-memory` above this measured limit.\nFour concurrent deep sessions can reach the host RAM guard near 50K tokens per session.\nExact pins seed 1, one session, and forward size 4096 when unset.\nA real environment value can override a pin and produces a log.\nExact refuses an explicit dense twin or bounded lenient acceptance.\nExact does not promise text identity with plain autoregressive decoding.\nVerify widths and unaligned warm restores can change floating point results.\nManifest artefacts remain unavailable until the manifest job.\nUse `--print-effective-settings` to inspect settings without loading tensors or starting a server.\n\n'
+PROFILES = '## Profiles\n\n| Profile | Effect |\n| --- | --- |\n| default | Use fast upstream practice for one session and medium reasoning effort. Output is not byte-exact. |\n| subagents | Use four sessions with 131072 context tokens each and a 4 GiB RAM cache. |\n| exact | Use reproducible plain autoregressive decoding with one session and no prompt cache. |\n| stock | Keep upstream defaults. Inject no environment values or flag defaults. |\n\nSubagents verifies up to 524288 total context tokens.\nUse `--allow-unmeasured-memory` above this measured limit.\nFour concurrent deep sessions can reach the host RAM guard near 50K tokens per session.\nThe default profile follows upstream gufo practice: fast output that is not byte-exact.\nExact is a reproducibility preset.\nOutput is byte-identical across runs of the same build and seed.\nOutput is identical to plain autoregressive decoding of that build.\nOutput is not identical across builds or to other engines.\nExact disables speculation, behaviour policies, lenient acceptance, the dense twin, the draft head, and RAM and disk prompt caches.\nExact uses one session, forward size 4096, and seed 1 unless a seed is supplied.\nExact refuses values that enable disabled settings or change its session count or prefill geometry.\nIt runs at about half the decode speed, and every request prefills its full prompt.\nManifest artefacts remain unavailable until the manifest job.\nUse `--print-effective-settings` to inspect settings without loading tensors or starting a server.\n\n'
 
 def validate_value(row, value):
     name, rule = row['name'], row['value_rule']
@@ -49,8 +49,10 @@ def validate_value(row, value):
                 fail()
             labels.add(label)
         return
-    if rule == 'uint':
+    if rule in {'uint', 'int31'}:
         if not re.fullmatch(r'[0-9]+', value) or int(value) > 18446744073709551615:
+            fail()
+        if rule == 'int31' and int(value) > 2147483647:
             fail()
         if name in {'--sessions', '--max-request-bytes', '--max-connections'} and int(value) == 0:
             fail()
@@ -82,6 +84,9 @@ def validate(data):
         raise ValueError('invalid catalog schema')
     names = set()
     for row in data['switches']:
+        row.setdefault('echo', False)
+        if row['name'] in {'GUFO_EVAL_API_KEY', 'PATH'} and row['echo']:
+            raise ValueError(row['name'] + ': never echo-safe')
         if set(row) != FIELDS:
             raise ValueError('invalid row fields')
         name = row['name']
@@ -111,7 +116,7 @@ def validate(data):
         for value in row['values'].values():
             if value is not None:
                 validate_value(row, value)
-        if type(row['exact_off']) is not bool or type(row['takes_value']) is not bool or not isinstance(row['note'], str):
+        if type(row['echo']) is not bool or type(row['exact_off']) is not bool or type(row['takes_value']) is not bool or not isinstance(row['note'], str):
             raise ValueError(name + ': invalid metadata')
         if (row['kind'] == 'flag') != name.startswith('--'):
             raise ValueError(name + ': kind mismatch')
@@ -132,7 +137,7 @@ def render_inc(rows):
             out += 'environment[' + name + '] = CopyEnvironmentValue(std::getenv(' + name + '));\n'
     out += '#elif defined(GUFO_RELEASE_CATALOG)\n'
     for row in rows:
-        if row['kind'] == 'env' and row['class'] != 'REMOVED':
+        if row['kind'] == 'env' and row['class'] != 'REMOVED' and row.get('echo', False):
             out += json.dumps(row['name']) + ',\n'
     return out + '#endif\n'
 
@@ -172,6 +177,9 @@ def main():
                 path.parent.mkdir(parents=True, exist_ok=True)
                 newline = '\r\n' if not path.exists() or b'\r\n' in path.read_bytes() else '\n'
                 path.write_bytes(content.replace('\n', newline).encode('utf-8'))
+            golden = root / 'tests/fixtures/release_flags_golden.md'
+            newline = '\r\n' if b'\r\n' in golden.read_bytes() else '\n'
+            golden.write_bytes(render_docs(rows).replace('\n', newline).encode('utf-8'))
             print('Generated', len(rows), 'switches')
     except (ValueError, OSError, TypeError, KeyError) as error:
         parser.exit(1, str(error) + '\n')

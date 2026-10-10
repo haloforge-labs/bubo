@@ -15,6 +15,18 @@ for user-facing changes and release history.
 > [!TIP]
 > This tree combines upstream v0.6.0 with the **[Windows port](https://github.com/pixmaate/gufo)**. **[Gufo RDMA for Dual Strix Halo](https://github.com/neuhaus/gufo)** is a separate variant.
 
+## Release profiles
+
+The default profile follows upstream gufo practice: fast output that is not byte-exact.
+`--profile exact` is a reproducibility preset.
+Output is byte-identical across runs of the same build and seed.
+Output is identical to plain autoregressive decoding of that build.
+Output is not identical across builds or to other engines.
+Exact decodes without speculation and without the prompt cache.
+It runs at about half the decode speed, and every request prefills its full prompt.
+Use `--no-cache` to disable RAM and disk prompt caches for all requests in any profile.
+See [Release switches](docs/FLAGS.md) for all settings.
+
 ## Models and benchmarks
 
 All model documentation lives under [docs/models](docs/models/README.md):
