@@ -105,6 +105,7 @@ enum class SnapshotEventReason : std::uint8_t {
   kExactReplacement,
   kCaptureFailure,
   kReservationMismatch,
+  kHostMemoryFloor,   ///< skipped: host MemAvailable minus this snapshot would fall under the floor (GUFO_CACHE_HOST_FLOOR_MB)
 };
 
 /// Continuation boundaries take precedence over optional history/retry copies.
@@ -128,6 +129,17 @@ struct SnapshotEvent {
   std::size_t retained_snapshot_bytes{0};
   std::size_t reserved_snapshot_bytes{0};
   std::size_t capacity_bytes{0};
+  // Removal diagnostics (GUFO_CACHE_REMOVAL_LOG): what was removed and what asked for room.
+  int purpose{-1};                      ///< removed entry's purpose (0 continuation, 1 history, 2 retry, 3 branch point)
+  int rank{-1};                         ///< removed entry's removal priority at that moment
+  std::size_t stable_prefix_tokens{0};  ///< removed entry's stable boundary (nonzero = whole-prompt entry)
+  std::uint64_t family{0};              ///< FNV-1a of the removed entry's first 32 tokens (conversation family)
+  std::uint64_t last_used{0};           ///< removed entry's snapshot_last_used tick
+  bool was_source{false};               ///< removed entry was the source record of the incoming lease
+  std::size_t incoming_tokens{0};       ///< incoming checkpoint's token count
+  int incoming_purpose{-1};
+  std::uint64_t incoming_family{0};
+  bool preserve_source{false};
 };
 
 /// Explains a miss without exposing prompt or token contents.
@@ -156,6 +168,10 @@ public:
     SnapshotEventSink on_event;
     // Invoked outside the cache mutex, before the removed reference is freed.
     std::function<void(std::shared_ptr<const ContinuationSnapshot>)> on_evict;
+    // Admission floor (default off): a snapshot is refused (skipped / host_memory_floor) when host MemAvailable minus the snapshot's bytes
+    // would fall under host_floor_bytes. A refused snapshot costs a later cache miss; an admitted one at ~1 GB free costs the request (HTTP 500).
+    std::function<std::uint64_t()> host_available_bytes;
+    std::uint64_t host_floor_bytes;   // no default member initializer: the class uses SnapshotSupport{} as a default argument (compile error otherwise); {} zero-initializes
   };
 
   class Lease {

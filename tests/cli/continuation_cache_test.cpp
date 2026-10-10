@@ -1097,7 +1097,7 @@ void TestImageIdentityIsolation() {
   for (const bool snapshot_mode : {false, true}) {
     std::vector<std::size_t> invalidations(2);
     std::size_t next_id = 0;
-    gufo::server::ContinuationCache::SnapshotSupport support;
+    gufo::server::ContinuationCache::SnapshotSupport support{};
     if (snapshot_mode) {
       support.capacity_bytes = [] { return std::size_t{1024}; };
       support.restore = [](auto& state, const auto& snapshot) {
@@ -1366,9 +1366,54 @@ void TestEvictedEntryCoveredByRetainedLongerEntryIsNotOffered() {
   }
 }
 
+void TestHostMemoryFloorEvictsThenRefuses() {
+  // host_floor_bytes > 0: an admission needs host available bytes >= floor + the snapshot. A shortfall is first covered by evicting retained entries
+  // (lowest removal priority first); only when eviction cannot cover it is the snapshot refused (skipped / host_memory_floor). Floor 0 never acts.
+  using gufo::server::ContinuationToken;
+  using gufo::server::SnapshotEventAction;
+  using gufo::server::SnapshotEventReason;
+  using gufo::server::SnapshotPurpose;
+  std::vector<std::size_t> invalidations(1);
+  std::uint64_t available = 100;
+  std::size_t removed = 0;
+  std::vector<SnapshotEventReason> skipped;
+  gufo::server::ContinuationCache cache(
+      1, [&] { return std::make_unique<FakeState>(0, &invalidations); },
+      {.restore = [](auto&, const auto&) {},
+       .capacity_bytes = [] { return 64; },
+       .on_event = [&](const gufo::server::SnapshotEvent& event) {
+         if (event.action == SnapshotEventAction::kRemoved) ++removed;
+         if (event.action == SnapshotEventAction::kSkipped) skipped.push_back(event.reason);
+       },
+       .host_available_bytes = [&] { return available; },
+       .host_floor_bytes = 50},
+      8);
+  const auto save = [&](const std::vector<ContinuationToken>& tokens) {
+    auto lease = cache.Acquire(tokens);
+    const bool admitted = lease.TryReserveSnapshot(8, tokens.size(), false, SnapshotPurpose::kContinuation, tokens);
+    if (admitted) {
+      auto snapshot = std::make_unique<FakeSnapshot>(tokens.size(), 8);
+      lease.Commit(tokens, std::move(snapshot));
+    }
+    return admitted;
+  };
+  Expect(save({1, 2, 3}), "available 100 - snapshot 8 >= floor 50: admitted");
+  Expect(save({4, 5, 6}), "second snapshot admitted with headroom");
+  Expect(removed == 0 && skipped.empty(), "no eviction and no refusal while the floor holds");
+  available = 55;   // 55 < 50 + 8: short by 3 bytes, one 8-byte entry covers it
+  Expect(save({7, 8, 9}), "a shortfall that one eviction covers admits the snapshot");
+  Expect(removed >= 1 && skipped.empty(), "the shortfall was met by evicting a retained entry, not by refusing");
+  const std::size_t removed_before = removed;
+  available = 20;   // 20 < 50 + 8: short by 38 bytes, the two retained entries (16 bytes) cannot cover it
+  Expect(!save({10, 11, 12}), "a shortfall that eviction cannot cover refuses the snapshot");
+  Expect(removed >= removed_before && skipped.size() == 1 && skipped[0] == SnapshotEventReason::kHostMemoryFloor,
+         "the refusal is reported as skipped / host_memory_floor");
+}
+
 int main() {
   ::setenv("GUFO_DISK_EVICT_DOMINATED", "1", 1);
   TestEvictedEntryCoveredByRetainedLongerEntryIsNotOffered();
+  TestHostMemoryFloorEvictsThenRefuses();
   TestAppendedImagesReuseOnlyCompatiblePrefixes();
   TestImageIdentityIsolation();
   TestColdMissThenExactExtensionHit();

@@ -94,7 +94,7 @@ struct ContinuationCache::Entry {
 struct ContinuationCache::Impl {
   std::vector<std::unique_ptr<Entry>> entries;
   std::size_t state_count{0};
-  SnapshotSupport snapshot_support;
+  SnapshotSupport snapshot_support{};
   mutable std::mutex mutex;
   std::condition_variable condition;
   std::uint64_t clock{0};
@@ -769,6 +769,17 @@ ContinuationState& ContinuationCache::StateAt(std::size_t index) {
   return *impl_->entries.at(index)->state;
 }
 
+namespace {
+std::uint64_t FamilyHash(std::span<const ContinuationToken> tokens) {
+  std::uint64_t h = 1469598103934665603ull;
+  for (std::size_t i = 0; i < tokens.size() && i < 32; ++i) {
+    h ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(tokens[i]));
+    h *= 1099511628211ull;
+  }
+  return h;
+}
+}  // namespace
+
 bool ContinuationCache::ReserveSnapshot(
     std::size_t source_index, std::size_t snapshot_bytes,
     std::size_t token_count, bool preserve_source, SnapshotPurpose& purpose,
@@ -810,6 +821,18 @@ bool ContinuationCache::ReserveSnapshot(
       return snapshot_bytes != 0 && used <= impl_->snapshot_capacity_bytes &&
              snapshot_bytes <= impl_->snapshot_capacity_bytes - used;
     };
+    // Host-memory floor (GUFO_CACHE_HOST_FLOOR_MB): the admission needs host available bytes >= floor + this snapshot. The shortfall is evicted
+    // first, lowest removal priority first (the same victims a byte-capacity shortage would pick); the snapshot is refused (skipped /
+    // host_memory_floor) only if eviction cannot cover the shortfall. Freed bytes are counted from the removed entries, because the memory only
+    // returns to the host after the removed snapshots are released outside this lock.
+    const std::uint64_t floor_shortfall = [&]() -> std::uint64_t {
+      const auto& support = impl_->snapshot_support;
+      if (support.host_floor_bytes == 0 || !support.host_available_bytes) return 0;
+      const std::uint64_t available = support.host_available_bytes();
+      const std::uint64_t needed = support.host_floor_bytes + snapshot_bytes;
+      return available < needed ? needed - available : 0;
+    }();
+    std::uint64_t floor_evicted = 0;
     if (!IsContinuation(purpose) &&
         std::ranges::none_of(impl_->entries.begin() + impl_->state_count,
                              impl_->entries.end(),
@@ -886,6 +909,19 @@ bool ContinuationCache::ReserveSnapshot(
         auto& entry = *impl_->entries[target];
         const std::size_t removed_bytes = entry.snapshot_bytes;
         const std::size_t removed_tokens = entry.tokens.size();
+        floor_evicted += removed_bytes;
+        auto removal_event = make_event(SnapshotEventAction::kRemoved, reason,
+                                        removed_bytes, removed_tokens);
+        removal_event.purpose = static_cast<int>(entry.purpose);
+        removal_event.rank = priority_for(target);
+        removal_event.stable_prefix_tokens = entry.stable_prefix_tokens;
+        removal_event.family = FamilyHash(entry.tokens);
+        removal_event.last_used = entry.snapshot_last_used;
+        removal_event.was_source = target == source_index;
+        removal_event.incoming_tokens = token_count;
+        removal_event.incoming_purpose = static_cast<int>(purpose);
+        removal_event.incoming_family = FamilyHash(replacement_prefix);
+        removal_event.preserve_source = preserve_source;
         // Defer only tagged candidates the incoming checkpoint may supersede.
         // Failed captures must still persist these real drops.
         const auto record = impl_->snapshot_support.on_evict
@@ -936,10 +972,9 @@ bool ContinuationCache::ReserveSnapshot(
         entry.snapshot_bytes = 0;
         entry.valid = false;
         impl_->retained_snapshot_bytes -= removed_bytes;
-        events.push_back(make_event(SnapshotEventAction::kRemoved, reason,
-                                    removed_bytes, removed_tokens));
+        events.push_back(removal_event);
       };
-      while (can_fit_after_eviction && !fits()) {
+      while (can_fit_after_eviction && (!fits() || floor_evicted < floor_shortfall)) {
         if (exact < impl_->entries.size() && impl_->entries[exact]->valid) {
           if (impl_->entries[exact]->purpose == SnapshotPurpose::kBranchPoint)
             purpose = SnapshotPurpose::kBranchPoint;
@@ -962,13 +997,26 @@ bool ContinuationCache::ReserveSnapshot(
         remove(target, SnapshotEventReason::kByteCapacity);
       }
 
-      if (fits()) {
+      if (fits() && floor_evicted >= floor_shortfall) {
         impl_->reserved_snapshot_bytes += snapshot_bytes;
         admitted = true;
       } else {
-        events.push_back(make_event(SnapshotEventAction::kSkipped,
-                                    SnapshotEventReason::kByteCapacity,
-                                    snapshot_bytes, token_count));
+        auto skipped_event = make_event(SnapshotEventAction::kSkipped,
+                                        fits() ? SnapshotEventReason::kHostMemoryFloor
+                                               : SnapshotEventReason::kByteCapacity,
+                                        snapshot_bytes, token_count);
+        // Why it was refused (GUFO_CACHE_REMOVAL_LOG): the incoming purpose bounds which retained entries it may displace (retry 0, history 1,
+        // continuation / branch point 3); rank = that bound; stable_prefix_tokens carries the number of retained entries it was allowed to evict.
+        skipped_event.incoming_tokens = token_count;
+        skipped_event.incoming_purpose = static_cast<int>(purpose);
+        skipped_event.incoming_family = FamilyHash(replacement_prefix);
+        skipped_event.preserve_source = preserve_source;
+        skipped_event.rank = max_priority;
+        std::size_t evictable = 0;
+        for (std::size_t i = impl_->state_count; i < impl_->entries.size(); ++i)
+          if (impl_->entries[i]->valid && impl_->entries[i]->snapshot != nullptr && priority_for(i) <= max_priority) ++evictable;
+        skipped_event.stable_prefix_tokens = evictable;
+        events.push_back(skipped_event);
       }
     }
   }

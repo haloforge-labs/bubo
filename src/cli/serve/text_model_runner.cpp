@@ -336,8 +336,33 @@ std::string_view SnapshotEventReasonName(SnapshotEventReason reason) noexcept {
       return "capture_failure";
     case SnapshotEventReason::kReservationMismatch:
       return "reservation_mismatch";
+    case SnapshotEventReason::kHostMemoryFloor:
+      return "host_memory_floor";
   }
   return "unknown";
+}
+
+// GUFO_CACHE_HOST_FLOOR_MB=N (default 0 = off): refuse a new snapshot (event=snapshot action=skipped reason=host_memory_floor) when host MemAvailable minus the
+// snapshot would fall under N MiB. 10-09 L4 arm A: the cache kept admitting 4.75 GB snapshots until 0.96 GB was left and the request then died with HTTP 500.
+std::uint64_t HostFloorBytes() {
+  static const std::uint64_t floor_bytes = [] {
+    const char* v = std::getenv("GUFO_CACHE_HOST_FLOOR_MB");
+    if (v == nullptr || *v == '\0' || *v == '-') return std::uint64_t{0};
+    char* end = nullptr;
+    const auto mb = std::strtoull(v, &end, 10);
+    return end != v && *end == '\0' ? static_cast<std::uint64_t>(mb) * 1024ull * 1024ull : std::uint64_t{0};
+  }();
+  return floor_bytes;
+}
+
+// GUFO_CACHE_REMOVAL_LOG=1 (diagnostic, default off): log EVERY snapshot removal (byte capacity and exact replacement too) with what was removed
+// (purpose, rank, stable boundary, family hash, last-use tick, source flag) and what asked for room, to find out why a stable-prefix record vanished.
+bool CacheRemovalLogEnabled() {
+  static const bool enabled = [] {
+    const char* v = std::getenv("GUFO_CACHE_REMOVAL_LOG");
+    return v != nullptr && std::string_view(v) == "1";
+  }();
+  return enabled;
 }
 
 void EmitSnapshotEvent(const SnapshotEvent& event) noexcept {
@@ -346,8 +371,9 @@ void EmitSnapshotEvent(const SnapshotEvent& event) noexcept {
   // Losing one because every entry is taken is not routine: the server holds
   // fewer conversations than the workload rotates through, so it is doing
   // avoidable full re-prefills. Failed captures also need attention.
+  const bool removal_log = CacheRemovalLogEnabled();
   if (event.action == SnapshotEventAction::kRemoved &&
-      event.reason != SnapshotEventReason::kEntryCapacity)
+      event.reason != SnapshotEventReason::kEntryCapacity && !removal_log)
     return;
   try {
     std::ostringstream line;
@@ -357,6 +383,19 @@ void EmitSnapshotEvent(const SnapshotEvent& event) noexcept {
          << " retained_bytes=" << event.retained_snapshot_bytes
          << " reserved_bytes=" << event.reserved_snapshot_bytes
          << " capacity_bytes=" << event.capacity_bytes;
+    if (removal_log && event.action == SnapshotEventAction::kRemoved)
+      line << " purpose=" << event.purpose << " rank=" << event.rank
+           << " stable_prefix_tokens=" << event.stable_prefix_tokens
+           << " family=" << event.family << " last_used=" << event.last_used
+           << " was_source=" << (event.was_source ? 1 : 0)
+           << " incoming_tokens=" << event.incoming_tokens
+           << " incoming_purpose=" << event.incoming_purpose
+           << " incoming_family=" << event.incoming_family
+           << " preserve_source=" << (event.preserve_source ? 1 : 0);
+    if (removal_log && event.action == SnapshotEventAction::kSkipped && event.incoming_purpose >= 0)
+      line << " incoming_purpose=" << event.incoming_purpose << " max_priority=" << event.rank
+           << " evictable=" << event.stable_prefix_tokens << " incoming_family=" << event.incoming_family
+           << " preserve_source=" << (event.preserve_source ? 1 : 0);
     Logger::Warn("cache", line.str());
   } catch (...) {
     // Cache logging must not affect request execution.
@@ -524,6 +563,8 @@ ContinuationCache::SnapshotSupport MakeSnapshotSupport(
                             validated->snapshot_max_bytes);
           },
       .on_event = EmitSnapshotEvent,
+      .host_available_bytes = [] { return HostAvailableBytes(); },
+      .host_floor_bytes = HostFloorBytes(),
   };
 }
 
