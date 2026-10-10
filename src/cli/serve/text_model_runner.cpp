@@ -383,8 +383,7 @@ void EmitSnapshotEvent(const SnapshotEvent& event) noexcept {
          << " retained_bytes=" << event.retained_snapshot_bytes
          << " reserved_bytes=" << event.reserved_snapshot_bytes
          << " capacity_bytes=" << event.capacity_bytes;
-    if (removal_log && (event.action == SnapshotEventAction::kRemoved ||
-                        (event.action == SnapshotEventAction::kSkipped && event.incoming_purpose >= 0)))
+    if (removal_log && event.action == SnapshotEventAction::kRemoved)
       line << " purpose=" << event.purpose << " rank=" << event.rank
            << " stable_prefix_tokens=" << event.stable_prefix_tokens
            << " family=" << event.family << " last_used=" << event.last_used
@@ -392,6 +391,10 @@ void EmitSnapshotEvent(const SnapshotEvent& event) noexcept {
            << " incoming_tokens=" << event.incoming_tokens
            << " incoming_purpose=" << event.incoming_purpose
            << " incoming_family=" << event.incoming_family
+           << " preserve_source=" << (event.preserve_source ? 1 : 0);
+    if (removal_log && event.action == SnapshotEventAction::kSkipped && event.incoming_purpose >= 0)
+      line << " incoming_purpose=" << event.incoming_purpose << " max_priority=" << event.rank
+           << " evictable=" << event.stable_prefix_tokens << " incoming_family=" << event.incoming_family
            << " preserve_source=" << (event.preserve_source ? 1 : 0);
     Logger::Warn("cache", line.str());
   } catch (...) {
