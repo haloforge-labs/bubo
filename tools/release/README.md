@@ -46,3 +46,13 @@ New rows default to `echo: false`; API keys and PATH are never echo-safe.
 Source-completeness checks use consumer files, excluding the generated include.
 Exact disables speculation, behaviour policies, model sidecars for drafts and twins, and both prompt cache tiers.
 Exact fixes forward size 4096 and one session; conflicting values are fatal.
+
+The exact reference command, with a clean environment and matching model and request settings, is:
+
+```sh
+gufo serve --profile stock --speculative off --no-cache --sessions 1 --seed 1 --think on --reasoning-effort medium
+```
+
+The literal getenv scan does not detect names passed through unreviewed helper wrappers.
+Public OPTION and DEFAULT rows require a change note of one sentence with at most 20 words.
+PlaceholderNotesCheck rejects "Inventory classification." and "Control " in these rows.

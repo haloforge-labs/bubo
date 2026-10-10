@@ -20,7 +20,7 @@ for user-facing changes and release history.
 The default profile follows upstream gufo practice: fast output that is not byte-exact.
 `--profile exact` is a reproducibility preset.
 Output is byte-identical across runs of the same build and seed.
-Output is identical to plain autoregressive decoding of that build.
+Output is identical to plain autoregressive decoding of that build with the same settings.
 Output is not identical across builds or to other engines.
 Exact decodes without speculation and without the prompt cache.
 It runs at about half the decode speed, and every request prefills its full prompt.
@@ -236,3 +236,9 @@ The initial design is informed by the following open source projects:
 - [hipEngine](https://github.com/shisa-ai/hipEngine) for torch-free HIP execution, and native speculative-cycle work.
 - [ds4](https://github.com/antirez/ds4) for DeepSeek V4 Flash, MoE scheduling, and DSpark.
 - [audio.cpp](https://github.com/0xShug0/audio.cpp) for audio models for tts and asr tasks.
+
+The exact reference command, with a clean environment and matching model and request settings, is:
+
+```sh
+gufo serve --profile stock --speculative off --no-cache --sessions 1 --seed 1 --think on --reasoning-effort medium
+```
