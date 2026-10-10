@@ -98,6 +98,7 @@ Empty environment values count as unset and produce a warning.
 | `GUFO_ROUTED_LANEROW` | Enable the routed expert prefill kernel. | 1 | Inventory classification. | any; strix-halo-tuned; qwen3.8-flash-next |
 | `GUFO_SPEC_EOG_STOP` | Permit speculative EOG stops. | 1 | Inventory classification. | any; strix-halo-tuned; qwen3.8-flash-next |
 | `GUFO_THINK_EOG_GUARD` | Block end of turn inside an unfinished thinking span. | 1 | Inventory classification. | any; strix-halo-tuned; qwen3.8-flash-next |
+| `GUFO_THINK_GUARD_ESCALATE` | Close an unfinished thinking span after this many blocked end-of-turn tries. 0 turns it off. | 16 | Inventory classification. | any; strix-halo-tuned; qwen3.8-flash-next |
 | `GUFO_THINK_MARKER_BIAS` | Control think marker bias. | 0 | Inventory classification. | any; generic; qwen3.8-flash-next |
 | `GUFO_THINK_MARKER_BIAS_BY_EFFORT` | Map reasoning effort to think marker bias. | low:-2,medium:-1,xhigh:0 | Inventory classification. | any; strix-halo-tuned; qwen3.8-flash-next |
 | `GUFO_WEIGHT_UPLOAD_READERS` | Control weight upload readers. | 16 | Inventory classification. | windows; generic; any |

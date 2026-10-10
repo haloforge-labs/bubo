@@ -154,6 +154,7 @@ json::parse(R"switch({"name":"GUFO_ROUTED_LANEROW","kind":"env","class":"DEFAULT
 json::parse(R"switch({"name":"GUFO_SPEC_EOG_STOP","kind":"env","class":"DEFAULT","model_family":"qwen3.8-flash-next","platform":"any","requires":[],"values":{"default":"1","subagents":"1","exact":null},"exact_off":false,"inject_with":null,"suppressed_by":["--no-behaviour"],"purpose":"Permit speculative EOG stops.","default_text":"1","hardware_scope":"strix-halo-tuned","note":"Inventory classification.","built_in":"0","value_rule":"bool","aliases":[],"takes_value":true})switch"),
 json::parse(R"switch({"name":"GUFO_SURVIVAL_FLOOR","kind":"env","class":"INTERNAL","model_family":"qwen3.8-flash-next","platform":"any","requires":[],"values":{"default":null,"subagents":null,"exact":null},"exact_off":false,"inject_with":null,"suppressed_by":[],"purpose":"Control survival floor.","default_text":"ON","hardware_scope":"generic","note":"Inventory classification.","built_in":null,"value_rule":"text","aliases":[],"takes_value":true})switch"),
 json::parse(R"switch({"name":"GUFO_THINK_EOG_GUARD","kind":"env","class":"DEFAULT","model_family":"qwen3.8-flash-next","platform":"any","requires":[],"values":{"default":"1","subagents":"1","exact":null},"exact_off":false,"inject_with":null,"suppressed_by":["--no-behaviour"],"purpose":"Block end of turn inside an unfinished thinking span.","default_text":"1","hardware_scope":"strix-halo-tuned","note":"Inventory classification.","built_in":"0","value_rule":"bool","aliases":[],"takes_value":true})switch"),
+json::parse(R"switch({"name":"GUFO_THINK_GUARD_ESCALATE","kind":"env","class":"DEFAULT","model_family":"qwen3.8-flash-next","platform":"any","requires":[],"values":{"default":"16","subagents":"16","exact":null},"exact_off":false,"inject_with":null,"suppressed_by":["--no-behaviour"],"purpose":"Close an unfinished thinking span after this many blocked end-of-turn tries. 0 turns it off.","default_text":"16","hardware_scope":"strix-halo-tuned","note":"Inventory classification.","built_in":"16","value_rule":"uint","aliases":[],"takes_value":true})switch"),
 json::parse(R"switch({"name":"GUFO_THINK_MARKER_BIAS","kind":"env","class":"OPTION","model_family":"qwen3.8-flash-next","platform":"any","requires":[],"values":{"default":null,"subagents":null,"exact":null},"exact_off":false,"inject_with":null,"suppressed_by":[],"purpose":"Control think marker bias.","default_text":"0","hardware_scope":"generic","note":"Inventory classification.","built_in":null,"value_rule":"number","aliases":[],"takes_value":true})switch"),
 json::parse(R"switch({"name":"GUFO_THINK_MARKER_BIAS_BY_EFFORT","kind":"env","class":"DEFAULT","model_family":"qwen3.8-flash-next","platform":"any","requires":[],"values":{"default":"low:-2,medium:-1,xhigh:0","subagents":"low:-2,medium:-1,xhigh:0","exact":null},"exact_off":false,"inject_with":null,"suppressed_by":["--no-behaviour"],"purpose":"Map reasoning effort to think marker bias.","default_text":"low:-2,medium:-1,xhigh:0","hardware_scope":"strix-halo-tuned","note":"Inventory classification.","built_in":null,"value_rule":"effort_map","aliases":[],"takes_value":true})switch"),
 json::parse(R"switch({"name":"GUFO_THINK_MARKER_LIST","kind":"env","class":"INTERNAL","model_family":"qwen3.8-flash-next","platform":"any","requires":[],"values":{"default":null,"subagents":null,"exact":null},"exact_off":false,"inject_with":null,"suppressed_by":[],"purpose":"Control think marker list.","default_text":"none","hardware_scope":"generic","note":"Inventory classification.","built_in":null,"value_rule":"text","aliases":[],"takes_value":true})switch"),
@@ -250,6 +251,7 @@ environment["GUFO_ROUTED_LANEROW"] = CopyEnvironmentValue(std::getenv("GUFO_ROUT
 environment["GUFO_SPEC_EOG_STOP"] = CopyEnvironmentValue(std::getenv("GUFO_SPEC_EOG_STOP"));
 environment["GUFO_SURVIVAL_FLOOR"] = CopyEnvironmentValue(std::getenv("GUFO_SURVIVAL_FLOOR"));
 environment["GUFO_THINK_EOG_GUARD"] = CopyEnvironmentValue(std::getenv("GUFO_THINK_EOG_GUARD"));
+environment["GUFO_THINK_GUARD_ESCALATE"] = CopyEnvironmentValue(std::getenv("GUFO_THINK_GUARD_ESCALATE"));
 environment["GUFO_THINK_MARKER_BIAS"] = CopyEnvironmentValue(std::getenv("GUFO_THINK_MARKER_BIAS"));
 environment["GUFO_THINK_MARKER_BIAS_BY_EFFORT"] = CopyEnvironmentValue(std::getenv("GUFO_THINK_MARKER_BIAS_BY_EFFORT"));
 environment["GUFO_THINK_MARKER_LIST"] = CopyEnvironmentValue(std::getenv("GUFO_THINK_MARKER_LIST"));
@@ -346,6 +348,7 @@ environment["XDG_CACHE_HOME"] = CopyEnvironmentValue(std::getenv("XDG_CACHE_HOME
 "GUFO_SPEC_EOG_STOP",
 "GUFO_SURVIVAL_FLOOR",
 "GUFO_THINK_EOG_GUARD",
+"GUFO_THINK_GUARD_ESCALATE",
 "GUFO_THINK_MARKER_BIAS",
 "GUFO_THINK_MARKER_BIAS_BY_EFFORT",
 "GUFO_THINK_MARKER_LIST",

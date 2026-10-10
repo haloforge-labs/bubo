@@ -3764,6 +3764,32 @@
       "takes_value": true
     },
     {
+      "name": "GUFO_THINK_GUARD_ESCALATE",
+      "kind": "env",
+      "class": "DEFAULT",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": "16",
+        "subagents": "16",
+        "exact": null
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [
+        "--no-behaviour"
+      ],
+      "purpose": "Close an unfinished thinking span after this many blocked end-of-turn tries. 0 turns it off.",
+      "default_text": "16",
+      "hardware_scope": "strix-halo-tuned",
+      "note": "Inventory classification.",
+      "built_in": "16",
+      "value_rule": "uint",
+      "aliases": [],
+      "takes_value": true
+    },
+    {
       "name": "GUFO_THINK_MARKER_BIAS",
       "kind": "env",
       "class": "OPTION",
