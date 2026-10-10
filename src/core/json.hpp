@@ -56,6 +56,13 @@ public:
     v.type_ = Type::kObject;
     return v;
   }
+  /// A number as parse() reads it: `value` for arithmetic, `text` (already
+  /// validated JSON number grammar) for exact re-serialisation.
+  static Value parsed_number(double value, std::string text) {
+    Value v(value);
+    v.num_text_ = std::move(text);
+    return v;
+  }
   static Value array() {
     Value v;
     v.type_ = Type::kArray;
@@ -199,6 +206,10 @@ private:
         os << (bool_ ? "true" : "false");
         break;
       case Type::kNumber: {
+        if (!num_text_.empty()) {
+          os << num_text_;
+          break;
+        }
         if (!std::isfinite(num_)) {
           throw std::invalid_argument("JSON numbers must be finite");
         }
@@ -280,6 +291,11 @@ private:
   Type type_ = Type::kNull;
   bool bool_ = false;
   double num_ = 0.0;
+  // The exact source text of a number read by parse(); empty for numbers built
+  // from C++ values. dump()/tojson() write it verbatim, so re-serialising a
+  // parsed document keeps every digit and spelling (integers above 2^53,
+  // "1.0", "1e5") instead of going through double (census row 30).
+  std::string num_text_;
   std::string str_;
   Array arr_;
   Object obj_;
@@ -559,7 +575,7 @@ struct Parser {
         !std::isfinite(value)) {
       fail("bad number");
     }
-    return Value(value);
+    return Value::parsed_number(value, tok);
   }
 };
 }  // namespace detail
