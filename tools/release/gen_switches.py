@@ -25,6 +25,11 @@ def validate_value(row, value):
         raise ValueError(name + ': invalid value ' + repr(value))
     if name in enums and value not in enums[name]:
         fail()
+    if rule == 'forward':
+        prefix = re.match(r'[ \t\r\n\v\f]*[+-]?[0-9]+', value)
+        if prefix is None or not 64 <= int(prefix.group()) <= 16384:
+            fail()
+        return
     if rule in {'text', 'twin_width', 'lenient', 'tuning'}:
         return
     if rule == 'bool':

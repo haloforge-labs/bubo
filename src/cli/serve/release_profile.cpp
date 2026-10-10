@@ -77,6 +77,14 @@ void ValidateValue(const json::Value& row, const std::string& value) {
       fail();
     return;
   }
+  if (rule == "forward") {
+    // Match PrefillChunkTokens' base-10 prefix grammar before checking its
+    // range.
+    const long number = std::strtol(value.c_str(), nullptr, 10);
+    if (number < 64 || number > 16384)
+      fail();
+    return;
+  }
   if (rule == "text" || rule == "twin_width")
     return;
   if (rule == "lenient") {
@@ -137,8 +145,6 @@ void ValidateValue(const json::Value& row, const std::string& value) {
     if (number != std::floor(number))
       fail();
     if (rule == "transition" && (number < 0 || number > 2))
-      fail();
-    if (rule == "forward" && (number < 64 || number > 16384))
       fail();
     if (rule == "twin_width" && (number < 1 || number > 8))
       fail();
@@ -415,6 +421,16 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
          (name == "GUFO_LENIENT" && *setting.value == "bounded")))
       throw std::invalid_argument("profile=exact: explicit value re-enables " +
                                   name);
+    if (setting.value)
+      ValidateValue(row, *setting.value);
+    if (row.member_str("kind") == "flag" &&
+        row.member_str("value_rule") == "uint" && setting.value) {
+      std::uint64_t number = 0;
+      (void)std::from_chars(setting.value->data(),
+                            setting.value->data() + setting.value->size(),
+                            number);
+      setting.value = std::to_string(number);
+    }
     if (name == "--cache-disk" && setting.value && setting.value->empty())
       setting.value.reset();
     if (inputs.profile == "exact" && match &&
@@ -430,8 +446,6 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
           inputs.profile == "exact" && row.find("exact_off")->as_bool()
               ? "suppressed by profile=exact"
               : "suppressed by explicit flag";
-    if (setting.value)
-      ValidateValue(row, *setting.value);
     settings.emplace(name, std::move(setting));
   }
   for (const auto& row : rows) {

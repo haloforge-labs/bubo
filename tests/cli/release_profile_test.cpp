@@ -225,7 +225,18 @@ void TestResolver() {
     Expect(Find(baseline, name).origin == "profile:default",
            "profile beats built-in");
   }
-  auto inputs = Inputs();
+  auto inputs = Inputs("exact");
+  inputs.explicit_flags["--sessions"] = "01";
+  Expect(Find(ResolveReleaseSettings(inputs), "--sessions").value ==
+             std::optional<std::string>("1"),
+         "exact accepts a numerically single session with leading zeros");
+  inputs = Inputs();
+  inputs.explicit_flags["--sessions"] = "01";
+  inputs.environment["GUFO_DENSE_TWIN_MODEL"] = "twin.gguf";
+  Expect(Find(ResolveReleaseSettings(inputs), "GUFO_DENSE_TWIN_MODEL").origin ==
+             "env",
+         "session requirements use the integer flag value");
+  inputs = Inputs();
   inputs.explicit_flags["--think"] = "off";
   Expect(!Find(ResolveReleaseSettings(inputs), "--reasoning-effort").value,
          "thinking off skips the medium effort default");
@@ -387,12 +398,18 @@ void TestResolver() {
            {"GUFO_DISK_EVICT_SKIP_TOKENS", "1000001"},
            {"GUFO_DISK_IDLE_MS", "600001"},
            {"GUFO_DISK_DEFER_MS", "-1"},
+           {"GUFO_PREFILL_FORWARD_TOKENS", "1e4"},
            {"GUFO_THINK_MARKER_BIAS_BY_EFFORT", "low:inf"}}) {
     inputs = Inputs();
     inputs.environment[name] = value;
     Reject([&] { (void)ResolveReleaseSettings(inputs); },
            "invalid real value refuses");
   }
+  inputs = Inputs("exact");
+  inputs.environment["GUFO_PREFILL_FORWARD_TOKENS"] = "4096tokens";
+  Expect(Find(ResolveReleaseSettings(inputs), "GUFO_PREFILL_FORWARD_TOKENS")
+                 .origin == "env",
+         "forward validation retains the existing integer-prefix grammar");
   for (const auto* field : {"class", "purpose", "requires"}) {
     auto rows = ReleaseSwitchTable();
     if (std::string_view(field) == "requires") {
