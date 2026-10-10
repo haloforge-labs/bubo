@@ -91,6 +91,20 @@ void TestStructures() {
   assert(ordered.tojson() == R"({"z": 1, "a": [true, null, {"n": 2}]})");
   assert(parse(R"({"e":[],"o":{},"t":"\u00e9\n"})").tojson() ==
          "{\"e\": [], \"o\": {}, \"t\": \"\xC3\xA9\\n\"}");
+  // Parsed numbers re-serialise from their source text (census row 30): an
+  // integer above 2^53 keeps every digit, and the model's spellings survive.
+  const auto big = parse("9007199254740993");
+  assert(big.dump() == "9007199254740993");
+  assert(big.as_double() == 9007199254740992.0);  // arithmetic still via double
+  const std::string spelled =
+      R"({"a":1.0,"b":1e5,"c":-0,"d":[12345678901234567890123,-0.50],"e":2E-3})";
+  assert(parse(spelled).dump() == spelled);
+  assert(parse(spelled).tojson() ==
+         R"({"a": 1.0, "b": 1e5, "c": -0, "d": [12345678901234567890123, -0.50], "e": 2E-3})");
+  // Numbers built from C++ values keep the shortest round-trip spelling.
+  assert(Value(42).dump() == "42");
+  assert(Value(0.5).dump() == "0.5");
+  assert(Value(1.0).dump() == "1");
 
   const auto bounded = std::string(128, '[') + "null" + std::string(128, ']');
   assert(parse(bounded).is_array());

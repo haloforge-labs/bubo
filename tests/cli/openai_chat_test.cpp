@@ -1052,6 +1052,30 @@ void TestHistoricalTypedArgumentsUseTojson() {
          "Typed historical arguments render as the template's tojson");
 }
 
+// Numbers in replayed tool arguments keep the model's exact text (census row 30):
+// an integer above 2^53 must not round through double, and spellings such as
+// 1.0 / 1e5 / -0.50 must not be normalised, or the replayed call no longer
+// matches the tokens the model generated.
+void TestHistoricalNumberArgumentsKeepSourceText() {
+  const auto item = gufo::json::parse(
+      R"({"type":"function_call","call_id":"call_1","name":"tool",
+          "arguments":"{\"id\":9007199254740993,\"f\":1.0,\"e\":1e5,\"ids\":[12345678901234567890123,-0.50]}"})");
+  gufo::tokenization::ChatMessage message;
+  gufo::core::ImageReadBudget budget;
+  std::string error;
+  Expect(gufo::server::ParseOpenAiResponseMessage(item, &message, budget,
+                                                  &error) &&
+             message.tool_calls.size() == 1 &&
+             message.tool_calls[0].arguments.size() == 4 &&
+             message.tool_calls[0].arguments[0].value == "9007199254740993" &&
+             !message.tool_calls[0].arguments[0].is_string &&
+             message.tool_calls[0].arguments[1].value == "1.0" &&
+             message.tool_calls[0].arguments[2].value == "1e5" &&
+             message.tool_calls[0].arguments[3].value ==
+                 "[12345678901234567890123, -0.50]",
+         "Historical number arguments keep their source text");
+}
+
 void TestMalformedHistoricalFunctions() {
   for (const auto source :
        {R"({"arguments":"{}"})", R"({"name":"","arguments":"{}"})",
@@ -5550,6 +5574,7 @@ int main(int argc, char** argv) {
   DebugHooksSettingsTest();
   DebugHooksSettingsEnvironmentTest();
   TestHistoricalTypedArgumentsUseTojson();
+  TestHistoricalNumberArgumentsKeepSourceText();
   TestBehaviourRequestOptions();
   TestNullReasoningHistory();
   TestProductionSamplingSelection();
