@@ -58,6 +58,8 @@ inline constexpr const char* kDebugSettingsEnvironment[] = {
     "GUFO_DISK_EVICT_DOMINATED",
     "GUFO_CACHE_HOST_FLOOR_MB",
     "GUFO_CACHE_REMOVAL_LOG",
+    "GUFO_MEM_ACCOUNTING",
+    "GUFO_MAX_IMAGE_TOKENS",
     "GUFO_DENSE_TWIN_MODEL",
     "GUFO_DENSE_TWIN_BATCH",
     "GUFO_DENSE_TWIN_MAX_N",
