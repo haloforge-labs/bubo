@@ -25,14 +25,16 @@ struct Expected {
   int answer_stop;
 };
 
-// Zero-based indices from the external loop_sim_reference.py simulate(),
-// pmax=64, stream token[i]=1000+i%period, with the default channel thresholds.
-constexpr std::array<Expected, 5> kExpected{{
+// Zero-based indices from the external reference, THINK cap 128 / ANSWER
+// cap 16.
+constexpr std::array<Expected, 7> kExpected{{
     {1, 127, 143, 511, 527},
+    {8, 127, 143, 511, 527},
     {16, 255, 271, 511, 527},
-    {17, 271, 287, 543, 559},
-    {44, 703, 719, 1407, 1423},
-    {64, 1023, 1039, 2047, 2063},
+    {19, 303, 319, -1, -1},
+    {44, 703, 719, -1, -1},
+    {64, 1023, 1039, -1, -1},
+    {128, 2047, 2063, -1, -1},
 }};
 
 void CheckPattern(Breaker& breaker, int period, Breaker::channel channel,
@@ -55,15 +57,20 @@ void CheckPattern(Breaker& breaker, int period, Breaker::channel channel,
       CHECK(breaker.watch_left == 16 + 256);
       CHECK(!breaker.terminal);
     }
-    if (i > nudge && i < terminal) {
+    if (nudge >= 0 && i > nudge && i < terminal) {
       CHECK(breaker.nudging());
       CHECK(!breaker.terminal);
     }
-    if (i >= terminal) {
+    if (terminal >= 0 && i >= terminal) {
       CHECK(breaker.terminal);
       CHECK(breaker.nudge_left == 0);
       CHECK(breaker.watch_left == 0);
     }
+  }
+  if (nudge < 0) {
+    CHECK(!breaker.terminal);
+    CHECK(breaker.take_event().what == Breaker::NONE);
+    return;
   }
   CHECK(breaker.take_event().what == Breaker::NUDGE);
   CHECK(breaker.take_event().what == terminal_action);
@@ -78,17 +85,21 @@ void ExactPeriods() {
       CHECK(breaker.cfg.think_tokens == 128);
       CHECK(breaker.cfg.answer_repeats == 32);
       CHECK(breaker.cfg.answer_tokens == 512);
-      CHECK(breaker.tail.size() == 64);
-      CHECK(breaker.matching.size() == 64);
+      CHECK(breaker.tail.size() == 128);
+      CHECK(breaker.matching.size() == 128);
       CHECK(breaker.pending.size() == 16);
+      CHECK(breaker.cfg.think_max_period == 128);
+      CHECK(breaker.cfg.answer_max_period == 16);
       CheckPattern(
           breaker, row.period, channel,
           channel == Breaker::THINK ? row.think_nudge : row.answer_nudge,
           channel == Breaker::THINK ? row.think_force : row.answer_stop);
-      CHECK(breaker.detections == 2);
-      CHECK(breaker.nudges == 1);
+      const bool detected = channel == Breaker::THINK || row.period <= 16;
+      CHECK(breaker.detections == (detected ? 2u : 0u));
+      CHECK(breaker.nudges == (detected ? 1u : 0u));
       CHECK(breaker.forced_thinks == (channel == Breaker::THINK ? 1u : 0u));
-      CHECK(breaker.stopped_answers == (channel == Breaker::ANSWER ? 1u : 0u));
+      CHECK(breaker.stopped_answers ==
+            (channel == Breaker::ANSWER && detected ? 1u : 0u));
     }
   }
 }
@@ -97,7 +108,7 @@ void BeyondMaxPeriod() {
   for (const auto channel : {Breaker::THINK, Breaker::ANSWER}) {
     Breaker breaker;
     for (int i = 0; i < 8192; ++i)
-      CHECK(breaker.accept(1000 + i % 65, channel).what == Breaker::NONE);
+      CHECK(breaker.accept(1000 + i % 129, channel).what == Breaker::NONE);
     CHECK(breaker.detections == 0);
     CHECK(!breaker.terminal);
     CHECK(breaker.take_event().what == Breaker::NONE);
@@ -126,17 +137,17 @@ void RandomStreams() {
 void ChannelSwitches() {
   for (const auto from : {Breaker::THINK, Breaker::ANSWER}) {
     const auto to = from == Breaker::THINK ? Breaker::ANSWER : Breaker::THINK;
-    const int nudge = from == Breaker::THINK ? 1023 : 2047;
+    const int nudge = from == Breaker::THINK ? 255 : 511;
     // Switch just before detection, during its watch, and after termination.
     for (const int prefix : {nudge, nudge + 1, nudge + 17}) {
       Breaker breaker;
       for (int i = 0; i < prefix; ++i)
-        breaker.accept(1000 + i % 64, from);
+        breaker.accept(1000 + i % 16, from);
       while (breaker.take_event().what != Breaker::NONE) {
       }
       const auto detections = breaker.detections;
-      CheckPattern(breaker, 64, to, to == Breaker::THINK ? 1023 : 2047,
-                   to == Breaker::THINK ? 1039 : 2063);
+      CheckPattern(breaker, 16, to, to == Breaker::THINK ? 255 : 511,
+                   to == Breaker::THINK ? 271 : 527);
       CHECK(breaker.current == to);
       CHECK(breaker.detections == detections + 2);
     }
@@ -145,19 +156,20 @@ void ChannelSwitches() {
 
 void BoundaryAndReset() {
   Breaker breaker;
-  CheckPattern(breaker, 64, Breaker::THINK, 1023, 1039);
+  CheckPattern(breaker, 128, Breaker::THINK, 2047, 2063);
   breaker.boundary(Breaker::ANSWER);
   CHECK(breaker.count == 0);
   CHECK(breaker.current == Breaker::ANSWER);
   CHECK(breaker.nudge_left == 0);
   CHECK(breaker.watch_left == 0);
+  CHECK(breaker.nudges_in_span == 0);
   CHECK(!breaker.terminal);
   CHECK(breaker.detections == 2);
   CHECK(std::all_of(breaker.tail.begin(), breaker.tail.end(),
                     [](int32_t token) { return token == 0; }));
   CHECK(std::all_of(breaker.matching.begin(), breaker.matching.end(),
                     [](uint32_t run) { return run == 0; }));
-  CheckPattern(breaker, 64, Breaker::ANSWER, 2047, 2063);
+  CheckPattern(breaker, 16, Breaker::ANSWER, 511, 527);
   breaker.cfg = {3, 7, 5, 11};
   breaker.reset();
   CHECK(breaker.cfg.think_repeats == 3);
@@ -168,6 +180,7 @@ void BoundaryAndReset() {
   CHECK(breaker.current == Breaker::ANSWER);
   CHECK(breaker.nudge_left == 0);
   CHECK(breaker.watch_left == 0);
+  CHECK(breaker.nudges_in_span == 0);
   CHECK(!breaker.terminal);
   CHECK(breaker.detections == 0);
   CHECK(breaker.nudges == 0);
@@ -180,7 +193,40 @@ void BoundaryAndReset() {
   CHECK(std::all_of(breaker.matching.begin(), breaker.matching.end(),
                     [](uint32_t run) { return run == 0; }));
   breaker.cfg = {};
-  CheckPattern(breaker, 64, Breaker::THINK, 1023, 1039);
+  CheckPattern(breaker, 128, Breaker::THINK, 2047, 2063);
+}
+void DisturbedNudge() {
+  for (const auto channel : {Breaker::THINK, Breaker::ANSWER}) {
+    const int period = channel == Breaker::THINK ? 44 : 8;
+    const int nudge = channel == Breaker::THINK ? 703 : 511;
+    const int terminal = channel == Breaker::THINK ? 1412 : 1028;
+    Breaker breaker;
+    for (int i = 0; i < 8192; ++i) {
+      const auto event =
+          breaker.accept(i == nudge + 5 ? 900000 : 1000 + i % period, channel);
+      CHECK(event.what == (i == nudge      ? Breaker::NUDGE
+                           : i == terminal ? (channel == Breaker::THINK
+                                                  ? Breaker::FORCE_THINK
+                                                  : Breaker::STOP_ANSWER)
+                                           : Breaker::NONE));
+      if (i == terminal)
+        CHECK(breaker.terminal && breaker.nudges_in_span == 1);
+    }
+    CHECK(breaker.detections == 2 && breaker.nudges == 1);
+  }
+}
+
+void NearExactCounter() {
+  // One incrementing ID per otherwise fixed block: explicitly outside the exact
+  // detector's scope.
+  for (const auto channel : {Breaker::THINK, Breaker::ANSWER}) {
+    Breaker breaker;
+    for (int i = 0; i < 8192; ++i) {
+      const int token = i % 44 == 43 ? 100000 + i / 44 : 1000 + i % 44;
+      CHECK(breaker.accept(token, channel).what == Breaker::NONE);
+    }
+    CHECK(breaker.detections == 0);
+  }
 }
 }  // namespace
 
@@ -191,7 +237,9 @@ int main() {
     RandomStreams();
     ChannelSwitches();
     BoundaryAndReset();
-    std::cout << "loop_breaker_test: 5 groups PASS\n";
+    DisturbedNudge();
+    NearExactCounter();
+    std::cout << "loop_breaker_test: 7 groups PASS\n";
     return 0;
   } catch (const std::exception& error) {
     std::cerr << "loop_breaker_test: " << error.what() << '\n';

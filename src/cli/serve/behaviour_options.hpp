@@ -39,12 +39,28 @@ inline double BehaviourNumber(const char* name, double disabled) {
   return number;
 }
 
+inline int ThinkGuardEscalate() {
+  const char* value = std::getenv("GUFO_THINK_GUARD_ESCALATE");
+  if (value == nullptr)
+    return 16;
+  const std::string_view text(value);
+  int result = 0;
+  const auto [end, error] =
+      std::from_chars(text.data(), text.data() + text.size(), result);
+  if (text.empty() || text.front() < '0' || text.front() > '9' ||
+      error != std::errc{} || end != text.data() + text.size() || result < 0)
+    throw std::invalid_argument(
+        "GUFO_THINK_GUARD_ESCALATE must be an integer in [0,2147483647]");
+  return result;
+}
+
 inline std::shared_ptr<sampling::BehaviourConfig> ParseBehaviourOptions(
     const json::Value& body,
     std::shared_ptr<const sampling::BehaviourConfig> previous = {}) {
   auto cfg = previous ? std::make_shared<sampling::BehaviourConfig>(*previous)
                       : std::make_shared<sampling::BehaviourConfig>();
   cfg->think_eog_guard = BehaviourSwitch("GUFO_THINK_EOG_GUARD");
+  cfg->think_guard_escalate = ThinkGuardEscalate();
   cfg->eog_boundary = BehaviourSwitch("GUFO_EOG_BOUNDARY");
   cfg->eog_min_prob_exact = BehaviourSwitch("GUFO_EOG_MIN_PROB_EXACT");
   cfg->eog_min_prob = BehaviourNumber("GUFO_EOG_MIN_PROB", -1.0);

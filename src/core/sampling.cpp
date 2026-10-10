@@ -250,7 +250,7 @@ bool SamplerState::CanSelectArgmax(TokenId token,
        std::ranges::find(b.marker_ids,token)!=b.marker_ids.end()))return fail("marker_greedy_choice_needs_full_row");
     if(b.loop_breaker&&st.loop.nudging())return fail("loop_nudge_needs_probability_row");
     if(!st.forcing() && eog && st.thinking && (b.think_eog_guard||
-       (b.loop_eog_close&&st.prefix_used)))return fail("thinking_eog_greedy_needs_full_row");
+       eog_closes_think(b,st)))return fail("thinking_eog_greedy_needs_full_row");
     if(!st.thinking && !st.forcing() && !NeedsConstraintMask()) {
       if(st.boundary.deferred_stop && !eog)return fail("deferred_eog_greedy_needs_full_row");
       if(eog && ((b.eog_boundary&&!st.boundary.allowed())||b.eog_min_prob>0))
@@ -582,6 +582,7 @@ void SamplerState::CopyDrawStateFrom(const SamplerState& other) {
   behaviour_state_.close_decision = false;
   behaviour_state_.deferred_at = other.behaviour_state_.deferred_at;
   behaviour_state_.close_at = other.behaviour_state_.close_at;
+  behaviour_state_.guard_blocked_at = other.behaviour_state_.guard_blocked_at;
 }
 
 void SamplerState::ResetHistory(std::span<const TokenId> tokens) {
@@ -1178,6 +1179,8 @@ std::vector<std::string> SamplerState::BehaviourSummary() const {
   auto lines=behaviour_state_.Summary();
   if(!BehaviourEnabled()) return lines;
   const auto& b=*config_.behaviour;
+  lines.push_back("BEHAVIOUR_ENGAGE name=guard_escalation taken="+std::string(behaviour_state_.guard_escalation_taken?"1":"0")+
+    " fallback=0 reason="+(behaviour_state_.guard_escalation_taken?"blocked_attempts_reached_k":"none")+" scope=request");
   std::vector<std::pair<std::string,bool>> enabled={
     {"think_eog_guard",b.think_eog_guard},{"eog_boundary",b.eog_boundary},
     {"eog_min_prob",b.eog_min_prob>0},{"eog_defer",b.eog_defer_p>0},
@@ -1383,7 +1386,7 @@ BehaviourLogits TransformBehaviour(std::span<const float> raw,
             "raw_topk_upper_bound_below_threshold", !changed_finite);
     }
   }
-  if(st.thinking&&b.think_eog_guard&&!st.forcing()&&!(b.loop_eog_close&&st.prefix_used)) {
+  if(st.thinking&&b.think_eog_guard&&!st.forcing()&&!eog_closes_think(b,st)) {
     bool changed_finite = false;
     for (auto token : b.eog_ids) changed_finite |= mask(token);
     stage("think_eog_guard", "eog_inside_open_think", !changed_finite);
@@ -1482,7 +1485,7 @@ SamplerState SamplerState::BehaviourWithoutIntervention(std::string_view name) c
     disabled->loop_breaker=false;variant.behaviour_state_.loop.nudge_left=0;
   } else if(name=="loop_transition")disabled->loop_transition=0;
   if(variant.behaviour_state_.forcing()&&variant.behaviour_state_.force_reason==name) {
-    if(name=="loop_transition")variant.behaviour_state_.Force(b.think_end,"loop_breaker");
+    if(name=="loop_transition")variant.behaviour_state_.Force(b.budget_forced,"loop_breaker");
     else {variant.behaviour_state_.forced.clear();variant.behaviour_state_.force_pos=0;}
   }
   variant.config_.behaviour=std::move(disabled);
@@ -1528,7 +1531,7 @@ SamplingDistribution SamplerState::BehaviourDistributionFor(
   // O/reasoning-budget.cpp:402 is a selected-token rewrite. Its exact port is
   // a push-forward of the entire filtered target probability mass BEFORE
   // min(1,p/q) and residual sampling. Draft q can remain the native proposal.
-  if(b.loop_eog_close&&behaviour_state_.thinking&&behaviour_state_.prefix_used&&
+  if(eog_closes_think(b,behaviour_state_)&&behaviour_state_.thinking&&
      !behaviour_state_.forcing()&&!b.think_end.empty()) {
     const auto end=b.think_end.front();
     std::vector<Probability> entries;double moved=0;
@@ -1598,7 +1601,7 @@ bool SamplerState::BehaviourTopSafe(std::span<const float> values,
     std::vector<std::string> names;
     for(const auto& stage:transforms.stages)names.push_back(stage.name);
     if(b.production_sampling)names.push_back("production_sampling");
-    if(b.loop_eog_close&&behaviour_state_.thinking&&behaviour_state_.prefix_used)
+    if(eog_closes_think(b,behaviour_state_)&&behaviour_state_.thinking)
       names.push_back("loop_eog_close");
     for(const auto& name:names) {
       auto variant=BehaviourWithoutIntervention(name);
@@ -1653,9 +1656,9 @@ bool SamplerState::BehaviourTopSafe(std::span<const float> values,
     return true;
   }
   if((behaviour_state_.boundary.deferred_stop&&behaviour_state_.boundary.allowed())||
-     (b.loop_eog_close&&behaviour_state_.thinking&&behaviour_state_.prefix_used)) {
+     (eog_closes_think(b,behaviour_state_)&&behaviour_state_.thinking)) {
     for(auto token:b.eog_ids)if(!Contains(ids,token))return fail("forced_eog_not_in_device_candidates");
-    if(b.loop_eog_close&&behaviour_state_.thinking&&behaviour_state_.prefix_used&&
+    if(eog_closes_think(b,behaviour_state_)&&behaviour_state_.thinking&&
        !b.think_end.empty()&&!Contains(ids,b.think_end.front()))return fail("forced_token_not_in_device_candidates");
   }
   double unseen_extra=0;
@@ -1708,6 +1711,8 @@ void SamplerState::ObserveBehaviour(const SamplingDistribution& distribution,
     } else if(decide(stage.after,stage.after_random)==actual&&
               decide(stage.before,stage.before_random)!=actual) {
       behaviour_state_.Taken(stage.name,stage.reason);
+      if(stage.name=="think_eog_guard")
+        behaviour_state_.guard_blocked_at.push_back(behaviour_state_.accepted_count+1);
     }
   }
   if(metadata->defer_stop) {

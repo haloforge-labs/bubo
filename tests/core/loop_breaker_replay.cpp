@@ -23,6 +23,8 @@ int main() {
   }
   using Breaker = gufo::sampling::LoopBreaker;
   Breaker breaker;
+  std::cout << "channel=THINK max_period=" << breaker.cfg.think_max_period
+            << '\n';
   uint64_t index = 0;
   std::string word;
   while (input >> word) {

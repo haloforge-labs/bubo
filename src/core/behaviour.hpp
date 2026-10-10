@@ -136,13 +136,15 @@ struct EogBoundaryState {
 struct LoopBreaker {
     enum channel { ANSWER, THINK };
     enum action { NONE, NUDGE, FORCE_THINK, STOP_ANSWER };
-    static constexpr int kMaxPeriod = 64;
+    static constexpr int kMaxPeriod = 128;
 
     struct config {
         int think_repeats = 16;
         int think_tokens = 128;
         int answer_repeats = 32;
         int answer_tokens = 512;
+        int think_max_period = kMaxPeriod;
+        int answer_max_period = 16;
     } cfg;
 
     struct event {
@@ -158,6 +160,7 @@ struct LoopBreaker {
     channel current = ANSWER;
     int nudge_left = 0;
     int watch_left = 0;
+    int nudges_in_span = 0;
     uint64_t detections = 0;
     uint64_t nudges = 0;
     uint64_t forced_thinks = 0;
@@ -180,6 +183,7 @@ struct LoopBreaker {
         current = next;
         nudge_left = 0;
         watch_left = 0;
+        nudges_in_span = 0;
         terminal = false;
     }
 
@@ -190,8 +194,6 @@ struct LoopBreaker {
     event accept(int32_t token, channel where) {
         if (where != current) boundary(where);
         if (terminal) return {};
-        const bool was_nudging = nudging();
-        const bool was_watching = watch_left > 0;
         if (nudge_left > 0) --nudge_left;
         if (watch_left > 0) --watch_left;
 
@@ -199,7 +201,10 @@ struct LoopBreaker {
         int repeats = 0;
         const int min_repeats = where == THINK ? cfg.think_repeats : cfg.answer_repeats;
         const int min_tokens  = where == THINK ? cfg.think_tokens  : cfg.answer_tokens;
-        for (int p = 1; p <= kMaxPeriod; ++p) {
+        const int max_period = std::clamp(
+            where == THINK ? cfg.think_max_period : cfg.answer_max_period,
+            0, kMaxPeriod);
+        for (int p = 1; p <= max_period; ++p) {
             auto & run = matching[p - 1];
             if (count >= (uint64_t) p && tail[(count - p) % tail.size()] == token) {
                 if (run != std::numeric_limits<uint32_t>::max()) ++run;
@@ -217,13 +222,14 @@ struct LoopBreaker {
         ++count;
 
         event found {};
-        if (period && !was_nudging && !was_watching) {
+        if (period && nudges_in_span == 0) {
             found = { NUDGE, where, period, repeats };
             nudge_left = 16;
             watch_left = 16 + 256;
             ++detections;
             ++nudges;
-        } else if (period && was_watching && !nudging()) {
+            ++nudges_in_span;
+        } else if (period && nudges_in_span >= 1 && !nudging()) {
             found = { where == THINK ? FORCE_THINK : STOP_ANSWER, where, period, repeats };
             nudge_left = 0;
             watch_left = 0;
@@ -272,6 +278,7 @@ struct BehaviourConfig {
   bool spec_eog_stop{false}, initial_thinking{false};
   double eog_min_prob{0}, eog_defer_p{0}, marker_bias{0};
   int loop_transition{2};
+  int think_guard_escalate{16};
   std::int64_t reasoning_budget{-1};
   std::vector<std::uint32_t> eog_ids, think_start, think_end;
   std::vector<std::vector<std::uint32_t>> think_starts, think_ends;
@@ -290,9 +297,10 @@ struct BehaviourConfig {
 struct BehaviourCount { std::uint64_t taken{0}, fallback{0}; };
 struct BehaviourState {
   bool thinking{false}, prefix_used{false}, waiting_utf8{false};
-  bool close_decision{false};
+  bool close_decision{false}, guard_escalated{false}, guard_escalation_taken{false};
+  std::uint64_t guard_blocked_attempts{0};
   std::uint64_t accepted_count{0};
-  std::vector<std::uint64_t> deferred_at, close_at;
+  std::vector<std::uint64_t> deferred_at, close_at, guard_blocked_at;
   std::int64_t remaining{-1};
   std::vector<std::uint32_t> match_tail, forced, matched_end;
   std::size_t force_pos{0};
@@ -307,7 +315,7 @@ struct BehaviourState {
     thinking = cfg.initial_thinking;
     remaining = cfg.reasoning_budget;
     if (thinking && cfg.reasoning_budget_enabled && remaining == 0)
-      Force(cfg.budget_forced.empty() ? cfg.think_end : cfg.budget_forced,
+      Force(cfg.budget_forced,
             "reasoning_budget");
   }
   void Force(const std::vector<std::uint32_t>& seq, std::string reason) {
@@ -329,11 +337,27 @@ struct BehaviourState {
     ++accepted_count;
     if(std::ranges::find(deferred_at,accepted_count)!=deferred_at.end()) boundary.deferred_stop=true;
     if(std::ranges::find(close_at,accepted_count)!=close_at.end()) close_decision=true;
+    // Sampling/draft positions journal Taken events; only acceptance consumes them.
+    const bool blocked=std::ranges::find(guard_blocked_at,accepted_count)!=
+      guard_blocked_at.end();
+    // Keep ordinals for CopyDrawStateFrom replay, as with close_at.
+    if (thinking && blocked && !guard_escalated) {
+      ++guard_blocked_attempts;
+      if (cfg.think_guard_escalate>0 &&
+          guard_blocked_attempts>=static_cast<std::uint64_t>(cfg.think_guard_escalate)) {
+        guard_escalated=true;
+        guard_escalation_taken=true;
+      }
+    }
     const bool was_thinking=thinking, was_forcing=forcing();
     const bool prefix_forcing=was_forcing&&force_reason=="loop_transition"&&cfg.loop_transition==2;
     if(prefix_forcing && remaining>0)--remaining;
-    if (close_decision) {
-      Force(cfg.think_end,"loop_eog_close"); close_decision=false;
+    // The redirect already selected the first close token. Continue only its
+    // remaining tokens; this is not an arbitrary forced think close.
+    const bool redirected_close=close_decision;
+    if (redirected_close) {
+      forced=cfg.think_end;force_pos=1;force_reason="loop_eog_close";
+      close_decision=false;
     }
     const auto piece=Piece(cfg,token);
     match_tail.push_back(token);
@@ -349,25 +373,27 @@ struct BehaviourState {
     if (!end_match.empty() && thinking) {
       matched_end=std::move(end_match);
       thinking=false; prefix_used=false; waiting_utf8=false;
+      guard_blocked_attempts=0;guard_escalated=false;
       forced.clear();force_pos=0;boundary.reset();loop.boundary(LoopBreaker::ANSWER);
       return;
     }
     if (!thinking && (Ends(cfg.think_start)||std::ranges::any_of(cfg.think_starts,[&](const auto& seq){return Ends(seq);}))) {
       matched_end.clear();
       thinking=true;prefix_used=false;remaining=cfg.reasoning_budget;
+      guard_blocked_attempts=0;guard_escalated=false;
       boundary.reset();loop.boundary(LoopBreaker::THINK);
       if(cfg.reasoning_budget_enabled && remaining==0)
-        Force(cfg.budget_forced.empty()?cfg.think_end:cfg.budget_forced,"reasoning_budget");
+        Force(cfg.budget_forced,"reasoning_budget");
       return;
     }
-    if (forcing()) {
+    if (forcing() && !redirected_close) {
       ++force_pos;
       if (!forcing()) {
         forced.clear();force_pos=0;
         if(force_reason=="loop_transition" && cfg.loop_transition==2) {
           prefix_used=true;loop.boundary(LoopBreaker::THINK);
           if(cfg.reasoning_budget_enabled && remaining==0)
-            Force(cfg.budget_forced.empty()?cfg.think_end:cfg.budget_forced,"reasoning_budget");
+            Force(cfg.budget_forced,"reasoning_budget");
         }
       }
     }
@@ -380,7 +406,7 @@ struct BehaviourState {
       if(remaining>0) --remaining;
       if(remaining==0) {
         waiting_utf8=!complete;
-        if(complete) Force(cfg.budget_forced.empty()?cfg.think_end:cfg.budget_forced,"reasoning_budget");
+        if(complete) Force(cfg.budget_forced,"reasoning_budget");
       }
     }
     if (cfg.loop_breaker && !grammar_active && !was_forcing && !forcing()) {
@@ -388,7 +414,7 @@ struct BehaviourState {
       const bool backstop=cfg.loop_transition==2 && prefix_used && thinking && event.what!=LoopBreaker::NONE;
       if(event.what==LoopBreaker::FORCE_THINK || backstop) {
         if(backstop || cfg.loop_transition==0 || cfg.loop_prefix.empty())
-          Force(cfg.think_end,"loop_breaker");
+          Force(cfg.budget_forced,"loop_breaker");
         else {
           auto seq=cfg.loop_prefix;
           if(cfg.loop_transition!=2) {
@@ -413,5 +439,9 @@ struct BehaviourState {
     return out;
   }
 };
+[[nodiscard]] inline bool eog_closes_think(const BehaviourConfig& cfg,
+                                         const BehaviourState& state) {
+  return cfg.loop_eog_close && (state.prefix_used || state.guard_escalated);
+}
 } // namespace gufo::sampling
 #endif

@@ -6,7 +6,7 @@
 #include <vector>
 namespace s=gufo::sampling;namespace q=gufo::models::qwen38_flash_next;
 #define CHECK(x) do{if(!(x))throw std::runtime_error(std::string(#x)+" line="+std::to_string(__LINE__));}while(false)
-std::shared_ptr<s::BehaviourConfig> Config(){auto b=std::make_shared<s::BehaviourConfig>();b->eog_ids={0,1};b->think_start={10};b->think_end={11,12};auto p=std::make_shared<std::vector<std::string>>(256,"x");(*p)[0]="";(*p)[1]="";(*p)[2]="word";(*p)[3]=".";(*p)[10]="<think>";(*p)[11]="</";(*p)[12]="think>";b->token_pieces=p;return b;}
+std::shared_ptr<s::BehaviourConfig> Config(){auto b=std::make_shared<s::BehaviourConfig>();b->eog_ids={0,1};b->think_start={10};b->think_end={11,12};b->budget_forced={11,12};auto p=std::make_shared<std::vector<std::string>>(256,"x");(*p)[0]="";(*p)[1]="";(*p)[2]="word";(*p)[3]=".";(*p)[10]="<think>";(*p)[11]="</";(*p)[12]="think>";b->token_pieces=p;return b;}
 s::SamplingConfig Sampling(std::shared_ptr<s::BehaviourConfig> b,float t=0){s::SamplingConfig c;c.seed=42;c.temperature=t;c.behaviour=std::move(b);return c;}
 bool Count(const s::SamplerState& sampler,std::string_view name,unsigned n){unsigned total=0;bool seen=false;for(const auto& l:sampler.BehaviourSummary())if(l.find("name="+std::string(name)+" ")!=std::string::npos){seen=true;const auto at=l.find("taken=")+6;total+=static_cast<unsigned>(std::stoul(l.substr(at)));}return seen&&total==n;}
 void BoundaryPort(){ // O/tests/test-eog-boundary.cpp:16, split fences/math/UTF8.
@@ -22,7 +22,7 @@ void LoopPort(){ // O/tests/test-loop-breaker.cpp:13-103, escalation/copy.
  s::LoopBreaker p;p.cfg={4,12,4,12};for(int i=0;i<11;++i)p.accept(20+i%3,s::LoopBreaker::THINK);CHECK(p.accept(22,s::LoopBreaker::THINK).period==3);
  s::LoopBreaker sixteen;for(int i=0;i<255;++i)sixteen.accept(100+i%16,s::LoopBreaker::THINK);CHECK(sixteen.accept(115,s::LoopBreaker::THINK).period==16);
  s::LoopBreaker answer;for(int i=0;i<127;++i)answer.accept(4,s::LoopBreaker::THINK);for(int i=0;i<511;++i)CHECK(answer.accept(4,s::LoopBreaker::ANSWER).what==s::LoopBreaker::NONE);CHECK(answer.accept(4,s::LoopBreaker::ANSWER).what==s::LoopBreaker::NUDGE);auto copy=answer;for(int i=0;i<16;++i)answer.accept(4,s::LoopBreaker::ANSWER);CHECK(answer.terminal);CHECK(!copy.terminal);
- s::LoopBreaker expired;expired.cfg={4,4,4,4};for(int i=0;i<4;++i)expired.accept(5,s::LoopBreaker::THINK);for(int i=0;i<273;++i)expired.accept(100+i,s::LoopBreaker::THINK);for(int i=0;i<3;++i)expired.accept(5,s::LoopBreaker::THINK);CHECK(expired.accept(5,s::LoopBreaker::THINK).what==s::LoopBreaker::NUDGE);
+ s::LoopBreaker expired;expired.cfg={4,4,4,4};for(int i=0;i<4;++i)expired.accept(5,s::LoopBreaker::THINK);for(int i=0;i<273;++i)expired.accept(100+i,s::LoopBreaker::THINK);for(int i=0;i<3;++i)expired.accept(5,s::LoopBreaker::THINK);CHECK(expired.accept(5,s::LoopBreaker::THINK).what==s::LoopBreaker::FORCE_THINK);
 }
 void LoopNearMissRecurrence(){s::LoopBreaker near;for(int i=0;i<255;++i)CHECK(near.accept(100+i%16,s::LoopBreaker::THINK).what==s::LoopBreaker::NONE);CHECK(near.accept(999,s::LoopBreaker::THINK).what==s::LoopBreaker::NONE);for(int i=0;i<200;++i)CHECK(near.accept(1000+i,s::LoopBreaker::THINK).what==s::LoopBreaker::NONE);s::LoopBreaker recurrent;recurrent.cfg={4,4,4,4};for(int i=0;i<4;++i)recurrent.accept(5,s::LoopBreaker::THINK);for(int i=0;i<16;++i)recurrent.accept(100+i,s::LoopBreaker::THINK);for(int i=0;i<3;++i)recurrent.accept(5,s::LoopBreaker::THINK);CHECK(recurrent.accept(5,s::LoopBreaker::THINK).what==s::LoopBreaker::FORCE_THINK);}
 void UnsetIdentity(){s::SamplingConfig c;c.temperature=1;c.top_k=3;c.seed=22;auto c2=c;c2.behaviour=Config();s::SamplerState a(c),b(c2);std::vector<float> row={1,2,3,4,5,6};for(int i=0;i<100;++i){auto x=a.Sample(row),y=b.Sample(row);CHECK(x==y);CHECK(a.rng_state()==b.rng_state());a.Accept(x);b.Accept(y);}CHECK(b.BehaviourSummary().empty());}
@@ -118,6 +118,177 @@ void PresetRealChoice(){
  auto c=Sampling(b);s::SamplerState sampler(c);std::vector<float> row={-10,-10,3,2};sampler.Accept(2);CHECK(sampler.Sample(row)==2);CHECK(Count(sampler,"production_sampling",1));
  auto same=Config();same->production_sampling=true;same->native_temperature=0;auto c2=Sampling(same);s::SamplerState unchanged(c2);CHECK(unchanged.Sample(row)==2);CHECK(Count(unchanged,"production_sampling",0));
 }
+void LongThinkTransition() {
+  auto b = Config();
+  b->initial_thinking = true;
+  b->loop_breaker = true;
+  b->loop_transition = 2;
+  b->loop_eog_close = true;
+  b->think_eog_guard = true;
+  b->loop_prefix = {4, 5};
+  b->budget_forced = {6, 11, 12};
+  s::SamplerState sampler(Sampling(b));
+  for (int i = 0; i < 704; ++i)
+    sampler.Accept(100 + i % 44);
+  auto state = sampler.SaveDrawState();
+  CHECK(state.behaviour->loop.nudges == 1 && !state.behaviour->forcing());
+  for (int i = 704; i < 720; ++i)
+    sampler.Accept(100 + i % 44);
+  CHECK(sampler.SaveDrawState().behaviour->force_reason == "loop_transition");
+  std::vector<float> row(256, -10);
+  row[0] = 10;
+  row[2] = 9;
+  for (auto token : {4u, 5u}) {
+    CHECK(sampler.Sample(row) == token);
+    sampler.Accept(token);
+  }
+  state = sampler.SaveDrawState();
+  CHECK(state.behaviour->prefix_used && state.behaviour->loop.count == 0);
+  auto backstop = sampler;
+  CHECK(!sampler.CanSelectArgmax(0));
+  CHECK(sampler.Distribution(row).probability(11) == 1);
+  for (auto token : {11u, 12u}) {
+    CHECK(sampler.Sample(row) == token);
+    sampler.Accept(token);
+  }
+  CHECK(!sampler.SaveDrawState().behaviour->thinking);
+  CHECK(sampler.Sample(row) == 0);
+  for (int i = 0; i < 704; ++i)
+    backstop.Accept(100 + i % 44);
+  CHECK(backstop.SaveDrawState().behaviour->force_reason == "loop_breaker");
+  // An arbitrary backstop must include the budget message before the close.
+  for (auto token : {6u, 11u, 12u}) {
+    CHECK(backstop.Sample(row) == token);
+    backstop.Accept(token);
+  }
+  CHECK(!backstop.SaveDrawState().behaviour->thinking);
+  auto tools = std::make_shared<s::BehaviourConfig>(*b);
+  tools->loop_exempt = true;
+  s::SamplerState exempt(Sampling(tools));
+  for (int i = 0; i < 4096; ++i)
+    exempt.Accept(100 + i % 44);
+  CHECK(exempt.SaveDrawState().behaviour->loop.detections == 0);
+  CHECK(!exempt.SaveDrawState().behaviour->prefix_used);
+  CHECK(exempt.Sample(row) == 2);  // Guard remains active; no loop redirect.
+}
+
+void GuardEscalation() {
+  auto b = Config();
+  b->initial_thinking = true;
+  b->think_eog_guard = true;
+  b->loop_eog_close = true;
+  CHECK(b->think_guard_escalate == 16);
+  s::SamplerState sampler(Sampling(b));
+  std::vector<float> row(16, -10);
+  row[0] = 10;
+  row[2] = 9;
+  for (int i = 1; i <= 16; ++i) {
+    // A speculative worker may accept before publishing its draw journal.
+    auto working = sampler;
+    CHECK(working.Sample(row) == 2);
+    CHECK(working.SaveDrawState().behaviour->guard_blocked_attempts ==
+          static_cast<unsigned>(i - 1));
+    working.Accept(2);
+    sampler.CopyDrawStateFrom(working);
+    CHECK(sampler.SaveDrawState().behaviour->guard_blocked_attempts ==
+          static_cast<unsigned>(i - 1));
+    sampler.Accept(2);
+    auto state = sampler.SaveDrawState();
+    CHECK(state.behaviour->guard_blocked_attempts == static_cast<unsigned>(i));
+    CHECK(state.behaviour->guard_escalated == (i == 16));
+    CHECK(Count(sampler, "guard_escalation", i == 16 ? 1 : 0));
+    if (i == 15)
+      CHECK(sampler.Distribution(row).probability(0) == 0);
+  }
+  CHECK(!sampler.CanSelectArgmax(0));
+  CHECK(sampler.Distribution(row).probability(0) == 0);
+  CHECK(sampler.Distribution(row).probability(11) == 1);
+  // Complete candidate transport agrees with the full probability redirect.
+  auto candidate_config = Sampling(b, 1);
+  candidate_config.top_k = 1;
+  s::SamplerState candidates(candidate_config);
+  for (int i = 0; i < 16; ++i) {
+    CHECK(candidates.Sample(row) == 2);
+    candidates.Accept(2);
+  }
+  std::vector<s::TokenId> ids;
+  for (unsigned i = 0; i < 16; ++i)
+    ids.push_back(i);
+  auto top = candidates.DistributionFromTop(row, ids, 16);
+  CHECK(top && top->probability(0) == 0 && top->probability(11) == 1);
+  CHECK(candidates.SampleFromTop(row, ids, 16) == 11);
+  for (auto token : {11u, 12u}) {
+    CHECK(sampler.Sample(row) == token);
+    sampler.Accept(token);
+  }
+  auto state = sampler.SaveDrawState();
+  CHECK(!state.behaviour->thinking && !state.behaviour->guard_escalated);
+  CHECK(state.behaviour->guard_blocked_attempts == 0);
+  sampler.Accept(10);
+  CHECK(sampler.Sample(row) == 2);
+  sampler.Accept(2);
+  state = sampler.SaveDrawState();
+  CHECK(state.behaviour->thinking && !state.behaviour->guard_escalated);
+  CHECK(state.behaviour->guard_blocked_attempts == 1);
+  CHECK(Count(sampler, "guard_escalation",
+              1));  // One per request, not one per span.
+  bool reason = false;
+  for (const auto& line : sampler.BehaviourSummary())
+    if (line ==
+        "BEHAVIOUR_ENGAGE name=guard_escalation taken=1 fallback=0 "
+        "reason=blocked_attempts_reached_k scope=request")
+      reason = true;
+  CHECK(reason);
+  sampler.ResetHistory({});
+  CHECK(Count(sampler, "guard_escalation", 0));
+}
+
+void GuardAcceptedOnlyAndOff() {
+  auto b = Config();
+  b->initial_thinking = true;
+  b->think_eog_guard = true;
+  b->loop_eog_close = true;
+  b->think_guard_escalate = 1;
+  s::SamplerState sampler(Sampling(b));
+  std::vector<float> row(16, -10);
+  row[0] = 10;
+  row[2] = 9;
+  const auto saved = sampler.SaveDrawState();
+  q::MtpProposal proposal;
+  proposal.size = 1;
+  proposal.ids[0] = 0;
+  proposal.probabilities[0] = 1;
+  proposal.token = 0;
+  proposal.probability = 1;
+  auto draft = sampler;
+  auto rejected = q::VerifyMtpProposal(row, proposal, draft);
+  CHECK(!rejected.accepted && rejected.token == 2);
+  CHECK(draft.SaveDrawState().behaviour->guard_blocked_attempts == 0);
+  CHECK(!draft.SaveDrawState().behaviour->guard_escalated);
+  // Discard the draft position: it must not leak into the committed state.
+  sampler.Accept(2);
+  CHECK(sampler.SaveDrawState().behaviour->guard_blocked_attempts == 0);
+  sampler.RestoreDrawState(saved);
+  CHECK(sampler.Sample(row) == 2);
+  CHECK(!sampler.SaveDrawState().behaviour->guard_escalated);
+  sampler.RestoreDrawState(saved);
+  sampler.Accept(2);
+  CHECK(!sampler.SaveDrawState().behaviour->guard_escalated);
+  // Keeping the target residual counts once when that token is accepted.
+  draft.Accept(rejected.token);
+  CHECK(draft.SaveDrawState().behaviour->guard_escalated);
+  auto off = std::make_shared<s::BehaviourConfig>(*b);
+  off->think_guard_escalate = 0;
+  s::SamplerState disabled(Sampling(off));
+  for (int i = 0; i < 64; ++i) {
+    CHECK(disabled.Sample(row) == 2);
+    disabled.Accept(2);
+  }
+  CHECK(disabled.SaveDrawState().behaviour->guard_blocked_attempts == 64);
+  CHECK(!disabled.SaveDrawState().behaviour->guard_escalated);
+  CHECK(Count(disabled, "guard_escalation", 0));
+}
+
 int main(){try{
   const auto run=[](const char* name,auto test){std::cout<<"RUN "<<name<<std::endl;test();};
   run("BoundaryPort",BoundaryPort);run("LoopPort",LoopPort);
@@ -129,5 +300,7 @@ int main(){try{
   run("ModelSuppression",ModelSuppression);run("DrawRollback",DrawRollback);
   run("MultiBlockClone",MultiBlockClone);run("RedundantInterventions",RedundantInterventions);
   run("CandidateGlobalTies",CandidateGlobalTies);run("Marker133Ids",Marker133Ids);
-  std::cout<<"behaviour_test: 18 groups PASS\n";
+  run("LongThinkTransition",LongThinkTransition);run("GuardEscalation",GuardEscalation);
+  run("GuardAcceptedOnlyAndOff",GuardAcceptedOnlyAndOff);
+  std::cout<<"behaviour_test: 21 groups PASS\n";
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

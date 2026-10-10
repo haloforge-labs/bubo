@@ -1872,7 +1872,7 @@ void TestBehaviourRequestOptions() {
     }
     EnvironmentScope() {
       for (const auto* name : {
-               "GUFO_THINK_EOG_GUARD", "GUFO_EOG_BOUNDARY",
+               "GUFO_THINK_EOG_GUARD", "GUFO_THINK_GUARD_ESCALATE", "GUFO_EOG_BOUNDARY",
                "GUFO_EOG_MIN_PROB_EXACT", "GUFO_EOG_MIN_PROB",
                "GUFO_EOG_DEFER_P", "GUFO_SPEC_EOG_STOP", "GUFO_LOOP_BREAKER",
                "GUFO_LOOP_BREAKER_EOG_CLOSE", "GUFO_LOOP_BREAKER_TRANSITION",
@@ -1905,6 +1905,29 @@ void TestBehaviourRequestOptions() {
     Expect(rejected, "invalid behaviour request is rejected deterministically");
   };
   Expect(parse("{}") == nullptr, "all unset switches preserve native sampling");
+  Expect(gufo::server::ThinkGuardEscalate() == 16,
+         "unset guard escalation defaults to sixteen");
+  EnvironmentScope::Set("GUFO_THINK_EOG_GUARD", "1");
+  for (const auto* value : {"0", "1", "16", "2147483647"}) {
+    EnvironmentScope::Set("GUFO_THINK_GUARD_ESCALATE", value);
+    Expect(parse("{}")->think_guard_escalate == std::stoi(value),
+           "guard escalation parses a strict nonnegative integer");
+  }
+  for (const auto* value : {"-1", "+1", " 16", "16 ", "1.5", "1e1", "16junk",
+                            "2147483648", "nan"}) {
+    EnvironmentScope::Set("GUFO_THINK_GUARD_ESCALATE", value);
+    invalid("{}");
+  }
+#ifndef _WIN32
+  EnvironmentScope::Set("GUFO_THINK_GUARD_ESCALATE", "");
+  invalid("{}");
+#endif
+  // Validate at startup even when every behaviour switch is off.
+  EnvironmentScope::Set("GUFO_THINK_EOG_GUARD", nullptr);
+  EnvironmentScope::Set("GUFO_THINK_GUARD_ESCALATE", "bad");
+  invalid("{}");
+  EnvironmentScope::Set("GUFO_THINK_GUARD_ESCALATE", nullptr);
+
   {
     FakeBackend backend;
     const auto response = gufo::server::HandleOpenAiChat(Request(R"({
@@ -2078,7 +2101,8 @@ void DebugHooksSettingsTest() {
          "settings retain the owning component's resolved auto budget");
   const auto* behaviour = values->find("behaviour");
   Expect(behaviour && !behaviour->find("enabled")->as_bool() &&
-             behaviour->member_double("eog_min_prob") == -1.0,
+             behaviour->member_double("eog_min_prob") == -1.0 &&
+             behaviour->member_size("think_guard_escalate") == 16,
          "disabled behaviour uses its parser's actual minimum default");
   const auto* tuning = values->find("platform_tuning");
   for (const auto& field : gufo::platform::detail::kTuningFields) {
@@ -2094,6 +2118,7 @@ void DebugHooksSettingsTest() {
              lenient->find("think_only")->as_bool() == config.think_only,
          "settings use the shared lenient parser");
   EnvironmentScope::Set("GUFO_THINK_EOG_GUARD", "1");
+  EnvironmentScope::Set("GUFO_THINK_GUARD_ESCALATE", "7");
   EnvironmentScope::Set("GUFO_EOG_MIN_PROB", "0.25");
   EnvironmentScope::Set("GUFO_THINK_MARKER_BIAS_BY_EFFORT", "low:0.5,xhigh:2");
   EnvironmentScope::Set("GUFO_MTP_TRACE", "01");
@@ -2103,9 +2128,21 @@ void DebugHooksSettingsTest() {
   behaviour = effective->find("behaviour");
   Expect(behaviour->find("think_eog_guard")->as_bool() &&
              behaviour->member_double("eog_min_prob") == 0.25 &&
+             behaviour->member_size("think_guard_escalate") == 7 &&
              behaviour->find("marker_bias_by_effort")->member_double("high") == 2.0 &&
              behaviour->find("marker_bias_by_effort")->member_double("minimal") == 0.5,
          "settings return parsed numeric values and resolved effort aliases");
+  gufo::sampling::SamplingConfig request_policy;
+  auto request_behaviour = std::make_shared<gufo::sampling::BehaviourConfig>();
+  request_behaviour->think_eog_guard = true;
+  request_behaviour->think_guard_escalate = 3;
+  request_policy.behaviour = request_behaviour;
+  const auto request_settings =
+      BuildEffectiveSettings(configured, request_policy, true);
+  Expect(request_settings.find("resolved")
+                 ->find("behaviour")
+                 ->member_size("think_guard_escalate") == 3,
+         "request settings echo the actual guard escalation policy");
   Expect(!effective->find("mtp_trace")->as_bool(),
          "MTP trace accepts only the literal one");
   Expect(effective->member_size("disk_boundary_align") == 128,
