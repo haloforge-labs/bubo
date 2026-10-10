@@ -22,10 +22,11 @@
 #include <utility>
 #include <vector>
 
-#include "src/core/json.hpp"
-#include "src/core/json_constraint.hpp"
 #include "src/cli/serve/behaviour_options.hpp"
 #include "src/cli/serve/debug_settings.hpp"
+#include "src/cli/serve/release_profile.hpp"
+#include "src/core/json.hpp"
+#include "src/core/json_constraint.hpp"
 #include "src/models/deepseek_v4_flash/chat_template.hpp"
 #include "src/models/qwen/control_tokens.hpp"
 
@@ -2122,7 +2123,7 @@ void DebugHooksSettingsEnvironmentTest() {
   const fs::path root = fs::absolute(fs::path(__FILE__)).parent_path()
                             .parent_path().parent_path();
   const std::regex calls(
-      R"debug((std::getenv|BehaviourSwitch|BehaviourNumber)\s*\(\s*([^)]*)\))debug");
+      R"debug((std::getenv|\bgetenv|BehaviourSwitch|BehaviourNumber)\s*\(\s*([^)]*)\))debug");
   const std::regex literal(R"debug(^"([A-Za-z_][A-Za-z_0-9]*)")debug");
   std::map<std::string, std::size_t> dynamic_reads;
   std::size_t literal_reads = 0;
@@ -2135,7 +2136,8 @@ void DebugHooksSettingsEnvironmentTest() {
         continue;
       const auto extension = entry.path().extension().string();
       if (extension != ".cpp" && extension != ".hpp" && extension != ".hip" &&
-          extension != ".h" && extension != ".cc" && extension != ".c")
+          extension != ".h" && extension != ".cc" && extension != ".c" &&
+          extension != ".inc")
         continue;
       std::ifstream input(entry.path(), std::ios::binary);
       Expect(input.good(), "environment completeness can read each source file");
@@ -2150,7 +2152,7 @@ void DebugHooksSettingsEnvironmentTest() {
           ++literal_reads;
           Expect(gufo::server::DebugSettingsListsEnvironment(name[1].str()),
                  path + ": environment missing from echo/allow-list: " + name[1].str());
-        } else if (function == "std::getenv") {
+        } else if (function == "std::getenv" || function == "getenv") {
           Expect(argument == "name" &&
                      (path == "src/cli/serve/behaviour_options.hpp" ||
                       path == "src/cli/serve/debug_settings.hpp"),
@@ -2165,6 +2167,65 @@ void DebugHooksSettingsEnvironmentTest() {
       }
     }
   }
+
+  // The original reviewed-wrapper check above retains its scope and counts.
+  // All source literals are now catalogued, including other model families.
+  const auto& rows = gufo::server::ReleaseSwitchTable();
+  std::map<std::string, std::string> classes, kinds;
+  for (const auto& row : rows) {
+    classes[row.member_str("name")] = row.member_str("class");
+    kinds[row.member_str("name")] = row.member_str("kind");
+  }
+  const std::regex all_names(R"debug("(GUFO_[A-Z0-9_]+)")debug");
+  const std::regex options(
+      R"debug(\.Add(?:Option|Flag|InverseFlag|CustomOption)\s*\(\s*"[^"]*"\s*,\s*"(--[a-z0-9-]+)")debug");
+  for (const auto& entry : fs::recursive_directory_iterator(root / "src")) {
+    if (!entry.is_regular_file())
+      continue;
+    const auto extension = entry.path().extension().string();
+    if (extension != ".cpp" && extension != ".hpp" && extension != ".hip" &&
+        extension != ".h" && extension != ".cc" && extension != ".c" &&
+        extension != ".inc")
+      continue;
+    std::ifstream input(entry.path(), std::ios::binary);
+    std::string text((std::istreambuf_iterator<char>(input)), {});
+    if (entry.path() == root / "src/cli/serve/release_switches.inc")
+      text = text.substr(text.find("#elif defined(GUFO_RELEASE_SNAPSHOT)"));
+    for (std::sregex_iterator match(text.begin(), text.end(), all_names), end;
+         match != end; ++match) {
+      const auto name = (*match)[1].str();
+      Expect(classes.contains(name),
+             entry.path().string() +
+                 ": source literal missing from release table: " + name);
+      Expect(classes[name] != "REMOVED",
+             entry.path().string() +
+                 ": removed switch remains in source: " + name);
+    }
+    if (entry.path() == root / "src/cli/serve/serve.cpp") {
+      for (std::sregex_iterator match(text.begin(), text.end(), options), end;
+           match != end; ++match)
+        Expect(kinds[(*match)[1].str()] == "flag",
+               "serve flag missing from release table: " + (*match)[1].str());
+    }
+  }
+  const auto read_generated = [&](const fs::path& file) {
+    std::ifstream input(file);
+    Expect(input.good(), "generated release file exists");
+    std::string text((std::istreambuf_iterator<char>(input)), {});
+    text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
+    return text;
+  };
+  gufo::server::ValidateSwitchTable(rows);
+  Expect(gufo::server::RenderReleaseInclude(rows) ==
+             read_generated(root / "src/cli/serve/release_switches.inc"),
+         "release header matches compiled table");
+  Expect(gufo::server::RenderReleaseDocs(rows) ==
+             read_generated(root / "docs/FLAGS.md"),
+         "release docs match compiled table");
+  Expect(gufo::server::RenderReleaseDocs(rows) ==
+             read_generated(root / "tests/fixtures/release_flags_golden.md"),
+         "C++ docs renderer matches Python golden");
+
   Expect(literal_reads > 20, "environment completeness actually scanned the sources");
   Expect(dynamic_reads["src/cli/serve/behaviour_options.hpp"] == 2 &&
              dynamic_reads["src/cli/serve/debug_settings.hpp"] == 1,

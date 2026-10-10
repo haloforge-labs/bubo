@@ -23,6 +23,7 @@ REQUIRED_DOC_FILES = [
     "THIRD_PARTY_NOTICES.md",
     "AGENTS.md",
     "docs/CLI.md",
+    "docs/FLAGS.md",
     "docs/DEVELOPMENT.md",
     "docs/RELEASING.md",
     "docs/models/README.md",
@@ -213,10 +214,26 @@ def main() -> int:
         default=".",
         help="Repository root directory",
     )
+    parser.add_argument("--flags-only", action="store_true", help="Check generated release wording only")
     args = parser.parse_args()
 
     repo_root = Path(args.root).resolve()
     all_errors: List[str] = []
+
+    # Generated switch text has a focused STE-style gate.
+    import importlib.util
+    flags_spec = importlib.util.spec_from_file_location(
+        "check_flags_docs", Path(__file__).with_name("check-flags-docs.py"))
+    flags_module = importlib.util.module_from_spec(flags_spec)
+    flags_spec.loader.exec_module(flags_module)
+    all_errors.extend(flags_module.check_flags_docs(repo_root / "docs/FLAGS.md"))
+
+    if args.flags_only:
+        for error in all_errors:
+            print(error)
+        if not all_errors:
+            print("PASS: FLAGS.md STE-style lint through check-docs.py")
+        return bool(all_errors)
 
     # 1. Required files
     all_errors.extend(check_required_files(repo_root))
