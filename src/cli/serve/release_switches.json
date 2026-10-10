@@ -3500,7 +3500,7 @@
         "subagents": null,
         "exact": null
       },
-      "exact_off": false,
+      "exact_off": true,
       "inject_with": null,
       "suppressed_by": [],
       "purpose": "Control iq4 wide variant.",
@@ -3525,7 +3525,7 @@
         "subagents": null,
         "exact": null
       },
-      "exact_off": false,
+      "exact_off": true,
       "inject_with": null,
       "suppressed_by": [],
       "purpose": "Control iq4 wmma waves.",
@@ -3604,7 +3604,7 @@
         "subagents": null,
         "exact": null
       },
-      "exact_off": false,
+      "exact_off": true,
       "inject_with": null,
       "suppressed_by": [],
       "purpose": "Control lenient think only.",
@@ -3627,9 +3627,9 @@
       "values": {
         "default": null,
         "subagents": null,
-        "exact": null
+        "exact": "0"
       },
-      "exact_off": false,
+      "exact_off": true,
       "inject_with": null,
       "suppressed_by": [],
       "purpose": "Control logit bias.",
@@ -3806,9 +3806,9 @@
       "values": {
         "default": null,
         "subagents": null,
-        "exact": null
+        "exact": "0"
       },
-      "exact_off": false,
+      "exact_off": true,
       "inject_with": null,
       "suppressed_by": [],
       "purpose": "Control model suppress tokens.",
@@ -4031,9 +4031,9 @@
       "values": {
         "default": null,
         "subagents": null,
-        "exact": null
+        "exact": "0"
       },
-      "exact_off": false,
+      "exact_off": true,
       "inject_with": null,
       "suppressed_by": [],
       "purpose": "Control production sampling.",
@@ -4181,9 +4181,9 @@
       "values": {
         "default": null,
         "subagents": null,
-        "exact": null
+        "exact": "0"
       },
-      "exact_off": false,
+      "exact_off": true,
       "inject_with": null,
       "suppressed_by": [],
       "purpose": "Control reasoning budget.",
@@ -4281,9 +4281,9 @@
       "values": {
         "default": "1",
         "subagents": "1",
-        "exact": null
+        "exact": "0"
       },
-      "exact_off": false,
+      "exact_off": true,
       "inject_with": null,
       "suppressed_by": [],
       "purpose": "Enable the routed expert prefill kernel.",
@@ -4412,9 +4412,9 @@
       "values": {
         "default": null,
         "subagents": null,
-        "exact": null
+        "exact": "0"
       },
-      "exact_off": false,
+      "exact_off": true,
       "inject_with": null,
       "suppressed_by": [],
       "purpose": "Control think marker bias.",

@@ -432,6 +432,21 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
           setting.value != Text(*row.find("values"), "exact"))))
       throw std::invalid_argument("profile=exact: explicit value re-enables " +
                                   name);
+    if (inputs.profile == "exact" && name == "--seed" && setting.value) {
+      std::int64_t seed = -1;
+      const auto parsed =
+          std::from_chars(setting.value->data(),
+                          setting.value->data() + setting.value->size(), seed);
+      if (parsed.ec != std::errc{} ||
+          parsed.ptr != setting.value->data() + setting.value->size() ||
+          seed < 0)
+        throw std::invalid_argument("profile=exact: --seed must be 0 or more");
+    }
+    if (inputs.profile == "exact" && match && real &&
+        row.member_str("class") == "INTERNAL" &&
+        !row.find("exact_off")->as_bool())
+      result.logs.push_back("profile=exact: " + name + "=" + *real +
+                            " (internal control set)");
     if (setting.value) {
       try {
         ValidateValue(row, *setting.value);
@@ -581,6 +596,9 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
           "profile=subagents: sessions x context exceeds measured 524288 "
           "tokens; lower context or pass --allow-unmeasured-memory");
   }
+  if (enabled("--no-cache") && inputs.explicit_flags.contains("--cache-disk") &&
+      !inputs.explicit_flags.at("--cache-disk").empty())
+    result.logs.push_back("cache: --no-cache overrides --cache-disk");
   std::size_t env = 0, skipped = 0;
   for (const auto& setting : result.settings) {
     env += setting.origin == "env";
@@ -593,8 +611,9 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
                          std::to_string(skipped) + " skipped (details below)");
   if (inputs.profile == "exact" && result.turned_off.empty())
     result.logs.push_back(
-        "profile=exact: turned off: none; pinned: none (model family does not "
-        "match)");
+        "profile=exact: byte-exact controls apply to Qwen3.8 Flash Next only; "
+        "seed=" +
+        result.effective_flags.at("--seed") + " applied");
   if (inputs.profile == "exact" && !result.turned_off.empty()) {
     std::string line = "profile=exact: turned off: ";
     for (const auto& name : result.turned_off) {
