@@ -51,6 +51,8 @@ struct TextRunnerRamCacheOptions {
   /// Explicit limits may exceed that budget up to the model's ceiling, which
   /// keeps kHostSnapshotHeadroomBytes of host RAM free.
   std::size_t capacity_bytes{0};
+  /// Server-wide cold prefill: disable retention, restore and cache pass cuts.
+  bool disabled{false};
 };
 
 struct TextRunnerDiskCacheOptions {

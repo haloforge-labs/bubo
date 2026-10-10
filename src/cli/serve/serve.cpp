@@ -773,7 +773,8 @@ void PrintServeHelp(std::string_view program_name,
            "  --exact                  Alias for --profile exact\n"
            "  --print-effective-settings  Print JSON and exit\n"
            "  --no-behaviour --no-twin --no-draft-head --no-vision --no-mtp\n"
-           "  --no-prompt-lookup --no-cache-disk --allow-unmeasured-memory\n";
+           "  --no-prompt-lookup --no-cache --no-cache-disk "
+           "--allow-unmeasured-memory\n";
     return;
   }
 
@@ -826,7 +827,7 @@ int RunServe(std::span<const char* const> args) {
   bool release_exact = false, print_effective_settings = false;
   bool no_twin = false, no_draft_head = false, no_vision = false;
   bool no_mtp = false, no_behaviour = false, no_prompt_lookup = false;
-  bool no_cache_disk = false, allow_unmeasured_memory = false;
+  bool no_cache = false, no_cache_disk = false, allow_unmeasured_memory = false;
   const auto add_release_options = [&](ArgParser& parser) {
     parser.AddOption("", "--profile", "NAME",
                      "Release profile: default, subagents, exact, or stock",
@@ -843,10 +844,13 @@ int RunServe(std::span<const char* const> args) {
     parser.AddFlag("", "--no-vision", "Suppress the vision sidecar", "Profiles",
                    &no_vision);
     parser.AddFlag("", "--no-mtp", "Disable MTP defaults", "Profiles", &no_mtp);
-    parser.AddFlag("", "--no-behaviour", "Disable the eight behaviour defaults",
+    parser.AddFlag("", "--no-behaviour", "Disable the nine behaviour defaults",
                    "Profiles", &no_behaviour);
     parser.AddFlag("", "--no-prompt-lookup", "Disable prompt lookup",
                    "Profiles", &no_prompt_lookup);
+    parser.AddFlag("", "--no-cache",
+                   "Disable RAM and disk prompt caches for all requests",
+                   "Profiles", &no_cache);
     parser.AddFlag("", "--no-cache-disk", "Disable the disk cache", "Profiles",
                    &no_cache_disk);
     parser.AddFlag("", "--allow-unmeasured-memory",
@@ -918,8 +922,13 @@ int RunServe(std::span<const char* const> args) {
   };
   add_server_options(server_parser);
   add_release_options(server_parser);
-  if (release.active)
-    server::PrefillReleaseFlags(release.resolved, server_parser);
+  try {
+    if (release.active)
+      server::PrefillReleaseFlags(release.resolved, server_parser);
+  } catch (const std::exception& error) {
+    std::cerr << "Error: " << error.what() << '\n';
+    return 2;
+  }
   std::string subcommand = "llm";
   std::vector<const char*> sub_args(args.begin(), args.end());
   for (std::size_t i = 0; i < args.size(); ++i) {
@@ -1387,8 +1396,13 @@ int RunServe(std::span<const char* const> args) {
 
     add_server_options(llm_parser);
     add_release_options(llm_parser);
-    if (release.active)
-      server::PrefillReleaseFlags(release.resolved, llm_parser);
+    try {
+      if (release.active)
+        server::PrefillReleaseFlags(release.resolved, llm_parser);
+    } catch (const std::exception& error) {
+      std::cerr << "Error: " << error.what() << '\n';
+      return 2;
+    }
     if (!llm_parser.Parse(sub_args, &parse_err)) {
       std::cerr << "Error: " << parse_err << "\n";
       PrintServeHelp("gufo", "llm");
@@ -1410,7 +1424,7 @@ int RunServe(std::span<const char* const> args) {
       vision_model_path.clear();
     if (no_prompt_lookup)
       prompt_lookup = false;
-    if (no_cache_disk)
+    if (no_cache || no_cache_disk)
       cache_disk_directory.clear();
     if (!llm_parser.WasSupplied("--max-pending-per-client")) {
       max_pending_requests_per_client = max_pending_requests;
@@ -1529,35 +1543,36 @@ int RunServe(std::span<const char* const> args) {
     std::string err;
     ModelLoadLog load_log("text", model);
     backend = std::make_shared<server::InferenceBackend>();
-    if (!backend->load(model, &err, max_context, session_count,
-                       server::TextPrefillPolicy{
-                           .decode_active_tokens = prefill_chunk_tokens,
-                       },
-                       server::TextSchedulerPolicy{
-                           .max_pending_requests = max_pending_requests,
-                           .max_pending_requests_per_client =
-                               max_pending_requests_per_client,
-                           .max_output_bytes_per_request = max_output_bytes,
-                           .max_buffered_output_bytes_per_request =
-                               max_buffered_output_bytes,
-                           .max_buffered_output_bytes_total =
-                               max_buffered_output_bytes_total,
-                           .request_timeout =
-                               std::chrono::milliseconds{
-                                   static_cast<std::chrono::milliseconds::rep>(
-                                       request_timeout_ms)},
-                           .log_progress = log_progress,
-                       },
-                       speculative_config,
-                       server::TextDiskCacheConfig{
-                           .directory = cache_disk_directory,
-                           .capacity_bytes = cache_disk_bytes,
-                           .staging_capacity_bytes = cache_disk_staging_bytes,
-                           .model_artifact_fingerprint = {},
-                       },
-                       vision_model_path,
-                       server::TextRunnerRamCacheOptions{
-                           .capacity_bytes = cache_ram_bytes})) {
+    if (!backend->load(
+            model, &err, max_context, session_count,
+            server::TextPrefillPolicy{
+                .decode_active_tokens = prefill_chunk_tokens,
+            },
+            server::TextSchedulerPolicy{
+                .max_pending_requests = max_pending_requests,
+                .max_pending_requests_per_client =
+                    max_pending_requests_per_client,
+                .max_output_bytes_per_request = max_output_bytes,
+                .max_buffered_output_bytes_per_request =
+                    max_buffered_output_bytes,
+                .max_buffered_output_bytes_total =
+                    max_buffered_output_bytes_total,
+                .request_timeout =
+                    std::chrono::milliseconds{
+                        static_cast<std::chrono::milliseconds::rep>(
+                            request_timeout_ms)},
+                .log_progress = log_progress,
+            },
+            speculative_config,
+            server::TextDiskCacheConfig{
+                .directory = cache_disk_directory,
+                .capacity_bytes = cache_disk_bytes,
+                .staging_capacity_bytes = cache_disk_staging_bytes,
+                .model_artifact_fingerprint = {},
+            },
+            vision_model_path,
+            server::TextRunnerRamCacheOptions{.capacity_bytes = cache_ram_bytes,
+                                              .disabled = no_cache})) {
       std::cerr << "Error loading model '" << model << "': " << err << "\n";
       return 1;
     }
