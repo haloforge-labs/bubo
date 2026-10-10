@@ -769,6 +769,17 @@ ContinuationState& ContinuationCache::StateAt(std::size_t index) {
   return *impl_->entries.at(index)->state;
 }
 
+namespace {
+std::uint64_t FamilyHash(std::span<const ContinuationToken> tokens) {
+  std::uint64_t h = 1469598103934665603ull;
+  for (std::size_t i = 0; i < tokens.size() && i < 32; ++i) {
+    h ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(tokens[i]));
+    h *= 1099511628211ull;
+  }
+  return h;
+}
+}  // namespace
+
 bool ContinuationCache::ReserveSnapshot(
     std::size_t source_index, std::size_t snapshot_bytes,
     std::size_t token_count, bool preserve_source, SnapshotPurpose& purpose,
@@ -886,6 +897,18 @@ bool ContinuationCache::ReserveSnapshot(
         auto& entry = *impl_->entries[target];
         const std::size_t removed_bytes = entry.snapshot_bytes;
         const std::size_t removed_tokens = entry.tokens.size();
+        auto removal_event = make_event(SnapshotEventAction::kRemoved, reason,
+                                        removed_bytes, removed_tokens);
+        removal_event.purpose = static_cast<int>(entry.purpose);
+        removal_event.rank = priority_for(target);
+        removal_event.stable_prefix_tokens = entry.stable_prefix_tokens;
+        removal_event.family = FamilyHash(entry.tokens);
+        removal_event.last_used = entry.snapshot_last_used;
+        removal_event.was_source = target == source_index;
+        removal_event.incoming_tokens = token_count;
+        removal_event.incoming_purpose = static_cast<int>(purpose);
+        removal_event.incoming_family = FamilyHash(replacement_prefix);
+        removal_event.preserve_source = preserve_source;
         // Defer only tagged candidates the incoming checkpoint may supersede.
         // Failed captures must still persist these real drops.
         const auto record = impl_->snapshot_support.on_evict
@@ -936,8 +959,7 @@ bool ContinuationCache::ReserveSnapshot(
         entry.snapshot_bytes = 0;
         entry.valid = false;
         impl_->retained_snapshot_bytes -= removed_bytes;
-        events.push_back(make_event(SnapshotEventAction::kRemoved, reason,
-                                    removed_bytes, removed_tokens));
+        events.push_back(removal_event);
       };
       while (can_fit_after_eviction && !fits()) {
         if (exact < impl_->entries.size() && impl_->entries[exact]->valid) {

@@ -128,6 +128,17 @@ struct SnapshotEvent {
   std::size_t retained_snapshot_bytes{0};
   std::size_t reserved_snapshot_bytes{0};
   std::size_t capacity_bytes{0};
+  // Removal diagnostics (GUFO_CACHE_REMOVAL_LOG): what was removed and what asked for room.
+  int purpose{-1};                      ///< removed entry's purpose (0 continuation, 1 history, 2 retry, 3 branch point)
+  int rank{-1};                         ///< removed entry's removal priority at that moment
+  std::size_t stable_prefix_tokens{0};  ///< removed entry's stable boundary (nonzero = whole-prompt entry)
+  std::uint64_t family{0};              ///< FNV-1a of the removed entry's first 32 tokens (conversation family)
+  std::uint64_t last_used{0};           ///< removed entry's snapshot_last_used tick
+  bool was_source{false};               ///< removed entry was the source record of the incoming lease
+  std::size_t incoming_tokens{0};       ///< incoming checkpoint's token count
+  int incoming_purpose{-1};
+  std::uint64_t incoming_family{0};
+  bool preserve_source{false};
 };
 
 /// Explains a miss without exposing prompt or token contents.

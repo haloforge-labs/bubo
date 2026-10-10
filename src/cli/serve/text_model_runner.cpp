@@ -340,14 +340,25 @@ std::string_view SnapshotEventReasonName(SnapshotEventReason reason) noexcept {
   return "unknown";
 }
 
+// GUFO_CACHE_REMOVAL_LOG=1 (diagnostic, default off): log EVERY snapshot removal (byte capacity and exact replacement too) with what was removed
+// (purpose, rank, stable boundary, family hash, last-use tick, source flag) and what asked for room, to find out why a stable-prefix record vanished.
+bool CacheRemovalLogEnabled() {
+  static const bool enabled = [] {
+    const char* v = std::getenv("GUFO_CACHE_REMOVAL_LOG");
+    return v != nullptr && std::string_view(v) == "1";
+  }();
+  return enabled;
+}
+
 void EmitSnapshotEvent(const SnapshotEvent& event) noexcept {
   // Replacing a retained prefix, or dropping one to fit the byte budget, is
   // routine; request summaries already report whether reuse succeeded.
   // Losing one because every entry is taken is not routine: the server holds
   // fewer conversations than the workload rotates through, so it is doing
   // avoidable full re-prefills. Failed captures also need attention.
+  const bool removal_log = CacheRemovalLogEnabled();
   if (event.action == SnapshotEventAction::kRemoved &&
-      event.reason != SnapshotEventReason::kEntryCapacity)
+      event.reason != SnapshotEventReason::kEntryCapacity && !removal_log)
     return;
   try {
     std::ostringstream line;
@@ -357,6 +368,15 @@ void EmitSnapshotEvent(const SnapshotEvent& event) noexcept {
          << " retained_bytes=" << event.retained_snapshot_bytes
          << " reserved_bytes=" << event.reserved_snapshot_bytes
          << " capacity_bytes=" << event.capacity_bytes;
+    if (removal_log && event.action == SnapshotEventAction::kRemoved)
+      line << " purpose=" << event.purpose << " rank=" << event.rank
+           << " stable_prefix_tokens=" << event.stable_prefix_tokens
+           << " family=" << event.family << " last_used=" << event.last_used
+           << " was_source=" << (event.was_source ? 1 : 0)
+           << " incoming_tokens=" << event.incoming_tokens
+           << " incoming_purpose=" << event.incoming_purpose
+           << " incoming_family=" << event.incoming_family
+           << " preserve_source=" << (event.preserve_source ? 1 : 0);
     Logger::Warn("cache", line.str());
   } catch (...) {
     // Cache logging must not affect request execution.
