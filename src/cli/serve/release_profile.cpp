@@ -830,7 +830,8 @@ json::Value ReleaseSettingsJson(const ReleaseResolution& resolved) {
     row["name"] = setting.name;
     row["value"] = setting.name == "--api-key" && setting.value
                        ? json::Value("<redacted>")
-                       : setting.value ? json::Value(*setting.value) : json::Value();
+                   : setting.value ? json::Value(*setting.value)
+                                   : json::Value();
     row["origin"] = setting.origin;
     row["class"] = setting.release_class;
     if (!setting.skipped_reason.empty())

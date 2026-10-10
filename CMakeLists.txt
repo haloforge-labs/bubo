@@ -1133,6 +1133,13 @@ if (BUILD_TESTING)
 endif()
 
 if (BUILD_TESTING)
+  # Compile the release layer and its CPU regressions as one named group.
+  # A single target also works with PowerShell -File string-array parameters.
+  add_custom_target(release_cpu_tests
+    DEPENDS gufo release_profile_test openai_chat_test arg_parser_test
+      behaviour_test loop_breaker_test continuation_cache_test
+      text_model_runner_test text_generation_scheduler_test)
+
   include(cmake/Checks.cmake)
 endif()
 
