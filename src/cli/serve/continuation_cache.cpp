@@ -821,7 +821,17 @@ bool ContinuationCache::ReserveSnapshot(
       return snapshot_bytes != 0 && used <= impl_->snapshot_capacity_bytes &&
              snapshot_bytes <= impl_->snapshot_capacity_bytes - used;
     };
-    if (!IsContinuation(purpose) &&
+    const bool host_floor_hit = [&] {
+      const auto& support = impl_->snapshot_support;
+      if (support.host_floor_bytes == 0 || !support.host_available_bytes) return false;
+      const std::uint64_t available = support.host_available_bytes();
+      return available < support.host_floor_bytes + snapshot_bytes;
+    }();
+    if (host_floor_hit) {
+      events.push_back(make_event(SnapshotEventAction::kSkipped,
+                                  SnapshotEventReason::kHostMemoryFloor,
+                                  snapshot_bytes, token_count));
+    } else if (!IsContinuation(purpose) &&
         std::ranges::none_of(impl_->entries.begin() + impl_->state_count,
                              impl_->entries.end(),
                              [](const auto& entry) { return !entry->valid; }) &&

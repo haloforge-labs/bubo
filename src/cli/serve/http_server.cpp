@@ -2458,9 +2458,15 @@ void HttpServer::handle_connection(int client_fd) {
                             *e.what() ? e.what() : "generation failed",
                             "internal_error", "server_exception");
     resp.headers.emplace_back("X-Request-ID", req.request_id);
+    // The exception text was not logged (10-09 L4 arm A: HTTP 500 at ~1 GB host memory left, cause invisible): add a control-free, 200-char copy.
+    std::string error_text = e.what();
+    for (char& c : error_text)
+      if (static_cast<unsigned char>(c) < 32) c = ' ';
+    if (error_text.size() > 200) error_text.resize(200);
     Logger::LogRequest(req.request_id, req.method, req.path,
                        response_started ? response_status : resp.status,
-                       duration_ms, "error_code=server_exception",
+                       duration_ms,
+                       std::string("error_code=server_exception error=\"") + error_text + "\"",
                        response_started ? "stream_error" : "failed");
     trace_failure(resp);
     if (!response_started)

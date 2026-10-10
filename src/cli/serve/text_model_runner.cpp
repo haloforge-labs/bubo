@@ -336,8 +336,23 @@ std::string_view SnapshotEventReasonName(SnapshotEventReason reason) noexcept {
       return "capture_failure";
     case SnapshotEventReason::kReservationMismatch:
       return "reservation_mismatch";
+    case SnapshotEventReason::kHostMemoryFloor:
+      return "host_memory_floor";
   }
   return "unknown";
+}
+
+// GUFO_CACHE_HOST_FLOOR_MB=N (default 0 = off): refuse a new snapshot (event=snapshot action=skipped reason=host_memory_floor) when host MemAvailable minus the
+// snapshot would fall under N MiB. 10-09 L4 arm A: the cache kept admitting 4.75 GB snapshots until 0.96 GB was left and the request then died with HTTP 500.
+std::uint64_t HostFloorBytes() {
+  static const std::uint64_t floor_bytes = [] {
+    const char* v = std::getenv("GUFO_CACHE_HOST_FLOOR_MB");
+    if (v == nullptr || *v == '\0' || *v == '-') return std::uint64_t{0};
+    char* end = nullptr;
+    const auto mb = std::strtoull(v, &end, 10);
+    return end != v && *end == '\0' ? static_cast<std::uint64_t>(mb) * 1024ull * 1024ull : std::uint64_t{0};
+  }();
+  return floor_bytes;
 }
 
 // GUFO_CACHE_REMOVAL_LOG=1 (diagnostic, default off): log EVERY snapshot removal (byte capacity and exact replacement too) with what was removed
@@ -544,6 +559,8 @@ ContinuationCache::SnapshotSupport MakeSnapshotSupport(
                             validated->snapshot_max_bytes);
           },
       .on_event = EmitSnapshotEvent,
+      .host_available_bytes = [] { return HostAvailableBytes(); },
+      .host_floor_bytes = HostFloorBytes(),
   };
 }
 

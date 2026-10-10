@@ -1366,9 +1366,47 @@ void TestEvictedEntryCoveredByRetainedLongerEntryIsNotOffered() {
   }
 }
 
+void TestHostMemoryFloorRefusesSnapshot() {
+  // host_floor_bytes > 0: a snapshot is refused (skipped / host_memory_floor) when host available bytes minus the snapshot would fall under the floor;
+  // with enough headroom it is admitted as before. Floor 0 (default) never refuses.
+  using gufo::server::ContinuationToken;
+  using gufo::server::SnapshotEventAction;
+  using gufo::server::SnapshotEventReason;
+  using gufo::server::SnapshotPurpose;
+  std::vector<std::size_t> invalidations(1);
+  std::uint64_t available = 100;
+  std::vector<SnapshotEventReason> skipped;
+  gufo::server::ContinuationCache cache(
+      1, [&] { return std::make_unique<FakeState>(0, &invalidations); },
+      {.restore = [](auto&, const auto&) {},
+       .capacity_bytes = [] { return 64; },
+       .on_event = [&](const gufo::server::SnapshotEvent& event) {
+         if (event.action == SnapshotEventAction::kSkipped) skipped.push_back(event.reason);
+       },
+       .host_available_bytes = [&] { return available; },
+       .host_floor_bytes = 50},
+      8);
+  const std::vector<ContinuationToken> tokens{1, 2, 3};
+  {
+    auto lease = cache.Acquire(tokens);
+    Expect(lease.TryReserveSnapshot(8, tokens.size(), false, SnapshotPurpose::kContinuation, tokens),
+           "available 100 - snapshot 8 >= floor 50: admitted");
+  }
+  available = 55;   // 55 < 50 + 8
+  {
+    const std::vector<ContinuationToken> other{4, 5, 6};
+    auto lease = cache.Acquire(other);
+    Expect(!lease.TryReserveSnapshot(8, other.size(), false, SnapshotPurpose::kContinuation, other),
+           "available 55 < floor 50 + snapshot 8: refused");
+  }
+  Expect(skipped.size() == 1 && skipped[0] == SnapshotEventReason::kHostMemoryFloor,
+         "the refusal is reported as skipped / host_memory_floor");
+}
+
 int main() {
   ::setenv("GUFO_DISK_EVICT_DOMINATED", "1", 1);
   TestEvictedEntryCoveredByRetainedLongerEntryIsNotOffered();
+  TestHostMemoryFloorRefusesSnapshot();
   TestAppendedImagesReuseOnlyCompatiblePrefixes();
   TestImageIdentityIsolation();
   TestColdMissThenExactExtensionHit();
