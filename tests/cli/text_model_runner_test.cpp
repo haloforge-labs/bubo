@@ -1181,6 +1181,9 @@ void TestBehaviourBudgetAndPhaseDoNotLeakThroughPromptSnapshot() {
   policy->reasoning_budget = 1;
   policy->eog_ids = {0};
   policy->think_end = {2};
+  // Production preparation appends the encoded think-end to the forced budget
+  // sequence.
+  policy->budget_forced = {2};
   policy->token_pieces = std::make_shared<const std::vector<std::string>>(
       std::vector<std::string>{"", "word", "</think>"});
   gufo::sampling::SamplingConfig config;
