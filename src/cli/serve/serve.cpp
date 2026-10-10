@@ -30,14 +30,15 @@
 #include "src/cli/arg_parser.hpp"
 #include "src/cli/sampling_options.hpp"
 #include "src/cli/serve/asr_service.hpp"
-#include "src/cli/serve/http_server.hpp"
 #include "src/cli/serve/debug_settings.hpp"
+#include "src/cli/serve/http_server.hpp"
 #include "src/cli/serve/image_api.hpp"
 #include "src/cli/serve/inference_backend.hpp"
 #include "src/cli/serve/logging.hpp"
+#include "src/cli/serve/release_profile.hpp"
 #include "src/cli/serve/sampling_request.hpp"
-#include "src/core/diagnostics/gpu_queues.h"
 #include "src/core/crypto/sha256.hpp"
+#include "src/core/diagnostics/gpu_queues.h"
 #include "src/core/platform/loaded_files.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
@@ -766,6 +767,13 @@ void PrintServeHelp(std::string_view program_name,
     ServerOptionHelpTargets server_help;
     AddServerOptionsForHelp(parser, &server_help);
     parser.PrintHelp();
+    std::cout
+        << "\nProfiles:\n"
+           "  --profile <default|subagents|exact|stock>\n"
+           "  --exact                  Alias for --profile exact\n"
+           "  --print-effective-settings  Print JSON and exit\n"
+           "  --no-behaviour --no-twin --no-draft-head --no-vision --no-mtp\n"
+           "  --no-prompt-lookup --no-cache-disk --allow-unmeasured-memory\n";
     return;
   }
 
@@ -805,6 +813,46 @@ void PrintServeHelp(std::string_view program_name,
 }
 
 int RunServe(std::span<const char* const> args) {
+  auto release = server::PrepareReleaseSettings(args);
+  if (!release.error.empty()) {
+    std::cerr << "Error: " << release.error << '\n';
+    return 2;
+  }
+  if (release.active) {
+    for (const auto& line : release.resolved.logs)
+      std::cerr << line << '\n';
+  }
+  std::string release_profile_name;
+  bool release_exact = false, print_effective_settings = false;
+  bool no_twin = false, no_draft_head = false, no_vision = false;
+  bool no_mtp = false, no_behaviour = false, no_prompt_lookup = false;
+  bool no_cache_disk = false, allow_unmeasured_memory = false;
+  const auto add_release_options = [&](ArgParser& parser) {
+    parser.AddOption("", "--profile", "NAME",
+                     "Release profile: default, subagents, exact, or stock",
+                     "Profiles", &release_profile_name);
+    parser.AddFlag("", "--exact", "Use the exact profile", "Profiles",
+                   &release_exact);
+    parser.AddFlag("", "--print-effective-settings",
+                   "Print settings as JSON and exit before model loading",
+                   "Profiles", &print_effective_settings);
+    parser.AddFlag("", "--no-twin", "Suppress the manifest twin", "Profiles",
+                   &no_twin);
+    parser.AddFlag("", "--no-draft-head", "Suppress the manifest draft head",
+                   "Profiles", &no_draft_head);
+    parser.AddFlag("", "--no-vision", "Suppress the vision sidecar", "Profiles",
+                   &no_vision);
+    parser.AddFlag("", "--no-mtp", "Disable MTP defaults", "Profiles", &no_mtp);
+    parser.AddFlag("", "--no-behaviour", "Disable the eight behaviour defaults",
+                   "Profiles", &no_behaviour);
+    parser.AddFlag("", "--no-prompt-lookup", "Disable prompt lookup",
+                   "Profiles", &no_prompt_lookup);
+    parser.AddFlag("", "--no-cache-disk", "Disable the disk cache", "Profiles",
+                   &no_cache_disk);
+    parser.AddFlag("", "--allow-unmeasured-memory",
+                   "Allow context above the measured subagent limit",
+                   "Profiles", &allow_unmeasured_memory);
+  };
   (void)std::setvbuf(stdout, nullptr, _IONBF, 0);
   (void)std::setvbuf(stderr, nullptr, _IONBF, 0);
   std::cout.setf(std::ios::unitbuf);
@@ -869,6 +917,9 @@ int RunServe(std::span<const char* const> args) {
         &debug_hooks, &max_score_tokens);
   };
   add_server_options(server_parser);
+  add_release_options(server_parser);
+  if (release.active)
+    server::PrefillReleaseFlags(release.resolved, server_parser);
   std::string subcommand = "llm";
   std::vector<const char*> sub_args(args.begin(), args.end());
   for (std::size_t i = 0; i < args.size(); ++i) {
@@ -1335,6 +1386,9 @@ int RunServe(std::span<const char* const> args) {
                          &trace_path);
 
     add_server_options(llm_parser);
+    add_release_options(llm_parser);
+    if (release.active)
+      server::PrefillReleaseFlags(release.resolved, llm_parser);
     if (!llm_parser.Parse(sub_args, &parse_err)) {
       std::cerr << "Error: " << parse_err << "\n";
       PrintServeHelp("gufo", "llm");
@@ -1344,6 +1398,20 @@ int RunServe(std::span<const char* const> args) {
       PrintServeHelp("gufo", "llm");
       return 0;
     }
+    if (print_effective_settings) {
+      std::cout << server::ReleaseSettingsJson(release.resolved).dump() << '\n';
+      return 0;
+    }
+    if (no_mtp) {
+      speculative_backend = "off";
+      mtp_model_path.clear();
+    }
+    if (no_vision)
+      vision_model_path.clear();
+    if (no_prompt_lookup)
+      prompt_lookup = false;
+    if (no_cache_disk)
+      cache_disk_directory.clear();
     if (!llm_parser.WasSupplied("--max-pending-per-client")) {
       max_pending_requests_per_client = max_pending_requests;
     }
@@ -1496,7 +1564,13 @@ int RunServe(std::span<const char* const> args) {
     backend->set_model_id(served_model_name);
     backend->set_sampling_defaults(
         max_tokens < 0 ? 0 : static_cast<std::size_t>(max_tokens),
-        sampling_config, SamplingOptionsSupplied(llm_parser));
+        sampling_config, [&] {
+          auto supplied = SamplingOptionsSupplied(llm_parser);
+          for (const auto& setting : release.resolved.settings)
+            if (setting.name == "--seed" && setting.origin == "profile:exact")
+              supplied.seed = true;
+          return supplied;
+        }());
     backend->set_reasoning_defaults(*reasoning_defaults);
     const auto effective_sampling =
         backend->sampling_defaults().Resolve(reasoning_defaults->enabled);
@@ -1528,6 +1602,17 @@ int RunServe(std::span<const char* const> args) {
       try {
         auto resolved = backend->debug_settings();
         resolved["served_model_name"] = backend->model_id();
+        resolved["origin"] = server::ReleaseOrigins(release.resolved);
+        resolved["release_profile"] = release.resolved.profile;
+        resolved["release_profile_settings"] =
+            server::ReleaseSettingsJson(release.resolved);
+        resolved["sessions"] = session_count;
+        resolved["context"] =
+            static_cast<unsigned long long>(backend->max_context());
+        resolved["speculative_backend"] = speculative_backend;
+        for (const auto* field :
+             {"twin_loaded", "draft_head_loaded", "mmproj_loaded"})
+          resolved[field] = "unknown until the manifest job";
         auto transport = json::Value::object();
         transport["host"] = host;
         transport["port"] = port;
@@ -1577,9 +1662,11 @@ int RunServe(std::span<const char* const> args) {
         gpu["driver_version"] = driver;
         resolved["gpu"] = std::move(gpu);
 #endif
-        debug_settings = std::make_shared<const json::Value>(server::BuildEffectiveSettings(
-            std::move(resolved), GUFO_RELEASE_VERSION, GUFO_REVISION,
-            crypto::Sha256FileHex(platform::LoadedExecutablePath())));
+        debug_settings =
+            std::make_shared<const json::Value>(server::BuildEffectiveSettings(
+                std::move(resolved), GUFO_RELEASE_VERSION, GUFO_REVISION,
+                crypto::Sha256FileHex(platform::LoadedExecutablePath()),
+                server::ReleaseOrigins(release.resolved)));
         server::Logger::Diagnostic("settings", "settings " + debug_settings->dump());
       } catch (const std::exception& error) {
         std::cerr << "Error enabling debug hooks: " << error.what() << '\n';

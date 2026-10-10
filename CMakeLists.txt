@@ -270,6 +270,7 @@ add_executable(gufo
   src/cli/transcribe/transcribe.cpp
   src/cli/video/video.cpp
   src/cli/serve/serve.cpp
+  src/cli/serve/release_profile.cpp
   src/cli/serve/continuation_cache.cpp
   src/cli/serve/continuation_disk_store.cpp
   src/cli/serve/text_model_runner.cpp
@@ -430,6 +431,18 @@ if (BUILD_TESTING)
   add_test(NAME strix_prompt_smoke COMMAND gufo prompt "Hello world")
   set_tests_properties(strix_prompt_smoke PROPERTIES LABELS "cpu;server;cli")
 
+  set(GUFO_PRODUCTION_ENV_SPEC "$ENV{GUFO_PRODUCTION_ENV_SPEC}" CACHE FILEPATH "Optional production release settings specification")
+  file(TO_CMAKE_PATH "${GUFO_PRODUCTION_ENV_SPEC}" GUFO_PRODUCTION_ENV_SPEC_PATH)
+  add_executable(release_profile_test
+    tests/cli/release_profile_test.cpp
+    src/cli/serve/release_profile.cpp)
+  target_link_libraries(release_profile_test PRIVATE gufo_core)
+  target_compile_definitions(release_profile_test PRIVATE
+    GUFO_PRODUCTION_ENV_SPEC="${GUFO_PRODUCTION_ENV_SPEC_PATH}"
+    GUFO_RELEASE_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+  add_test(NAME release_profile_test COMMAND release_profile_test)
+  set_tests_properties(release_profile_test PROPERTIES LABELS "cpu;cli;release")
+
   add_executable(arg_parser_test
     tests/cli/arg_parser_test.cpp
   )
@@ -489,6 +502,7 @@ if (BUILD_TESTING)
 
   add_executable(openai_chat_test
     tests/cli/openai_chat_test.cpp
+    src/cli/serve/release_profile.cpp
     src/cli/serve/logging.cpp
     src/cli/serve/openai_chat.cpp
     src/models/deepseek_v4_flash/chat_template.cpp

@@ -162,6 +162,13 @@ public:
   [[nodiscard]] static std::unique_ptr<GgufReader> OpenFile(
       const std::filesystem::path& path, std::string* error_msg = nullptr);
 
+  /// Maps only the named shard and reads its metadata and tensor descriptors.
+  /// Does not open sibling shards or read tensor payloads.
+  [[nodiscard]] static std::unique_ptr<GgufReader> OpenHeaderFile(
+      const std::filesystem::path& path, std::string* error_msg = nullptr) {
+    return OpenSingleFile(path, error_msg);
+  }
+
   /// Parses a GGUF file from an existing in-memory buffer without file mapping.
   [[nodiscard]] static std::unique_ptr<GgufReader> OpenMemory(
       const void* data, std::size_t size, std::string* error_msg = nullptr);

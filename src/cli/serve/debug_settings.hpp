@@ -17,69 +17,9 @@ namespace gufo::server {
 // Keep this catalog explicit: the source-completeness test rejects newly read
 // variables until their diagnostic meaning has been reviewed.
 inline constexpr const char* kDebugSettingsEnvironment[] = {
-    "GUFO_BATCH_DRAFT_HEAD",
-    "GUFO_DEBUG_HOOKS",
-    "GUFO_THINK_EOG_GUARD",
-    "GUFO_EOG_BOUNDARY",
-    "GUFO_EOG_MIN_PROB_EXACT",
-    "GUFO_EOG_MIN_PROB",
-    "GUFO_EOG_DEFER_P",
-    "GUFO_SPEC_EOG_STOP",
-    "GUFO_LOOP_BREAKER",
-    "GUFO_LOOP_BREAKER_EOG_CLOSE",
-    "GUFO_LOOP_BREAKER_TRANSITION",
-    "GUFO_LOOP_BREAKER_TRANSITION_TEXT",
-    "GUFO_REASONING_BUDGET",
-    "GUFO_LOGIT_BIAS",
-    "GUFO_MODEL_SUPPRESS_TOKENS",
-    "GUFO_THINK_MARKER_BIAS",
-    "GUFO_THINK_MARKER_BIAS_BY_EFFORT",
-    "GUFO_THINK_MARKER_LIST",
-    "GUFO_PRODUCTION_SAMPLING",
-    "GUFO_LENIENT",
-    "GUFO_LENIENT_LAMBDA",
-    "GUFO_LENIENT_THINK_ONLY",
-    "GUFO_MTP_TRACE",
-    "GUFO_PLATFORM_TUNING",
-    "GUFO_DISK_BOUNDARY_ALIGN",
-    "GUFO_DISK_INPASS",
-    "GUFO_DISK_DEFER",
-    "GUFO_DISK_DEFER_MS",
-    "GUFO_DISK_PERSIST",
-    "GUFO_DISK_IDLE_MS",
-    "GUFO_DISK_EVICT_BACKLOG_BYTES",
-    "GUFO_DISK_SLICE",
-    "GUFO_PREFILL_DIAG",
-    "GUFO_MOE_BENCH",
-    "GUFO_ROUTED_LANEROW",
-    "GUFO_SURVIVAL_FLOOR",
-    "GUFO_DRAFT_VOCAB_AUTO",
-    "GUFO_DISK_EVICT_SKIP_TOKENS",
-    "GUFO_DISK_EVICT_DOMINATED",
-    "GUFO_CACHE_HOST_FLOOR_MB",
-    "GUFO_CACHE_REMOVAL_LOG",
-    "GUFO_MEM_ACCOUNTING",
-    "GUFO_MAX_IMAGE_TOKENS",
-    "GUFO_DENSE_TWIN_MODEL",
-    "GUFO_DENSE_TWIN_BATCH",
-    "GUFO_DENSE_TWIN_MAX_N",
-    "GUFO_DENSE_TWIN_SHADOW",
-    "GUFO_DENSE_TWIN_ALLOW_Q8",
-    "GUFO_DENSE_TWIN_TRACE",
-    "GUFO_IQ4_WIDE_VARIANT",
-    "GUFO_IQ4_WMMA_WAVES",
-    "GUFO_DRAFT_OUT_MODEL",
-    "GUFO_PREFILL_FORWARD_TOKENS",
-    "GUFO_DISPATCH_TELEMETRY",
-    "GUFO_TRACE",
-    "GPU_MAX_HW_QUEUES",
-    "HOST",
-    "GUFO_HOST",
-    "PORT",
-    "GUFO_PORT",
-    "XDG_CACHE_HOME",
-    "LOCALAPPDATA",
-    "HOME",
+#define GUFO_RELEASE_CATALOG
+#include "src/cli/serve/release_switches.inc"
+#undef GUFO_RELEASE_CATALOG
 };
 
 struct DebugSettingsIrrelevantEnvironment {
@@ -108,13 +48,14 @@ inline constexpr DebugSettingsIrrelevantEnvironment
 // owners after construction; reparsing flags here would conceal auto budgets.
 [[nodiscard]] inline json::Value BuildEffectiveSettings(
     json::Value resolved, std::string_view version, std::string_view revision,
-    std::string_view build_id) {
+    std::string_view build_id, json::Value origin = json::Value::object()) {
   if (!resolved.is_object())
     throw std::invalid_argument("resolved debug settings must be an object");
   auto settings = json::Value::object();
   settings["version"] = std::string(version);
   settings["revision"] = std::string(revision);
   settings["exe_build_id"] = std::string(build_id);
+  settings["origin"] = std::move(origin);
   auto environment = json::Value::object();
   for (const char* name : kDebugSettingsEnvironment) {
     const char* value = std::getenv(name);

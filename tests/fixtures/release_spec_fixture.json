@@ -1,0 +1,29 @@
+{
+  "env": {
+    "GUFO_ROUTED_LANEROW": "1",
+    "GUFO_THINK_EOG_GUARD": "1",
+    "GUFO_EOG_BOUNDARY": "1",
+    "GUFO_EOG_MIN_PROB": "0.2",
+    "GUFO_EOG_DEFER_P": "0.9",
+    "GUFO_SPEC_EOG_STOP": "1",
+    "GUFO_LOOP_BREAKER": "1",
+    "GUFO_LOOP_BREAKER_EOG_CLOSE": "1",
+    "GUFO_THINK_MARKER_BIAS_BY_EFFORT": "low:-2,medium:-1,xhigh:0",
+    "GUFO_LENIENT": "bounded"
+  },
+  "args": {
+    "--sessions": "1",
+    "--context": "262144",
+    "--max-request-bytes": "67108864",
+    "--cache-ram-bytes": "6442450944",
+    "--speculative": "mtp",
+    "--mtp-policy": "survival",
+    "--mtp-draft-vocab": "auto",
+    "--think": "on",
+    "--temperature": "1.0",
+    "--top-p": "0.95",
+    "--top-k": "20",
+    "--min-p": "0",
+    "--prompt-lookup": true
+  }
+}
