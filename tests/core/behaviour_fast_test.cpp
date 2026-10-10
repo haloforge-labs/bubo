@@ -633,7 +633,7 @@ int Dump(const char* path) {
 
 int Bench() {
   volatile std::uint64_t checksum = 0;
-  for (unsigned mode = 0; mode < 6; ++mode) {
+  for (unsigned mode = 0; mode < 7; ++mode) {
     auto row = RealRow(mode % 4);
     auto b = Behaviour(row.size(), mode == 1 ? 1 : 3, mode < 2);
     // Benchmark production-like valid list sizes; bounds/duplicates belong to
@@ -653,7 +653,9 @@ int Bench() {
     }
     if (mode == 5)
       b->eog_min_prob_exact = true;
-    s::SamplerState sampler(Config(b, 1));
+    // Mode 6: greedy answer token with top_k 0 (a benchmark client's request);
+    // the EOG denominator then covers the whole row.
+    s::SamplerState sampler(mode == 6 ? Config(b, 0, 0) : Config(b, 1));
     if (mode >= 2)
       sampler.Accept(2);
     constexpr unsigned iterations = 48;

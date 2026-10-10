@@ -1317,6 +1317,45 @@ BehaviourLogits TransformBehaviour(std::span<const float> raw,
     }
     return 0.0;
   };
+  // raw_probability is min(1, exp(x - max) / sum), and sum holds the maximum's
+  // own term exp(0) = 1 (adding non-negative terms never rounds below it), so
+  // p <= exp(x - max) holds exactly in double. When this bound settles a
+  // threshold test, skip the denominator: with top_k <= 0 or exact mode it
+  // sorts the whole vocabulary row on every answer-channel token. Tests the
+  // bound does not settle use raw_probability unchanged.
+  bool maximum_ready = false;
+  double finite_maximum = -INFINITY;
+  const auto raw_value = [&](TokenId token) -> std::optional<float> {
+    if (ids.empty()) {
+      if (token >= raw.size() || !std::isfinite(raw[token])) return std::nullopt;
+      return raw[token];
+    }
+    for (std::size_t i = 0; i < raw.size(); ++i)
+      if (id(i) == token && std::isfinite(raw[i])) return raw[i];
+    return std::nullopt;
+  };
+  const auto probability_bound = [&](float value) {
+    if (!maximum_ready) {
+      float best = -INFINITY;
+      for (const float v : raw)
+        if (std::isfinite(v) && v > best) best = v;
+      finite_maximum = best;
+      maximum_ready = true;
+    }
+    return std::exp(static_cast<double>(value) - finite_maximum);
+  };
+  const auto raw_probability_below = [&](TokenId token, double threshold) {
+    const auto value = raw_value(token);
+    if (!value) return 0.0 < threshold;
+    if (probability_bound(*value) < threshold) return true;
+    return raw_probability(token) < threshold;
+  };
+  const auto raw_probability_at_least = [&](TokenId token, double threshold) {
+    const auto value = raw_value(token);
+    if (!value) return 0.0 >= threshold;
+    if (probability_bound(*value) < threshold) return false;
+    return raw_probability(token) >= threshold;
+  };
   if(b.logit_bias_enabled && !b.logit_bias.empty()) {
     for(auto [token,bias]:b.logit_bias)for(std::size_t i=0;i<current.size();++i)
       if(id(i)==token)current[i]+=bias;
@@ -1345,7 +1384,7 @@ BehaviourLogits TransformBehaviour(std::span<const float> raw,
     const bool boundary_ok=!b.eog_boundary||st.boundary.allowed();
     if(b.eog_boundary&&!boundary_ok) {
       if(b.eog_defer_p>0&&!st.boundary.deferred_stop)
-        for(auto token:b.eog_ids)if(!exempt(token)&&raw_probability(token)>=b.eog_defer_p)result.defer=true;
+        for(auto token:b.eog_ids)if(!exempt(token)&&raw_probability_at_least(token,b.eog_defer_p))result.defer=true;
       bool changed_finite = false;
       for (auto token : b.eog_ids)
         if (!exempt(token)) changed_finite |= mask(token);
@@ -1380,7 +1419,7 @@ BehaviourLogits TransformBehaviour(std::span<const float> raw,
     } else if(b.eog_min_prob>0) {
       bool changed_finite = false;
       for (auto token : b.eog_ids)
-        if (!exempt(token) && raw_probability(token) < b.eog_min_prob)
+        if (!exempt(token) && raw_probability_below(token, b.eog_min_prob))
           changed_finite |= mask(token);
       stage("eog_min_prob", b.eog_min_prob_exact ? "raw_full_probability_below_threshold" :
             "raw_topk_upper_bound_below_threshold", !changed_finite);

@@ -1,6 +1,8 @@
 #include "src/core/sampling.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
+#include <algorithm>
 #include <cmath>
+#include <functional>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -84,6 +86,66 @@ void DifferentialCandidates(){
  // Forced token represented in candidate IDs remains a valid singleton.
  auto forced=Config();forced->initial_thinking=true;forced->reasoning_budget_enabled=true;forced->reasoning_budget=0;c=Sampling(forced,1);c.top_k=2;
  s::SamplerState singleton(c);std::vector<float> known={9,8,7,6};std::vector<s::TokenId> known_ids={3,2,11,5};auto target=singleton.DistributionFromTop(known,known_ids,16);CHECK(target&&target->probability(11)==1);
+}
+// The pre-bound raw_probability arithmetic (sorted denominator), kept as the oracle.
+double ReferenceRawProbability(const std::vector<float>& row,s::TokenId token,int top_k,bool exact){
+ if(token>=row.size()||!std::isfinite(row[token]))return 0.0;
+ std::vector<float> d(row.begin(),row.end());std::erase_if(d,[](float v){return !std::isfinite(v);});
+ if(!exact&&top_k>0&&d.size()>static_cast<std::size_t>(top_k)){
+  std::partial_sort(d.begin(),d.begin()+top_k,d.end(),std::greater<>{});d.resize(top_k);
+ }else std::ranges::sort(d,std::greater<>{});
+ const double maximum=d.front();double sum=0;for(auto v:d)sum+=std::exp(static_cast<double>(v)-maximum);
+ if(sum<=0)return 0.0;
+ return std::min(1.0,std::exp(static_cast<double>(row[token])-maximum)/sum);
+}
+void EogBoundDecisionIdentity(){
+ // The max-logit bound must reproduce the sorted denominator's decisions:
+ // min-prob masks and the defer flag, top_k 0 / 20, exact off / on, on random
+ // rows and at the float steps where the EOG probability crosses the threshold.
+ std::uint64_t rng=4242;unsigned bound_settled=0,denominator_used=0,checked=0;
+ for(int case_no=0;case_no<480;++case_no){
+  const int top_k=case_no%2==0?0:20;const bool exact=(case_no/2)%2==1;const bool defer=(case_no/4)%2==1;
+  const double threshold=case_no%3==0?(defer?.9:.2):(defer?.5+s::Uniform(&rng)*.49:.01+s::Uniform(&rng)*.94);
+  std::vector<float> row(256);
+  for(auto& v:row)v=static_cast<float>(-30+s::Uniform(&rng)*20);  // tail below -10
+  const double spread=.2+s::Uniform(&rng)*(defer?8:4);
+  row[2]=0;for(unsigned i=3;i<12;++i)row[i]=static_cast<float>(-s::Uniform(&rng)*spread);
+  if(case_no%5==0)row[4]=row[2];  // tie at the maximum
+  if(case_no%7==0){row[20]=-INFINITY;row[21]=-INFINITY;}
+  const bool second_eog=case_no%6==0;
+  row[1]=second_eog?static_cast<float>(-s::Uniform(&rng)*3):-INFINITY;
+  const auto reference_p=[&](float eog){auto r=row;r[0]=eog;return ReferenceRawProbability(r,0,top_k,exact);};
+  // Bisect the EOG logit where the reference crosses the threshold.
+  double lo=-9,hi=20;
+  for(int i=0;i<80;++i){const double mid=(lo+hi)/2;(reference_p(static_cast<float>(mid))>=threshold?hi:lo)=mid;}
+  const float lo_f=static_cast<float>(lo),hi_f=static_cast<float>(hi);
+  // Crossing steps use the denominator; the steps at log(threshold) are the
+  // closest cases the bound settles (the row maximum is 0 there).
+  const float bound_edge=static_cast<float>(std::log(threshold));
+  const std::vector<float> eogs={std::nextafter(lo_f,-INFINITY),lo_f,hi_f,std::nextafter(hi_f,INFINITY),
+   std::nextafter(bound_edge,-INFINITY),bound_edge,std::nextafter(bound_edge,INFINITY),
+   static_cast<float>(-9+s::Uniform(&rng)*10),static_cast<float>(-8+s::Uniform(&rng)*4)};
+  for(const float eog:eogs){
+   row[0]=eog;
+   auto b=Config();b->eog_min_prob_exact=exact;
+   if(defer){b->eog_boundary=true;b->eog_defer_p=threshold;}else b->eog_min_prob=threshold;
+   auto c=Sampling(b,1);c.top_k=top_k;c.top_p=1;
+   s::SamplerState sampler(c);if(defer)sampler.Accept(2);  // "word": not at a boundary
+   const auto d=sampler.Distribution(row);
+   double finite_max=-INFINITY;for(auto v:row)if(std::isfinite(v))finite_max=std::max(finite_max,static_cast<double>(v));
+   bool expect_defer=false;
+   for(s::TokenId token:{s::TokenId{0},s::TokenId{1}}){
+    if(!std::isfinite(row[token]))continue;
+    const double p=ReferenceRawProbability(row,token,top_k,exact);
+    if(std::exp(static_cast<double>(row[token])-finite_max)<threshold)++bound_settled;else ++denominator_used;
+    if(defer)expect_defer=expect_defer||p>=threshold;
+    else CHECK((d.probability(token)==0)==(p<threshold));  // EOG stays in the top 20 when unmasked
+    ++checked;
+   }
+   if(defer)CHECK(d.behaviour()&&d.behaviour()->defer_stop==expect_defer);
+  }
+ }
+ CHECK(bound_settled>500);CHECK(denominator_used>1000);CHECK(checked>4000);
 }
 void GrammarPhaseAndReset(){
  // Thinking bytes and a literal split tool-call trigger cannot activate the
@@ -302,5 +364,6 @@ int main(){try{
   run("CandidateGlobalTies",CandidateGlobalTies);run("Marker133Ids",Marker133Ids);
   run("LongThinkTransition",LongThinkTransition);run("GuardEscalation",GuardEscalation);
   run("GuardAcceptedOnlyAndOff",GuardAcceptedOnlyAndOff);
-  std::cout<<"behaviour_test: 21 groups PASS\n";
+  run("EogBoundDecisionIdentity",EogBoundDecisionIdentity);
+  std::cout<<"behaviour_test: 22 groups PASS\n";
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
