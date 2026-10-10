@@ -28,6 +28,17 @@ bool ParseOpenAiResponseMessage(const json::Value& item,
 /// Shared effort names; each API applies its own thinking and alias rules.
 std::optional<ReasoningEffort> ParseReasoningEffortName(std::string_view value);
 
+/// Reasoning and visible text of a generation without tools or schemas, split
+/// exactly as Chat Completions reports them. (Upstream main dropped this helper when it
+/// moved the Anthropic handler into the shared compat template; our scored Responses
+/// logprobs branch and the /v1/messages debug paths still use it.)
+struct GeneratedText {
+  std::string reasoning;
+  std::string text;
+};
+GeneratedText SplitGeneratedText(
+    std::string_view text, TextGenerationBackend::InitialOutputState initial);
+
 /// Messages tools and tool_choice, mapped onto the Chat tool declarations so
 /// framing, schema constraints and replayed tool turns match Chat.
 std::optional<HttpResponse> ParseAnthropicToolControls(const json::Value& body,
