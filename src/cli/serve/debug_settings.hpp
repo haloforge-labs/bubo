@@ -71,6 +71,7 @@ inline constexpr DebugSettingsIrrelevantEnvironment
   auto behaviour = json::Value::object();
   behaviour["enabled"] = parsed != nullptr;
   behaviour["think_eog_guard"] = BehaviourSwitch("GUFO_THINK_EOG_GUARD");
+  behaviour["think_guard_escalate"] = ThinkGuardEscalate();
   behaviour["eog_boundary"] = BehaviourSwitch("GUFO_EOG_BOUNDARY");
   behaviour["eog_min_prob_exact"] = BehaviourSwitch("GUFO_EOG_MIN_PROB_EXACT");
   behaviour["eog_min_prob"] = BehaviourNumber("GUFO_EOG_MIN_PROB", -1.0);
@@ -125,6 +126,7 @@ inline constexpr DebugSettingsIrrelevantEnvironment
   const auto& policy = request_sampling.behaviour ? *request_sampling.behaviour : inactive;
   behaviour["enabled"] = request_sampling.behaviour != nullptr;
   behaviour["think_eog_guard"] = policy.think_eog_guard;
+  behaviour["think_guard_escalate"] = policy.think_guard_escalate;
   behaviour["eog_boundary"] = policy.eog_boundary;
   behaviour["eog_min_prob_exact"] = policy.eog_min_prob_exact;
   behaviour["eog_min_prob"] = policy.eog_min_prob;

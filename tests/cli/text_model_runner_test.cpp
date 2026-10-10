@@ -2649,9 +2649,16 @@ void TestDiskWriterPoolEvictionShutdownAndRestore() {
 }
 
 void TestServerCacheDisabledHasColdGeometry() {
+  class DebugPersistentRunner final : public PersistentSnapshotRunner {
+  public:
+    using PersistentSnapshotRunner::PersistentSnapshotRunner;
+    [[nodiscard]] gufo::json::Value DebugSettings() const override {
+      return gufo::json::Value::object();
+    }
+  };
   auto stats = std::make_shared<FakeStats>();
-  auto runner = std::make_shared<PersistentSnapshotRunner>(
-      stats, "no-cache-test", 4096, 32768);
+  auto runner =
+      std::make_shared<DebugPersistentRunner>(stats, "no-cache-test", 4096, 32768);
   // A supplied disk directory must never be opened with server cache disabled.
   const auto directory =
       std::filesystem::current_path() / "no-cache-must-not-exist";
