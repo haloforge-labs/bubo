@@ -420,11 +420,19 @@ void Review2Regression(int finding) {
     }
     inputs = Inputs("exact");
     inputs.environment["GUFO_HIPBLASLT_PLAN_CACHE"] = "0";
+    inputs.environment["GUFO_EVAL_API_KEY"] = "secret-marker";
     const auto result = ResolveReleaseSettings(inputs);
-    Expect(std::count(result.logs.begin(), result.logs.end(),
-                      "profile=exact: GUFO_HIPBLASLT_PLAN_CACHE=0 (internal "
-                      "control set)") == 1,
-           "exact logs the unread plan cache control once");
+    Expect(std::none_of(result.logs.begin(), result.logs.end(),
+                        [](const auto& line) {
+                          return line.find("secret-marker") !=
+                                 std::string::npos;
+                        }),
+           "internal control diagnostics never expose secret values");
+    Expect(
+        std::count(result.logs.begin(), result.logs.end(),
+                   "profile=exact: GUFO_HIPBLASLT_PLAN_CACHE is set (internal "
+                   "control)") == 1,
+        "exact logs the unread plan cache control once");
   } else if (finding == 4) {
     const auto docs = RenderReleaseDocs(ReleaseSwitchTable());
     Expect(docs.find("identical to plain autoregressive decoding of that build "

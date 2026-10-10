@@ -445,8 +445,8 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
     if (inputs.profile == "exact" && match && real &&
         row.member_str("class") == "INTERNAL" &&
         !row.find("exact_off")->as_bool())
-      result.logs.push_back("profile=exact: " + name + "=" + *real +
-                            " (internal control set)");
+      result.logs.push_back("profile=exact: " + name +
+                            " is set (internal control)");
     if (setting.value) {
       try {
         ValidateValue(row, *setting.value);
