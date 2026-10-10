@@ -1097,7 +1097,7 @@ void TestImageIdentityIsolation() {
   for (const bool snapshot_mode : {false, true}) {
     std::vector<std::size_t> invalidations(2);
     std::size_t next_id = 0;
-    gufo::server::ContinuationCache::SnapshotSupport support;
+    gufo::server::ContinuationCache::SnapshotSupport support{};
     if (snapshot_mode) {
       support.capacity_bytes = [] { return std::size_t{1024}; };
       support.restore = [](auto& state, const auto& snapshot) {

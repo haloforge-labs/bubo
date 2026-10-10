@@ -171,7 +171,7 @@ public:
     // Admission floor (default off): a snapshot is refused (skipped / host_memory_floor) when host MemAvailable minus the snapshot's bytes
     // would fall under host_floor_bytes. A refused snapshot costs a later cache miss; an admitted one at ~1 GB free costs the request (HTTP 500).
     std::function<std::uint64_t()> host_available_bytes;
-    std::uint64_t host_floor_bytes{0};
+    std::uint64_t host_floor_bytes;   // no default member initializer: the class uses SnapshotSupport{} as a default argument (compile error otherwise); {} zero-initializes
   };
 
   class Lease {

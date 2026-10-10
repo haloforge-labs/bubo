@@ -94,7 +94,7 @@ struct ContinuationCache::Entry {
 struct ContinuationCache::Impl {
   std::vector<std::unique_ptr<Entry>> entries;
   std::size_t state_count{0};
-  SnapshotSupport snapshot_support;
+  SnapshotSupport snapshot_support{};
   mutable std::mutex mutex;
   std::condition_variable condition;
   std::uint64_t clock{0};
