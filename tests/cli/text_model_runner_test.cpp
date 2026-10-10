@@ -2687,7 +2687,7 @@ void TestServerCacheDisabledHasColdGeometry() {
         request.Commit();
       else
         request.Cancel();
-      Expect(pool.CachedPrefixTokens(prompt) == 0,
+      Expect(pool.CachedPrefixTokens(prompt, nullptr) == 0,
              "completion and cancellation retain no prefix");
     }
   }
