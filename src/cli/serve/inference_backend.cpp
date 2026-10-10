@@ -2431,6 +2431,8 @@ const QwenFlashNextTextRunnerState& RequireQwenFlashNextState(
 
 class QwenFlashNextTextRunner final : public HipTextModelRunner {
 public:
+  void OnRequestFinished() const override { model_->LogTwinCounters("request"); }
+
   [[nodiscard]] json::Value DebugSettings() const override {
     auto settings = json::Value::object();
     auto files = json::Value::array();

@@ -105,6 +105,8 @@ public:
   [[nodiscard]] std::uint32_t PrefillCapacity() const noexcept;
   [[nodiscard]] std::uint32_t PrefillThroughCapacity() const noexcept;
   [[nodiscard]] std::uint32_t ExecutorMaxBatch() const noexcept;
+  /// Prints the decode-twin counters under `tag`; no-op without a twin.
+  void LogTwinCounters(const char* tag) const;
   [[nodiscard]] std::uint32_t PrefillCheckpointSlack() const noexcept;
   [[nodiscard]] std::vector<platform::LoadedFile> LoadedFiles() const;
   [[nodiscard]] const ModelOptions& options() const noexcept { return options_; }

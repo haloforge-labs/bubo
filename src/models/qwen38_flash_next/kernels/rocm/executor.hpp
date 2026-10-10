@@ -456,6 +456,8 @@ public:
     return options_.max_speculative;
   }
   [[nodiscard]] bool has_mtp() const noexcept { return model_->has_mtp(); }
+  /// Prints the decode-twin counter lines under `tag`; no-op without a twin.
+  void LogTwinCounters(const char* tag) const;
 
 private:
   Executor() = default;

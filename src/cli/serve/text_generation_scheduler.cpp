@@ -724,6 +724,9 @@ struct TextGenerationScheduler::Impl {
       request->result.text =
           runner_pool->runner().Decode(request->result.tokens);
     }
+    // Fresh counter totals per request: the destructor line never prints when
+    // the server is force-killed.
+    runner_pool->runner().OnRequestFinished();
   }
 
   void CompleteCancelled(

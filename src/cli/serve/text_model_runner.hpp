@@ -269,6 +269,8 @@ public:
   TextModelRunner& operator=(TextModelRunner&&) = delete;
 
   [[nodiscard]] virtual TextRunnerDescriptor Descriptor() const = 0;
+  /// Called once per finished request (any outcome); the default does nothing.
+  virtual void OnRequestFinished() const {}
   [[nodiscard]] virtual json::Value DebugSettings() const {
     throw std::invalid_argument("debug settings are not supported for this model");
   }

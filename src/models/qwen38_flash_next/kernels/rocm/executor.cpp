@@ -3549,6 +3549,10 @@ void Executor::PrintTwinCounters(const char* tag, const char* copy, std::uint32_
                    twin_batch_mixed_.load(std::memory_order_relaxed)));
 }
 
+void Executor::LogTwinCounters(const char* tag) const {
+  if (model_ != nullptr && model_->has_twin()) PrintTwinCounters(tag, "-", 0);
+}
+
 void Executor::CountTwinPass(std::uint32_t n) const {
   if (!model_->has_twin()) return;
   static const bool trace = [] {

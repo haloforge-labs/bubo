@@ -398,6 +398,10 @@ std::uint32_t Model::ExecutorMaxBatch() const noexcept {
   return executor_->max_batch();
 }
 
+void Model::LogTwinCounters(const char* tag) const {
+  executor_->LogTwinCounters(tag);
+}
+
 std::uint32_t Model::PrefillCheckpointSlack() const noexcept {
   return kPrefillTailTokens;
 }
