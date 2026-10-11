@@ -314,7 +314,8 @@ set(bubo_command_sources
 )
 add_library(bubo_prepare STATIC
   src/cli/prepare/prepare.cpp
-  src/core/prepare/release_catalogue.cpp)
+  src/core/prepare/release_catalogue.cpp
+  src/core/prepare/fingerprint_table.cpp)
 target_link_libraries(bubo_prepare PUBLIC CURL::libcurl OpenSSL::Crypto ZLIB::ZLIB)
 set(bubo_inference_target gufo)
 if(WIN32 AND GUFO_BRAND STREQUAL "bubo")
@@ -430,6 +431,7 @@ include(CTest)
 if (BUILD_TESTING)
   add_compile_options(-UNDEBUG)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  add_subdirectory(tests/prepare)
 
   add_subdirectory(tests/cache)
 

@@ -1,0 +1,18 @@
+Usage: bubo prepare [all|runtime|model] [OPTIONS]
+
+Prepare pinned runtime and model files. The default step is all.
+I1 skeleton: selected steps print 'not implemented in I1' and exit 10.
+
+Options:
+  --output ROOT  Parent folder (default: %LOCALAPPDATA%\Bubo)
+  --yes          Accept the displayed plan when implemented
+  --verify       Force runtime verification; model hashing is unconditional
+  --offline      Use local files only when implemented
+  --help         Print help without writes, network or engine loading
+
+Model layout: ROOT\models\huihui-qwen38-flash-next-ud-q4-k-xl-v1\
+  Four main shards; mtp\, mmproj\, twin\, draft_head\ sidecars.
+
+Exit codes: 0 success/help; 2 syntax/schema/header/profile; 3 consent/cancel;
+  4 offline/missing pin; 5 transport/TLS; 6 integrity; 7 storage/access;
+  8 prepare lock; 9 archive/internal; 10 I1 step not implemented.

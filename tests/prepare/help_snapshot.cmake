@@ -1,0 +1,12 @@
+execute_process(COMMAND "${BUBO}" prepare --help
+  RESULT_VARIABLE result OUTPUT_VARIABLE actual ERROR_VARIABLE error)
+if(NOT result EQUAL 0 OR NOT error STREQUAL "")
+  message(FATAL_ERROR "prepare --help failed: ${result}: ${error}")
+endif()
+file(READ "${GOLDEN}" expected)
+string(REPLACE "\r\n" "\n" actual "${actual}")
+string(REPLACE "\r\n" "\n" expected "${expected}")
+if(NOT actual STREQUAL expected)
+  message(FATAL_ERROR "prepare help differs from reviewed golden snapshot")
+endif()
+message(STATUS "PASS: bubo prepare --help golden snapshot")
