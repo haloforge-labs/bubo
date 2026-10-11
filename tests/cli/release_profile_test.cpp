@@ -133,7 +133,15 @@ void AuditCatalog() {
   for (const auto& name : missing)
     std::cerr << "MISSING: " << name << '\n';
   Expect(missing.empty(), "source literal catalog completeness");
-
+  // Extend the existing env/catalog scan with the public program-name policy.
+  // Python keeps one implementation shared by hosted CI and this CPU test.
+  std::string command = "\"" GUFO_BRAND_SCAN_PYTHON "\" -B \"" +
+                        (root / "tools/release/check_brand.py").string() +
+                        "\" --root \"" + root.string() + "\"";
+#ifdef _WIN32
+  command = "\"" + command + "\"";
+#endif
+  Expect(std::system(command.c_str()) == 0, "public program-name literal scan");
 }
 
 void ReviewRegression(int finding) {

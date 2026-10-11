@@ -487,6 +487,7 @@ if (BUILD_TESTING)
     src/cli/serve/release_profile.cpp)
   target_link_libraries(release_profile_test PRIVATE gufo_core gufo_logging)
   target_compile_definitions(release_profile_test PRIVATE
+    GUFO_BRAND_SCAN_PYTHON="${Python3_EXECUTABLE}"
     GUFO_PRODUCTION_ENV_SPEC="${GUFO_PRODUCTION_ENV_SPEC_PATH}"
     GUFO_RELEASE_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
   add_test(NAME release_profile_test COMMAND release_profile_test)

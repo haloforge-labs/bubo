@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import re
+from check_brand import check as check_brand
 from pathlib import Path
 
 CLASSES = {'DEFAULT', 'OPTION', 'DEBUG', 'INTERNAL', 'REMOVED', 'OTHER_MODEL'}
@@ -173,6 +174,9 @@ def main():
                     raise ValueError('generated output differs: ' + name)
             if (root / 'tests/fixtures/release_flags_golden.md').read_text(encoding='utf-8') != render_docs(rows):
                 raise ValueError('C++ renderer golden differs')
+            errors = check_brand(root)
+            if errors:
+                raise ValueError('\n'.join(errors))
             print('PASS: release catalog, generated header, docs, and C++ renderer golden')
         else:
             for name, content in outputs.items():
