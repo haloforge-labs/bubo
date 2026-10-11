@@ -531,7 +531,7 @@
             pkgsSys.runCommand "check-mk-serve" { } ''
               # Verify the synthesized CLI string contains expected flags and binary path
               cmd_str="${cmd}"
-              echo "$cmd_str" | grep -F "/bin/gufo serve"
+              echo "$cmd_str" | grep -F "/bin/bubo serve"
               echo "$cmd_str" | grep -F -- "--model /var/models/qwen.gguf"
               echo "$cmd_str" | grep -F -- "--context 4096"
               echo "$cmd_str" | grep -F -- "--served-model-name qwen-test"

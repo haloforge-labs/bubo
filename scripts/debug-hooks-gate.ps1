@@ -25,7 +25,7 @@ try {
   $probe = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 18101)
   try { $probe.Start() } finally { $probe.Stop() }
   $runtime = if ($phase -eq 'base') { $BaseRuntimeDir } else { $RuntimeDir }
-  $exe = Join-Path $runtime 'gufo.exe'
+  $exe = Join-Path $runtime 'bubo.exe'
   if (!(Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Missing executable: $exe" }
   $arguments = @('serve', 'llm', '--model', ('"' + $ModelPath + '"'),
    '--mtp-model', ('"' + $MtpModelPath + '"'), '--speculative', 'mtp',

@@ -3,7 +3,7 @@
 Hybrid Gated DeltaNet / gated-attention MoE (40 layers, 256 experts, top 8,
 3B active), GGUF architecture `qwen35moe`. It runs on its own runtime in
 `src/models/qwen36_a3b`, which reuses Flash-Next's kernels without changing
-them, and is served by `gufo serve` like the other text models. Fine-tunes
+them, and is served by `bubo serve` like the other text models. Fine-tunes
 with the same architecture (for example Tiel-Coder-35B-A3B) load the same way.
 
 Built and measured on Windows (gfx1151, TheRock ROCm); the Linux build
@@ -13,7 +13,7 @@ compiles it but has not run it.
 
 ```powershell
 hf download unsloth/Qwen3.6-35B-A3B-MTP-GGUF Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf
-build\release\gufo.exe serve llm --model Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf `
+build\release\bubo.exe serve llm --model Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf `
   --context 131072 --think on --temperature 1.0 --top-p 0.95 --top-k 20 `
   --speculative mtp --draft-tokens 6 --mtp-policy survival `
   --mtp-draft-vocab latin --prompt-lookup

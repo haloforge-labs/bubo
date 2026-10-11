@@ -60,7 +60,7 @@ active decode time. Preserve a separate fresh AR completion-hash control.
 
 ## Direct and serving measurements
 
-`gufo bench` measures the model path. Keep model artifact, prompt length,
+`bubo bench` measures the model path. Keep model artifact, prompt length,
 generation length, context depth, speculative mode, and sampling controls
 fixed when comparing runs. `pp2048` means 2,048 new prompt tokens; context
 depth is separate from the amount of new prefill work.
@@ -107,7 +107,7 @@ NLL/perplexity, top-1 agreement, and top-k overlap as applicable. Aggregates
 are over scored positions. A changed tokenizer, template, suite, or history
 changes the comparison identity.
 
-Capability evaluation is separate: [gufo eval](CLI.md#benchmarks-and-evaluations) grades free-running
+Capability evaluation is separate: [bubo eval](CLI.md#benchmarks-and-evaluations) grades free-running
 answers through the OpenAI-compatible server.
 
 ## Focused kernel measurements
@@ -149,7 +149,7 @@ maintained correctness test.
 Serving reports exclude endpoint hosts, prompts, generated text, model paths,
 raw token IDs, and timestamps. The canonical machine fingerprint excludes
 hostnames, usernames, secrets, timestamps, and private paths.
-`gufo diagnose --validate-artifact` validates its supported diagnostic schema;
+`bubo diagnose --validate-artifact` validates its supported diagnostic schema;
 each model/tool owns the validation of its own result schema.
 
 Downloaded tokenizer files and `.direnv` shell state are local artifacts.

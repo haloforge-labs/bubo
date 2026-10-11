@@ -9,7 +9,7 @@
 #   - Visual Studio Build Tools (MSVC STL + Windows SDK; the compiler is TheRock clang)
 #   - CMake 3.21+, and ninja on PATH or at C:\tools\ninja\ninja.exe
 #
-#   powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1     # release -> build\release\gufo.exe
+#   powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1     # release -> build\release\bubo.exe
 #   powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1 -Preset gpu-test -Target <target>
 param(
   [string]$Preset = "release",
@@ -87,7 +87,7 @@ if ($KeepGoing) { $buildArgs += @("--", "-k", "0") }
 cmake @buildArgs
 if ($LASTEXITCODE -ne 0) { throw "build failed" }
 
-# Runtime DLLs next to gufo.exe: ROCm (amdhip64, hipblas, hipblaslt, rocblas
+# Runtime DLLs next to bubo.exe: ROCm (amdhip64, hipblas, hipblaslt, rocblas
 # and their kernel libraries) and vcpkg's (icu, curl, ssl, png, jpeg, zlib).
 $bin = $build
 $rocmDlls = @("amdhip64_7.dll", "amd_comgr*.dll", "hipblas.dll", "libhipblaslt.dll", "origami.dll", "rocblas.dll", "rocsolver.dll", "rocsparse.dll", "rocm_kpack.dll", "rocm-openblas*.dll", "hiprtc*.dll")

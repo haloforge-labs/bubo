@@ -82,9 +82,9 @@ version, changelog or release manifest in an ordinary feature or fix pull
 request.
 
 Nix keeps release identity and source identity separate. The default package is
-a development build and reports `gufo version development (<revision>)`.
+a development build and reports `bubo development (<revision>), engine gufo development`.
 Official artifacts build the `release` package from a `vX.Y.Z` tag and report
-`gufo version X.Y.Z (<revision>)`. Both package outputs retain the exact flake
+`bubo X.Y.Z (<revision>), engine gufo X.Y.Z`. Both package outputs retain the exact flake
 revision; only the explicitly selected release output reads the semantic version
 from `version.txt`.
 

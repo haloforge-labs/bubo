@@ -21,8 +21,8 @@ nix develop -c hf download antirez/deepseek-v4-gguf \
   --local-dir models/deepseek-v4-flash
 nix build
 MODEL=/path/to/target.gguf
-./result/bin/gufo chat --model "$MODEL"
-./result/bin/gufo serve llm --model "$MODEL" --context 32768 --sessions 1
+./result/bin/bubo chat --model "$MODEL"
+./result/bin/bubo serve llm --model "$MODEL" --context 32768 --sessions 1
 ```
 
 Add `--dspark-model /path/to/DSpark-support.gguf` to enable DSpark.

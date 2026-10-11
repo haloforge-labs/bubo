@@ -6,9 +6,9 @@
 #   powershell -ExecutionPolicy Bypass -File tools\windows\start.ps1            # pick and start
 #   powershell -ExecutionPolicy Bypass -File tools\windows\start.ps1 -Last      # start the previous choice again
 #   powershell -ExecutionPolicy Bypass -File tools\windows\start.ps1 -List      # what is here, and what fits
-#   ... -DryRun          print the gufo command instead of starting it
+#   ... -DryRun          print the bubo command instead of starting it
 #   ... -ModelDir DIR    also search DIR for GGUF files (remembered)
-#   ... -Bin DIR         use gufo.exe from DIR (default: build\release)
+#   ... -Bin DIR         use bubo.exe from DIR (default: build\release)
 #
 # Choices are remembered in %LOCALAPPDATA%\gufo\start.json (never the API key).
 param(
@@ -105,9 +105,9 @@ foreach ($dir in $ModelDir) {
 
 # --- The build --------------------------------------------------------------
 if (-not $Bin) { $Bin = Join-Path $GufoRoot "build\release" }
-$exe = Join-Path $Bin "gufo.exe"
+$exe = Join-Path $Bin "bubo.exe"
 if (-not $List -and -not (Test-Path $exe)) {
-  Write-Host "gufo.exe not found in $Bin." -ForegroundColor Yellow
+  Write-Host "bubo.exe not found in $Bin." -ForegroundColor Yellow
   Write-Host "Build it with: powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1"
   Write-Host "(tools\windows\check.ps1 lists anything the build still needs)"
   if ($DryRun -or -not (Ask-YesNo "Build now? It takes a while" $false)) { exit 1 }
@@ -122,7 +122,7 @@ if ((Test-Path $exe) -and (Get-Command git -ErrorAction SilentlyContinue) -and (
     $head = [DateTimeOffset]::FromUnixTimeSeconds([int64]$headTime).UtcDateTime
     $built = (Get-Item $exe).LastWriteTimeUtc
     if ($head -gt $built.AddMinutes(1)) {
-      Write-Host ("note: gufo.exe was built {0:yyyy-MM-dd HH:mm}, before the last source commit ({1:yyyy-MM-dd HH:mm}); rebuild with tools\windows\build.ps1" -f $built.ToLocalTime(), $head.ToLocalTime()) -ForegroundColor Yellow
+      Write-Host ("note: bubo.exe was built {0:yyyy-MM-dd HH:mm}, before the last source commit ({1:yyyy-MM-dd HH:mm}); rebuild with tools\windows\build.ps1" -f $built.ToLocalTime(), $head.ToLocalTime()) -ForegroundColor Yellow
     }
   }
 }
@@ -140,13 +140,13 @@ function Start-Gufo($Plan) {
     $gufoArgs[$index + 1] = "$free"
     $port = $free
   }
-  $running = @(Get-Process -Name "gufo", "gufo-a3b" -ErrorAction SilentlyContinue)
+  $running = @(Get-Process -Name "bubo", "gufo", "gufo-a3b" -ErrorAction SilentlyContinue)
   foreach ($process in $running) {
-    Write-Host ("gufo is already running: {0} (PID {1}, {2:N1} GiB) and holds GPU memory" -f $process.ProcessName, $process.Id, ($process.WorkingSet64 / 1GB)) -ForegroundColor Yellow
+    Write-Host ("bubo is already running: {0} (PID {1}, {2:N1} GiB) and holds GPU memory" -f $process.ProcessName, $process.Id, ($process.WorkingSet64 / 1GB)) -ForegroundColor Yellow
   }
   if ($running.Count -gt 0 -and -not (Ask-YesNo "Start another server anyway?" $false)) { exit 1 }
   if ($Plan.NeedsApiKey -and -not $DryRun) {
-    Write-Host "Serving to the local network: Windows may ask once to let gufo.exe through the firewall." -ForegroundColor Yellow
+    Write-Host "Serving to the local network: Windows may ask once to let bubo.exe through the firewall." -ForegroundColor Yellow
     $key = Read-Host "API key clients must send (Enter = none, anyone on the network can use the server)"
     if ($key) { $gufoArgs = @($gufoArgs[0]) + @("--api-key", $key) + @($gufoArgs | Select-Object -Skip 1) }
   }
@@ -158,7 +158,7 @@ function Start-Gufo($Plan) {
   $stray = @(Get-GufoEnvSwitches | Where-Object { -not $planEnv.ContainsKey($_.Name) })
   $clear = @()
   if ($stray.Count -gt 0) {
-    Write-Host "These variables in this shell change how gufo runs:" -ForegroundColor Yellow
+    Write-Host "These variables in this shell change how bubo runs:" -ForegroundColor Yellow
     $stray | ForEach-Object { Write-Host "  $($_.Name)=$($_.Value)" -ForegroundColor Yellow }
     if (Ask-YesNo "Ignore them for this run?" $true) { $clear = @($stray | ForEach-Object { $_.Name }) }
   }
@@ -199,7 +199,7 @@ function Start-Gufo($Plan) {
       & $Plan.Exe @gufoArgs
     }
     if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
-      Write-Host "gufo.exe exited with code $LASTEXITCODE; tools\windows\check.ps1 checks the setup" -ForegroundColor Red
+      Write-Host "bubo.exe exited with code $LASTEXITCODE; tools\windows\check.ps1 checks the setup" -ForegroundColor Red
     }
   } finally {
     foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], "Process") }
@@ -297,7 +297,7 @@ function Get-TargetPlanBase($Target) {
 
 $gpuLine = if ($memory.GpuName) { "$($memory.GpuName), $($memory.DedicatedGiB) GB dedicated GPU memory, $($memory.RamGiB) GB RAM visible to Windows" } else { "no Radeon GPU found" }
 Write-Host ""
-Write-Host "Gufo on Windows - $gpuLine" -ForegroundColor Cyan
+Write-Host "Bubo on Windows - $gpuLine" -ForegroundColor Cyan
 if ($memory.GpuName -and $memory.DedicatedGiB -lt 64) {
   Write-Host "  tip: raise Variable Graphics Memory (AMD Software > Performance > Tuning); 96 GB is what Flash-Next wants" -ForegroundColor Yellow
 }
@@ -325,7 +325,7 @@ foreach ($target in $targets) {
   Write-Host ("      {0}" -f (Get-Source $target)) -ForegroundColor DarkGray
   if (-not $problem) { $rows += @{ Target = $target; Base = $base } }
 }
-if ($targets.Count -eq 0) { Write-Host "  no model gufo can serve was found" -ForegroundColor Yellow }
+if ($targets.Count -eq 0) { Write-Host "  no model bubo can serve was found" -ForegroundColor Yellow }
 
 $missingFamilies = @("fn", "27b", "a3b") | Where-Object { $family = $_; -not ($targets | Where-Object { $_.Family -eq $family }) }
 if ($missingFamilies) {
@@ -461,7 +461,7 @@ function Edit-Plan {
   $network = Ask-Choice "Who may connect: 1) this PC only  2) the local network" @("1", "2") $(if ($state.Host -eq "0.0.0.0") { "2" } else { "1" })
   $state.Host = if ($network -eq "2") { "0.0.0.0" } else { "127.0.0.1" }
   $state.Log = Ask-YesNo "Also save the log to a file" $state.Log
-  $extra = Read-Host "Extra gufo options, e.g. --max-tokens 32768 (Enter = $(if ($state.Extra) { $state.Extra } else { 'none' }); - clears)"
+  $extra = Read-Host "Extra bubo options, e.g. --max-tokens 32768 (Enter = $(if ($state.Extra) { $state.Extra } else { 'none' }); - clears)"
   if ($extra -eq "-") { $state.Extra = "" } elseif ($extra) { $state.Extra = $extra.Trim() }
 }
 

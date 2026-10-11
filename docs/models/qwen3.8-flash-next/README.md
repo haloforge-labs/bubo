@@ -24,8 +24,8 @@ nix develop -c hf download unsloth/Qwen3.8-Flash-Next-GGUF \
 nix build
 MODEL=/path/to/first-target-shard.gguf
 MTP=/path/to/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf
-./result/bin/gufo chat --model "$MODEL"
-./result/bin/gufo serve llm --model "$MODEL" --speculative mtp \
+./result/bin/bubo chat --model "$MODEL"
+./result/bin/bubo serve llm --model "$MODEL" --speculative mtp \
   --mtp-model "$MTP" --sessions 2 --context 32768
 ```
 

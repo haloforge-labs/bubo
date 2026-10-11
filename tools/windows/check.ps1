@@ -1,4 +1,4 @@
-# Checks everything Gufo needs on Windows, from the build toolchain to the
+# Checks everything Bubo needs on Windows, from the build toolchain to the
 # models, and says how to fix what is missing. Read-only: installs and
 # changes nothing.
 #
@@ -39,7 +39,7 @@ function Section([string]$title) {
   Write-Host $title -ForegroundColor Cyan
 }
 
-Write-Host "Gufo on Windows: checking the setup"
+Write-Host "Bubo on Windows: checking the setup"
 
 # --- Build prerequisites ---------------------------------------------------------
 Section "Build prerequisites"
@@ -94,12 +94,12 @@ $prerequisiteFailures = $failures
 # --- The build ---------------------------------------------------------------------
 Section "Build"
 if (-not $Bin) { $Bin = Join-Path $GufoRoot "build\release" }
-$exe = Join-Path $Bin "gufo.exe"
+$exe = Join-Path $Bin "bubo.exe"
 $built = $false
 if (Test-Path $exe) {
   $built = $true
   $builtAt = (Get-Item $exe).LastWriteTime
-  Report "gufo.exe" $true ("{0} (built {1:yyyy-MM-dd HH:mm})" -f $exe, $builtAt)
+  Report "bubo.exe" $true ("{0} (built {1:yyyy-MM-dd HH:mm})" -f $exe, $builtAt)
   # A build older than the checked-out source is the usual "fixed upstream,
   # still broken here" trap after a git pull.
   if ((Get-Command git -ErrorAction SilentlyContinue) -and (Test-Path (Join-Path $GufoRoot ".git"))) {
@@ -117,24 +117,24 @@ if (Test-Path $exe) {
     $dirty = @(& git -C $GufoRoot status --porcelain -- src compat cmake CMakeLists.txt 2>$null)
     if ($dirty.Count -gt 0) { Note "source" "$($dirty.Count) uncommitted source change(s); the build may not match any commit" }
   }
-  # build.ps1 copies these next to gufo.exe; without them it fails to start.
+  # build.ps1 copies these next to bubo.exe; without them it fails to start.
   $runtime = @("amdhip64_7.dll", "libhipblaslt.dll", "rocblas.dll", "hipblas.dll", "libcurl.dll", "libssl-3-x64.dll", "icuuc78.dll")
   $missingRuntime = @($runtime | Where-Object { -not (Test-Path (Join-Path $Bin $_)) })
   $missingKernels = @("hipblaslt\library", "rocblas\library") | Where-Object { -not (Test-Path (Join-Path $Bin $_)) }
   Report "runtime files" ($missingRuntime.Count -eq 0 -and @($missingKernels).Count -eq 0) `
-    ($(if ($missingRuntime.Count -or @($missingKernels).Count) { "missing: $((@($missingRuntime) + @($missingKernels)) -join ', ')" } else { "ROCm, hipBLASLt/rocBLAS kernels and vcpkg DLLs beside gufo.exe" })) `
+    ($(if ($missingRuntime.Count -or @($missingKernels).Count) { "missing: $((@($missingRuntime) + @($missingKernels)) -join ', ')" } else { "ROCm, hipBLASLt/rocBLAS kernels and vcpkg DLLs beside bubo.exe" })) `
     "rerun tools\windows\build.ps1 (it copies them)"
   # Ask the engine itself whether HIP sees a gfx1151 (driver + runtime).
   $probe = @(& $exe diagnose --section gpu 2>&1 | ForEach-Object { "$_" })
   $gpuLine = $probe | Where-Object { $_ -match "^GPU Architecture\s*:" } | Select-Object -First 1
   $supported = [bool]($probe | Where-Object { $_ -match "Compatibility Verdict: \[supported\]" })
-  Report "HIP sees the GPU" $supported ($(if ($gpuLine) { ($gpuLine -replace "^GPU Architecture\s*:\s*", "") } else { "gufo diagnose found no GPU" })) `
+  Report "HIP sees the GPU" $supported ($(if ($gpuLine) { ($gpuLine -replace "^GPU Architecture\s*:\s*", "") } else { "bubo diagnose found no GPU" })) `
     "update the AMD Software (Adrenalin) driver; run '$exe diagnose' for details"
 } elseif ($prerequisiteFailures -eq 0) {
-  Report "gufo.exe" $false "not built yet ($Bin)" "powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1"
+  Report "bubo.exe" $false "not built yet ($Bin)" "powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1"
   $next += "build: powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1"
 } else {
-  Report "gufo.exe" $false "not built yet; fix the prerequisites above first"
+  Report "bubo.exe" $false "not built yet; fix the prerequisites above first"
 }
 
 # --- GPU memory ---------------------------------------------------------------------
@@ -156,7 +156,7 @@ if ($memory.GpuName) {
     Note "dedicated GPU memory" "size unknown; 96 GB is recommended for Qwen3.8-Flash-Next"
   }
 } else {
-  Report "AMD GPU" $false "no Radeon adapter found" "Gufo needs a gfx1151 GPU (Ryzen AI Max+ 395 / Radeon 8060S)"
+  Report "AMD GPU" $false "no Radeon adapter found" "Bubo needs a gfx1151 GPU (Ryzen AI Max+ 395 / Radeon 8060S)"
 }
 
 # --- Models -------------------------------------------------------------------------
@@ -227,13 +227,13 @@ if ($listener) {
 } else {
   Report "port 8080" $true "free"
 }
-$running = @(Get-Process -Name "gufo", "gufo-a3b" -ErrorAction SilentlyContinue)
+$running = @(Get-Process -Name "bubo", "gufo", "gufo-a3b" -ErrorAction SilentlyContinue)
 foreach ($process in $running) {
   Note "server running" ("{0} (PID {1}) holds {2:N1} GiB; a second server competes for GPU memory" -f $process.ProcessName, $process.Id, ($process.WorkingSet64 / 1GB))
 }
 $switches = @(Get-GufoEnvSwitches)
 if ($switches.Count -gt 0) {
-  Note "environment" ("set in this shell and read by gufo: " + (($switches | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ", "))
+  Note "environment" ("set in this shell and read by bubo: " + (($switches | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ", "))
   Note "" "start.ps1 offers to ignore them; to drop them here: Remove-Item Env:NAME"
 } else {
   Report "environment" $true "no GUFO_* / A3B_* switches set"
@@ -247,7 +247,7 @@ if ($failures -gt 0) {
   Write-Host "Ready: $servable model(s) can be served." -ForegroundColor Green
   $next += "start: powershell -ExecutionPolicy Bypass -File tools\windows\start.ps1"
 } else {
-  Write-Host "Nothing is broken, but gufo cannot serve anything yet." -ForegroundColor Yellow
+  Write-Host "Nothing is broken, but bubo cannot serve anything yet." -ForegroundColor Yellow
 }
 foreach ($step in $next) { Write-Host "  next: $step" }
 if ($failures -gt 0) { exit 1 }

@@ -133,7 +133,7 @@ Normal runner command, with a fresh output directory and selected suites:
 nix develop -c python3 tests/functional/run.py \
   --record-baseline --output /tmp/card01 --sampling-preset qwen38 \
   --suite cache-transforms -- \
-  /path/to/main/gufo serve llm \
+  /path/to/main/bubo serve llm \
   --model /path/to/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf \
   --mtp-model /path/to/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf \
   --speculative off --sessions 1 --context 32768 --think off
@@ -914,7 +914,7 @@ production binary and separate output directories:
 nix develop -c python3 tests/functional/run.py \
   --record-baseline --output /tmp/compaction-ar --sampling-preset qwen38 \
   --suite cache-compaction -- \
-  /path/to/main/result/bin/gufo serve llm \
+  /path/to/main/result/bin/bubo serve llm \
   --model /path/to/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf \
   --mtp-model /path/to/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf \
   --speculative off --sessions 1 --context 32768 --think off

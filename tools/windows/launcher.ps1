@@ -1,12 +1,12 @@
-# Gufo mini launcher (start.cmd): finds the models on this machine with their
+# Bubo mini launcher (start.cmd): finds the models on this machine with their
 # drafts and vision sidecars, then picks a model and its features with single
 # number keys. Everything that is exact and measured faster is on by default;
 # the Latin draft vocabulary is the one opt-in (recommended for English use).
 #
 #   start.cmd            menu
 #   start.cmd -Last      start the previous choice again
-#   start.cmd -DryRun    print the gufo command instead of starting it
-#   start.cmd -Bin DIR   use gufo.exe from DIR
+#   start.cmd -DryRun    print the bubo command instead of starting it
+#   start.cmd -Bin DIR   use bubo.exe from DIR
 #
 # Choices are remembered in %LOCALAPPDATA%\gufo\launcher.json. The full
 # question-by-question launcher is tools\windows\start.ps1.
@@ -21,13 +21,13 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "inventory.ps1")
 $invariant = [Globalization.CultureInfo]::InvariantCulture
 
-# --- gufo.exe: a source build, or the prebuilt package's bin folder ---------------
+# --- bubo.exe: a source build, or the prebuilt package's bin folder ---------------
 $exe = $null
 foreach ($dir in @($Bin, (Join-Path $GufoRoot "build\release"), (Join-Path $GufoRoot "bin"), $GufoRoot)) {
-  if ($dir -and (Test-Path (Join-Path $dir "gufo.exe"))) { $exe = Join-Path $dir "gufo.exe"; break }
+  if ($dir -and (Test-Path (Join-Path $dir "bubo.exe"))) { $exe = Join-Path $dir "bubo.exe"; break }
 }
 if (-not $exe) {
-  Write-Host "gufo.exe not found. Build it with tools\windows\build.ps1, or use the prebuilt package." -ForegroundColor Yellow
+  Write-Host "bubo.exe not found. Build it with tools\windows\build.ps1, or use the prebuilt package." -ForegroundColor Yellow
   exit 1
 }
 
@@ -36,7 +36,7 @@ if (-not $exe) {
 $longest = Get-ChildItem (Join-Path (Split-Path $exe) "hipblaslt"), (Join-Path (Split-Path $exe) "rocblas") -Recurse -File -ErrorAction SilentlyContinue |
   Sort-Object { $_.FullName.Length } -Descending | Select-Object -First 1
 if ($longest -and $longest.FullName.Length -ge 260) {
-  Write-Host ("This folder is too deep: GPU kernel files reach {0} characters, past Windows' 260 limit, and gufo would crash." -f $longest.FullName.Length) -ForegroundColor Red
+  Write-Host ("This folder is too deep: GPU kernel files reach {0} characters, past Windows' 260 limit, and bubo would crash." -f $longest.FullName.Length) -ForegroundColor Red
   Write-Host ("Move it to a shorter path, e.g. C:\gufo (at most {0} characters for the folder)." -f (259 - ($longest.FullName.Length - (Split-Path $exe).Length))) -ForegroundColor Red
   exit 1
 }
@@ -76,9 +76,9 @@ function Start-Plan($Plan) {
     $gufoArgs[[array]::IndexOf($gufoArgs, "--port") + 1] = "$free"
     $port = $free
   }
-  $running = @(Get-Process -Name "gufo" -ErrorAction SilentlyContinue)
+  $running = @(Get-Process -Name "bubo", "gufo" -ErrorAction SilentlyContinue)
   if ($running.Count -gt 0 -and -not $DryRun) {
-    Write-Host ("gufo is already running (PID {0}) and holds GPU memory; close it first for the full memory." -f ($running.Id -join ", ")) -ForegroundColor Yellow
+    Write-Host ("bubo is already running (PID {0}) and holds GPU memory; close it first for the full memory." -f ($running.Id -join ", ")) -ForegroundColor Yellow
   }
   # Diagnostic switches from the shell must not leak into a normal start.
   foreach ($variable in Get-GufoEnvSwitches) { Remove-Item "Env:$($variable.Name)" -ErrorAction SilentlyContinue }
@@ -147,9 +147,9 @@ $gpu = if ($memory.GpuName) { "$($memory.GpuName), $($memory.DedicatedGiB) GB GP
 
 function Show-Models {
   Clear-Host
-  Write-Host "  gufo  -  $gpu" -ForegroundColor Cyan
+  Write-Host "  bubo  -  $gpu" -ForegroundColor Cyan
   Write-Host ""
-  if ($options.Count -eq 0) { Write-Host "  no model gufo can serve was found" -ForegroundColor Yellow }
+  if ($options.Count -eq 0) { Write-Host "  no model bubo can serve was found" -ForegroundColor Yellow }
   for ($i = 0; $i -lt [math]::Min(9, $options.Count); $i++) {
     $o = $options[$i]
     $tags = @()

@@ -1,6 +1,6 @@
 # Windows (native, gfx1151)
 
-Gufo builds and runs natively on Windows 11 x64 against AMD's TheRock ROCm
+Bubo builds and runs natively on Windows 11 x64 against AMD's TheRock ROCm
 distribution for gfx1151 (Ryzen AI Max+ 395 / Radeon 8060S). No WSL. Linux
 builds are unaffected: the port lives in `compat/win32`, Windows-only files and
 `_WIN32` branches.
@@ -8,7 +8,7 @@ builds are unaffected: the port lives in `compat/win32`, Windows-only files and
 ## Prebuilt
 
 Each [release](https://github.com/pixmaate/gufo/releases) carries
-`gufo-windows-<date>.zip`: `gufo.exe` with the ROCm, vcpkg and Visual C++
+`bubo-windows-<date>.zip`: `bubo.exe` with the ROCm, vcpkg and Visual C++
 runtimes in `bin\`, and `start.cmd`. It needs only a Strix Halo (gfx1151)
 machine, a current AMD driver and the models; its `README.txt` lists the
 downloads. `tools\windows\package.ps1` makes the zip from a release build.
@@ -28,13 +28,13 @@ newer clang can round fused kernels differently (see [Test status](#test-status)
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\windows\check.ps1   # what is missing, what fits, how to fix it
-powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1   # release -> build\release\gufo.exe
+powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1   # release -> build\release\bubo.exe
 powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1 -Preset gpu-test   # + tests and tools
 ```
 
 `build.ps1` imports the MSVC environment, configures with TheRock clang and the
 vcpkg toolchain, builds, and copies the ROCm and vcpkg runtime DLLs plus the
-hipBLASLt/rocBLAS kernel libraries next to `gufo.exe`, so `build\release` runs
+hipBLASLt/rocBLAS kernel libraries next to `bubo.exe`, so `build\release` runs
 as it is.
 
 `check.ps1` covers the whole setup, not only the build: the toolchain; the
@@ -67,13 +67,13 @@ powershell -ExecutionPolicy Bypass -File tools\windows\start.ps1 -List    # what
 `start.ps1` looks through the Hugging Face cache, a `models` folder in or
 beside the checkout, LM Studio's folders and any `-ModelDir` (remembered). It
 reads each GGUF header to tell targets, MTP and DFlash2 drafts and vision
-sidecars apart, lists what `gufo serve llm` runs (Qwen3.8-Flash-Next,
+sidecars apart, lists what `bubo serve llm` runs (Qwen3.8-Flash-Next,
 Qwen3.8-27B, Qwen3.6-35B-A3B and its fine-tunes) at the context that fits the
 dedicated GPU memory, pairs each with its draft and `mmproj`, and offers the
 speed modes those files allow, fastest measured first. Enter starts the plan
 it shows; `c` changes context, sessions, thinking, draft file, port, local
 network access (with an API key), a log file and extra options. It prints the
-full `gufo` command, runs it in the same window, offers to ignore `GUFO_*` /
+full `bubo` command, runs it in the same window, offers to ignore `GUFO_*` /
 `A3B_*` switches left in the shell, and restores every variable it touched.
 Choices are kept in `%LOCALAPPDATA%\gufo\start.json` (never the API key);
 `-DryRun` prints the command only.
@@ -102,7 +102,7 @@ lists any set in the calling shell.
 
 ## Other text models
 
-`start.ps1` offers these as well. `gufo serve llm --model PATH` also serves
+`start.ps1` offers these as well. `bubo serve llm --model PATH` also serves
 Qwen3.8-27B (with a DFlash2 draft,
 see [its guide](models/qwen3.8-27b/README.md)) and Qwen3.6-35B-A3B
 (`qwen35moe` GGUFs, see [its guide](models/qwen3.6-35b-a3b/README.md)). Both
@@ -167,7 +167,7 @@ example `GUFO_PLATFORM_TUNING=+fast_sampling` to try one on Linux, or
 | `hot_first_upload` | Weights read on every token are uploaded before the routed experts | GEMVs on memory allocated late run 6-22% slower on Windows; placement only |
 
 Checked on Windows, all decode switches on against all off (the Linux path):
-`gufo bench --logit-eval` dumps are bit-identical at all 4418 positions, and a
+`bubo bench --logit-eval` dumps are bit-identical at all 4418 positions, and a
 fixed-seed sampled decode produces byte-identical text. All off decodes
 7.6-9.5% slower on Windows (sampled probe, prose / code / reasoning 32.0 /
 34.3 / 44.1 against 34.5 / 37.2 / 48.3 tok/s).

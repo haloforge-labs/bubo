@@ -316,7 +316,7 @@ let
     )
     ++ extraArgs;
 
-  bin = if gufoPackage != null then "${gufoPackage}/bin/gufo" else "gufo";
+  bin = if gufoPackage != null then "${gufoPackage}/bin/bubo" else "bubo";
   escapedServerArgs = lib.escapeShellArgs serverArgs;
   escapedModalityArgs = lib.escapeShellArgs modalityArgs;
   rawHostStr = if (host != null && isRawEnvVar host) then " --host ${host}" else "";

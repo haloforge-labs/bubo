@@ -1,10 +1,10 @@
-# Gufo: the Strix Halo inference engine
+# Bubo: the Strix Halo inference product
 
 <p align="center">
-  <img src="assets/gufo-logo.jpg" alt="Gufo logo" width="180">
+  <img src="assets/gufo-logo.jpg" alt="Bubo logo" width="180">
 </p>
 
-Gufo is a vertical local inference engine specifically built and optimized for the AMD Strix Halo hardware:
+Bubo uses the gufo vertical local inference engine specifically built and optimized for the AMD Strix Halo hardware:
 Ryzen AI MAX+ 395 systems with Radeon 8060S (`gfx1151`), up to 128 GiB of unified memory.
 
 **Contributions are welcome!**
@@ -30,7 +30,7 @@ See [Release switches](docs/FLAGS.md) for all settings.
 The exact reference command, with a clean environment and matching model and request settings, is:
 
 ```sh
-gufo serve --profile stock --speculative off --no-cache --sessions 1 --seed 1 --think on --reasoning-effort medium
+bubo serve --profile stock --speculative off --no-cache --sessions 1 --seed 1 --think on --reasoning-effort medium
 ```
 
 ## Models and benchmarks
@@ -55,7 +55,7 @@ Each model guide lists the required files and complete benchmark settings.
 
 ## Philosophy
 
-- Contributions are welcome! We need the help of Strix Halo community to keep improving gufo!
+- Contributions are welcome! We need the help of Strix Halo community to keep improving Bubo!
 - We would like this to be the one-stop shop for Strix Halo Local AI enthusiasts: batteries included for text, audio, image, and video models.
 - Build and optimize specifically for the Strix Halo 128 GiB hardware. Smaller memory configurations should still work and preserve the speed benefits for models that can fit on memory.
 - Support only the best available models for their size that can run on this hardware: less code to maintain, more focused optimization and testing work.
@@ -86,7 +86,7 @@ podman run --rm \
   -p 8080:8080 \
   -v ./models:/models:ro \
   ghcr.io/gufo-org/toolboxes/gufo-runtime:latest \
-  gufo serve --host 0.0.0.0 --port 8080 llm \
+  bubo serve --host 0.0.0.0 --port 8080 llm \
   --model /models/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q8_K_XL.gguf \
   --speculative dflash2 \
   --dflash-model /models/Qwen3.8-27B-DFlash2-GGUF/Qwen3.8-27B-DFlash2-Q4_K_M.gguf
@@ -164,8 +164,8 @@ prebuilt zip.
 
 ```sh
 nix build
-./result/bin/gufo diagnose
-./result/bin/gufo serve llm --model /path/to/model.gguf
+./result/bin/bubo diagnose
+./result/bin/bubo serve llm --model /path/to/model.gguf
 ```
 
 [flake.lock](flake.lock) pins the dependencies. `nix develop` adds profiling,
@@ -207,8 +207,8 @@ sudo apt install hipblas-dev hipblaslt-dev rocblas-dev \
 
 cmake --preset release -DCMAKE_INSTALL_PREFIX="$HOME/.local"
 cmake --build --preset release --parallel 4
-./build/release/gufo diagnose
-./build/release/gufo serve llm --model /path/to/model.gguf
+./build/release/bubo diagnose
+./build/release/bubo serve llm --model /path/to/model.gguf
 ```
 
 Configuring fails at `find_package(hipblas)` when those ROCm packages are
@@ -217,7 +217,7 @@ For nonstandard installations, pass ordinary CMake paths, for example
 `cmake --preset release -DCMAKE_PREFIX_PATH="/opt/rocm"`.
 If compiler discovery picks a system Clang, also pass
 `-DCMAKE_HIP_COMPILER=/opt/rocm/llvm/bin/clang++`.
-Use `cmake --install build/release` to install Gufo,
+Use `cmake --install build/release` to install Bubo,
 its runtime data and license notices. The GPU driver must allow your user to
 access `/dev/kfd` and `/dev/dri`; model weights are acquired separately.
 

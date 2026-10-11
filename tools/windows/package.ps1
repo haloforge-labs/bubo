@@ -1,7 +1,7 @@
 # Packs the release build into a prebuilt zip for people who do not build:
-#   gufo-windows-<version>\
+#   bubo-windows-<version>\
 #     start.cmd                    the launcher (number keys)
-#     bin\gufo.exe + DLLs          ROCm runtime (gfx1151 kernels), vcpkg libraries,
+#     bin\bubo.exe + DLLs          ROCm runtime (gfx1151 kernels), vcpkg libraries,
 #                                  and the Visual C++ / OpenMP runtimes (app-local)
 #     tools\windows\launcher.ps1, inventory.ps1
 #     README.txt, LICENSE, THIRD-PARTY.txt
@@ -10,21 +10,24 @@
 param(
   [string]$Version = (Get-Date -Format "yyyy-MM-dd"),
   [string]$Out = "",
+  [string]$BuildName = "release",
   [string]$Vcpkg = "C:\vcpkg"
 )
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path "$PSScriptRoot\..\..").Path
-$build = Join-Path $root "build\release"
+$build = Join-Path $root "build\$BuildName"
+$brand = Get-Content -LiteralPath (Join-Path $build "generated\brand.json") -Raw | ConvertFrom-Json
+if ($brand.product -ne 'bubo' -or $brand.exe -ne 'bubo.exe') { throw 'Bubo package requires GUFO_BRAND=bubo' }
 if (-not $Out) { $Out = Join-Path $root "dist" }
-if (-not (Test-Path (Join-Path $build "gufo.exe"))) { throw "build first: tools\windows\build.ps1" }
+if (-not (Test-Path (Join-Path $build $brand.exe))) { throw "build first: tools\windows\build.ps1" }
 
-$name = "gufo-windows-$Version"
+$name = "$($brand.product)-windows-$Version"
 $stage = Join-Path $Out $name
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 $bin = Join-Path $stage "bin"
 New-Item -ItemType Directory -Force $bin, (Join-Path $stage "tools\windows") | Out-Null
 
-Copy-Item (Join-Path $build "gufo.exe") $bin
+Copy-Item (Join-Path $build $brand.exe) $bin
 Get-ChildItem (Join-Path $build "*.dll") | Copy-Item -Destination $bin
 foreach ($dir in "rocblas", "hipblaslt") {
   if (Test-Path (Join-Path $build $dir)) { Copy-Item (Join-Path $build $dir) -Destination $bin -Recurse }

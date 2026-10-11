@@ -13,7 +13,7 @@ Download about 33.1 GB and start the server:
 MODEL_DIR=$(hf download Qwen/Qwen-Image-2.1 \
   --revision b3179ad355be050328e483a9dfdd9e60cd62adfa)
 nix build
-./result/bin/gufo serve image --model "$MODEL_DIR" \
+./result/bin/bubo serve image --model "$MODEL_DIR" \
   --served-model-name Qwen-Image-2.1 --port 8080
 ```
 
@@ -68,7 +68,7 @@ For llama-swap, add this model and send the same requests to the proxy:
 models:
   Qwen-Image-2.1:
     cmd: >
-      /path/to/gufo serve image --model /path/to/snapshot
+      /path/to/bubo serve image --model /path/to/snapshot
       --served-model-name Qwen-Image-2.1 --port ${PORT}
 ```
 

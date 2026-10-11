@@ -11,8 +11,8 @@ nix develop -c hf download Qwen/Qwen3-ASR-1.7B \
   --revision 7278e1e70fe206f11671096ffdd38061171dd6e5 \
   --local-dir models/Qwen3-ASR-1.7B
 nix build
-./result/bin/gufo transcribe --model models/Qwen3-ASR-1.7B --audio speech.wav
-./result/bin/gufo serve asr --model models/Qwen3-ASR-1.7B
+./result/bin/bubo transcribe --model models/Qwen3-ASR-1.7B --audio speech.wav
+./result/bin/bubo serve asr --model models/Qwen3-ASR-1.7B
 ```
 
 ```sh
@@ -60,5 +60,5 @@ need not equal recognition of a complete recording.
 Two requests can prepare CPU frontends concurrently. Device state remains
 isolated by FIFO admission between audio chunks; cancellation removes queued
 work. `--context` controls capacity per chunk; `--served-model-name` sets
-the public model ID. TTS runs separately with `gufo serve tts`.
+the public model ID. TTS runs separately with `bubo serve tts`.
 See [server limits](../../SERVER.md) and [quality gaps](QUALITY.md).

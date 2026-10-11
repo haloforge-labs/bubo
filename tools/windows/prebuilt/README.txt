@@ -1,7 +1,7 @@
 Gufo for Windows - prebuilt
 ===========================
 
-A native Windows build of gufo (https://github.com/gufo-org/gufo), the ROCm
+A native Windows build of Bubo (https://github.com/gufo-org/gufo), the ROCm
 inference engine for AMD Strix Halo, with an OpenAI-compatible server.
 Source and docs: https://github.com/pixmaate/gufo
 

@@ -1,11 +1,11 @@
 # CLI (`src/cli`)
 
-This directory contains the unified `gufo` CLI.
+This directory contains the unified `bubo` CLI.
 
 ## Philosophy
 
-1. **One Binary**: All user-facing capabilities (`serve`, `prompt`, `chat`, `bench`, `video`, `diagnose`, `probe`) live under the single `gufo` executable.
-2. **Subcommands Over Flag Soup**: Model-specific or modality-specific options belong under explicit subcommands (e.g. `gufo serve ... llm ...`, `gufo serve ... video ...`), keeping global options clean and self-documenting.
+1. **One Binary**: All user-facing capabilities (`serve`, `prompt`, `chat`, `bench`, `video`, `diagnose`, `probe`) live under the single `bubo` executable.
+2. **Subcommands Over Flag Soup**: Model-specific or modality-specific options belong under explicit subcommands (e.g. `bubo serve ... llm ...`, `bubo serve ... video ...`), keeping global options clean and self-documenting.
 3. **Declarative Parsing**: Flags and arguments are declared and bound to typed struct fields using `ArgParser` (`src/cli/arg_parser.hpp`). Never parse raw `argv` manually.
 4. **CLI Layer vs Engine Core**: Code in `src/cli/` handles argument parsing, terminal output, and daemon lifecycle. Heavy computational work and kernel dispatches belong in `src/models/` and `src/core/`.
 
@@ -17,11 +17,11 @@ Each top-level command has its own dedicated subdirectory:
 src/cli/
 ├── main.cpp              # Root dispatcher & global flags (-h, -v, help)
 ├── arg_parser.hpp        # Declarative type-safe argument parser
-├── bench/                # `gufo bench` (model throughput & kernel benchmarks)
-├── diagnose/             # `gufo diagnose` & `gufo probe` (hardware inventory & toolchain probe)
-├── prompt/               # `gufo prompt` & `gufo chat` (text generation CLI & REPL)
-├── serve/                # `gufo serve` (HTTP API server: `llm`, `video`, `audio`)
-└── video/                # `gufo video` (MiniMax H3 text-to-video generator CLI)
+├── bench/                # `bubo bench` (model throughput & kernel benchmarks)
+├── diagnose/             # `bubo diagnose` & `bubo probe` (hardware inventory & toolchain probe)
+├── prompt/               # `bubo prompt` & `bubo chat` (text generation CLI & REPL)
+├── serve/                # `bubo serve` (HTTP API server: `llm`, `video`, `audio`)
+└── video/                # `bubo video` (MiniMax H3 text-to-video generator CLI)
 ```
 
 ## Adding a Command or Flag

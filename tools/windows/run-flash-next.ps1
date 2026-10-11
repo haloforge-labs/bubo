@@ -26,8 +26,8 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $bin = Join-Path $PSScriptRoot "..\..\build\release"
-if (-not (Test-Path "$bin\gufo.exe")) {
-  throw "gufo.exe not found in $bin; build first: powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1"
+if (-not (Test-Path "$bin\bubo.exe")) {
+  throw "bubo.exe not found in $bin; build first: powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1"
 }
 
 $modelFile = "UD-Q4_K_XL\Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf"
@@ -103,5 +103,5 @@ if ($Mode -eq "serve") {
 Get-ChildItem Env: | Where-Object { $_.Name -like "GUFO_*" } | ForEach-Object {
   Write-Host "using $($_.Name)=$($_.Value) from this shell" -ForegroundColor Yellow
 }
-Write-Host "gufo $($arguments -join ' ')"
-& "$bin\gufo.exe" @arguments
+Write-Host "bubo $($arguments -join ' ')"
+& "$bin\bubo.exe" @arguments

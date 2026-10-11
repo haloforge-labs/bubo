@@ -125,20 +125,20 @@ changes.
 ```sh
 MODEL=models/<model>/<artifact>.gguf
 
-./result/bin/gufo bench \
+./result/bin/bubo bench \
   --model "$MODEL" \
   --n-prompt 128,512,1024,2048,4096 \
   --n-gen 0 \
   --repetitions 3
 
-./result/bin/gufo bench \
+./result/bin/bubo bench \
   --model "$MODEL" \
   --n-prompt 2048 \
   --n-gen 128 \
   --n-depth 4096,8192,12288,16384 \
   --repetitions 1
 
-./result/bin/gufo bench \
+./result/bin/bubo bench \
   --model "$MODEL" \
   --validate-prefill 1024 \
   --n-prompt 1024 \
@@ -157,7 +157,7 @@ largest requested concurrency:
 ```sh
 MODEL=models/<model>/<artifact>.gguf
 
-./result/bin/gufo serve \
+./result/bin/bubo serve \
   --host 127.0.0.1 \
   --port 8080 \
   --sessions 4 \
@@ -177,7 +177,7 @@ tools/serving/gufo-serving-bench.py \
   --max-tokens 128 \
   --output artifacts/serving/benchmark.json
 
-./result/bin/gufo diagnose \
+./result/bin/bubo diagnose \
   --validate-artifact artifacts/serving/benchmark.json
 ```
 
@@ -226,7 +226,7 @@ The report keeps these metrics separate:
 
 Raw per-request samples and p50/p95/p99 summaries are retained. Endpoint hosts,
 prompt text, generated text, model paths, timestamps, and token IDs are never
-written to the artifact. `gufo bench` remains the direct model-path
+written to the artifact. `bubo bench` remains the direct model-path
 microbenchmark; use this serving harness for TTFT, ITL, queueing, and
 concurrency decisions.
 
@@ -236,7 +236,7 @@ The check reads the code objects in a binary. It does not use a GPU. Run it
 after each compiler or ROCm update, and after each kernel change:
 
 ```sh
-python3 tools/ci/check-kernel-resources.py result/bin/gufo \
+python3 tools/ci/check-kernel-resources.py result/bin/bubo \
   --baseline tools/ci/kernel-resources.json
 ```
 
@@ -245,7 +245,7 @@ each kernel that has more scratch, more spilled VGPRs or less VGPR occupancy
 than in the base build:
 
 ```sh
-python3 tools/ci/check-kernel-resources.py new/bin/gufo --compare old/bin/gufo
+python3 tools/ci/check-kernel-resources.py new/bin/bubo --compare old/bin/bubo
 ```
 
 Change the baseline only after you decide that a new allowance is correct.
@@ -257,7 +257,7 @@ Compare allocation, mapped-registration, first-touch, warm-access, copy,
 advice/prefetch, synchronization, teardown, fault, and checksum behavior:
 
 ```sh
-./result/bin/gufo diagnose \
+./result/bin/bubo diagnose \
   --benchmark allocation \
   --working-set-mib 64,1024 \
   --warmup 2 \
@@ -361,7 +361,7 @@ busy, and what changed between two runs.
 ```sh
 # profile a command and analyze in one step
 nix develop -c python3 tools/prof/prof.py run --stages qwen -- \
-  ./result/bin/gufo bench --model "$MODEL" -p 2048 -n 0 -r 1
+  ./result/bin/bubo bench --model "$MODEL" -p 2048 -n 0 -r 1
 
 # re-analyze an existing database
 nix develop -c python3 tools/prof/prof.py show /tmp/prof/prof_results.db --top 20
@@ -437,7 +437,7 @@ microbenchmark before acting on the mix.
   --repetitions 10
 
 GUFO_HIPBLASLT_PLAN_CACHE=/tmp/gufo-hipblaslt-plans.bin \
-  ./result/bin/gufo bench ...
+  ./result/bin/bubo bench ...
 
 nix develop -c tools/bench/build.sh tools/qwen27b/deltanet_bench.hip
 /tmp/deltanet_bench 8 48
@@ -449,7 +449,7 @@ nix develop -c tools/bench/build.sh tools/qwen27b/attention_bench.hip
 
 The recurrence probe checks exact outputs/state with a rotating 144 MiB state
 working set. The Qwen27B model suite checks full-logit rollback, including
-replay-ring wraparound; `gufo bench` measures actual speculative throughput.
+replay-ring wraparound; `bubo bench` measures actual speculative throughput.
 
 Generated profiler, plan, and replay artifacts stay outside the repository.
 

@@ -319,7 +319,7 @@ function Get-GufoFit([double]$NeedGiB, $Memory) {
   "too big"
 }
 
-# GUFO_* and A3B_* switches (and HOST / PORT) change what gufo.exe runs.
+# GUFO_* and A3B_* switches (and HOST / PORT) change what bubo.exe runs.
 function Get-GufoEnvSwitches {
   @(Get-ChildItem Env: | Where-Object { $_.Name -like "GUFO_*" -or $_.Name -like "A3B_*" -or $_.Name -eq "HOST" -or $_.Name -eq "PORT" })
 }

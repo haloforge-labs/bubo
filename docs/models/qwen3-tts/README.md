@@ -18,7 +18,7 @@ checkpoints are unsupported. Official Python is an offline oracle only.
 nix develop -c hf download Qwen/Qwen3-TTS-12Hz-1.7B-Base \
   --local-dir models/Qwen3-TTS-12Hz-1.7B-Base
 nix build
-./result/bin/gufo serve tts \
+./result/bin/bubo serve tts \
   --model models/Qwen3-TTS-12Hz-1.7B-Base \
   --voice narrator=reference.wav --voice-text narrator=reference.txt
 ```
@@ -39,7 +39,7 @@ curl -sS http://127.0.0.1:8080/v1/audio/speech \
 `GET /v1/audio/voices` lists usable voices. Base also accepts per-request
 `reference_audio` and `reference_text`; see [the audio API](../../SERVER.md#other-model-services)
 for formats, limits and language/sampling controls. Use `--context` to set token capacity and `--served-model-name` to select
-the public model ID. ASR runs separately with `gufo serve asr`; llama-swap
+the public model ID. ASR runs separately with `bubo serve asr`; llama-swap
 can expose both processes under one API URL.
 Repeated Base requests reuse the same reference's encoder features and exact
 waveform-decoder state. One reference prefix is retained per runtime; changing

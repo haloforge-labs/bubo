@@ -46,7 +46,7 @@ let
   };
 in
 stdenv.mkDerivation {
-  pname = "gufo";
+  pname = "bubo";
   version = packageVersion;
   src = productionSource;
 
@@ -77,6 +77,7 @@ stdenv.mkDerivation {
   cmakeFlags = [
     "-DCMAKE_BUILD_TYPE=RelWithDebInfo"
     "-DBUILD_TESTING=OFF"
+    "-DGUFO_BRAND=bubo"
     "-DGUFO_RELEASE_VERSION=${versionLabel}"
     "-DGUFO_REVISION=${revision}"
     "-DGUFO_FFMPEG_EXECUTABLE=${ffmpeg-headless}/bin/ffmpeg"
@@ -88,10 +89,10 @@ stdenv.mkDerivation {
   installCheckPhase = ''
     runHook preInstallCheck
 
-    test "$($out/bin/gufo --version)" = "gufo version ${versionLabel} (${revision})"
-    $out/bin/gufo --help >/dev/null
-    test "$($out/bin/gufo-server --version)" = "gufo version ${versionLabel} (${revision})"
-    $out/bin/gufo-server --help >/dev/null
+    test "$($out/bin/bubo --version)" = "bubo ${versionLabel} (${revision}), engine gufo ${versionLabel}"
+    $out/bin/bubo --help >/dev/null
+    test ! -e $out/bin/gufo
+    test ! -e $out/bin/gufo-server
     test ! -e $out/bin/gufo-kernel-bench
     test -f $out/share/licenses/gufo/LICENSE
     test -f $out/share/licenses/gufo/third-party/LICENSE.ds4
@@ -111,10 +112,10 @@ stdenv.mkDerivation {
   };
 
   meta = with lib; {
-    description = "Gufo Engine — local inference runtime for AMD Strix Halo (gfx1151 GPU)";
+    description = "Bubo — gufo engine: local inference runtime for AMD Strix Halo (gfx1151 GPU)";
     homepage = "https://github.com/gufo-org/gufo";
     license = licenses.mit;
     platforms = [ "x86_64-linux" ];
-    mainProgram = "gufo";
+    mainProgram = "bubo";
   };
 }

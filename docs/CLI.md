@@ -1,6 +1,6 @@
 # Command-Line Interface
 
-The `gufo` executable provides terminal interfaces for:
+The `bubo` executable provides terminal interfaces for:
 
 - Interactive conversations.
 - One-shot prompt testing.
@@ -14,10 +14,10 @@ prompt caching.
 
 ## Functionalities
 
-This is an exhaustive list of functionalities and features offered by the gufo cli, the mapping between features and flags is not documented here and should be discovered using the `--help` command to avoid divergences between the implementation and the documentation.
+This is an exhaustive list of functionalities and features offered by the Bubo CLI, the mapping between features and flags is not documented here and should be discovered using the `--help` command to avoid divergences between the implementation and the documentation.
 
 The supported modalities are LLM, image, video, and audio (TTS, ASR).
-`gufo serve image` provides [Qwen-Image-2.1 generation and editing](models/qwen-image-2.1/README.md).
+`bubo serve image` provides [Qwen-Image-2.1 generation and editing](models/qwen-image-2.1/README.md).
 
 ### LLM or text
 
@@ -139,15 +139,15 @@ TODO
 
 ### Audio (TTS and ASR)
 
-Use `gufo serve tts --model DIR --context 4096` for synthesis or
-`gufo serve asr --model DIR --context 1024` for transcription. Each process
+Use `bubo serve tts --model DIR --context 4096` for synthesis or
+`bubo serve asr --model DIR --context 1024` for transcription. Each process
 loads one checkpoint; llama-swap can route both services under one API URL.
 The Nix helper uses the same `modality`, `model`, `context`, and
 `servedModelName` fields.
 
 `--context` reserves the model's token capacity. ASR applies that capacity
 per audio chunk, so long files do not require one enormous context. The
-standalone `gufo transcribe` command also uses `--model` and `--context`;
+standalone `bubo transcribe` command also uses `--model` and `--context`;
 `--prompt` supplies optional transcription hints.
 
 **Voices**
@@ -162,7 +162,7 @@ standalone `gufo transcribe` command also uses `--model` and `--context`;
   caller does not need to repeat it. Voices require a TTS checkpoint.
 
 ```sh
-gufo serve tts \
+bubo serve tts \
   --model models/Qwen3-TTS-12Hz-1.7B-Base \
   --voice narrator_eng=/audio/clear-english-voice.wav \
   --voice-text narrator_eng=/audio/clear-english-voice.txt \
@@ -204,14 +204,14 @@ These apply to every modality, before or after the subcommand:
 ## Commands
 
 ```text
-gufo serve
-gufo chat
-gufo prompt
-gufo eval
-gufo bench
-gufo video
-gufo transcribe
-gufo diagnose
+bubo serve
+bubo chat
+bubo prompt
+bubo eval
+bubo bench
+bubo video
+bubo transcribe
+bubo diagnose
 ```
 
 `serve` starts the OpenAI-compatible server. `chat` maintains an interactive
@@ -226,12 +226,12 @@ combinations return an error instead of being ignored.
 
 ### Server mode
 
-Gufo can be run as a server exposing OpenAI-compatible API HTTP endpoints, activated based on the model served.
+Bubo can be run as a server exposing OpenAI-compatible API HTTP endpoints, activated based on the model served.
 
 ```sh
-gufo serve --host 0.0.0.0 --port 8080 llm --model /models/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q8_K_XL.gguf
+bubo serve --host 0.0.0.0 --port 8080 llm --model /models/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q8_K_XL.gguf
 # or
-gufo serve tts \
+bubo serve tts \
   --model ./models/Qwen3-TTS-12Hz-1.7B-Base \
   --voice narrator_ita=./audio/clear-italian-voice.wav \
   --voice-text "narrator_ita=Questo racconto e' cresciuto..." \
@@ -242,15 +242,15 @@ gufo serve tts \
 Several flags are offered by the command, they won't be documented here to avoid having the out of sync. If you need more information please use the help command
 
 ```sh
-gufo serve --help
+bubo serve --help
 # or
-gufo serve llm --help
+bubo serve llm --help
 ```
 
 ### Diagnose
 
-Gufo can self detect if everything is correctly configured to be able to run, such as drivers, groups, permissions, etc.
+Bubo can self detect if everything is correctly configured to be able to run, such as drivers, groups, permissions, etc.
 
 ### Benchmarks and Evaluations
 
-Two utilities are shipped with gufo to quickly verify the speed of a model (`bench`) and the accuracy of it (`eval`).
+Two utilities are shipped with Bubo to quickly verify the speed of a model (`bench`) and the accuracy of it (`eval`).

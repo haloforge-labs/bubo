@@ -2142,7 +2142,7 @@ stop conflicting model servers before invoking measurement drivers.
 | --- | --- |
 | `CACHE_EXP_DIR` | External root containing `scripts/`, `results/` and experimental `cache/`. |
 | `GUFO_REPO` | Explicit source checkout used for corpora and functional drivers. |
-| `GUFO_BIN` | Explicit candidate or baseline production binary; default is `$CACHE_EXP_DIR/bin/gufo`. |
+| `GUFO_BIN` | Explicit candidate or baseline production binary; default is `$CACHE_EXP_DIR/bin/bubo`. |
 | `LLAMA_TOKENIZE` | Explicit compatible llama.cpp tokenizer executable. |
 | `FN_MODEL`, `FN_MTP`, `Q27_MODEL`, `Q27_DFLASH` | Actual model and speculative sidecar files. |
 | `PYTHON` | Interpreter used by shell drivers; default `python3`. |

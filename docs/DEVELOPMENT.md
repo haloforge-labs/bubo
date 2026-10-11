@@ -35,7 +35,7 @@ Git first: flakes only see tracked files.
 
 ```sh
 nix build                              # production package, no tests or tools
-./result/bin/gufo diagnose
+./result/bin/bubo diagnose
 nix build .#checks.x86_64-linux.pr     # hosted CPU/repository checks
 nix develop                            # GPU development, profilers, reference tools
 ```
@@ -136,7 +136,7 @@ documentation-only changes.
 
 ## Performance work
 
-Measure with `result/bin/gufo` from `nix build` or a `release` build, keeping
+Measure with `result/bin/bubo` from `nix build` or a `release` build, keeping
 compiler and dependency versions fixed across compared runs. Follow
 [performance engineering](PERFORMANCE.md) and the
 [kernel optimization skill](../.agents/skills/optimize-kernel/SKILL.md). Use

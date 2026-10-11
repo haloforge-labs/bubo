@@ -17,8 +17,8 @@ nix develop -c hf download z-lab/Qwen3.8-27B-DFlash2-GGUF \
 nix build
 MODEL=models/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_XL.gguf
 DRAFT=models/qwen3.8-27b/Qwen3.8-27B-DFlash2-Q4_K_M.gguf
-./result/bin/gufo chat --model "$MODEL"
-./result/bin/gufo serve llm --model "$MODEL" --speculative dflash2 \
+./result/bin/bubo chat --model "$MODEL"
+./result/bin/bubo serve llm --model "$MODEL" --speculative dflash2 \
   --dflash-model "$DRAFT" --sessions 2 --context 32768
 ```
 
@@ -42,7 +42,7 @@ Vision weights upload lazily. Repeat `--image` in `prompt` or `chat`; chat
 attaches them to the first user turn. Images count toward context capacity.
 
 ```sh
-./result/bin/gufo prompt --model "$MODEL" --image photo.jpg \
+./result/bin/bubo prompt --model "$MODEL" --image photo.jpg \
   --prompt "Describe this image." --temperature 0
 ```
 
