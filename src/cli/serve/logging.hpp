@@ -1,6 +1,7 @@
 #ifndef GUFO_SERVER_LOGGING_HPP_
 #define GUFO_SERVER_LOGGING_HPP_
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -25,6 +26,8 @@ std::optional<LogLevel> LogLevelFromName(std::string_view name);
 /// The spelling `LogLevelFromName` accepts, for echoing the resolved level
 /// back.
 std::string_view LogLevelName(LogLevel level);
+
+class AsyncLogSink;
 
 class Logger {
 public:
@@ -59,6 +62,27 @@ public:
       __attribute__((format(printf, 3, 4)))
 #endif
       ;
+
+  // Preserve raw printf bytes (including fragments); no timestamp or tag added.
+  // Raw defaults to ERROR so legacy diagnostics cannot disappear on overflow.
+  static void Raw(const char* format, ...)
+#if defined(__GNUC__) || defined(__clang__)
+      __attribute__((format(printf, 1, 2)))
+#endif
+      ;
+  static void Raw(LogLevel level, const char* format, ...)
+#if defined(__GNUC__) || defined(__clang__)
+      __attribute__((format(printf, 2, 3)))
+#endif
+      ;
+  static bool FlushSync(
+      std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
+  // Exit only: wait at most 2 seconds for the sink, including an active write.
+  static void Shutdown();
+#ifdef GUFO_LOG_TESTING
+  // Compiled only into the isolated CPU test, never into production.
+  static void SetSinkForTesting(AsyncLogSink* sink);
+#endif
 
   /// Logs completion after the response body, including streamed generation.
   /// `success_level` is used when the status and outcome are unremarkable, so

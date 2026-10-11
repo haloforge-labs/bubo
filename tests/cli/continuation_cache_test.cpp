@@ -1148,6 +1148,7 @@ void TestCacheCandidateDetailIsDebugTierOnly() {
     const auto previous_level = gufo::server::Logger::Level();
     gufo::server::Logger::SetLevel(level);
     std::ostringstream output;
+    gufo::server::Logger::FlushSync();
     auto* previous_sink = std::clog.rdbuf(output.rdbuf());
     {
       gufo::server::ContinuationCache cache(1, [&] {
@@ -1162,6 +1163,7 @@ void TestCacheCandidateDetailIsDebugTierOnly() {
       auto other = cache.Acquire(diverged);
       Expect(!other.cache_hit(), "a different prompt cannot reuse the slot");
     }
+    gufo::server::Logger::FlushSync();
     std::clog.rdbuf(previous_sink);
     gufo::server::Logger::SetLevel(previous_level);
     return output.str();
@@ -1204,6 +1206,7 @@ void TestWaitingAcquireReportsCandidateSkips() {
   const auto previous_level = gufo::server::Logger::Level();
   gufo::server::Logger::SetLevel(gufo::server::LogLevel::kDebug);
   std::ostringstream output;
+  gufo::server::Logger::FlushSync();
   auto* previous_sink = std::clog.rdbuf(output.rdbuf());
   {
     auto waiter = cache.Acquire(
@@ -1211,6 +1214,7 @@ void TestWaitingAcquireReportsCandidateSkips() {
         [&] { return std::chrono::steady_clock::now() >= deadline; });
     Expect(!waiter, "the cancelled waiter never acquires the busy slot");
   }
+  gufo::server::Logger::FlushSync();
   std::clog.rdbuf(previous_sink);
   gufo::server::Logger::SetLevel(previous_level);
   const std::string log = output.str();

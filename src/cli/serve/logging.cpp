@@ -5,8 +5,18 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstdarg>
+#include <deque>
+#include <stdexcept>
+#include <thread>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -17,12 +27,55 @@
 #include <sstream>
 #include <string>
 
+#include "src/cli/serve/logging_sink.hpp"
+
 namespace gufo::server {
 namespace {
 
-std::mutex& LogMutex() {
-  static std::mutex mutex;
-  return mutex;
+void WriteStderr(std::string_view batch) {
+  // One stream write and flush per batch, to the same stderr stream buffer as
+  // before. This also preserves existing CPU tests that capture clog.
+  std::clog.write(batch.data(), static_cast<std::streamsize>(batch.size()));
+  std::clog.flush();
+  if (!std::clog.good())
+    throw std::runtime_error("stderr write failed");
+}
+
+AsyncLogSink& ProductionSink() {
+  // Intentionally retain state through CRT teardown, including a stuck writer.
+  static auto* sink = [] {
+    const char* sync = std::getenv("GUFO_LOG_SYNC");
+    auto* result =
+        new AsyncLogSink(WriteStderr, sync && std::string_view(sync) == "1");
+    std::atexit([] { Logger::Shutdown(); });
+    return result;
+  }();
+  return *sink;
+}
+
+#ifdef GUFO_LOG_TESTING
+AsyncLogSink* test_sink = nullptr;
+#endif
+
+AsyncLogSink& Sink() {
+#ifdef GUFO_LOG_TESTING
+  if (test_sink)
+    return *test_sink;
+#endif
+  return ProductionSink();
+}
+
+std::string FormatRaw(const char* format, va_list args) {
+  va_list copy;
+  va_copy(copy, args);
+  const int size = std::vsnprintf(nullptr, 0, format, copy);
+  va_end(copy);
+  if (size < 0)
+    return {};
+  std::string line(static_cast<std::size_t>(size) + 1, '\0');
+  std::vsnprintf(line.data(), line.size(), format, args);
+  line.resize(static_cast<std::size_t>(size));
+  return line;
 }
 
 // Process-wide verbosity threshold. Connection workers, the text scheduler and
@@ -76,6 +129,215 @@ std::string CurrentTimestamp() {
 }
 
 }  // namespace
+
+struct AsyncLogSink::State {
+  explicit State(Writer output, bool sync)
+      : writer(std::move(output)), synchronous(sync) {}
+  struct Entry {
+    std::string line;
+    std::uint64_t sequence;
+  };
+  Writer writer;
+  const bool synchronous;
+  std::mutex mutex, io_mutex;
+  std::condition_variable wake, changed;
+  std::deque<Entry> queue;
+  std::uint64_t accepted = 0, delivered = 0, dropped = 0, reported = 0;
+  std::uint64_t active_lines = 0;
+  std::size_t bytes = 0, active_bytes = 0;
+  bool stopping = false, done = false, failed = false;
+  std::string timeout_report;
+
+  void Run() {
+    std::unique_lock lock(mutex);
+    for (;;) {
+      wake.wait(lock, [&] {
+        return stopping || !queue.empty() || dropped != reported;
+      });
+      if (queue.empty() && dropped == reported && timeout_report.empty() &&
+          stopping) {
+        done = true;
+        changed.notify_all();
+        return;
+      }
+      std::string batch;
+      batch.reserve(65536);
+      std::uint64_t sequence = delivered, count = 0;
+      std::size_t consumed = 0;
+      // Cap fragments as well as bytes: both sparse and burst logs batch, while
+      // no ordinary line waits more than 100 ms before its first write starts.
+      while (!queue.empty() && count < 64 && batch.size() < 65536) {
+        auto& entry = queue.front();
+        batch += entry.line;
+        consumed += entry.line.size();
+        sequence = entry.sequence;
+        queue.pop_front();
+        ++count;
+      }
+      const auto drop_target = dropped;
+      if (drop_target != reported)
+        batch += "[log] dropped " + std::to_string(drop_target - reported) +
+                 " lines\n";
+      if (!timeout_report.empty()) {
+        batch += timeout_report;
+        timeout_report.clear();
+      }
+      active_lines = count;
+      active_bytes = consumed;
+      lock.unlock();
+      bool ok = true;
+      try {
+        const std::lock_guard io_lock(io_mutex);
+        writer(batch);
+      } catch (...) {
+        ok = false;
+      }
+      lock.lock();
+      bytes -= consumed;
+      active_lines = active_bytes = 0;
+      if (ok) {
+        delivered = sequence;
+        reported = drop_target;
+      } else {
+        // Stop after a sink error: retrying a broken descriptor would spin.
+        failed = done = true;
+        changed.notify_all();
+        return;
+      }
+      changed.notify_all();
+    }
+  }
+};
+
+AsyncLogSink::AsyncLogSink(Writer writer, bool synchronous)
+    : state_(std::make_shared<State>(std::move(writer), synchronous)) {
+  if (!synchronous)
+    std::thread([state = state_] { state->Run(); }).detach();
+}
+
+AsyncLogSink::~AsyncLogSink() {
+  (void)Shutdown();
+}
+
+void AsyncLogSink::Push(std::string line, LogLevel level) {
+  const auto state = state_;
+  if (state->synchronous) {
+    const std::lock_guard io_lock(state->io_mutex);
+    state->writer(line);
+    const std::lock_guard lock(state->mutex);
+    ++state->accepted;
+    ++state->delivered;
+    return;
+  }
+  std::unique_lock lock(state->mutex);
+  const auto lines = state->queue.size() + state->active_lines;
+  if (level < LogLevel::kWarn &&
+      (state->stopping || state->failed || lines >= 16384 ||
+       line.size() > 4 * 1024 * 1024 ||
+       state->bytes > 4 * 1024 * 1024 - line.size())) {
+    ++state->dropped;
+    state->wake.notify_one();
+    return;
+  }
+  if (state->stopping || state->failed || line.size() > 16 * 1024 * 1024 ||
+      state->bytes > 16 * 1024 * 1024 - line.size()) {
+    // Only WARN/ERROR can reach this deliberate last-resort synchronous path.
+    // Preserve the already accepted prefix before writing this fatal message.
+    lock.unlock();
+    (void)FlushSync();
+    const std::lock_guard io_lock(state->io_mutex);
+    state->writer(line);
+    return;
+  }
+  state->bytes += line.size();
+  state->queue.push_back({std::move(line), ++state->accepted});
+  state->wake.notify_one();
+}
+
+bool AsyncLogSink::FlushSync(std::chrono::milliseconds timeout) {
+  const auto state = state_;
+  std::unique_lock lock(state->mutex);
+  const auto target = state->accepted, drop_target = state->dropped;
+  state->wake.notify_one();
+  const auto ready = [&] {
+    return state->failed ||
+           (state->delivered >= target && state->reported >= drop_target);
+  };
+  if (timeout == std::chrono::milliseconds::max())
+    state->changed.wait(lock, ready);
+  else if (!state->changed.wait_for(lock, timeout, ready))
+    return false;
+  return !state->failed;
+}
+
+AsyncLogSink::Stats AsyncLogSink::GetStats() const {
+  const std::lock_guard lock(state_->mutex);
+  return {state_->accepted,
+          state_->delivered,
+          state_->dropped,
+          state_->reported,
+          state_->accepted - state_->delivered,
+          state_->bytes};
+}
+
+AsyncLogSink::Stats AsyncLogSink::Shutdown() {
+  const auto state = state_;
+  std::unique_lock lock(state->mutex);
+  if (!state->stopping) {
+    state->stopping = true;
+    state->wake.notify_one();
+    if (!state->synchronous)
+      state->changed.wait_for(lock, std::chrono::seconds(2),
+                              [&] { return state->done; });
+    const auto pending = state->accepted - state->delivered;
+    if (pending) {
+      state->timeout_report = "[log] shutdown: undelivered " +
+                              std::to_string(pending) +
+                              " lines (sink did not drain within 2 s)\n";
+#ifdef _WIN32
+      // A blocked stderr cannot receive a report within the deadline. Also
+      // expose it to the Windows debugger; the writer emits it if it resumes.
+      OutputDebugStringA(state->timeout_report.c_str());
+#endif
+    }
+  }
+  return {state->accepted,
+          state->delivered,
+          state->dropped,
+          state->reported,
+          state->accepted - state->delivered,
+          state->bytes};
+}
+
+void Logger::Raw(const char* format, ...) {
+  va_list args;
+  va_start(args, format);
+  auto line = FormatRaw(format, args);
+  va_end(args);
+  Sink().Push(std::move(line), LogLevel::kError);
+}
+
+void Logger::Raw(LogLevel level, const char* format, ...) {
+  va_list args;
+  va_start(args, format);
+  auto line = FormatRaw(format, args);
+  va_end(args);
+  Sink().Push(std::move(line), level);
+}
+
+bool Logger::FlushSync(std::chrono::milliseconds timeout) {
+  return Sink().FlushSync(timeout);
+}
+
+void Logger::Shutdown() {
+  (void)Sink().Shutdown();
+}
+
+#ifdef GUFO_LOG_TESTING
+void Logger::SetSinkForTesting(AsyncLogSink* sink) {
+  test_sink = sink;
+}
+#endif
 
 std::optional<LogLevel> LogLevelFromName(std::string_view name) {
   if (name == "debug")
@@ -139,16 +401,14 @@ void Logger::Log(LogLevel level, std::string_view component,
     output << "\033[0m";
   output << " [" << SafeLine(component, 64) << "] " << SafeLine(message)
          << '\n';
-  const std::lock_guard lock(LogMutex());
-  std::clog << output.str() << std::flush;
+  Sink().Push(output.str(), level);
 }
 
 void Logger::Diagnostic(std::string_view component, std::string_view message) {
   std::ostringstream output;
-  output << CurrentTimestamp() << " [INFO] [" << SafeLine(component, 64)
-         << "] " << SafeLine(message, message.size()) << '\n';
-  const std::lock_guard lock(LogMutex());
-  std::clog << output.str() << std::flush;
+  output << CurrentTimestamp() << " [INFO] [" << SafeLine(component, 64) << "] "
+         << SafeLine(message, message.size()) << '\n';
+  Sink().Push(output.str(), LogLevel::kInfo);
 }
 
 void Logger::LogFormatted(LogLevel level, std::string_view component,

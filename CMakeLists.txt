@@ -239,6 +239,11 @@ endif()
 add_library(gufo_logging STATIC src/cli/serve/logging.cpp src/cli/serve/trace.cpp)
 target_include_directories(gufo_logging PUBLIC ${PROJECT_SOURCE_DIR})
 target_compile_features(gufo_logging PUBLIC cxx_std_20)
+target_link_libraries(gufo_logging PUBLIC Threads::Threads)
+target_link_libraries(gufo_qwen38_flash_next PUBLIC gufo_logging)
+if(TARGET gufo_qwen38_flash_next_mmq)
+  target_link_libraries(gufo_qwen38_flash_next_mmq PUBLIC gufo_logging)
+endif()
 
 # The imported DeepSeek V4 Flash runtime routes its informational messages
 # through the shared logger instead of writing to stderr directly, so it needs
@@ -433,6 +438,12 @@ if (BUILD_TESTING)
 
   set(GUFO_PRODUCTION_ENV_SPEC "$ENV{GUFO_PRODUCTION_ENV_SPEC}" CACHE FILEPATH "Optional production release settings specification")
   file(TO_CMAKE_PATH "${GUFO_PRODUCTION_ENV_SPEC}" GUFO_PRODUCTION_ENV_SPEC_PATH)
+  add_executable(log_async_test tests/cli/log_async_test.cpp src/cli/serve/logging.cpp)
+  target_compile_definitions(log_async_test PRIVATE GUFO_LOG_TESTING=1)
+  target_link_libraries(log_async_test PRIVATE Threads::Threads)
+  add_test(NAME log_async_test COMMAND log_async_test)
+  set_tests_properties(log_async_test PROPERTIES LABELS "cpu;cli;release;check-pr" TIMEOUT 45)
+
   add_executable(release_profile_test
     tests/cli/release_profile_test.cpp
     src/cli/serve/release_profile.cpp)
@@ -1136,7 +1147,7 @@ if (BUILD_TESTING)
   # Compile the release layer and its CPU regressions as one named group.
   # A single target also works with PowerShell -File string-array parameters.
   add_custom_target(release_cpu_tests
-    DEPENDS gufo release_profile_test openai_chat_test arg_parser_test
+    DEPENDS gufo release_profile_test log_async_test openai_chat_test arg_parser_test
       behaviour_test loop_breaker_test continuation_cache_test
       text_model_runner_test text_generation_scheduler_test)
 

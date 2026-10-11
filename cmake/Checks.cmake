@@ -12,7 +12,7 @@ set(gufo_pr_targets
   cache_retention_test
   arg_parser_test json_test json_constraint_test gguf_reader_test gguf_identity_test
   logit_sampler_test ggml_dequant_test
-  loop_breaker_test release_profile_test
+  loop_breaker_test release_profile_test log_async_test
   quote_tracker_test
   openai_chat_test http_server_test trace_test audio_websocket_test
   text_generation_scheduler_test

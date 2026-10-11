@@ -4778,6 +4778,31 @@
       "aliases": [],
       "takes_value": true,
       "echo": true
+    },
+    {
+      "name": "GUFO_LOG_SYNC",
+      "kind": "env",
+      "class": "INTERNAL",
+      "model_family": "any",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": null,
+        "subagents": null,
+        "exact": null
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Write logs synchronously for crash diagnostics.",
+      "default_text": "off",
+      "hardware_scope": "generic",
+      "note": "Use 1 for synchronous logs. A hard crash can lose about 100 ms of asynchronous logs.",
+      "built_in": "0",
+      "value_rule": "bool",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true
     }
   ]
 }

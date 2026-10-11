@@ -2849,6 +2849,7 @@ void TestProgressLoggingIsOptInAndBounded() {
     auto control = std::make_shared<FakeControl>();
     control->prefill_capacity = 2;
     std::ostringstream output;
+    gufo::server::Logger::FlushSync();
     auto* previous = std::clog.rdbuf(output.rdbuf());
     {
       auto scheduler = MakeScheduler(
@@ -2858,6 +2859,7 @@ void TestProgressLoggingIsOptInAndBounded() {
       Expect(result.tokens.size() == 55,
              "progress logging preserves generated tokens");
     }
+    gufo::server::Logger::FlushSync();
     std::clog.rdbuf(previous);
     return output.str();
   };
@@ -2880,6 +2882,7 @@ void TestAdmissionLoggingIsDebugTierOnly() {
     const auto previous_level = gufo::server::Logger::Level();
     gufo::server::Logger::SetLevel(level);
     std::ostringstream output;
+    gufo::server::Logger::FlushSync();
     auto* previous = std::clog.rdbuf(output.rdbuf());
     bool rejected = false;
     {
@@ -2903,6 +2906,7 @@ void TestAdmissionLoggingIsDebugTierOnly() {
       (void)active.Wait();
       (void)queued.Wait();
     }
+    gufo::server::Logger::FlushSync();
     std::clog.rdbuf(previous);
     gufo::server::Logger::SetLevel(previous_level);
     Expect(rejected, "admission logging still rejects a full pending queue");
@@ -3553,10 +3557,12 @@ void TestDebugTimelineRequestTruncation() {
   TextRequestMetadata metadata;
   metadata.debug_timeline = true;
   std::ostringstream lines;
+  gufo::server::Logger::FlushSync();
   auto* old_buffer = std::clog.rdbuf(lines.rdbuf());
   const auto result = scheduler->Submit({1, 2},
       gufo::server::DebugTimeline::kMaxDecodeCycles + 1, 0.0F, {}, false,
       metadata).Wait();
+  gufo::server::Logger::FlushSync();
   std::clog.rdbuf(old_buffer);
   std::size_t cycles = 0;
   const auto events = gufo::server::SerializeDebugTimeline(result);

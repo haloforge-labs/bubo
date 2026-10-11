@@ -170,6 +170,7 @@ Use `--print-effective-settings` to inspect settings without loading tensors or 
 | `GUFO_HIPBLASLT_PLAN_CACHE` | Control hipblaslt plan cache. | - | Inventory classification. | any; generic; any |
 | `GUFO_IQ4_WIDE_VARIANT` | Control iq4 wide variant. | 4 | Inventory classification. | any; generic; qwen3.8-flash-next |
 | `GUFO_IQ4_WMMA_WAVES` | Control iq4 wmma waves. | 8 | Inventory classification. | any; generic; qwen3.8-flash-next |
+| `GUFO_LOG_SYNC` | Write logs synchronously for crash diagnostics. | off | Use 1 for synchronous logs. A hard crash can lose about 100 ms of asynchronous logs. | any; generic; any |
 | `GUFO_MEM_ACCOUNTING` | Control mem accounting. | off | Inventory classification. | any; generic; any |
 | `GUFO_MOE_BENCH` | Control moe bench. | off | Inventory classification. | any; generic; qwen3.8-flash-next |
 | `GUFO_MTP_TRACE` | Write one trace line for each decode cycle. | off | With stderr redirected by Start-Process, this trace costs about 20 % decode until asynchronous logging is available. | any; generic; qwen3.8-flash-next |

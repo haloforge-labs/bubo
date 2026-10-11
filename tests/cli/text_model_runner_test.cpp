@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "src/cli/serve/continuation_disk_store.hpp"
+#include "src/cli/serve/logging.hpp"
 #include "src/core/json.hpp"
 #include "src/models/qwen/control_tokens.hpp"
 #include "src/models/qwen/vision/prompt.hpp"
@@ -2244,11 +2245,13 @@ void TestSnapshotCacheCapacityIsReportedAtStartup() {
               std::make_shared<SnapshotRunner>(stats, 64, 256, budget);
           runner->retained_snapshot_ceiling_bytes = ceiling;
           std::ostringstream startup_log;
+          gufo::server::Logger::FlushSync();
           auto* previous = std::clog.rdbuf(startup_log.rdbuf());
           {
             TextRunnerPool pool(runner, sessions, std::nullopt,
                                 {.capacity_bytes = requested});
           }
+          gufo::server::Logger::FlushSync();
           std::clog.rdbuf(previous);
           const auto output = startup_log.str();
           const auto automatic =
@@ -2326,10 +2329,12 @@ void TestSnapshotStartupReportsSelectedLimits() {
   auto stats = std::make_shared<FakeStats>();
   auto runner = std::make_shared<ChangingHeadroomRunner>(stats);
   std::ostringstream startup_log;
+  gufo::server::Logger::FlushSync();
   auto* previous = std::clog.rdbuf(startup_log.rdbuf());
   {
     TextRunnerPool pool(runner, 1, std::nullopt, {.capacity_bytes = 8 * gib});
   }
+  gufo::server::Logger::FlushSync();
   std::clog.rdbuf(previous);
 
   const auto output = startup_log.str();
@@ -2765,16 +2770,20 @@ int main(int argc, char** argv) {
   TestSnapshotForkAndUnsupportedCapabilities();
   TestSnapshotCacheBranchesOnePrefixIntoIndependentStates();
   std::ostringstream normal_log;
+  gufo::server::Logger::FlushSync();
   auto* previous = std::clog.rdbuf(normal_log.rdbuf());
   TestSnapshotRetentionUsesPromptBoundary();
+  gufo::server::Logger::FlushSync();
   std::clog.rdbuf(previous);
   Expect(normal_log.str().find("action=removed") == std::string::npos &&
              normal_log.str().find("action=skipped") == std::string::npos,
          "routine cache replacement stays quiet");
 
   std::ostringstream eviction_log;
+  gufo::server::Logger::FlushSync();
   previous = std::clog.rdbuf(eviction_log.rdbuf());
   TestEntryCapacityEvictionIsLogged();
+  gufo::server::Logger::FlushSync();
   std::clog.rdbuf(previous);
   Expect(
       eviction_log.str().find("action=removed") != std::string::npos &&
@@ -2792,8 +2801,10 @@ int main(int argc, char** argv) {
   TestMeasuredStateIsReconciledWithClaim();
   TestSnapshotBudgetRefusalDoesNotFailCompletedRequest();
   std::ostringstream failure_log;
+  gufo::server::Logger::FlushSync();
   previous = std::clog.rdbuf(failure_log.rdbuf());
   TestSnapshotCaptureFailureReleasesReservationAndKeepsRequestSuccessful();
+  gufo::server::Logger::FlushSync();
   std::clog.rdbuf(previous);
   Expect(
       failure_log.str().find("[WARN] [cache]") != std::string::npos &&
