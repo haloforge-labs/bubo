@@ -447,7 +447,7 @@ if (BUILD_TESTING)
   add_executable(release_profile_test
     tests/cli/release_profile_test.cpp
     src/cli/serve/release_profile.cpp)
-  target_link_libraries(release_profile_test PRIVATE gufo_core)
+  target_link_libraries(release_profile_test PRIVATE gufo_core gufo_logging)
   target_compile_definitions(release_profile_test PRIVATE
     GUFO_PRODUCTION_ENV_SPEC="${GUFO_PRODUCTION_ENV_SPEC_PATH}"
     GUFO_RELEASE_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
@@ -517,6 +517,7 @@ if (BUILD_TESTING)
   set_tests_properties(json_test PROPERTIES LABELS "cpu;json")
 
   add_executable(platform_tuning_test tests/core/platform_tuning_test.cpp)
+  target_link_libraries(platform_tuning_test PRIVATE gufo_logging)
   add_test(NAME platform_tuning_test COMMAND platform_tuning_test)
   set_tests_properties(platform_tuning_test PROPERTIES LABELS "cpu")
 
@@ -1147,7 +1148,7 @@ if (BUILD_TESTING)
   # Compile the release layer and its CPU regressions as one named group.
   # A single target also works with PowerShell -File string-array parameters.
   add_custom_target(release_cpu_tests
-    DEPENDS gufo release_profile_test log_async_test openai_chat_test arg_parser_test
+    DEPENDS gufo release_profile_test log_async_test platform_tuning_test openai_chat_test arg_parser_test
       behaviour_test loop_breaker_test continuation_cache_test
       text_model_runner_test text_generation_scheduler_test)
 
