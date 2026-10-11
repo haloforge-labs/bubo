@@ -5,6 +5,13 @@ function(add_qwen_cpu_test target source labels)
   set_tests_properties(${target} PROPERTIES LABELS "${labels}")
 endfunction()
 
+add_qwen_cpu_test(qwen_parallel_paths_test
+  tests/models/qwen/cpu/parallel_paths_test.cpp
+  "cpu;qwen")
+add_qwen_cpu_test(parallel_for_test
+  tests/core/parallel_for_test.cpp
+  "cpu")
+
 # Qwen tests mirror src/models/qwen so focused module, policy, and runtime
 # changes have an obvious validation target while preserving CTest names.
 add_qwen_cpu_test(qwen_tokenizer_test

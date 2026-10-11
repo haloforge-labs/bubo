@@ -9,6 +9,7 @@
 #include <span>
 #include <vector>
 
+#include "src/core/parallel_for.hpp"
 #include "src/models/qwen/forward.hpp"
 #include "src/models/qwen/gemm_route.hpp"
 
@@ -208,8 +209,7 @@ void ForwardSSM(std::span<const float> x_normed,
   auto conv_state = ssm_cache.GetConvState(layer_idx);
   std::vector<float> conv_out(qkv_dim, 0.0F);
 
-#pragma omp parallel for schedule(static)
-  for (std::size_t c = 0; c < qkv_dim; ++c) {
+  core::ParallelFor(qkv_dim, [&](std::size_t c) {
     const std::size_t c_off = c * conv_kernel;
     for (std::uint32_t k = 1; k < conv_kernel; ++k) {
       conv_state[c_off + k - 1] = conv_state[c_off + k];
@@ -228,7 +228,7 @@ void ForwardSSM(std::span<const float> x_normed,
     }
 
     conv_out[c] = SiLU(dot);
-  }
+  });
 
   // 3. Partition Q, K, V from conv_out
   const float* q_ptr = conv_out.data();
@@ -238,8 +238,8 @@ void ForwardSSM(std::span<const float> x_normed,
       conv_out.data() + (static_cast<std::size_t>(num_k_heads) * key_dim * 2);
 
   // 4. Per-head Gated DeltaNet matrix recurrence.
-#pragma omp parallel for schedule(static)
-  for (std::uint32_t h = 0; h < num_v_heads; ++h) {
+  core::ParallelFor(num_v_heads, [&](std::size_t head) {
+    const auto h = static_cast<std::uint32_t>(head);
     auto s_matrix = ssm_cache.GetDeltaNetState(layer_idx, h);
     const std::uint32_t kh_idx = h % num_k_heads;
     const float* q_h = q_ptr + (static_cast<std::size_t>(kh_idx) * key_dim);
@@ -311,7 +311,7 @@ void ForwardSSM(std::span<const float> x_normed,
       }
       o_h[j] = o_j;
     }
-  }
+  });
 
   // 5. Per-Head Output RMSNorm (128 elements per head norm)
   if (!parameters.norm.empty()) {
@@ -324,10 +324,9 @@ void ForwardSSM(std::span<const float> x_normed,
   }
 
   // 6. Gating: y = o * SiLU(gate)
-#pragma omp parallel for schedule(static)
-  for (std::size_t i = 0; i < gate_dim; ++i) {
+  core::ParallelFor(gate_dim, [&](std::size_t i) {
     ssm_out_scratch[i] *= SiLU(ssm_gate_scratch[i]);
-  }
+  });
 
   // 7. Linear Output Projection
   if (!parameters.output.empty()) {

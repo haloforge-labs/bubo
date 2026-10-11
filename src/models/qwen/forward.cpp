@@ -9,6 +9,7 @@
 #include <cstring>
 #include <span>
 
+#include "src/core/parallel_for.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
 #include "src/core/quant/ggml_gemm.hpp"
 #include "src/models/qwen/gemm_route.hpp"
@@ -54,21 +55,19 @@ void TensorGEMV(const QwenTensorRef& A, std::span<const float> x, std::size_t M,
   switch (resolution.route) {
     case qwen::QwenGemmRoute::kCpuF32Rows: {
       const auto* ptr = static_cast<const float*>(A.data);
-#pragma omp parallel for schedule(static)
-      for (std::size_t m = 0; m < M; ++m) {
+      core::ParallelFor(M, [&](std::size_t m) {
         const auto* row = ptr + (m * K);
         float dot = 0.0F;
         for (std::size_t k = 0; k < K; ++k) {
           dot += row[k] * x[k];
         }
         y[m] = dot;
-      }
+      });
       return;
     }
     case qwen::QwenGemmRoute::kCpuBf16Rows: {
       const auto* ptr = static_cast<const std::uint16_t*>(A.data);
-#pragma omp parallel for schedule(static)
-      for (std::size_t m = 0; m < M; ++m) {
+      core::ParallelFor(M, [&](std::size_t m) {
         const auto* row = ptr + (m * K);
         float dot = 0.0F;
         for (std::size_t k = 0; k < K; ++k) {
@@ -78,28 +77,26 @@ void TensorGEMV(const QwenTensorRef& A, std::span<const float> x, std::size_t M,
           dot += val * x[k];
         }
         y[m] = dot;
-      }
+      });
       return;
     }
     case qwen::QwenGemmRoute::kCpuF16Rows: {
       const auto* ptr = static_cast<const std::uint16_t*>(A.data);
-#pragma omp parallel for schedule(static)
-      for (std::size_t m = 0; m < M; ++m) {
+      core::ParallelFor(M, [&](std::size_t m) {
         const auto* row = ptr + (m * K);
         float dot = 0.0F;
         for (std::size_t k = 0; k < K; ++k) {
           dot += quant::Fp16ToFloat(row[k]) * x[k];
         }
         y[m] = dot;
-      }
+      });
       return;
     }
     case qwen::QwenGemmRoute::kCpuQuantDot:
-#pragma omp parallel for schedule(static)
-      for (std::size_t m = 0; m < M; ++m) {
+      core::ParallelFor(M, [&](std::size_t m) {
         const void* row = QuantizedRow(A, m, K);
         y[m] = quant::Dot(A.type, row, x, K);
-      }
+      });
       return;
     default:
       assert(false && "TensorGEMV: non-CPU GEMM route");
