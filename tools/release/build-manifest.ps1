@@ -55,7 +55,11 @@ $hashes = @($files | ForEach-Object {
 })
 . "$PSScriptRoot\pe-imports.ps1"
 $closure = Get-PeClosure $exe[0].FullName @($exe[0].DirectoryName)
-$linkedNames = @($closure.Edges | ForEach-Object Name | Sort-Object -Unique)
+# Lazy inference is a separate closure root; preserve linked-port evidence.
+$enginePath = Join-Path $exe[0].DirectoryName 'bubo-engine.dll'
+if (-not (Test-Path -LiteralPath $enginePath)) { throw 'Package inference DLL missing' }
+$engineClosure = Get-PeClosure $enginePath @($exe[0].DirectoryName)
+$linkedNames = @(@($closure.Edges) + @($engineClosure.Edges) | ForEach-Object Name | Sort-Object -Unique)
 $linkedPorts = @()
 foreach ($port in ($ports | Where-Object { $_.version })) {
   $list = Join-Path $installed "vcpkg\info\$($port.name)_$($port.version)_$triplet.list"

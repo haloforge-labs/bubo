@@ -20,6 +20,11 @@ $build = Join-Path $root "build\$BuildName"
 $brand = Get-Content -LiteralPath (Join-Path $build "generated\brand.json") -Raw | ConvertFrom-Json
 if ($brand.product -ne 'bubo' -or $brand.exe -ne 'bubo.exe') { throw 'Bubo package requires GUFO_BRAND=bubo' }
 if ($brand.product_version -ne $Version) { throw 'Product version changed; reconfigure and rebuild before packaging' }
+if (-not (Test-Path -LiteralPath (Join-Path $build 'prepare_gate.exe'))) {
+  throw 'Build prepare_gate before packaging; production source evidence is mandatory'
+}
+& (Join-Path $build 'prepare_gate.exe') --release (Join-Path $root 'tools\release\prepare-evidence')
+if ($LASTEXITCODE -ne 0) { throw 'Prepare release pin/evidence gate failed' }
 if (-not $Out) { $Out = Join-Path $root "dist" }
 $Out = [IO.Path]::GetFullPath($Out)
 if (-not (Test-Path (Join-Path $build $brand.exe))) { throw "build first: tools\windows\build.ps1" }
@@ -32,6 +37,11 @@ $bin = Join-Path $stage "bin"
 New-Item -ItemType Directory -Force $bin, (Join-Path $stage "tools\windows") | Out-Null
 
 Copy-Item (Join-Path $build $brand.exe) $bin
+if (-not (Test-Path -LiteralPath (Join-Path $build 'bubo-engine.dll'))) {
+  throw 'Bubo package requires the matching lazy inference DLL; rebuild bubo'
+}
+# bubo-engine.dll and the vcpkg z.dll are included by the DLL glob below.
+# zlib1.dll is not the runtime name in this vcpkg triplet.
 # Audited against normal/delay import closure and source/port dynamic loads.
 # Keep AMD runtime files: prepare supplies them; this filter removes only the
 # unused vcpkg extras. Recheck the closure before dropping any other library.
@@ -60,17 +70,21 @@ Copy-Item (Join-Path $root "LICENSE") $stage
 Copy-Item (Join-Path $root "tools\windows\prebuilt\README.txt"), (Join-Path $root "tools\windows\prebuilt\THIRD-PARTY.txt") $stage
 New-Item -ItemType Directory -Force (Join-Path $stage "licenses") | Out-Null
 Copy-Item (Join-Path $Vcpkg "installed\x64-windows\share\libwebp\copyright") (Join-Path $stage "licenses\libwebp.txt")
+Copy-Item (Join-Path $Vcpkg "installed\x64-windows\share\zlib\copyright") (Join-Path $stage "licenses\zlib.txt")
 $commit = (& git -C $root rev-parse --short HEAD 2>$null)
 Add-Content (Join-Path $stage "README.txt") "`r`nBuilt from https://github.com/pixmaate/gufo commit $commit ($Version)."
 
 & "$root\tools\release\check-package.ps1" -PackageFolder $stage
 if ($LASTEXITCODE -ne 0) { throw 'Release import deny-list failed' }
 . "$root\tools\release\pe-imports.ps1"
-$closure = Get-PeClosure (Join-Path $bin $brand.exe)
-$missing = @($closure.Edges | Where-Object {
-  $_.Resolution -eq 'missing' -and -not $_.From.StartsWith("$env:SystemRoot\", [StringComparison]::OrdinalIgnoreCase)
-})
-if ($missing.Count) { throw "Package import closure is incomplete: $($missing.Name -join ', ')" }
+foreach ($entry in @($brand.exe, 'bubo-engine.dll')) {
+  # The engine is loaded dynamically, so it is a separate closure root.
+  $closure = Get-PeClosure (Join-Path $bin $entry)
+  $missing = @($closure.Edges | Where-Object {
+    $_.Resolution -eq 'missing' -and -not $_.From.StartsWith("$env:SystemRoot\", [StringComparison]::OrdinalIgnoreCase)
+  })
+  if ($missing.Count) { throw "Package import closure is incomplete: $($missing.Name -join ', ')" }
+}
 & "$root\tools\release\build-manifest.ps1" -BuildFolder $build -PackageFolder $stage
 
 $zip = Join-Path $Out "$name.zip"
