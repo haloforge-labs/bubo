@@ -440,6 +440,36 @@ void ReviewFailure(bool synchronous) {
       exceptions == 0 && later && once,
       "writer exceptions contained, later lines delivered, one failure report");
 }
+void SummaryFailure() {
+  auto blocked = std::make_shared<Blocked>();
+  AsyncLogSink sink([blocked](std::string_view batch) {
+    if (batch.starts_with("[log] dropped "))
+      throw std::runtime_error("injected summary failure");
+    blocked->Write(batch);
+  });
+  sink.Push("seed\n", LogLevel::kError);
+  Expect(blocked->entered.try_acquire_for(2s), "summary-failure seed entered");
+  sink.Push(std::string(5 * 1024 * 1024, 'I'), LogLevel::kInfo);
+  blocked->resume.release();
+  const bool flushed = sink.FlushSync();
+  sink.Push("later\n", LogLevel::kError);
+  sink.Shutdown();
+  const auto stats = sink.GetStats();
+  const auto text = blocked->capture->Text();
+  std::cout << "review-summary-failure flush=" << flushed
+            << " failures=" << stats.failures
+            << " failed_lines=" << stats.failed_lines
+            << " dropped=" << stats.dropped << '\n';
+  Expect(
+      !flushed && stats.failures == 1 && stats.failed_lines == 0 &&
+          stats.dropped == 1,
+      "a failed summary write is counted and cannot claim a successful flush");
+  Expect(text.find("later\n") != std::string::npos &&
+             text.find("[log] sink failures 1 writes, discarded 0 lines\n") !=
+                 std::string::npos,
+         "writer recovers and reports its failed summary once");
+}
+
 void ReviewWording() {
   auto blocked = std::make_shared<Blocked>();
   AsyncLogSink sink(
@@ -561,6 +591,7 @@ int main(int argc, char** argv) {
   ReviewTimeout(true);
   ReviewFailure(true);
   ReviewFailure(false);
+  SummaryFailure();
   ReviewWording();
   DefaultFlushBound();
   SlowSink();

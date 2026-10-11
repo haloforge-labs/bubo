@@ -367,7 +367,7 @@ bool AsyncLogSink::FlushSync(std::chrono::milliseconds timeout) {
   timeout = std::min(timeout, std::chrono::milliseconds(1950));
   if (!state->changed.wait_for(lock, timeout, ready))
     return false;
-  return !state->discard && state->failed_lines == 0;
+  return !state->discard && state->failures == 0;
 }
 
 AsyncLogSink::Stats AsyncLogSink::GetStats() const {
