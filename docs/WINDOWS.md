@@ -8,10 +8,12 @@ builds are unaffected: the port lives in `compat/win32`, Windows-only files and
 ## Prebuilt
 
 Each [release](https://github.com/pixmaate/gufo/releases) carries
-`bubo-windows-<date>.zip`: `bubo.exe` with the ROCm, vcpkg and Visual C++
+`bubo-<product>-windows-x64.zip`: `bubo.exe` with the ROCm, vcpkg and Visual C++
 runtimes in `bin\`, and `start.cmd`. It needs only a Strix Halo (gfx1151)
 machine, a current AMD driver and the models; its `README.txt` lists the
 downloads. `tools\windows\package.ps1` makes the zip from a release build.
+Its product version comes from `tools/release/product_version.txt` and must
+match the configured build metadata.
 
 ## Prerequisites
 

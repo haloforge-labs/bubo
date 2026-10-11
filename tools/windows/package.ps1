@@ -1,27 +1,29 @@
 # Packs the release build into a prebuilt zip for people who do not build:
-#   bubo-windows-<version>\
+#   bubo-<product-version>-windows-x64\
 #     start.cmd                    the launcher (number keys)
 #     bin\bubo.exe + DLLs          ROCm runtime (gfx1151 kernels), vcpkg libraries,
 #                                  and the Visual C++ / OpenMP runtimes (app-local)
 #     tools\windows\launcher.ps1, inventory.ps1
 #     README.txt, LICENSE, THIRD-PARTY.txt
 #
-#   powershell -ExecutionPolicy Bypass -File tools\windows\package.ps1 [-Version 2026-10-03] [-Out dist]
+#   powershell -ExecutionPolicy Bypass -File tools\windows\package.ps1 [-Out dist]
 param(
-  [string]$Version = (Get-Date -Format "yyyy-MM-dd"),
   [string]$Out = "",
   [string]$BuildName = "release",
   [string]$Vcpkg = "C:\vcpkg"
 )
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path "$PSScriptRoot\..\..").Path
+$Version = (Get-Content -LiteralPath (Join-Path $root 'tools\release\product_version.txt') -Raw).Trim()
+if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { throw 'Invalid tracked product version' }
 $build = Join-Path $root "build\$BuildName"
 $brand = Get-Content -LiteralPath (Join-Path $build "generated\brand.json") -Raw | ConvertFrom-Json
 if ($brand.product -ne 'bubo' -or $brand.exe -ne 'bubo.exe') { throw 'Bubo package requires GUFO_BRAND=bubo' }
+if ($brand.product_version -ne $Version) { throw 'Product version changed; reconfigure and rebuild before packaging' }
 if (-not $Out) { $Out = Join-Path $root "dist" }
 if (-not (Test-Path (Join-Path $build $brand.exe))) { throw "build first: tools\windows\build.ps1" }
 
-$name = "$($brand.product)-windows-$Version"
+$name = "$($brand.product)-$Version-windows-x64"
 $stage = Join-Path $Out $name
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 $bin = Join-Path $stage "bin"
