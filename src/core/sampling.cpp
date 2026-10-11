@@ -1000,7 +1000,8 @@ SamplingDistribution SamplerState::LinearDistribution(
   return SamplingDistribution(std::move(candidates), total);
 }
 
-void SamplerState::PrepareSelected(std::span<const float> logits) {
+void SamplerState::PrepareSelected(std::span<const float> logits,
+                                   SelectionProof* proof) {
   candidate_scratch_.clear();
   // Vocabulary IDs and sparse penalties are both sorted. Walk them together
   // instead of searching the penalties for every vocabulary entry.
@@ -1121,11 +1122,14 @@ void SamplerState::PrepareSelected(std::span<const float> logits) {
   } else {
     select_all();
   }
-  FinishSelected(full_softmax_sum, has_full_softmax_sum);
+  if (proof && !candidate_scratch_.empty())
+    proof->topk_last = candidate_scratch_.back();
+  FinishSelected(full_softmax_sum, has_full_softmax_sum, proof);
 }
 
 void SamplerState::FinishSelected(double full_softmax_sum,
-                                  bool has_full_softmax_sum) {
+                                  bool has_full_softmax_sum,
+                                  SelectionProof* proof) {
   if (candidate_scratch_.empty()) {
     throw std::runtime_error("logit distribution contains no finite values");
   }
@@ -1145,6 +1149,7 @@ void SamplerState::FinishSelected(double full_softmax_sum,
     double cumulative = 0.0;
     std::size_t top_p_keep = 0;
     while (top_p_keep < keep) {
+      if (proof) proof->previous_mass = cumulative;
       cumulative += std::exp((candidate_scratch_[top_p_keep].value - maximum) /
                              config_.temperature);
       ++top_p_keep;
@@ -1153,6 +1158,11 @@ void SamplerState::FinishSelected(double full_softmax_sum,
       }
     }
     keep = top_p_keep;
+    if (proof) {
+      proof->full_sum = sum;
+      proof->top_p_keep = keep;
+      proof->minimum = minimum;
+    }
   }
   if (config_.min_p > 0.0F && keep > 1) {
     const double threshold = candidate_scratch_.front().value +
@@ -1168,6 +1178,116 @@ void SamplerState::FinishSelected(double full_softmax_sum,
   candidate_scratch_.resize(keep);
 }
 
+
+std::optional<SamplingDistribution> SamplerState::InertEogDistribution(
+    std::span<const float> logits, SamplerState& native) const {
+  const auto& b = *config_.behaviour;
+  const auto& st = behaviour_state_;
+  // Only EOG masks can be active here. Keep the general path for active masks,
+  // penalties, bias, forcing, close rewrites and sampling-profile changes.
+  if (NeedsConstraintMask() || config_.penalties_enabled() ||
+      b.production_sampling ||
+      (b.logit_bias_enabled && !b.logit_bias.empty()) ||
+      (b.model_suppress_tokens && !b.suppress_ids.empty()) || st.forcing() ||
+      (st.thinking && b.marker_bias != 0 && !b.marker_ids.empty()) ||
+      (b.loop_breaker && st.loop.nudging()) ||
+      (st.thinking && eog_closes_think(b, st)) || st.boundary.deferred_stop ||
+      config_.min_p != 0 ||
+      (config_.temperature > 0 && config_.top_k == 0 && config_.top_p >= 1))
+    return std::nullopt;
+
+  // This inexpensive scan also rejects EOG-dominated rows before attempting
+  // a full top-p softmax. Eligibility never determines a sampling decision.
+  const auto winner = native.SampleGreedy(logits);
+  const double maximum = logits[winner];
+  if (std::ranges::find(b.eog_ids, winner) != b.eog_ids.end())
+    return std::nullopt;
+  for (auto token : b.eog_ids) {
+    if (token >= logits.size() || !std::isfinite(logits[token]))
+      continue;
+    const double mass = std::exp(static_cast<double>(logits[token]) - maximum);
+    // A confident masked stop changes the deferred-stop journal even when
+    // the filtered token is identical. Require the existing exact bound.
+    if (!st.thinking && b.eog_boundary && !st.boundary.allowed() &&
+        b.eog_defer_p > 0 && !(mass < b.eog_defer_p))
+      return std::nullopt;
+    if (config_.temperature > 0 && config_.top_k == 0 &&
+        !(mass < 1.0 - static_cast<double>(config_.top_p)))
+      return std::nullopt;
+  }
+
+  SamplingDistribution current;
+  if (config_.temperature == 0) {
+    current = SamplingDistribution({{winner, 1.0}}, 1.0);
+  } else {
+    SelectionProof proof;
+    native.PrepareSelected(logits, &proof);
+    auto& selected = native.candidate_scratch_;
+    for (const auto& entry : selected)
+      if (std::ranges::find(b.eog_ids, entry.token) != b.eog_ids.end())
+        return std::nullopt;
+    if (config_.top_k > 0) {
+      // A mask strictly outside the raw top-k cannot affect truncation,
+      // normalization, top-p or min-keep. Include the token-ID tie break.
+      for (auto token : b.eog_ids)
+        if (token < logits.size() && std::isfinite(logits[token]) &&
+            !IsBetterProbability(proof.topk_last, {token, logits[token]}))
+          return std::nullopt;
+    } else if (proof.top_p_keep > proof.minimum) {
+      // All retained terms and the maximum are unchanged. The masked sum is
+      // <= the original sum, since both add nonnegative terms in ID order.
+      // Bound its decrease by removed terms plus roundoff in BOTH sums:
+      // gamma_n bounds an n-term positive floating-point sum. Use epsilon
+      // (twice unit roundoff), and a further factor four for conservative
+      // accumulation/product rounding. No approximate probabilities enter
+      // the returned distribution. Unsettled cutoffs use the general path.
+      const double ne = static_cast<double>(logits.size()) *
+                        std::numeric_limits<double>::epsilon();
+      if (!(ne < .5))
+        return std::nullopt;
+      double tempered_removed = 0;
+      for (auto token : b.eog_ids)
+        if (token < logits.size() && std::isfinite(logits[token]))
+          tempered_removed = std::nextafter(
+              tempered_removed +
+                  std::exp((static_cast<double>(logits[token]) - maximum) /
+                           config_.temperature),
+              INFINITY);
+      const double error = 4 * (ne / (1 - ne)) * proof.full_sum;
+      const double lower = proof.full_sum - tempered_removed - error;
+      if (!(proof.previous_mass + error <
+            static_cast<double>(config_.top_p) * lower))
+        return std::nullopt;
+    }
+    const double peak = selected.front().value;
+    double total = 0;
+    for (auto& candidate : selected) {
+      candidate.value =
+          std::exp((candidate.value - peak) / config_.temperature);
+      total += candidate.value;
+    }
+    current = SamplingDistribution(std::move(selected), total);
+  }
+
+  auto metadata = std::make_shared<BehaviourDistribution>();
+  metadata->random = config_.temperature > 0;
+  const auto stage = [&](std::string name, std::string reason) {
+    metadata->stages.push_back({std::move(name), std::move(reason), current,
+                                current, metadata->random, metadata->random});
+  };
+  if (!st.thinking) {
+    if (b.eog_boundary && !st.boundary.allowed())
+      stage("eog_boundary", "visible_text_not_at_boundary");
+    if (b.eog_min_prob > 0)
+      stage("eog_min_prob", b.eog_min_prob_exact
+                                ? "raw_full_probability_below_threshold"
+                                : "raw_topk_upper_bound_below_threshold");
+  } else if (b.think_eog_guard) {
+    stage("think_eog_guard", "eog_inside_open_think");
+  }
+  current.behaviour_ = std::move(metadata);
+  return current;
+}
 
 SamplerState SamplerState::WithoutBehaviour() const {
   auto copy=*this; copy.config_.behaviour.reset(); return copy;
@@ -1537,6 +1657,8 @@ SamplingDistribution SamplerState::BehaviourDistributionFor(
   const bool global=!ids.empty()&&vocab>0;
   auto native=WithoutBehaviour();
   if(behaviour_state_.thinking)native.config_.constraint.reset();
+  if (ids.empty() && observe_behaviour_)
+    if (auto inert = InertEogDistribution(logits, native)) return std::move(*inert);
   const auto build_with=[&](SamplerState working,std::span<const float> row){
     if(global) {
       std::vector<std::size_t> order(ids.size());

@@ -466,6 +466,20 @@ if (BUILD_TESTING)
   add_test(NAME behaviour_test COMMAND behaviour_test)
   set_tests_properties(behaviour_test PROPERTIES LABELS "cpu;sampling;behaviour")
 
+  add_library(eog_cost_old OBJECT
+    tests/core/eog_cost_adapter.cpp
+    src/core/json_constraint.cpp
+    src/core/json_schema_lexeme.cpp
+    src/core/json_schema_regex.cpp
+    tests/fixtures/behaviour_fast_baseline/src/core/sampling.cpp)
+  target_include_directories(eog_cost_old BEFORE PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/behaviour_fast_baseline)
+  target_link_libraries(eog_cost_old PRIVATE gufo_core)
+  target_compile_definitions(eog_cost_old PRIVATE sampling=sampling_eog_old EOG_COST_OLD=1)
+  add_executable(eog_cost_test tests/core/eog_cost_test.cpp
+    tests/core/eog_cost_adapter.cpp $<TARGET_OBJECTS:eog_cost_old>)
+  target_link_libraries(eog_cost_test PRIVATE gufo_core)
+
   add_executable(loop_breaker_test tests/core/loop_breaker_test.cpp)
   target_link_libraries(loop_breaker_test PRIVATE gufo_core)
   add_test(NAME loop_breaker_test COMMAND loop_breaker_test)

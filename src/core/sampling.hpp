@@ -224,10 +224,19 @@ private:
       std::span<const float> logits) const;
   [[nodiscard]] SamplingDistribution LinearDistribution(
       std::span<const float> logits) const;
-  void PrepareSelected(std::span<const float> logits);
+  struct SelectionProof {
+    Probability topk_last;
+    double full_sum{0}, previous_mass{0};
+    std::size_t top_p_keep{0}, minimum{0};
+  };
+  [[nodiscard]] std::optional<SamplingDistribution> InertEogDistribution(
+      std::span<const float> logits, SamplerState& native) const;
+  void PrepareSelected(std::span<const float> logits,
+                       SelectionProof* proof = nullptr);
   /// top-p and min-p over the sorted candidate_scratch_ (PrepareSelected's
   /// second half).
-  void FinishSelected(double full_softmax_sum, bool has_full_softmax_sum);
+  void FinishSelected(double full_softmax_sum, bool has_full_softmax_sum,
+                      SelectionProof* proof = nullptr);
 
   SamplingConfig config_;
   // Resolve request opt-in once; speculative sampler copies retain it.
