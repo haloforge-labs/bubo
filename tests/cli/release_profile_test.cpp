@@ -493,6 +493,28 @@ void Review2Regression(int finding) {
            "other family receives the exact scope message");
     Expect(result.effective_flags.at("--seed") == "1",
            "other family gets seed 1");
+    Expect(result.injections.empty() && result.turned_off.empty(),
+           "exact does not inject byte-exact controls into another family");
+    for (const auto& row : ReleaseSwitchTable()) {
+      if (row.member_str("kind") != "env" || !row.find("exact_off")->as_bool())
+        continue;
+      auto other = inputs;
+      const auto name = row.member_str("name");
+      other.environment[name] = "1";
+      const auto external = ResolveReleaseSettings(other);
+      Expect(Find(external, name).origin == "env" &&
+                 external.injections.empty() && external.turned_off.empty(),
+             "other-family exact leaves explicit environment control alone: " +
+                 name);
+    }
+    auto concurrent = inputs;
+    concurrent.explicit_flags["--sessions"] = "2";
+    concurrent.explicit_flags["--cache-disk"] = "cache";
+    concurrent.explicit_flags["--speculative"] = "off";
+    Expect(
+        ResolveReleaseSettings(concurrent).effective_flags.at("--sessions") ==
+            "2",
+        "other-family exact accepts its ordinary session and cache options");
     Expect(RenderReleaseDocs(ReleaseSwitchTable())
                    .find("Other model families keep their existing defaults "
                          "except for the exact seed.") != std::string::npos,

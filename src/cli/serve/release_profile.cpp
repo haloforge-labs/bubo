@@ -310,6 +310,8 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
   result.profile = inputs.profile;
   result.architecture = inputs.architecture;
   result.native_context = inputs.native_context;
+  const bool exact_controls =
+      inputs.profile == "exact" && inputs.model_family == "qwen3.8-flash-next";
   std::map<std::string, ReleaseSetting> settings;
   const auto enabled = [&](const std::string& name) {
     auto it = inputs.explicit_flags.find(name);
@@ -337,7 +339,11 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
       }
     }
     const bool match = Matches(row, inputs);
+    const bool exact_off = exact_controls && row.find("exact_off")->as_bool();
     auto profile = match ? ProfileValue(row, inputs.profile) : std::nullopt;
+    if (inputs.profile == "exact" && !exact_controls &&
+        row.find("exact_off")->as_bool())
+      profile.reset();
     if (name == "--context" && profile && inputs.native_context &&
         *profile == std::to_string(*inputs.native_context)) {
       profile.reset();
@@ -352,8 +358,7 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
         trigger && (!inputs.explicit_flags.contains(*trigger) ||
                     inputs.explicit_flags.at(*trigger).empty()))
       profile.reset();
-    if (inputs.profile == "exact" && match &&
-        row.find("exact_off")->as_bool()) {
+    if (exact_off && match) {
       result.turned_off.push_back(name);
       profile = Text(*row.find("values"), "exact");
       if (const auto flag = inputs.explicit_flags.find(name);
@@ -382,15 +387,13 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
         profile.reset();
       }
     }
-    if (profile || (inputs.profile == "exact" && match &&
-                    row.find("exact_off")->as_bool())) {
+    if (profile || (exact_off && match)) {
       setting.value = profile;
       setting.origin = suppressed ? "flag" : "profile:" + inputs.profile;
     }
     auto manifest = inputs.manifest_defaults.find(name);
     if (inputs.profile != "stock" && match && !suppressed &&
-        manifest != inputs.manifest_defaults.end() &&
-        !(inputs.profile == "exact" && row.find("exact_off")->as_bool())) {
+        manifest != inputs.manifest_defaults.end() && !exact_off) {
       setting.value = manifest->second;
       setting.origin = "manifest";
     }
@@ -425,8 +428,7 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
     }
     // Explicit CLI values only exist for flag rows. Env rows are handled
     // above; resolver tests may also simulate higher-precedence values.
-    if (inputs.profile == "exact" && match &&
-        row.find("exact_off")->as_bool() && setting.value &&
+    if (exact_off && match && setting.value &&
         ((name == "GUFO_LENIENT" && *setting.value == "bounded") ||
          (name != "GUFO_LENIENT" &&
           setting.value != Text(*row.find("values"), "exact"))))
@@ -442,7 +444,7 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
           seed < 0)
         throw std::invalid_argument("profile=exact: --seed must be 0 or more");
     }
-    if (inputs.profile == "exact" && match && real &&
+    if (exact_controls && match && real &&
         row.member_str("class") == "INTERNAL" &&
         !row.find("exact_off")->as_bool())
       result.logs.push_back("profile=exact: " + name +
@@ -469,7 +471,7 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
     }
     if (name == "--cache-disk" && setting.value && setting.value->empty())
       setting.value.reset();
-    if (inputs.profile == "exact" && match &&
+    if (exact_controls && match &&
         ((name == "--sessions" &&
           setting.value != std::optional<std::string>("1")) ||
          (name == "--cache-disk" && setting.value) ||
@@ -479,13 +481,9 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
           setting.value != std::optional<std::string>("1"))))
       throw std::invalid_argument("profile=exact: incompatible " + name);
     if (match && !real && !inputs.explicit_flags.contains(name) &&
-        ((suppressed && !setting.value) ||
-         (inputs.profile == "exact" && row.find("exact_off")->as_bool() &&
-          !setting.value)))
-      setting.skipped_reason =
-          inputs.profile == "exact" && row.find("exact_off")->as_bool()
-              ? "suppressed by profile=exact"
-              : "suppressed by explicit flag";
+        ((suppressed && !setting.value) || (exact_off && !setting.value)))
+      setting.skipped_reason = exact_off ? "suppressed by profile=exact"
+                                         : "suppressed by explicit flag";
     settings.emplace(name, std::move(setting));
   }
   // Defaults can depend on defaults removed later in sorted row order.
