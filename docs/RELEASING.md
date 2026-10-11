@@ -67,7 +67,7 @@ of the release version.
 
 ## Release flow
 
-`version.txt` is the canonical release version. A daily GitHub workflow reads
+`version.txt` is the canonical engine release version. A daily GitHub workflow reads
 the Conventional Commit history after the latest release and opens or updates
 one release pull request. That pull request updates `version.txt`,
 `CHANGELOG.md` and the release manifest. It receives the same CI as any other
@@ -81,12 +81,19 @@ run follows the same process and is available for recovery. Do not edit the
 version, changelog or release manifest in an ordinary feature or fix pull
 request.
 
-Nix keeps release identity and source identity separate. The default package is
-a development build and reports `bubo development (<revision>), engine gufo development`.
-Official artifacts build the `release` package from a `vX.Y.Z` tag and report
-`bubo X.Y.Z (<revision>), engine gufo X.Y.Z`. Both package outputs retain the exact flake
-revision; only the explicitly selected release output reads the semantic version
-from `version.txt`.
+CMake reads `version.txt` and the independent Bubo product version in
+`tools/release/product_version.txt` on every configure. Both development and
+release binaries report `bubo <product> (<revision>), engine gufo <engine>`.
+The revision is the current short Git HEAD; source archives without Git report
+`unknown`. Nix retains the flake revision in its package identity, while its
+filtered source archive produces the `unknown` binary revision. Nix does not
+pass cached version or revision overrides. Neither cached `-D` values nor
+normal overrides are accepted: the tracked files remain authoritative.
+
+The Windows package script reads the same product version file and checks it
+against generated brand metadata before naming the artifact
+`bubo-<product>-windows-x64.zip`. Update the product version independently of
+the engine version when releasing Bubo.
 
 After Release Please creates a GitHub Release, the same workflow sends its exact
 `vX.Y.Z` tag to the Toolboxes repository. Toolboxes builds the release package

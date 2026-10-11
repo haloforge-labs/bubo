@@ -11,7 +11,7 @@ inline constexpr std::string_view kDefaultProfile = "@GUFO_DEFAULT_PROFILE@";
 inline constexpr std::string_view kEngineName = "gufo";
 inline constexpr std::string_view kCacheDirName = "gufo";
 inline constexpr std::string_view kApiKeys[] = {"gufo", "bubo"};
-inline constexpr std::string_view kProductVersion = "@GUFO_RELEASE_VERSION@";
+inline constexpr std::string_view kProductVersion = "@GUFO_PRODUCT_VERSION@";
 inline constexpr std::string_view kEngineVersion = "@GUFO_RELEASE_VERSION@";
 inline constexpr std::string_view kRevision = "@GUFO_BUILD_REVISION@";
 

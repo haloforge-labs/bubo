@@ -15,8 +15,7 @@ set(CMAKE_C_EXTENSIONS ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-set(GUFO_RELEASE_VERSION "development" CACHE STRING "Gufo release version")
-set(GUFO_REVISION "unknown" CACHE STRING "Gufo source revision")
+include(cmake/Version.cmake)
 set(GUFO_BRAND "bubo" CACHE STRING "Product brand: bubo or gufo")
 set_property(CACHE GUFO_BRAND PROPERTY STRINGS bubo gufo)
 if(GUFO_BRAND STREQUAL "bubo")
@@ -25,28 +24,6 @@ elseif(GUFO_BRAND STREQUAL "gufo")
   set(GUFO_DEFAULT_PROFILE "stock")
 else()
   message(FATAL_ERROR "GUFO_BRAND must be bubo or gufo")
-endif()
-# Keep the configured engine version as the product version until a separate
-# product version is selected. Refresh revision even in reused build folders.
-set(GUFO_BUILD_REVISION "${GUFO_REVISION}")
-find_package(Git QUIET)
-if(GIT_FOUND)
-  execute_process(COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    OUTPUT_VARIABLE GUFO_GIT_REVISION OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET RESULT_VARIABLE GUFO_GIT_RESULT)
-  if(GUFO_GIT_RESULT EQUAL 0)
-    set(GUFO_BUILD_REVISION "${GUFO_GIT_REVISION}")
-    foreach(ref HEAD refs/heads/release-defaults)
-      execute_process(COMMAND ${GIT_EXECUTABLE} rev-parse --git-path ${ref}
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        OUTPUT_VARIABLE ref_path OUTPUT_STRIP_TRAILING_WHITESPACE)
-      if(NOT IS_ABSOLUTE "${ref_path}")
-        set(ref_path "${CMAKE_SOURCE_DIR}/${ref_path}")
-      endif()
-      set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${ref_path}")
-    endforeach()
-  endif()
 endif()
 configure_file(src/cli/brand.hpp.in generated/src/cli/brand.hpp @ONLY)
 configure_file(src/cli/brand.json.in generated/brand.json @ONLY)
@@ -433,10 +410,19 @@ if (BUILD_TESTING)
   gufo_qwen_image_21_register_tests()
 
   add_test(NAME gufo_version COMMAND gufo --version)
+  gufo_escape_version_regex("${GUFO_BRAND}" brand_regex)
+  gufo_escape_version_regex("${GUFO_PRODUCT_VERSION}" product_version_regex)
+  gufo_escape_version_regex("${GUFO_RELEASE_VERSION}" engine_version_regex)
+  gufo_escape_version_regex("${GUFO_BUILD_REVISION}" revision_regex)
   set_tests_properties(gufo_version PROPERTIES
     LABELS "cpu"
     PASS_REGULAR_EXPRESSION
-      "${GUFO_BRAND} ${GUFO_RELEASE_VERSION} \\(${GUFO_BUILD_REVISION}\\), engine gufo ${GUFO_RELEASE_VERSION}")
+      "^${brand_regex} ${product_version_regex} \\(${revision_regex}\\), engine gufo ${engine_version_regex}[\r\n]*$")
+  add_test(NAME version_sources_test COMMAND ${CMAKE_COMMAND}
+    "-DVERSION_MODULE=${CMAKE_SOURCE_DIR}/cmake/Version.cmake"
+    "-DTEST_ROOT=${CMAKE_BINARY_DIR}/version-sources-test"
+    -P "${CMAKE_SOURCE_DIR}/tests/cli/version_sources_test.cmake")
+  set_tests_properties(version_sources_test PROPERTIES LABELS "cpu")
 
   add_test(NAME gufo_help COMMAND gufo --help)
   set_tests_properties(gufo_help PROPERTIES LABELS "cpu")

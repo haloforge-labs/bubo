@@ -17,7 +17,8 @@
 }:
 
 let
-  versionLabel = if releaseVersion == null then "development" else releaseVersion;
+  engineVersion = builtins.replaceStrings [ "\n" "\r" ] [ "" "" ] (builtins.readFile ../../version.txt);
+  productVersion = builtins.replaceStrings [ "\n" "\r" ] [ "" "" ] (builtins.readFile ../../tools/release/product_version.txt);
   packageVersion =
     if releaseVersion == null then "0-unstable-${revision}" else releaseVersion;
   sourceRoot = ../..;
@@ -31,7 +32,8 @@ let
         relativePath = lib.removePrefix "${root}/" pathString;
       in
       pathString == root
-      || builtins.elem relativePath [ "CMakeLists.txt" "LICENSE" "NOTICE" "THIRD_PARTY_NOTICES.md" ]
+      || builtins.elem relativePath [ "CMakeLists.txt" "LICENSE" "NOTICE" "THIRD_PARTY_NOTICES.md" "version.txt" ]
+      || builtins.elem relativePath [ "tools" "tools/release" "tools/release/product_version.txt" ]
       || relativePath == "licenses"
       || lib.hasPrefix "licenses/" relativePath
       || relativePath == "cmake"
@@ -78,8 +80,6 @@ stdenv.mkDerivation {
     "-DCMAKE_BUILD_TYPE=RelWithDebInfo"
     "-DBUILD_TESTING=OFF"
     "-DGUFO_BRAND=bubo"
-    "-DGUFO_RELEASE_VERSION=${versionLabel}"
-    "-DGUFO_REVISION=${revision}"
     "-DGUFO_FFMPEG_EXECUTABLE=${ffmpeg-headless}/bin/ffmpeg"
     "-DGUFO_FFPROBE_EXECUTABLE=${ffmpeg-headless}/bin/ffprobe"
     "-DCMAKE_HIP_COMPILER=${rocmPackages.llvm.clang}/bin/clang"
@@ -89,7 +89,7 @@ stdenv.mkDerivation {
   installCheckPhase = ''
     runHook preInstallCheck
 
-    test "$($out/bin/bubo --version)" = "bubo ${versionLabel} (${revision}), engine gufo ${versionLabel}"
+    test "$($out/bin/bubo --version)" = "bubo ${productVersion} (unknown), engine gufo ${engineVersion}"
     $out/bin/bubo --help >/dev/null
     test ! -e $out/bin/gufo
     test ! -e $out/bin/gufo-server

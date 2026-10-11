@@ -120,13 +120,6 @@
   },
   {
     "file": ".devops/nix/package.nix",
-    "line": "    test \"$($out/bin/bubo --version)\" = \"bubo ${versionLabel} (${revision}), engine gufo ${versionLabel}\"",
-    "count": 1,
-    "category": "engine",
-    "reason": "Nix metadata or library diagnostic identifies the unchanged engine."
-  },
-  {
-    "file": ".devops/nix/package.nix",
     "line": "    test -f $out/share/licenses/gufo/LICENSE",
     "count": 1,
     "category": "resource-path",
@@ -152,13 +145,6 @@
     "count": 1,
     "category": "build-target",
     "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
-  },
-  {
-    "file": "CMakeLists.txt",
-    "line": "      \"${GUFO_BRAND} ${GUFO_RELEASE_VERSION} \\\\(${GUFO_BUILD_REVISION}\\\\), engine gufo ${GUFO_RELEASE_VERSION}\")",
-    "count": 1,
-    "category": "engine",
-    "reason": "Build metadata or diagnostics identify the unchanged gufo engine."
   },
   {
     "file": "CMakeLists.txt",
@@ -533,20 +519,6 @@
   },
   {
     "file": "CMakeLists.txt",
-    "line": "set(GUFO_RELEASE_VERSION \"development\" CACHE STRING \"Gufo release version\")",
-    "count": 1,
-    "category": "engine",
-    "reason": "Build metadata or diagnostics identify the unchanged gufo engine."
-  },
-  {
-    "file": "CMakeLists.txt",
-    "line": "set(GUFO_REVISION \"unknown\" CACHE STRING \"Gufo source revision\")",
-    "count": 1,
-    "category": "engine",
-    "reason": "Build metadata or diagnostics identify the unchanged gufo engine."
-  },
-  {
-    "file": "CMakeLists.txt",
     "line": "set_property(CACHE GUFO_BRAND PROPERTY STRINGS bubo gufo)",
     "count": 1,
     "category": "compatibility",
@@ -835,20 +807,6 @@
   {
     "file": "docs/RELEASING.md",
     "line": "Rolling Toolboxes images remain separate: they follow Gufo `main` and use `edge`",
-    "count": 1,
-    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
-    "category": "engine"
-  },
-  {
-    "file": "docs/RELEASING.md",
-    "line": "`bubo X.Y.Z (<revision>), engine gufo X.Y.Z`. Both package outputs retain the exact flake",
-    "count": 1,
-    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
-    "category": "engine"
-  },
-  {
-    "file": "docs/RELEASING.md",
-    "line": "a development build and reports `bubo development (<revision>), engine gufo development`.",
     "count": 1,
     "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
     "category": "engine"
@@ -3131,5 +3089,26 @@
     "count": 1,
     "category": "compatibility",
     "reason": "Internal PowerShell helper name is retained; its executable is Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "      \"^${brand_regex} ${product_version_regex} \\\\(${revision_regex}\\\\), engine gufo ${engine_version_regex}[\\r\\n]*$\")",
+    "count": 1,
+    "category": "engine",
+    "reason": "Version output identifies the engine separately from the Bubo product."
+  },
+  {
+    "file": ".devops/nix/package.nix",
+    "line": "    test \"$($out/bin/bubo --version)\" = \"bubo ${productVersion} (unknown), engine gufo ${engineVersion}\"",
+    "count": 1,
+    "category": "engine",
+    "reason": "Version output identifies the engine separately from the Bubo product."
+  },
+  {
+    "file": "docs/RELEASING.md",
+    "line": "release binaries report `bubo <product> (<revision>), engine gufo <engine>`.",
+    "count": 1,
+    "category": "engine",
+    "reason": "Version output identifies the engine separately from the Bubo product."
   }
 ]

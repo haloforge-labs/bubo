@@ -72,12 +72,18 @@ tree), `deepseek-gpu` and `qwen-gpu-kernel-oracle`. Definitions live in
 | `GUFO_BUILD_TOOLS` | `OFF` | Build kernel benchmarks and tuning executables |
 | `GUFO_ENABLE_WARNINGS` | `ON` | Compiler warnings |
 | `GUFO_ENABLE_SANITIZERS` | `OFF` | AddressSanitizer and UndefinedBehaviorSanitizer |
-| `GUFO_RELEASE_VERSION` | `development` | Reported semantic release version |
-| `GUFO_REVISION` | `unknown` | Reported source revision and provenance identity |
 | `GUFO_FFMPEG_EXECUTABLE`, `GUFO_FFPROBE_EXECUTABLE` | `ffmpeg`, `ffprobe` | External media executables |
 
 C++20 is required; HIP kernels compile from the same tree, and the adapted
 llama.cpp quantized kernels keep their own C++17 dialect in isolation.
+
+Version metadata is refreshed on every configure: `version.txt` supplies the
+engine base version and `tools/release/product_version.txt` supplies the Bubo
+product version. `GUFO_RELEASE_VERSION`, `GUFO_PRODUCT_VERSION` and
+`GUFO_REVISION` are derived normal CMake variables, not configurable options.
+Cached `-D` values and normal overrides are discarded so old build folders
+cannot preserve a stale identity. The revision is the short Git HEAD, or
+`unknown` when Git or its repository is unavailable.
 
 ## Development loop
 

@@ -1,1 +1,1 @@
-{"product":"@GUFO_BRAND@","exe":"@GUFO_BRAND@.exe","default_profile":"@GUFO_DEFAULT_PROFILE@"}
+{"product":"@GUFO_BRAND@","exe":"@GUFO_BRAND@.exe","default_profile":"@GUFO_DEFAULT_PROFILE@","product_version":"@GUFO_PRODUCT_VERSION@","engine_version":"@GUFO_RELEASE_VERSION@","revision":"@GUFO_BUILD_REVISION@"}
