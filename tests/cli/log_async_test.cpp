@@ -196,6 +196,30 @@ void HardCap() {
             << " dropped=" << sink.GetStats().dropped << " fallback=1\n";
 }
 
+void EmptyProtectedBound() {
+  auto blocked = std::make_shared<Blocked>();
+  AsyncLogSink sink(
+      [blocked](std::string_view batch) { blocked->Write(batch); });
+  sink.Push("seed\n", LogLevel::kInfo);
+  Expect(blocked->entered.try_acquire_for(2s), "empty-record sink is blocked");
+  sink.Push(std::string(16 * 1024 * 1024 - 512, 'E'), LogLevel::kError);
+  auto producer = std::async(std::launch::async, [&] {
+    for (int i = 0; i < 1024; ++i)
+      sink.Push({}, LogLevel::kError);
+  });
+  const bool bounded = producer.wait_for(50ms) == std::future_status::timeout;
+  const auto full = sink.GetStats();
+  blocked->resume.release();
+  producer.get();
+  Expect(sink.FlushSync(), "empty protected records flush after resumption");
+  Expect(
+      bounded && full.pending_bytes <= 16 * 1024 * 1024 && full.accepted < 1026,
+      "empty protected records consume storage and trigger the hard cap");
+  std::cout << "extra empty_protected_bound=1 pending_bytes="
+            << full.pending_bytes << " accepted_at_cap=" << full.accepted
+            << " dropped=" << full.dropped << '\n';
+}
+
 void Ordering() {
   auto capture = std::make_shared<Capture>();
   AsyncLogSink sink(
@@ -266,7 +290,7 @@ void StuckShutdown() {
   const auto start = Clock::now();
   const auto stats = sink.Shutdown();
   const auto shutdown_ms = Ms(Clock::now() - start);
-  Expect(shutdown_ms >= 1900 && shutdown_ms < 2200 && stats.pending == 1,
+  Expect(shutdown_ms >= 1900 && shutdown_ms < 2000 && stats.pending == 1,
          "shutdown waits at most 2 s plus scheduling allowance and reports "
          "pending lines");
   const auto again = Clock::now();
@@ -283,7 +307,7 @@ void StuckShutdown() {
              }),
          "shutdown loss report reaches stderr when the blocked sink resumes");
   std::cout << "(e) shutdown_ms=" << shutdown_ms << " wait_bound_ms=2000"
-            << " scheduling_allowance_ms=200 undelivered=" << stats.pending
+            << " drain_wait_ms=1950 undelivered=" << stats.pending
             << " report_after_resume=1\n";
 }
 void SyncSmoke() {
@@ -307,6 +331,7 @@ int main(int argc, char** argv) {
   Overflow(0, "16K-lines");
   Overflow(1024, "4MiB-bytes");
   HardCap();
+  EmptyProtectedBound();
   Ordering();
   FlushUnderLoad();
   StuckShutdown();

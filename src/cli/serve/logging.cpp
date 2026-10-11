@@ -140,6 +140,9 @@ struct AsyncLogSink::State {
     std::string line;
     std::uint64_t sequence;
   };
+  // Charge the entry and deque bookkeeping as well as its bytes. Otherwise
+  // empty/tiny protected messages could grow without reaching the hard cap.
+  static constexpr std::size_t kEntryCharge = sizeof(Entry) + 24;
   Writer writer;
   const bool synchronous;
   std::mutex mutex, io_mutex;
@@ -167,12 +170,12 @@ struct AsyncLogSink::State {
       batch.reserve(65536);
       std::uint64_t sequence = delivered, count = 0;
       std::size_t consumed = 0;
-      // Cap fragments as well as bytes: both sparse and burst logs batch, while
-      // no ordinary line waits more than 100 ms before its first write starts.
+      // Cap fragments as well as bytes. Start sparse or burst batches as soon
+      // as the writer is free, then flush each batch without a 100 ms delay.
       while (!queue.empty() && count < 64 && batch.size() < 65536) {
         auto& entry = queue.front();
         batch += entry.line;
-        consumed += entry.line.size();
+        consumed += entry.line.size() + kEntryCharge;
         sequence = entry.sequence;
         queue.pop_front();
         ++count;
@@ -241,16 +244,18 @@ void AsyncLogSink::Push(std::string line, LogLevel level) {
   }
   std::unique_lock lock(state->mutex);
   const auto lines = state->queue.size() + state->active_lines;
+  const auto charge = line.size() > 16 * 1024 * 1024
+                          ? 16 * 1024 * 1024 + 1
+                          : line.size() + State::kEntryCharge;
   if (level < LogLevel::kWarn &&
       (state->stopping || state->failed || lines >= 16384 ||
-       line.size() > 4 * 1024 * 1024 ||
-       state->bytes > 4 * 1024 * 1024 - line.size())) {
+       charge > 4 * 1024 * 1024 || state->bytes > 4 * 1024 * 1024 - charge)) {
     ++state->dropped;
     state->wake.notify_one();
     return;
   }
-  if (state->stopping || state->failed || line.size() > 16 * 1024 * 1024 ||
-      state->bytes > 16 * 1024 * 1024 - line.size()) {
+  if (state->stopping || state->failed || charge > 16 * 1024 * 1024 ||
+      state->bytes > 16 * 1024 * 1024 - charge) {
     // Only WARN/ERROR can reach this deliberate last-resort synchronous path.
     // Preserve the already accepted prefix before writing this fatal message.
     lock.unlock();
@@ -259,7 +264,7 @@ void AsyncLogSink::Push(std::string line, LogLevel level) {
     state->writer(line);
     return;
   }
-  state->bytes += line.size();
+  state->bytes += charge;
   state->queue.push_back({std::move(line), ++state->accepted});
   state->wake.notify_one();
 }
@@ -294,8 +299,9 @@ AsyncLogSink::Stats AsyncLogSink::Shutdown() {
   const auto state = state_;
   std::unique_lock lock(state->mutex);
   if (!state->stopping) {
+    // Reserve 50 ms of the 2 s exit budget for accounting and the loss report.
     const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(1950);
     state->stopping = true;
     state->wake.notify_one();
     if (!state->synchronous)
@@ -304,7 +310,7 @@ AsyncLogSink::Stats AsyncLogSink::Shutdown() {
     if (pending) {
       state->timeout_report = "[log] shutdown: undelivered " +
                               std::to_string(pending) +
-                              " lines (sink did not drain within 2 s)\n";
+                              " lines (2 s shutdown budget)\n";
 #ifdef _WIN32
       // A blocked stderr cannot receive a report within the deadline. Also
       // expose it to the Windows debugger; the writer emits it if it resumes.
