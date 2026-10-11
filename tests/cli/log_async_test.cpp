@@ -254,7 +254,9 @@ void FlushUnderLoad() {
     for (int i = 0; i < 2000; ++i) {
       Logger::Raw(LogLevel::kInfo, "load=%d\n", i);
       pushed.store(i + 1);
-      std::this_thread::sleep_for(100us);
+      // Keep arrivals active in bursts; avoid 2,000 rounded Windows timers.
+      if ((i + 1) % 20 == 0)
+        std::this_thread::sleep_for(1ms);
     }
     running.store(false);
   });
