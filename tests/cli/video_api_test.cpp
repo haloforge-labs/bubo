@@ -522,6 +522,71 @@ void TestQueueSaturation(const std::filesystem::path& root) {
   runner.Release();
 }
 
+void TestBrandAliases(const std::filesystem::path& root) {
+  FakeRunner runner;
+  VideoJobService service(Options(root, &runner));
+  for (const auto* key : {"gufo", "bubo"}) {
+    for (const bool multipart : {false, true}) {
+      const std::string options =
+          R"({"seed":17,"frames":22,"output_format":"ppm","selected_frame":3})";
+      auto body = gufo::json::Value::object();
+      body["model"] = "minimax-h3-dev";
+      body["prompt"] = "alias contract";
+      body["size"] = "256x256";
+      body["seconds"] = "1";
+      body[key] = gufo::json::parse(options);
+      const auto response = Send(
+          service, "POST", "/v1/videos",
+          multipart ? Multipart("alias-boundary", {{"model", "minimax-h3-dev"},
+                                                   {"prompt", "alias contract"},
+                                                   {"size", "256x256"},
+                                                   {"seconds", "1"},
+                                                   {key, options}})
+                    : body.dump(),
+          {}, multipart ? "multipart/form-data; boundary=alias-boundary" : "");
+      Check(response.status == 202,
+            "both JSON/multipart namespace spellings accepted");
+      WaitCompleted(service, CreatedId(response));
+      const auto request = runner.latest();
+      Check(request.seed == 17 && request.parameters.frames == 22 &&
+                request.parameters.selected_frames == std::vector<int>{3},
+            "namespace aliases preserve effective H3 options");
+      for (const auto* invalid :
+           {"7", "null", "[]", R"({"seed":-1})", R"({"unknown":1})"}) {
+        body[key] = gufo::json::parse(invalid);
+        const auto rejected = Send(
+            service, "POST", "/v1/videos",
+            multipart
+                ? Multipart("alias-boundary", {{"model", "minimax-h3-dev"},
+                                               {"prompt", "alias contract"},
+                                               {"size", "256x256"},
+                                               {"seconds", "1"},
+                                               {key, invalid}})
+                : body.dump(),
+            {},
+            multipart ? "multipart/form-data; boundary=alias-boundary" : "");
+        Check(rejected.status == 400,
+              "aliases retain validation for objects and options");
+      }
+    }
+  }
+  const auto conflict = Send(
+      service, "POST", "/v1/videos",
+      R"({"model":"minimax-h3-dev","prompt":"x","size":"256x256","seconds":"1","gufo":{"seed":17,"output_format":"ppm"},"bubo":{"seed":18}})");
+  Check(conflict.status == 400 &&
+            conflict.body.find("conflicting") != std::string::npos,
+        "conflicting namespace aliases fail closed");
+  const auto same = Send(
+      service, "POST", "/v1/videos",
+      R"({"model":"minimax-h3-dev","prompt":"x","size":"256x256","seconds":"1","gufo":{"seed":17},"bubo":{"seed":17,"output_format":"ppm"}})");
+  Check(same.status == 202,
+        "consistent namespace aliases merge without losing options");
+  WaitCompleted(service, CreatedId(same));
+  Check(runner.latest().seed == 17, "merged aliases retain seed");
+  std::cout << "PASS: video API gufo/bubo JSON and multipart aliases; "
+               "validation and conflict checks\n";
+}
+
 }  // namespace
 
 int main() {
@@ -536,6 +601,7 @@ int main() {
   TestDurations(base / "durations");
   TestLongPrompts(base / "long-prompts");
   TestQueueSaturation(base / "queue");
+  TestBrandAliases(base / "aliases");
   std::filesystem::remove_all(base, ignored);
   std::cout << "Video API contract tests passed.\n";
   return 0;

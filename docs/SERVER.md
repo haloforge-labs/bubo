@@ -11,7 +11,7 @@ fields return explicit errors.
 
 ## Optional debug hooks and logprobs
 
-`gufo serve llm --debug-hooks` or `GUFO_DEBUG_HOOKS=1` enables settings and
+`bubo serve llm --debug-hooks` or `GUFO_DEBUG_HOOKS=1` enables settings and
 request timeline diagnostics. The capability defaults off. This implementation
 currently requires the Flash-Next runner; enabling it for another runner fails
 at startup instead of returning incomplete settings. It does not enable
@@ -256,17 +256,17 @@ not be required to serve requests.
 
 ## Single Executable and Model Configuration
 
-The deployed product is one `gufo` executable. Supported model graphs,
+The deployed product is one `bubo` executable. Supported model graphs,
 tokenizers and HIP kernels are compiled into it.
 
 The executable provides subcommands rather than separate inference binaries:
 
 ```text
-gufo serve
-gufo chat
-gufo prompt
-gufo video
-gufo transcribe
+bubo serve
+bubo chat
+bubo prompt
+bubo video
+bubo transcribe
 ```
 
 `chat` and `prompt` are transport adapters over the same scheduler and may
@@ -341,7 +341,7 @@ disabled unspecified filters are Gufo defaults.
 ```sh
 nix build
 
-./result/bin/gufo serve \
+./result/bin/bubo serve \
   --host 127.0.0.1 \
   --port 8080 \
   --sessions 1 \
@@ -715,7 +715,7 @@ cache snapshots. HTTP handlers do not implement model kernels.
 | `GET` | `/v1/videos/{id}/content` | The requested MiniMax H3 job completed |
 | `DELETE` | `/v1/videos/{id}` | MiniMax H3 video serving is configured |
 
-Use `gufo serve image --model SNAPSHOT_DIR` for
+Use `bubo serve image --model SNAPSHOT_DIR` for
 [Qwen-Image-2.1](models/qwen-image-2.1/README.md). Generation accepts JSON;
 editing accepts multipart PNG/JPEG references. Both return base64 PNG data
 and work through llama-swap's image routes.
@@ -726,11 +726,11 @@ Qwen3-TTS serving is enabled with a dedicated model process. All three 12Hz
 fields that are required:
 
 ```sh
-./result/bin/gufo serve --port 8080 tts \
+./result/bin/bubo serve --port 8080 tts \
   --model /persist/models/audio/Qwen3-TTS-12Hz-1.7B-CustomVoice
 ```
 
-Start ASR separately with `gufo serve asr --model DIR`. Both speech
+Start ASR separately with `bubo serve asr --model DIR`. Both speech
 commands accept `--model`, `--context`, and `--served-model-name`, plus the
 shared HTTP options. Context defaults are 4096 for TTS and 1024 per chunk
 for ASR. Route separate model processes through llama-swap when one public
@@ -752,7 +752,7 @@ so clients select a speaker by name instead of uploading a reference clip on
 every request:
 
 ```sh
-./result/bin/gufo serve tts \
+./result/bin/bubo serve tts \
   --model /persist/models/audio/Qwen3-TTS-12Hz-1.7B-Base \
   --voice narrator_eng=/persist/models/audio/clear-english-voice.wav \
   --voice narrator_ita=/persist/models/audio/clear-italian-voice.wav
@@ -763,7 +763,7 @@ every request:
 appear before or after its matching `--voice`:
 
 ```sh
-./result/bin/gufo serve tts \
+./result/bin/bubo serve tts \
   --model /persist/models/audio/Qwen3-TTS-12Hz-1.7B-Base \
   --voice narrator_ita=/persist/models/audio/clear-italian-voice.wav \
   --voice-text "narrator_ita=Questo racconto e' cresciuto..." \
@@ -814,7 +814,7 @@ event, while WebSocket speech reports an error without `audio.done`.
 Qwen3-ASR serving uses its own model process:
 
 ```sh
-./result/bin/gufo serve asr \
+./result/bin/bubo serve asr \
   --model /var/llms/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B/snapshots/<revision>
 ```
 
@@ -840,6 +840,9 @@ omissions are documented in the [H3 upstream contract](models/minimax-h3/QUALITY
 Create requests accept both `application/json` and OpenAI-client-compatible
 `multipart/form-data`; duplicate form fields, malformed boundaries, unsupported
 media types, and reference-image parts fail explicitly.
+Video options accept either `gufo` or `bubo` as the JSON object or multipart field name.
+Both names can be supplied together when shared options agree; conflicting values are rejected.
+Existing response fields and headers retain their engine spelling.
 H3 accepts `seconds` as a JSON number or string (including multipart), at
 `512x512` or `1344x768`. Durations from 5 seconds are converted to 24-fps frames
 and rounded up to the official VAE grid (`17n + 5`), within upstream's
@@ -1227,7 +1230,7 @@ never executes tools, shell commands, URLs, or generated code.
 The HTTP transport currently uses a wildcard CORS origin and the same listener
 and API key for inference and metrics.
 
-`gufo eval` and `tools/serving/gufo-serving-bench.py` send `OPENAI_API_KEY`
+`bubo eval` and `tools/serving/gufo-serving-bench.py` send `OPENAI_API_KEY`
 as the bearer credential when it is set.
 
 ## Lifecycle and limits
@@ -1283,7 +1286,7 @@ loss permanent for the process:
   `{"status":"device_lost","error":{...,"code":"device_lost"}}`;
 - every text-backend `POST` route, including unimplemented stubs that would
   otherwise answer 501, returns 503 `device_lost` without reaching the device;
-- `gufo serve` logs `event=device_lost_shutdown`, runs the `SIGTERM` shutdown
+- `bubo serve` logs `event=device_lost_shutdown`, runs the `SIGTERM` shutdown
   and exits with status 75 (`EX_TEMPFAIL`), also when an external `SIGTERM`
   stops it after the loss. Teardown can block on the dead device, so the
   process exits with status 75 after 10 s regardless.
@@ -1304,7 +1307,7 @@ errors and pending probes. The counter resets when the process restarts; the
 fatal loss log and supervisor exit status remain useful when a metrics scrape
 misses the brief period before exit.
 
-`gufo diagnose` inspects system availability in a separate process. It cannot
+`bubo diagnose` inspects system availability in a separate process. It cannot
 validate the serving process's existing HIP context; use the serving health
 endpoints and a supervisor restart policy for this failure mode.
 
@@ -1422,7 +1425,7 @@ identity is the exception: scheduler admission lines name a client by the peer
 address of its socket (`client_id=127.0.0.1` on the default loopback bind), so a
 public `--host` writes client IP addresses into the debug tier.
 
-Pass `--log-progress` to `gufo serve llm` to log each prefill chunk, each
+Pass `--log-progress` to `bubo serve llm` to log each prefill chunk, each
 50-token decode boundary, and the final decode remainder. Each line includes the
 request ID, completed and total tokens, percentage, current speed and average
 speed. Speculative requests also include accepted and proposed drafts. Progress
@@ -1434,7 +1437,7 @@ flag.
 
 Some failures only show in the content itself, such as tool-call markup leaking
 into `content` or a history that the template renders differently. For those,
-start `gufo serve llm` with `--trace <PATH>`. The server appends one JSON
+start `bubo serve llm` with `--trace <PATH>`. The server appends one JSON
 object per line to `PATH` and logs `event=trace_enabled` at WARN. A new file is
 created readable and writable by its owner only; an existing file keeps its
 permissions. A path that cannot be opened fails startup before the model loads.

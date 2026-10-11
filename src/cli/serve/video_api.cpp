@@ -15,6 +15,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/cli/brand.hpp"
 #include "src/core/json.hpp"
 
 namespace gufo::server {
@@ -329,7 +330,7 @@ std::optional<json::Value> ParseMultipartBody(const HttpRequest& request,
     }
     const std::string_view content =
         body.substr(content_begin, content_end - content_begin);
-    if (field_name == "gufo" && !filename_present) {
+    if ((field_name == "gufo" || field_name == "bubo") && !filename_present) {
       try {
         json::Value extension = json::parse(std::string(content));
         if (!extension.is_object()) {
@@ -415,7 +416,8 @@ HttpResponse CreateVideo(const HttpRequest& request, VideoJobService& service) {
                  "image and ordered-reference conditioning are not supported",
                  "unsupported_input_reference");
   }
-  if (!HasOnlyMembers(body, {"model", "prompt", "size", "seconds", "gufo"})) {
+  if (!HasOnlyMembers(body,
+                      {"model", "prompt", "size", "seconds", "gufo", "bubo"})) {
     return Error(400, "Bad Request",
                  "request contains an unsupported video field",
                  "unsupported_field");
@@ -476,7 +478,26 @@ HttpResponse CreateVideo(const HttpRequest& request, VideoJobService& service) {
   std::optional<int> frames;
   std::optional<int> selected_frame;
   bool preset_explicit = false;
-  if (const json::Value* extension = body.find("gufo")) {
+  json::Value merged_options = json::Value::object();
+  bool has_options = false;
+  for (const auto key : cli::kApiKeys) {
+    if (const auto* options = body.find(std::string(key))) {
+      has_options = true;
+      if (!options->is_object())
+        return Error(400, "Bad Request",
+                     "'gufo' must contain only supported video options",
+                     "invalid_strix_options");
+      for (const auto& [name, value] : options->members()) {
+        if (const auto* previous = merged_options.find(name);
+            previous && previous->dump() != value.dump())
+          return Error(400, "Bad Request",
+                       "conflicting gufo and bubo video options",
+                       "invalid_strix_options");
+        merged_options[name] = value;
+      }
+    }
+  }
+  if (const json::Value* extension = has_options ? &merged_options : nullptr) {
     if (!extension->is_object() ||
         !HasOnlyMembers(*extension, {"preset", "seed", "frames",
                                      "output_format", "selected_frame"})) {

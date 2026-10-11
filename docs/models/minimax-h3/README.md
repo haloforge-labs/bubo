@@ -47,7 +47,7 @@ unsupported, or unsafe shard paths fail loading.
 
 ## CLI and server
 
-Build with `nix build` and use `result/bin/gufo`. The presets are frozen in
+Build with `nix build` and use `result/bin/bubo`. The presets are frozen in
 [`generation.cpp`](../../../src/models/minimax_h3/generation.cpp):
 
 | Preset | Internal canvas | Output canvas | Sigma points / transitions | Active blocks | Velocity reuse interval |
@@ -68,7 +68,7 @@ The CLI's `dev` preset uses the real 22-frame latent window, decodes frames
 0, 11, and 21, and skips audio/muxing:
 
 ```sh
-./result/bin/gufo video \
+./result/bin/bubo video \
   --model /var/llms/huggingface/MiniMax-H3 \
   --preset dev --seed 42 --frames-dir /tmp/h3-preview --profile \
   "A red fox walking through snow"
@@ -83,13 +83,15 @@ the default is `row-parallel`.
 Start a video-only server:
 
 ```sh
-./result/bin/gufo serve \
+./result/bin/bubo serve \
   --host 127.0.0.1 --port 8080 \
   --video-model /var/llms/huggingface/MiniMax-H3 \
   --video-root /var/llms/huggingface/gufo-h3-jobs --video-ttl 3600
 ```
 
 `POST /v1/videos` accepts JSON or multipart form data. For example:
+The video-options object or multipart field accepts both `gufo` and `bubo`.
+When both are supplied, shared values must agree.
 
 ```json
 {
