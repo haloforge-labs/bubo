@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "src/cli/arg_parser.hpp"
+#include "src/cli/brand.hpp"
 #include "src/cli/sampling_options.hpp"
 #include "src/cli/serve/asr_service.hpp"
 #include "src/cli/serve/debug_settings.hpp"
@@ -926,7 +927,7 @@ int RunServe(std::span<const char* const> args) {
   // Identify the modality only after leading server options. The selected
   // parser consumes every option together, so --served-model-name -v and
   // --model audio cannot be mistaken for server flags or subcommands.
-  ArgParser server_parser("gufo serve");
+  ArgParser server_parser(gufo::cli::ProductCommand("serve"));
   const auto add_server_options = [&](ArgParser& parser,
                                       bool include_sessions = true) {
     AddServerOptions(
@@ -969,7 +970,7 @@ int RunServe(std::span<const char* const> args) {
         std::cerr << "Error: unknown serve command '" << topic << "'\n";
         return 2;
       }
-      PrintServeHelp("gufo", topic);
+      PrintServeHelp(gufo::cli::kProductName, topic);
       return 0;
     }
     break;
@@ -1069,7 +1070,7 @@ int RunServe(std::span<const char* const> args) {
   if (subcommand == "image") {
     std::filesystem::path model;
     std::string name = "Qwen-Image-2.1";
-    ArgParser parser("gufo serve image",
+    ArgParser parser(gufo::cli::ProductCommand("serve image"),
                      "Serve Qwen-Image-2.1 generation and editing.");
     parser.AddOption("-m", "--model", "DIR",
                      "Qwen-Image-2.1 safetensors directory", "Model", &model);
@@ -1082,7 +1083,7 @@ int RunServe(std::span<const char* const> args) {
       return 2;
     }
     if (parser.IsHelpRequested()) {
-      PrintServeHelp("gufo", "image");
+      PrintServeHelp(gufo::cli::kProductName, "image");
       return 0;
     }
     if (!prepare_server_options())
@@ -1108,7 +1109,8 @@ int RunServe(std::span<const char* const> args) {
     std::uint64_t video_ttl_seconds = 3600;
 
     gufo::cli::ArgParser video_parser(
-        "gufo serve video", "Start the MiniMax H3 video generation server.");
+        gufo::cli::ProductCommand("serve video"),
+        "Start the MiniMax H3 video generation server.");
     video_parser.AddOption("-m", "--model", "DIR",
                            "Operator-supplied MiniMax H3 directory", "Model",
                            &video_model);
@@ -1126,11 +1128,11 @@ int RunServe(std::span<const char* const> args) {
     if (!video_parser.Parse(sub_args, &parse_err)) {
       server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: " << parse_err << "\n";
-      PrintServeHelp("gufo", "video");
+      PrintServeHelp(gufo::cli::kProductName, "video");
       return 2;
     }
     if (video_parser.IsHelpRequested()) {
-      PrintServeHelp("gufo", "video");
+      PrintServeHelp(gufo::cli::kProductName, "video");
       return 0;
     }
     if (!prepare_server_options()) {
@@ -1148,7 +1150,7 @@ int RunServe(std::span<const char* const> args) {
     if (video_model.empty()) {
       server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: --model <DIR> is required for video server\n";
-      PrintServeHelp("gufo", "video");
+      PrintServeHelp(gufo::cli::kProductName, "video");
       return 2;
     }
 
@@ -1177,7 +1179,7 @@ int RunServe(std::span<const char* const> args) {
   } else if (subcommand == "tts" || subcommand == "asr") {
     const bool is_tts = subcommand == "tts";
     SpeechOptions options{.context = is_tts ? 4096U : 1024U};
-    ArgParser parser("gufo serve " + subcommand,
+    ArgParser parser(gufo::cli::ProductCommand("serve " + subcommand),
                      is_tts ? "Serve Qwen3-TTS speech synthesis."
                             : "Serve Qwen3-ASR transcription.");
     AddSpeechOptions(parser, is_tts, &options);
@@ -1188,7 +1190,7 @@ int RunServe(std::span<const char* const> args) {
       return 2;
     }
     if (parser.IsHelpRequested()) {
-      PrintServeHelp("gufo", subcommand);
+      PrintServeHelp(gufo::cli::kProductName, subcommand);
       return 0;
     }
     if (!prepare_server_options())
@@ -1304,7 +1306,7 @@ int RunServe(std::span<const char* const> args) {
     std::string trace_path;
 
     gufo::cli::ArgParser llm_parser(
-        "gufo serve llm",
+        gufo::cli::ProductCommand("serve llm"),
         "Start the OpenAI/Anthropic-compatible text LLM HTTP server.");
     llm_parser.AddOption("-m", "--model", "PATH",
                          "Path to GGUF model file (required)", "Model", &model);
@@ -1444,11 +1446,11 @@ int RunServe(std::span<const char* const> args) {
     if (!llm_parser.Parse(sub_args, &parse_err)) {
       server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: " << parse_err << "\n";
-      PrintServeHelp("gufo", "llm");
+      PrintServeHelp(gufo::cli::kProductName, "llm");
       return 2;
     }
     if (llm_parser.IsHelpRequested()) {
-      PrintServeHelp("gufo", "llm");
+      PrintServeHelp(gufo::cli::kProductName, "llm");
       return 0;
     }
     if (print_effective_settings) {

@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "src/cli/arg_parser.hpp"
+#include "src/cli/brand.hpp"
 #include "src/models/minimax_h3/sha256.hpp"
 
 #ifndef GUFO_H3_SOURCE_MANIFEST
@@ -258,7 +259,7 @@ std::optional<VideoCliOptions> ParseVideoOptions(
   options.request.seed = 42;
   options.request.source_manifest = DefaultH3SourceManifest();
   VideoOverrides overrides;
-  ArgParser parser("gufo video");
+  ArgParser parser(gufo::cli::ProductCommand("video"));
   RegisterVideoOptions(parser, options, overrides);
   if (!parser.Parse(args, error) || parser.IsHelpRequested()) {
     return std::nullopt;
@@ -332,11 +333,11 @@ int RunVideo(std::span<const char* const> args) {
   auto options = ParseVideoOptions(args, &error);
   if (!options.has_value()) {
     if (error.empty()) {
-      PrintVideoHelp("gufo");
+      PrintVideoHelp(gufo::cli::kProductName);
       return 0;
     }
     std::cerr << "Error: " << error << '\n';
-    PrintVideoHelp("gufo");
+    PrintVideoHelp(gufo::cli::kProductName);
     return 2;
   }
   if (!WriteAtomic(options->parameters_path,

@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "src/cli/arg_parser.hpp"
+#include "src/cli/brand.hpp"
 #include "src/core/json.hpp"
 #include "src/models/qwen3_asr/hip/transcription_runtime.hpp"
 
@@ -131,7 +132,7 @@ int RunTranscribe(std::span<const char* const> args) {
   std::vector<std::string> positionals;
 
   ArgParser parser(
-      "gufo transcribe [OPTIONS] [WAV]",
+      gufo::cli::ProductCommand("transcribe [OPTIONS] [WAV]"),
       "Transcribe a PCM or float WAV with native HIP Qwen3-ASR-1.7B.");
   parser.AddOption("-m", "--model", "DIR", "Qwen3-ASR-1.7B model directory",
                    "Model", &model);
@@ -162,11 +163,11 @@ int RunTranscribe(std::span<const char* const> args) {
   std::string error;
   if (!parser.Parse(args, &error)) {
     std::cerr << "Error: " << error << '\n';
-    PrintTranscribeHelp("gufo");
+    PrintTranscribeHelp(gufo::cli::kProductName);
     return 2;
   }
   if (parser.IsHelpRequested()) {
-    PrintTranscribeHelp("gufo");
+    PrintTranscribeHelp(gufo::cli::kProductName);
     return 0;
   }
   if (model.empty()) {

@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "src/cli/arg_parser.hpp"
+#include "src/cli/brand.hpp"
 #include "src/core/json.hpp"
 
 namespace gufo::server {
@@ -19,7 +20,7 @@ using ReleaseEnvironment = std::map<std::string, std::optional<std::string>>;
 // are implemented here. Tests can simulate an already reviewed manifest.
 struct ManifestArtefacts {};
 struct ReleaseInputs {
-  std::string profile = "default";
+  std::string profile = std::string(cli::kDefaultProfile);
   std::map<std::string, std::string> explicit_flags;
   std::filesystem::path model_path;
   ReleaseEnvironment environment;

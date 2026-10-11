@@ -17,6 +17,40 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(GUFO_RELEASE_VERSION "development" CACHE STRING "Gufo release version")
 set(GUFO_REVISION "unknown" CACHE STRING "Gufo source revision")
+set(GUFO_BRAND "bubo" CACHE STRING "Product brand: bubo or gufo")
+set_property(CACHE GUFO_BRAND PROPERTY STRINGS bubo gufo)
+if(GUFO_BRAND STREQUAL "bubo")
+  set(GUFO_DEFAULT_PROFILE "default")
+elseif(GUFO_BRAND STREQUAL "gufo")
+  set(GUFO_DEFAULT_PROFILE "stock")
+else()
+  message(FATAL_ERROR "GUFO_BRAND must be bubo or gufo")
+endif()
+# Keep the configured engine version as the product version until a separate
+# product version is selected. Refresh revision even in reused build folders.
+set(GUFO_BUILD_REVISION "${GUFO_REVISION}")
+find_package(Git QUIET)
+if(GIT_FOUND)
+  execute_process(COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE GUFO_GIT_REVISION OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET RESULT_VARIABLE GUFO_GIT_RESULT)
+  if(GUFO_GIT_RESULT EQUAL 0)
+    set(GUFO_BUILD_REVISION "${GUFO_GIT_REVISION}")
+    foreach(ref HEAD refs/heads/release-defaults)
+      execute_process(COMMAND ${GIT_EXECUTABLE} rev-parse --git-path ${ref}
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE ref_path OUTPUT_STRIP_TRAILING_WHITESPACE)
+      if(NOT IS_ABSOLUTE "${ref_path}")
+        set(ref_path "${CMAKE_SOURCE_DIR}/${ref_path}")
+      endif()
+      set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${ref_path}")
+    endforeach()
+  endif()
+endif()
+configure_file(src/cli/brand.hpp.in generated/src/cli/brand.hpp @ONLY)
+configure_file(src/cli/brand.json.in generated/brand.json @ONLY)
+include_directories(${CMAKE_BINARY_DIR}/generated)
 include_directories(${CMAKE_SOURCE_DIR})
 if (WIN32)
   # Windows: POSIX shadow headers (compat/win32/include) plus their Win32
@@ -284,6 +318,10 @@ add_executable(gufo
   src/eval/http_client.cpp
 )
 target_link_libraries(gufo PRIVATE gufo_diagnostics gufo_core gufo_llm_cli gufo_http CURL::libcurl)
+set_target_properties(gufo PROPERTIES OUTPUT_NAME "${GUFO_BRAND}")
+if(GUFO_BRAND STREQUAL "bubo")
+  add_custom_target(bubo DEPENDS gufo)
+endif()
 target_compile_definitions(gufo PRIVATE
   GUFO_RELEASE_VERSION="${GUFO_RELEASE_VERSION}"
   GUFO_REVISION="${GUFO_REVISION}"
@@ -297,13 +335,13 @@ if (ENGINE_ENABLE_HIP)
 endif()
 target_link_libraries(gufo PRIVATE gufo_qwen3_tts gufo_qwen3_asr)
 
-if (WIN32)
+if (GUFO_BRAND STREQUAL "gufo" AND WIN32)
   # Symlinks need Developer Mode or elevation on Windows; ship a copy.
   add_custom_target(gufo-server ALL
     COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:gufo> ${CMAKE_CURRENT_BINARY_DIR}/gufo-server.exe
     DEPENDS gufo
   )
-else()
+elseif(GUFO_BRAND STREQUAL "gufo")
   add_custom_target(gufo-server ALL
     COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE_NAME:gufo> ${CMAKE_CURRENT_BINARY_DIR}/gufo-server
     DEPENDS gufo
@@ -360,9 +398,9 @@ install(FILES
 install(FILES LICENSE NOTICE THIRD_PARTY_NOTICES.md DESTINATION share/licenses/gufo)
 install(DIRECTORY licenses/ DESTINATION share/licenses/gufo/third-party)
 install(FILES src/models/deepseek_v4_flash/LICENSE.ds4 DESTINATION share/licenses/gufo/third-party)
-if (WIN32)
+if (GUFO_BRAND STREQUAL "gufo" AND WIN32)
   install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/gufo-server.exe DESTINATION bin)
-else()
+elseif(GUFO_BRAND STREQUAL "gufo")
   install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E create_symlink gufo \"\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufo-server\")")
 endif()
 if (ENGINE_ENABLE_HIP AND GUFO_BUILD_TOOLS)
@@ -398,7 +436,7 @@ if (BUILD_TESTING)
   set_tests_properties(gufo_version PROPERTIES
     LABELS "cpu"
     PASS_REGULAR_EXPRESSION
-      "gufo version ${GUFO_RELEASE_VERSION} \\(${GUFO_REVISION}\\)")
+      "${GUFO_BRAND} ${GUFO_RELEASE_VERSION} \\(${GUFO_BUILD_REVISION}\\), engine gufo ${GUFO_RELEASE_VERSION}")
 
   add_test(NAME gufo_help COMMAND gufo --help)
   set_tests_properties(gufo_help PROPERTIES LABELS "cpu")
@@ -1160,9 +1198,12 @@ endif()
 
 if (BUILD_TESTING)
   # Compile the release layer and its CPU regressions as one named group.
+  add_executable(brand_test tests/cli/brand_test.cpp)
+  add_test(NAME brand_test COMMAND brand_test)
+  set_tests_properties(brand_test PROPERTIES LABELS "cpu")
   # A single target also works with PowerShell -File string-array parameters.
   add_custom_target(release_cpu_tests
-    DEPENDS gufo release_profile_test log_async_test platform_tuning_test openai_chat_test arg_parser_test
+    DEPENDS gufo brand_test release_profile_test log_async_test platform_tuning_test openai_chat_test arg_parser_test
       behaviour_test loop_breaker_test continuation_cache_test
       text_model_runner_test text_generation_scheduler_test)
 

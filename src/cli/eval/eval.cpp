@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "src/cli/arg_parser.hpp"
+#include "src/cli/brand.hpp"
 #include "src/core/json.hpp"
 #include "src/eval/dataset.hpp"
 #include "src/eval/extract.hpp"
@@ -368,7 +369,7 @@ bool WriteReport(const std::filesystem::path& output, const Value& report,
 
 std::string SanitizedCommand(const EvalOptions& options) {
   std::ostringstream command;
-  command << "gufo eval";
+  command << gufo::cli::ProductCommand("eval");
   if (options.base_url != kDefaultBaseUrl) {
     command << " --base-url <endpoint>";
   }
@@ -639,7 +640,7 @@ int Execute(const EvalOptions& options) {
 EvalOptions ParseOptions(std::span<const char* const> args,
                          bool* help_requested, std::string* error) {
   EvalOptions options;
-  ArgParser parser("gufo eval",
+  ArgParser parser(gufo::cli::ProductCommand("eval"),
                    "Run the pinned Antirez DS4 capability questions against "
                    "an OpenAI-compatible server.");
   parser.AddOption("", "--base-url", "URL",
@@ -668,7 +669,7 @@ EvalOptions ParseOptions(std::span<const char* const> args,
 
 void PrintEvalHelp(std::string_view) {
   EvalOptions options;
-  ArgParser parser("gufo eval",
+  ArgParser parser(gufo::cli::ProductCommand("eval"),
                    "Run the pinned Antirez DS4 capability questions against "
                    "an OpenAI-compatible server.");
   parser.AddOption("", "--base-url", "URL",
@@ -696,7 +697,7 @@ int RunEval(std::span<const char* const> args) {
     return 2;
   }
   if (help_requested) {
-    PrintEvalHelp("gufo");
+    PrintEvalHelp(gufo::cli::kProductName);
     return 0;
   }
   return Execute(options);

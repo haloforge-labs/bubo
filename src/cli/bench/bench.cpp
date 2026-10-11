@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "src/cli/arg_parser.hpp"
+#include "src/cli/brand.hpp"
 #include "src/cli/sampling_options.hpp"
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/gguf_reader.hpp"
@@ -1316,7 +1317,7 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
   bool explicit_n = false;
 
   gufo::cli::ArgParser parser(
-      "gufo bench",
+      gufo::cli::ProductCommand("bench"),
       "Benchmark prompt processing (pp) and token generation (tg) "
       "throughput.");
   bool speculative_explicit = false;
@@ -1389,10 +1390,10 @@ int RunBench(std::span<const char* const> args) {
   if (!opt_res.has_value()) {
     if (!parse_err.empty()) {
       std::cerr << "Error: " << parse_err << "\n";
-      PrintBenchHelp("gufo");
+      PrintBenchHelp(gufo::cli::kProductName);
       return 2;
     }
-    PrintBenchHelp("gufo");
+    PrintBenchHelp(gufo::cli::kProductName);
     return 0;
   }
 
@@ -1858,7 +1859,8 @@ int RunBench(std::span<const char* const> args) {
   std::cout << "\n";
   return 0;
 #else
-  std::cerr << "Error: Gufo GPU benchmark requires ENGINE_ENABLE_HIP=ON\n";
+  std::cerr << kProductName
+            << ": GPU benchmark requires ENGINE_ENABLE_HIP=ON\n";
   PrintModelLoadTime(model_load_start, false);
   return 1;
 #endif

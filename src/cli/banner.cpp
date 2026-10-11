@@ -8,6 +8,8 @@
 #include <span>
 #include <string_view>
 
+#include "src/cli/brand.hpp"
+
 namespace gufo::cli {
 
 namespace {
@@ -57,7 +59,7 @@ void PrintStartupBanner(std::string_view version,
   const char* bold = color ? "\033[1m" : "";
   const char* reset = color ? "\033[0m" : "";
 
-  std::clog << "  " << tint << ",___," << reset << "   " << bold << "gufo"
+  std::clog << "  " << tint << ",___," << reset << "   " << bold << kProductName
             << reset << ' ' << version << '\n'
             << "  " << tint << eyes << reset << "   Fast LLM & DiT inference"
             << separator << "gfx1151\n"

@@ -1,0 +1,31 @@
+#ifndef GUFO_CLI_BRAND_HPP_
+#define GUFO_CLI_BRAND_HPP_
+
+#include <string>
+#include <string_view>
+
+namespace gufo::cli {
+inline constexpr std::string_view kProductName = "@GUFO_BRAND@";
+inline constexpr std::string_view kExeName = "@GUFO_BRAND@";
+inline constexpr std::string_view kDefaultProfile = "@GUFO_DEFAULT_PROFILE@";
+inline constexpr std::string_view kEngineName = "gufo";
+inline constexpr std::string_view kCacheDirName = "gufo";
+inline constexpr std::string_view kApiKeys[] = {"gufo", "bubo"};
+inline constexpr std::string_view kProductVersion = "@GUFO_RELEASE_VERSION@";
+inline constexpr std::string_view kEngineVersion = "@GUFO_RELEASE_VERSION@";
+inline constexpr std::string_view kRevision = "@GUFO_BUILD_REVISION@";
+
+inline std::string ProductCommand(std::string_view command) {
+  return std::string(kProductName) + " " + std::string(command);
+}
+
+inline std::string FormatVersion(std::string_view product,
+                                 std::string_view version,
+                                 std::string_view revision,
+                                 std::string_view engine_version) {
+  return std::string(product) + " " + std::string(version) + " (" +
+         std::string(revision.empty() ? "unknown" : revision) + "), engine " +
+         std::string(kEngineName) + " " + std::string(engine_version);
+}
+}  // namespace gufo::cli
+#endif

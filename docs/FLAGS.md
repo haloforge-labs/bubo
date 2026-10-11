@@ -127,7 +127,7 @@ Exact uses one session, forward size 4096, and seed 1 unless a seed is supplied.
 Exact refuses values that enable disabled settings or change its session count or prefill geometry.
 It runs at about half the decode speed, and every request prefills its full prompt.
 Sidecar files (MTP, vision, dense twin, draft head) are set with their own options.
-Reference: `gufo serve --profile stock --speculative off --no-cache --sessions 1 --seed 1 --think on --reasoning-effort medium`.
+Reference: `bubo serve --profile stock --speculative off --no-cache --sessions 1 --seed 1 --think on --reasoning-effort medium`.
 Use `--print-effective-settings` to inspect settings without loading tensors or starting a server.
 
 ## Diagnostics

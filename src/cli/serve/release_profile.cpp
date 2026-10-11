@@ -977,7 +977,7 @@ std::string RenderReleaseDocs(std::span<const json::Value> rows) {
       "full prompt.\n"
       "Sidecar files (MTP, vision, dense twin, draft head) are set with their "
       "own options.\n"
-      "Reference: `gufo serve --profile stock --speculative off --no-cache "
+      "Reference: `bubo serve --profile stock --speculative off --no-cache "
       "--sessions 1 --seed 1 --think on --reasoning-effort medium`.\n"
       "Use `--print-effective-settings` to inspect settings without loading "
       "tensors or starting a server.\n"

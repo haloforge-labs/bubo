@@ -5,28 +5,22 @@
 
 #include "src/cli/banner.hpp"
 #include "src/cli/bench/bench.hpp"
+#include "src/cli/brand.hpp"
 #include "src/cli/diagnose/diagnose.h"
 #include "src/cli/eval/eval.hpp"
+#include "src/cli/model_families.hpp"
 #include "src/cli/prompt/prompt.hpp"
 #include "src/cli/serve/serve.hpp"
 #include "src/cli/transcribe/transcribe.hpp"
 #include "src/cli/video/video.hpp"
 
-#ifndef GUFO_RELEASE_VERSION
-#define GUFO_RELEASE_VERSION "development"
-#endif
-#ifndef GUFO_REVISION
-#define GUFO_REVISION "unknown"
-#endif
-
-constexpr std::string_view kGufoReleaseVersion = GUFO_RELEASE_VERSION;
-constexpr std::string_view kGufoRevision = GUFO_REVISION;
-
 namespace {
 
 void print_version() {
-  std::cout << "gufo version " << kGufoReleaseVersion << " (" << kGufoRevision
-            << ")\n";
+  std::cout << gufo::cli::FormatVersion(
+                   gufo::cli::kProductName, gufo::cli::kProductVersion,
+                   gufo::cli::kRevision, gufo::cli::kEngineVersion)
+            << '\n';
 }
 
 void print_help(std::string_view program_name) {
@@ -48,17 +42,20 @@ void print_help(std::string_view program_name) {
       << " <COMMAND> --help' for details on a command\n\n"
       << "Options:\n"
       << "  -h, --help     Print help\n"
-      << "  -v, --version  Print version\n";
+      << "  -v, --version  Print version\n\n"
+      << "Model families (serve llm / asr / tts / image / video):\n";
+  for (const auto family : gufo::cli::kModelFamilies)
+    std::cout << "  " << family << '\n';
 }
 
 int run(std::span<const char* const> args) {
   if (args.empty()) {
     std::cerr << "Error: missing command or option\n";
-    print_help("gufo");
+    print_help(gufo::cli::kProductName);
     return 2;
   }
 
-  const std::string_view program_name = args[0];
+  const std::string_view program_name = gufo::cli::kProductName;
   const auto options = args.subspan(1);
 
   if (options.empty()) {
@@ -121,7 +118,7 @@ int run(std::span<const char* const> args) {
     return 2;
   }
 
-  gufo::cli::PrintStartupBanner(kGufoReleaseVersion, options);
+  gufo::cli::PrintStartupBanner(gufo::cli::kProductVersion, options);
 
   if (first_arg == "probe") {
     return gufo::cli::RunProbe(options.subspan(1));
@@ -159,9 +156,10 @@ int run(std::span<const char* const> args) {
     return gufo::cli::RunServe(options.subspan(1));
   }
 
-  // If invoked as legacy binary name or flag passed directly, route to serve
-  if (program_name.ends_with("gufo-server") ||
-      program_name.ends_with("/gufo-server")) {
+  // Legacy alias is retained for the optional upstream-branded build only.
+  if (gufo::cli::kProductName == "gufo" &&
+      (std::string_view(args[0]).ends_with("gufo-server") ||
+       std::string_view(args[0]).ends_with("gufo-server.exe"))) {
     return gufo::cli::RunServe(options);
   }
 

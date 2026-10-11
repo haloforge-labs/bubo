@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "src/cli/model_families.hpp"
 #include "src/cli/serve/debug_settings.hpp"
 
 using namespace gufo::server;
@@ -98,6 +99,8 @@ void CheckSpec(const std::filesystem::path& path) {
 
 void AuditCatalog() {
   const auto root = std::filesystem::path(GUFO_RELEASE_SOURCE_ROOT);
+  Expect(ReleaseInputs{}.profile == gufo::cli::kDefaultProfile,
+         "resolver compile-time default follows the build brand");
   std::set<std::string> names, missing;
   for (const auto& row : ReleaseSwitchTable())
     names.insert(row.member_str("name"));
@@ -130,6 +133,7 @@ void AuditCatalog() {
   for (const auto& name : missing)
     std::cerr << "MISSING: " << name << '\n';
   Expect(missing.empty(), "source literal catalog completeness");
+
 }
 
 void ReviewRegression(int finding) {
@@ -792,25 +796,91 @@ void TestResolver() {
   inputs.environment["GUFO_LENIENT"] = "bounded";
   Reject([&] { (void)ResolveReleaseSettings(inputs); },
          "explicit requirement violation refuses");
-  inputs = Inputs();
-  inputs.model_family = "other";
-  Expect(ResolveReleaseSettings(inputs).injections.empty(),
-         "family mismatch injects nothing");
-  inputs.explicit_flags["--no-behaviour"] = "1";
-  auto other_disabled = ResolveReleaseSettings(inputs);
-  Expect(other_disabled.injections.empty(),
-         "suppression cannot inject another model's defaults");
-  Expect(std::none_of(other_disabled.settings.begin(),
-                      other_disabled.settings.end(),
-                      [](const auto& row) {
-                        return row.skipped_reason.starts_with("skipped: needs");
-                      }),
-         "family mismatch has no missing-artifact defaults");
-  for (const auto* profile : {"subagents", "exact", "stock"}) {
-    auto other = Inputs(profile);
-    other.model_family = "other";
-    Expect(ResolveReleaseSettings(other).injections.empty(),
-           "every profile leaves another family unchanged");
+  // Read the real catalog declaration rather than a test-owned family list.
+  // New catalog families enter this matrix without updating the test.
+  const auto catalog_source =
+      Read(std::filesystem::path(GUFO_RELEASE_SOURCE_ROOT) /
+           "tools/release/gen_switches.py");
+  std::smatch declaration;
+  Expect(std::regex_search(catalog_source, declaration,
+                           std::regex(R"(\bFAMILIES\s*=\s*\{([^}]*)\})")),
+         "real catalog FAMILIES declaration exists");
+  const auto family_source = declaration[1].str();
+  const std::regex family_literal(R"family(['"]([^'"]+)['"])family");
+  std::set<std::string> families;
+  for (std::sregex_iterator
+           match(family_source.begin(), family_source.end(), family_literal),
+       end;
+       match != end; ++match)
+    families.insert((*match)[1].str());
+  families.erase("any");
+  families.insert("qwen3.6-a3b");
+  const std::set<std::string> help_families(
+      std::begin(gufo::cli::kModelFamilies),
+      std::end(gufo::cli::kModelFamilies));
+  Expect(help_families == families,
+         "public family list matches the real catalog");
+  for (const auto& family : families) {
+    for (const auto* profile : {"default", "subagents", "stock", "exact"}) {
+      for (const bool suppressed : {false, true}) {
+        auto upstream_inputs = Inputs("stock");
+        upstream_inputs.model_family = family;
+        if (suppressed)
+          upstream_inputs.explicit_flags["--no-behaviour"] = "1";
+        const auto upstream = ResolveReleaseSettings(upstream_inputs);
+        auto candidate_inputs = upstream_inputs;
+        candidate_inputs.profile = profile;
+        const auto candidate = ResolveReleaseSettings(candidate_inputs);
+        if (family == "qwen3.8-flash-next" &&
+            std::string_view(profile) != "stock") {
+          Expect(!candidate.injections.empty() ||
+                     candidate.effective_flags != upstream.effective_flags,
+                 "Flash Next retains its tuned profile");
+          continue;
+        }
+        auto flags = upstream.effective_flags;
+        const bool exact = std::string_view(profile) == "exact";
+        if (exact)
+          flags["--seed"] = "1";
+        Expect(candidate.effective_flags == flags,
+               "upstream flag diff: " + std::string(family) + "/" + profile);
+        Expect(candidate.injections.empty(), "upstream env injections empty");
+        for (const auto& setting : candidate.settings) {
+          const auto& stock = Find(upstream, setting.name);
+          Expect(setting.value == (exact && setting.name == "--seed"
+                                       ? std::optional<std::string>("1")
+                                       : stock.value),
+                 "effective env/flag diff: " + std::string(family) + "/" +
+                     profile + "/" + setting.name);
+        }
+        Expect(candidate.turned_off.empty(), "other family policies retained");
+        Expect(std::none_of(
+                   candidate.settings.begin(), candidate.settings.end(),
+                   [](const auto& row) {
+                     return row.skipped_reason.starts_with("skipped: needs");
+                   }),
+               "no missing-artifact defaults for other families");
+        if (exact) {
+          Expect(std::find(
+                     candidate.logs.begin(), candidate.logs.end(),
+                     "profile=exact: byte-exact controls apply to Qwen3.8 "
+                     "Flash Next only; seed=1 applied") != candidate.logs.end(),
+                 "other-family exact documents seed-only scope");
+          candidate_inputs.explicit_flags["--seed"] = "7";
+          Expect(ResolveReleaseSettings(candidate_inputs)
+                         .effective_flags.at("--seed") == "7",
+                 "other-family exact retains an explicit seed");
+        }
+      }
+      std::cout << "PASS: family=" << family << " profile=" << profile
+                << (family == "qwen3.8-flash-next" &&
+                            std::string_view(profile) != "stock"
+                        ? " tuned defaults retained"
+                    : std::string_view(profile) == "exact"
+                        ? " diff=seed:1 only; message checked"
+                        : " diff=EMPTY")
+                << " (with/without --no-behaviour)\n";
+    }
   }
   Expect(ResolveReleaseSettings(Inputs("stock")).injections.empty(),
          "stock injects nothing");

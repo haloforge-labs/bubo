@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "src/cli/arg_parser.hpp"
+#include "src/cli/brand.hpp"
 #include "src/cli/sampling_options.hpp"
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/gguf_reader.hpp"
@@ -582,7 +583,8 @@ int RunDeepSeekChat(const PromptOptions& opt, const core::GgufReader& reader,
   const auto reasoning = PromptReasoningOptions(opt);
   const auto chat_options =
       models::deepseek_v4_flash::ResolveDeepSeekChatOptions(reasoning);
-  std::cout << "=== Gufo Interactive Chat (DeepSeek V4 Flash) ===\n"
+  std::cout << "=== " << kProductName
+            << " Interactive Chat (DeepSeek V4 Flash) ===\n"
             << "Type 'exit' or Ctrl+D to quit.\n\n";
   for (std::string input;;) {
     std::cout << ">>> User: " << std::flush;
@@ -833,7 +835,7 @@ static std::optional<PromptOptions> ParseTextOptions(
     std::span<const char* const> args, std::string* error_msg,
     std::string_view command) {
   PromptOptions opt;
-  gufo::cli::ArgParser parser("gufo prompt",
+  gufo::cli::ArgParser parser(gufo::cli::ProductCommand("prompt"),
                               "Execute one prompt request and exit.");
   bool speculative_explicit = false;
   RegisterTextOptions(parser, opt, speculative_explicit, command);
@@ -945,10 +947,10 @@ int RunPrompt(std::span<const char* const> args) {
   if (!opt_res.has_value()) {
     if (!parse_err.empty()) {
       std::cerr << "Error: " << parse_err << "\n";
-      PrintPromptHelp("gufo");
+      PrintPromptHelp(gufo::cli::kProductName);
       return 2;
     }
-    PrintPromptHelp("gufo");
+    PrintPromptHelp(gufo::cli::kProductName);
     return 0;
   }
 
@@ -971,7 +973,7 @@ int RunPrompt(std::span<const char* const> args) {
   }
 
   if (opt.prompt_text.empty() && opt.model_path.empty()) {
-    PrintPromptHelp("gufo");
+    PrintPromptHelp(gufo::cli::kProductName);
     return 0;
   }
 
@@ -1191,16 +1193,16 @@ int RunChat(std::span<const char* const> args) {
   if (!opt_res.has_value()) {
     if (!parse_err.empty()) {
       std::cerr << "Error: " << parse_err << "\n";
-      PrintChatHelp("gufo");
+      PrintChatHelp(gufo::cli::kProductName);
       return 2;
     }
-    PrintChatHelp("gufo");
+    PrintChatHelp(gufo::cli::kProductName);
     return 0;
   }
 
   auto opt = *opt_res;
   if (opt.model_path.empty()) {
-    std::cout << "gufo chat: interactive conversation mode\n"
+    std::cout << kProductName << " chat: interactive conversation mode\n"
               << "(Specify --model <PATH.gguf> to load model weights)\n";
     return 0;
   }
@@ -1306,7 +1308,8 @@ int RunChat(std::span<const char* const> args) {
   }
   PrintModelLoadTime(model_load_start);
 
-  std::cout << "=== Gufo Interactive Chat (" << architecture << ") ===\n"
+  std::cout << "=== " << kProductName << " Interactive Chat (" << architecture
+            << ") ===\n"
             << "Type 'exit' or Ctrl+D to quit.\n\n";
 
   std::vector<tokenization::ChatMessage> history;
