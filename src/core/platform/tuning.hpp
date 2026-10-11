@@ -20,6 +20,8 @@
 #include <cstdlib>
 #include <string_view>
 
+#include "src/cli/serve/logging.hpp"
+
 namespace gufo::platform {
 
 struct Tuning {
@@ -114,18 +116,19 @@ inline Tuning ParseTuning() {
       }
     }
     if (!known) {
-      std::fprintf(stderr,
-                   "gufo: GUFO_PLATFORM_TUNING: unknown switch '%.*s'\n",
-                   static_cast<int>(item.size()), item.data());
+      gufo::server::Logger::Raw(
+          "gufo: GUFO_PLATFORM_TUNING: unknown switch '%.*s'\n",
+          static_cast<int>(item.size()), item.data());
     }
   }
   if (env != nullptr) {
-    std::fprintf(stderr, "gufo: platform tuning:");
+    gufo::server::Logger::Raw("gufo: platform tuning:");
     for (const auto& field : kTuningFields) {
-      std::fprintf(stderr, " %s%.*s", tuning.*field.member ? "+" : "-",
-                   static_cast<int>(field.name.size()), field.name.data());
+      gufo::server::Logger::Raw(" %s%.*s", tuning.*field.member ? "+" : "-",
+                                static_cast<int>(field.name.size()),
+                                field.name.data());
     }
-    std::fprintf(stderr, "\n");
+    gufo::server::Logger::Raw("\n");
   }
   return tuning;
 }

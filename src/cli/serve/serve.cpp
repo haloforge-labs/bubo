@@ -169,6 +169,7 @@ void ReportTerminationReason() {
     }
     try {
       server::Logger::Error("server", "event=terminated reason=" + reason);
+      server::Logger::FlushSync(std::chrono::seconds(2));
     } catch (...) {
       // The handler must not throw on its way out.
     }
@@ -192,10 +193,13 @@ void ShutdownAfterDeviceLoss() {
   // nor a dead-device join may prevent the forced exit.
   try {
     std::thread([kShutdownTimeout] {
-      std::this_thread::sleep_for(kShutdownTimeout);
+      // Reserve the last 2 s for logs without extending the 10 s watchdog.
+      std::this_thread::sleep_for(kShutdownTimeout - std::chrono::seconds(2));
+      server::Logger::FlushSync(std::chrono::seconds(2));
       ::_exit(kDeviceLostExitStatus);
     }).detach();
   } catch (...) {
+    server::Logger::FlushSync(std::chrono::seconds(2));
     ::_exit(kDeviceLostExitStatus);
   }
   server::Logger::Error(
@@ -814,14 +818,24 @@ void PrintServeHelp(std::string_view program_name,
 }
 
 int RunServe(std::span<const char* const> args) {
+  // Declared first: the final drain runs after model/server destructors log.
+  struct LogShutdown {
+    ~LogShutdown() {
+      server::Logger::FlushSync(std::chrono::milliseconds(0));
+      server::Logger::Shutdown();
+    }
+  } log_shutdown;
   auto release = server::PrepareReleaseSettings(args);
   if (!release.error.empty()) {
+    server::Logger::FlushSync(std::chrono::seconds(2));
     std::cerr << "Error: " << release.error << '\n';
     return 2;
   }
   if (release.active) {
-    for (const auto& line : release.resolved.logs)
+    for (const auto& line : release.resolved.logs) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << line << '\n';
+    }
   }
   std::string release_profile_name;
   bool release_exact = false, print_effective_settings = false;
@@ -926,6 +940,7 @@ int RunServe(std::span<const char* const> args) {
     if (release.active)
       server::PrefillReleaseFlags(release.resolved, server_parser);
   } catch (const std::exception& error) {
+    server::Logger::FlushSync(std::chrono::seconds(2));
     std::cerr << "Error: " << error.what() << '\n';
     return 2;
   }
@@ -950,6 +965,7 @@ int RunServe(std::span<const char* const> args) {
           arg == "help" && i + 1 < args.size() ? args[i + 1] : "";
       if (!topic.empty() && topic != "llm" && topic != "video" &&
           topic != "tts" && topic != "asr" && topic != "image") {
+        server::Logger::FlushSync(std::chrono::seconds(2));
         std::cerr << "Error: unknown serve command '" << topic << "'\n";
         return 2;
       }
@@ -968,24 +984,29 @@ int RunServe(std::span<const char* const> args) {
   const auto prepare_server_options = [&] {
     in_addr address{};
     if (::inet_pton(AF_INET, host.c_str(), &address) != 1) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: --host must be an IPv4 address\n";
       return false;
     }
     if (port < 0 || port > 65535) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: --port must be between 0 and 65535\n";
       return false;
     }
     if (max_score_tokens == 0) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: --max-score-tokens must be positive\n";
       return false;
     }
     if (debug_hooks && subcommand != "llm") {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr
           << "GUFO_DEBUG_HOOKS/--debug-hooks ignored for non-text server\n";
       debug_hooks = false;
     }
     if (session_count == 0 || max_connections == 0 ||
         max_request_body_bytes == 0) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: server limits must be positive\n";
       return false;
     }
@@ -995,6 +1016,7 @@ int RunServe(std::span<const char* const> args) {
     // `--log-level=debug`, so the two spellings together are a conflict to
     // report, not a precedence to resolve silently.
     if (log_options.verbose && log_options.level.has_value()) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: --verbose is shorthand for --log-level=debug, so "
                    "it cannot combine with --log-level\n";
       return false;
@@ -1055,6 +1077,7 @@ int RunServe(std::span<const char* const> args) {
                      "Model", &name);
     add_server_options(parser, false);
     if (!parser.Parse(sub_args, &parse_err)) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: " << parse_err << '\n';
       return 2;
     }
@@ -1065,6 +1088,7 @@ int RunServe(std::span<const char* const> args) {
     if (!prepare_server_options())
       return 2;
     if (model.empty()) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: --model <DIR> is required for image server\n";
       return 2;
     }
@@ -1072,6 +1096,7 @@ int RunServe(std::span<const char* const> args) {
     try {
       images = std::make_shared<server::ImageService>(model, name);
     } catch (const std::exception& error) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error loading Qwen-Image-2.1: " << error.what() << '\n';
       return 1;
     }
@@ -1099,6 +1124,7 @@ int RunServe(std::span<const char* const> args) {
 
     add_server_options(video_parser);
     if (!video_parser.Parse(sub_args, &parse_err)) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: " << parse_err << "\n";
       PrintServeHelp("gufo", "video");
       return 2;
@@ -1114,11 +1140,13 @@ int RunServe(std::span<const char* const> args) {
     if (video_ttl_seconds == 0 ||
         video_ttl_seconds >
             static_cast<std::uint64_t>(std::chrono::seconds::max().count())) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: --ttl must be a positive duration\n";
       return 2;
     }
 
     if (video_model.empty()) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: --model <DIR> is required for video server\n";
       PrintServeHelp("gufo", "video");
       return 2;
@@ -1139,6 +1167,7 @@ int RunServe(std::span<const char* const> args) {
             .runner = {},
         });
     if (!video_jobs->ready()) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error enabling MiniMax H3 video service: "
                 << video_jobs->initialization_error() << '\n';
       return 1;
@@ -1154,6 +1183,7 @@ int RunServe(std::span<const char* const> args) {
     AddSpeechOptions(parser, is_tts, &options);
     add_server_options(parser, false);
     if (!parser.Parse(sub_args, &parse_err)) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: " << parse_err << '\n';
       return 2;
     }
@@ -1164,11 +1194,13 @@ int RunServe(std::span<const char* const> args) {
     if (!prepare_server_options())
       return 2;
     if (options.model.empty()) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: --model <DIR> is required for " << subcommand
                 << " server\n";
       return 2;
     }
     if (options.context < (is_tts ? 1U : 32U)) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: --context must be at least " << (is_tts ? 1 : 32)
                 << '\n';
       return 2;
@@ -1179,6 +1211,7 @@ int RunServe(std::span<const char* const> args) {
       if (!BuildVoicePresets(options.voice_specs, options.voice_text_specs,
                              options.voice_lang_specs, &voice_presets,
                              &parse_err)) {
+        server::Logger::FlushSync(std::chrono::seconds(2));
         std::cerr << "Error: " << parse_err << '\n';
         return 2;
       }
@@ -1193,10 +1226,12 @@ int RunServe(std::span<const char* const> args) {
             .runner = {},
         });
       } catch (const std::exception& error) {
+        server::Logger::FlushSync(std::chrono::seconds(2));
         std::cerr << "Error loading Qwen3-TTS: " << error.what() << '\n';
         return 1;
       }
       if (!tts->ready()) {
+        server::Logger::FlushSync(std::chrono::seconds(2));
         std::cerr << "Error enabling Qwen3-TTS service: "
                   << tts->initialization_error() << '\n';
         return 1;
@@ -1214,10 +1249,12 @@ int RunServe(std::span<const char* const> args) {
             .runner = {},
         });
       } catch (const std::exception& error) {
+        server::Logger::FlushSync(std::chrono::seconds(2));
         std::cerr << "Error loading Qwen3-ASR: " << error.what() << '\n';
         return 1;
       }
       if (!asr->ready()) {
+        server::Logger::FlushSync(std::chrono::seconds(2));
         std::cerr << "Error enabling Qwen3-ASR service: "
                   << asr->initialization_error() << '\n';
         return 1;
@@ -1400,10 +1437,12 @@ int RunServe(std::span<const char* const> args) {
       if (release.active)
         server::PrefillReleaseFlags(release.resolved, llm_parser);
     } catch (const std::exception& error) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: " << error.what() << '\n';
       return 2;
     }
     if (!llm_parser.Parse(sub_args, &parse_err)) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: " << parse_err << "\n";
       PrintServeHelp("gufo", "llm");
       return 2;
@@ -1436,6 +1475,7 @@ int RunServe(std::span<const char* const> args) {
     // would be accepted and then silently discarded, so reject the combination
     // instead of ignoring an option the caller asked for.
     if (log_progress && !server::Logger::Enabled(server::LogLevel::kInfo)) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: --log-progress needs --log-level=info or "
                    "--log-level=debug\n";
       return 2;
@@ -1444,6 +1484,7 @@ int RunServe(std::span<const char* const> args) {
     // instead of after the weights are resident.
     if (!trace_path.empty()) {
       if (const auto error = server::Trace::Open(trace_path)) {
+        server::Logger::FlushSync(std::chrono::seconds(2));
         std::cerr << "Error: cannot open --trace file '" << trace_path
                   << "': " << *error << "\n";
         return 2;
@@ -1466,18 +1507,21 @@ int RunServe(std::span<const char* const> args) {
         request_timeout_ms > static_cast<std::uint64_t>(
                                  std::chrono::milliseconds::max().count()) ||
         !sampling_valid) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: sampling and scheduling limits are invalid\n";
       return 2;
     }
     if (draft_tokens == 0 || min_draft_tokens == 0 ||
         min_draft_tokens > draft_tokens ||
         draft_tokens > std::numeric_limits<std::uint32_t>::max()) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: speculative draft limits are invalid\n";
       return 2;
     }
     const auto reasoning_defaults = ResolveReasoningDefaults(
         reasoning_mode, reasoning_effort, preserve_thinking, &parse_err);
     if (!reasoning_defaults.has_value()) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: " << parse_err << "\n";
       return 2;
     }
@@ -1495,6 +1539,7 @@ int RunServe(std::span<const char* const> args) {
     } else if (speculative_backend == "mtp") {
       speculative_config.backend = server::TextSpeculativeBackend::kMtp;
     } else {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: speculative backend '" << speculative_backend
                 << "' is not supported by the HTTP server\n";
       return 2;
@@ -1506,11 +1551,13 @@ int RunServe(std::span<const char* const> args) {
       speculative_config.dflash_policy =
           speculative::ParseDFlashDraftPolicy(draft_policy);
     } catch (const std::invalid_argument& exception) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: " << exception.what() << '\n';
       return 2;
     }
     if (speculative_config.backend == server::TextSpeculativeBackend::kDFlash &&
         (dflash_model_path.empty() || min_draft_tokens != 1)) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: DFlash2 requires --dflash-model and "
                    "--min-draft-tokens 1; bound blocks with --draft-tokens\n";
       return 2;
@@ -1526,12 +1573,14 @@ int RunServe(std::span<const char* const> args) {
     speculative_config.min_draft_tokens =
         static_cast<std::uint32_t>(min_draft_tokens);
     if (model.empty()) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: --model <PATH> is required\n";
       return 2;
     }
     if ((mtp_policy != "length" && mtp_policy != "survival") ||
         (mtp_draft_vocab != "full" && mtp_draft_vocab != "latin" &&
          mtp_draft_vocab != "auto")) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: --mtp-policy is length or survival, "
                    "--mtp-draft-vocab is full, latin or auto\n";
       return 2;
@@ -1573,6 +1622,7 @@ int RunServe(std::span<const char* const> args) {
             vision_model_path,
             server::TextRunnerRamCacheOptions{.capacity_bytes = cache_ram_bytes,
                                               .disabled = no_cache})) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error loading model '" << model << "': " << err << "\n";
       return 1;
     }
@@ -1684,6 +1734,7 @@ int RunServe(std::span<const char* const> args) {
                 server::ReleaseOrigins(release.resolved)));
         server::Logger::Diagnostic("settings", "settings " + debug_settings->dump());
       } catch (const std::exception& error) {
+        server::Logger::FlushSync(std::chrono::seconds(2));
         std::cerr << "Error enabling debug hooks: " << error.what() << '\n';
         return 2;
       }
@@ -1724,6 +1775,7 @@ int RunServe(std::span<const char* const> args) {
       images);
   std::string err;
   if (!server.start(&err)) {
+    server::Logger::FlushSync(std::chrono::seconds(2));
     std::cerr << "Error starting HTTP server: " << err << "\n";
     return 1;
   }
@@ -1732,6 +1784,7 @@ int RunServe(std::span<const char* const> args) {
   // after the scheduler records the loss but before a request fires the hook.
   const auto exit_if_device_lost = [&device_lost, &backend] {
     if (device_lost.load() || (backend != nullptr && backend->device_lost())) {
+      server::Logger::FlushSync(std::chrono::seconds(2));
       ::_exit(kDeviceLostExitStatus);
     }
   };

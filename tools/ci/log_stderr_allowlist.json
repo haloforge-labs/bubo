@@ -1,0 +1,5 @@
+{
+  "schema": 1,
+  "sites": [],
+  "reason": "All fprintf(stderr) sites in the guarded serving files are routed through Logger::Raw. No exceptions."
+}

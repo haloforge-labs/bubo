@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "qfn_mmq.h"
+#include "src/cli/serve/logging.hpp"
 #include "src/core/hip/snapshot_transfer.hpp"
 #include "src/core/platform/tuning.hpp"
 #include "src/models/qwen38_flash_next/batch_twin_policy.hpp"
@@ -84,10 +85,11 @@ bool RoutedLanerowEnabled() {
       return false;
     if (std::strcmp(value, "1") == 0)
       return true;
-    std::fprintf(stderr,
-                 "[routed-lanerow] warning: unsupported GUFO_ROUTED_LANEROW "
-                 "value '%s' (2 reserved); using default dispatch\n",
-                 value);
+    gufo::server::Logger::Raw(
+        gufo::server::LogLevel::kWarn,
+        "[routed-lanerow] warning: unsupported GUFO_ROUTED_LANEROW "
+        "value '%s' (2 reserved); using default dispatch\n",
+        value);
     return false;
   }();
   return enabled;
@@ -111,8 +113,9 @@ void CopyReferenceOnce(hipStream_t stream) {
     } buffers;
     const auto info = hipMemGetInfo(&free, &total);
     if (info != hipSuccess) {
-      std::fprintf(stderr,
-                   "[moe-bench] copy_ref=skipped(memory query failed)\n");
+      gufo::server::Logger::Raw(
+          gufo::server::LogLevel::kInfo,
+          "[moe-bench] copy_ref=skipped(memory query failed)\n");
       return;
     }
     while (bytes > (std::size_t{1} << 30) && free < 2 * bytes + reserve)
@@ -120,7 +123,8 @@ void CopyReferenceOnce(hipStream_t stream) {
     if (free < 2 * bytes + reserve ||
         hipMalloc(&buffers.src, bytes) != hipSuccess ||
         hipMalloc(&buffers.dst, bytes) != hipSuccess) {
-      std::fprintf(stderr, "[moe-bench] copy_ref=skipped(no memory)\n");
+      gufo::server::Logger::Raw(gufo::server::LogLevel::kInfo,
+                                "[moe-bench] copy_ref=skipped(no memory)\n");
       return;
     }
     // Initialize and warm outside the three measured copies.
@@ -131,7 +135,9 @@ void CopyReferenceOnce(hipStream_t stream) {
                               hipMemcpyDeviceToDevice, stream),
                "copy warm", &error) ||
         !Check(hipStreamSynchronize(stream), "copy warm sync", &error)) {
-      std::fprintf(stderr, "[moe-bench] copy_ref=failed(%s)\n", error.c_str());
+      gufo::server::Logger::Raw(gufo::server::LogLevel::kWarn,
+                                "[moe-bench] copy_ref=failed(%s)\n",
+                                error.c_str());
       return;
     }
     std::array<double, 3> times{};
@@ -142,18 +148,20 @@ void CopyReferenceOnce(hipStream_t stream) {
                                 hipMemcpyDeviceToDevice, stream),
                  "copy ref", &error) ||
           !events.Finish(stream, us, &error) || us <= 0) {
-        std::fprintf(stderr, "[moe-bench] copy_ref=failed(%s)\n",
-                     error.c_str());
+        gufo::server::Logger::Raw(gufo::server::LogLevel::kWarn,
+                                  "[moe-bench] copy_ref=failed(%s)\n",
+                                  error.c_str());
         return;
       }
     }
     std::sort(times.begin(), times.end());
-    std::fprintf(stderr,
-                 "[moe-bench] copy_ref_gbps=%.3f copy_ref_read_gbps=%.3f "
-                 "copy_ref_bytes=%zu copy_ref_us=%.3f repeats=3 "
-                 "convention=read+write,read-equivalent\n",
-                 MoeGbps(2.0 * bytes, times[1]), MoeGbps(bytes, times[1]),
-                 bytes, times[1]);
+    gufo::server::Logger::Raw(
+        gufo::server::LogLevel::kInfo,
+        "[moe-bench] copy_ref_gbps=%.3f copy_ref_read_gbps=%.3f "
+        "copy_ref_bytes=%zu copy_ref_us=%.3f repeats=3 "
+        "convention=read+write,read-equivalent\n",
+        MoeGbps(2.0 * bytes, times[1]), MoeGbps(bytes, times[1]), bytes,
+        times[1]);
   });
 }
 
@@ -1359,18 +1367,21 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
       e->draft_head_.data = rows;
       e->draft_head_.rows = static_cast<std::uint32_t>(ids.size());
       e->draft_ids_ = map;
-      std::fprintf(stderr,
-                   "qwen38_flash_next: draft vocabulary %zu of %u tokens "
-                   "(%.0f MB)\n",
-                   ids.size(), out.rows,
-                   static_cast<double>(ids.size() * row_bytes) / 1e6);
+      gufo::server::Logger::Raw(
+          gufo::server::LogLevel::kInfo,
+          "qwen38_flash_next: draft vocabulary %zu of %u tokens "
+          "(%.0f MB)\n",
+          ids.size(), out.rows,
+          static_cast<double>(ids.size() * row_bytes) / 1e6);
     }
     e->batch_draft_head_ =
         BatchDraftHeadSwitch(std::getenv("GUFO_BATCH_DRAFT_HEAD"));
     if (e->batch_draft_head_) {
       const auto selected = e->BatchDraftOutput();
-      std::fprintf(stderr, "[batchdraft] enabled head=%s rows=%u\n",
-                   BatchDraftHeadName(selected.head), selected.tensor->rows);
+      gufo::server::Logger::Raw(gufo::server::LogLevel::kInfo,
+                                "[batchdraft] enabled head=%s rows=%u\n",
+                                BatchDraftHeadName(selected.head),
+                                selected.tensor->rows);
     }
     if (!Check(hipHostMalloc(&e->mtp_token_host_, sizeof(std::int32_t),
                              ResultHostFlags()),
@@ -2862,14 +2873,15 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
       active_diag_->totals.moe_lanerow_fallback_layers += lanerow ? 0 : 1;
     }
     if (!lanerow)
-      std::fprintf(stderr,
-                   "[routed-lanerow] fallback gate=%d up=%d down=%d "
-                   "hidden=%u ff=%u experts=%u tokens=%u "
-                   "reason=unsupported-format-or-shape\n",
-                   static_cast<int>(l.ffn_gate_exps.type),
-                   static_cast<int>(l.ffn_up_exps.type),
-                   static_cast<int>(l.ffn_down_exps.type), c.hidden_size,
-                   c.expert_ff, c.num_experts, n_tokens);
+      gufo::server::Logger::Raw(
+          gufo::server::LogLevel::kInfo,
+          "[routed-lanerow] fallback gate=%d up=%d down=%d "
+          "hidden=%u ff=%u experts=%u tokens=%u "
+          "reason=unsupported-format-or-shape\n",
+          static_cast<int>(l.ffn_gate_exps.type),
+          static_cast<int>(l.ffn_up_exps.type),
+          static_cast<int>(l.ffn_down_exps.type), c.hidden_size, c.expert_ff,
+          c.num_experts, n_tokens);
   }
   if (!RouteHints(n_tokens, error_msg, lanerow)) {
     return false;
@@ -2992,8 +3004,8 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
       ++bench.moe_fallback_layers;
     }
     if (lanerow_requested)
-      std::fprintf(
-          stderr,
+      gufo::server::Logger::Raw(
+          gufo::server::LogLevel::kInfo,
           "[moe-bench] moe_lanerow_layers=%llu "
           "moe_lanerow_fallback_layers=%llu path=%s tokens=%u "
           "gate_item_rows=%u down_item_rows=%u layer_us=%.3f\n",
@@ -3140,8 +3152,10 @@ bool Executor::Run(Session& session, std::uint64_t key, bool graph,
       if (Tl().Enabled()) {
         std::size_t nodes = 0;
         (void)hipGraphGetNodes(captured, nullptr, &nodes);
-        std::fprintf(stderr, "qwen38_flash_next: graph %016llx: %zu nodes\n",
-                     static_cast<unsigned long long>(key), nodes);
+        gufo::server::Logger::Raw(
+            gufo::server::LogLevel::kInfo,
+            "qwen38_flash_next: graph %016llx: %zu nodes\n",
+            static_cast<unsigned long long>(key), nodes);
       }
       const bool instantiated =
           Check(hipGraphInstantiate(&exec, captured, nullptr, nullptr, 0),
@@ -3495,43 +3509,70 @@ void Executor::PrintShadowStats() const {
   std::vector<const ShadowStat*> v;
   for (const auto& kv : shadow_stats_) v.push_back(&kv.second);
   std::sort(v.begin(), v.end(), [](const ShadowStat* x, const ShadowStat* y) { return x->d2 / (x->r2 + 1e-30) > y->d2 / (y->r2 + 1e-30); });
-  std::fprintf(stderr, "[shadow] %zu tensors compared (4-bit kernel vs fake-quant Q8_0 on the same real activations); worst first: label relRMS maxabs passes\n", v.size());
+  gufo::server::Logger::Raw(
+      gufo::server::LogLevel::kInfo,
+      "[shadow] %zu tensors compared (4-bit kernel vs fake-quant Q8_0 on the "
+      "same real activations); worst first: label relRMS maxabs passes\n",
+      v.size());
   for (std::size_t i = 0; i < v.size() && i < 40; ++i)
-    std::fprintf(stderr, "[shadow] %-30s %.3e %.3e %llu\n", v[i]->label.c_str(), std::sqrt(v[i]->d2 / (v[i]->r2 + 1e-30)), v[i]->maxabs, static_cast<unsigned long long>(v[i]->passes));
+    gufo::server::Logger::Raw(
+        gufo::server::LogLevel::kInfo, "[shadow] %-30s %.3e %.3e %llu\n",
+        v[i]->label.c_str(), std::sqrt(v[i]->d2 / (v[i]->r2 + 1e-30)),
+        v[i]->maxabs, static_cast<unsigned long long>(v[i]->passes));
   std::map<std::string, std::vector<double>> by_class;
   for (const auto* s : v) by_class[s->label.substr(s->label.find('.', 4) + 1)].push_back(std::sqrt(s->d2 / (s->r2 + 1e-30)));
   for (auto& kv : by_class) {
     std::sort(kv.second.begin(), kv.second.end());
-    std::fprintf(stderr, "[shadow] class %-16s n=%zu median %.3e worst %.3e\n", kv.first.c_str(), kv.second.size(), kv.second[kv.second.size() / 2], kv.second.back());
+    gufo::server::Logger::Raw(
+        gufo::server::LogLevel::kInfo,
+        "[shadow] class %-16s n=%zu median %.3e worst %.3e\n", kv.first.c_str(),
+        kv.second.size(), kv.second[kv.second.size() / 2], kv.second.back());
   }
 }
 
 void Executor::PrintBatchDraftCounters(const char* tag) const {
   if (!batch_draft_head_)
     return;
-  std::fprintf(stderr, "[batchdraft] %s batched projection steps / rows:", tag);
+  gufo::server::Logger::Raw(
+      gufo::server::LogLevel::kInfo,
+      "[batchdraft] %s batched projection steps / rows:", tag);
   for (unsigned i = 0; i < batch_draft_steps_.size(); ++i) {
-    std::fprintf(stderr, " %s=%llu/%llu",
-                 BatchDraftHeadName(static_cast<BatchDraftHead>(i)),
-                 static_cast<unsigned long long>(
-                     batch_draft_steps_[i].load(std::memory_order_relaxed)),
-                 static_cast<unsigned long long>(
-                     batch_draft_rows_[i].load(std::memory_order_relaxed)));
+    gufo::server::Logger::Raw(
+        gufo::server::LogLevel::kInfo, " %s=%llu/%llu",
+        BatchDraftHeadName(static_cast<BatchDraftHead>(i)),
+        static_cast<unsigned long long>(
+            batch_draft_steps_[i].load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(
+            batch_draft_rows_[i].load(std::memory_order_relaxed)));
   }
-  std::fprintf(stderr, "\n");
+  gufo::server::Logger::Raw(gufo::server::LogLevel::kInfo, "\n");
 }
 
 void Executor::PrintDraftOutCounters(const char* tag) const {
   PrintBatchDraftCounters(tag);
-  std::fprintf(stderr, "[draftout] %s draft steps: 4-bit copy=%llu 8-bit trunk head=%llu (8-bit must stay 0 when the copy is armed; verify / trunk logits always read the 8-bit head)\n", tag,
-               static_cast<unsigned long long>(draft_out_steps_[1].load(std::memory_order_relaxed)), static_cast<unsigned long long>(draft_out_steps_[0].load(std::memory_order_relaxed)));
+  gufo::server::Logger::Raw(
+      gufo::server::LogLevel::kInfo,
+      "[draftout] %s draft steps: 4-bit copy=%llu 8-bit trunk head=%llu (8-bit "
+      "must stay 0 when the copy is armed; verify / trunk logits always read "
+      "the 8-bit head)\n",
+      tag,
+      static_cast<unsigned long long>(
+          draft_out_steps_[1].load(std::memory_order_relaxed)),
+      static_cast<unsigned long long>(
+          draft_out_steps_[0].load(std::memory_order_relaxed)));
 }
 
 void Executor::PrintTwinCounters(const char* tag, const char* copy, std::uint32_t n) const {
   const auto v = [&](unsigned i) { return static_cast<unsigned long long>(twin_passes_[i].load(std::memory_order_relaxed)); };
-  std::fprintf(stderr,
-               "[twin] %s copy=%s n=%u passes_total=%llu | 4bit decode=%llu verify=%llu wide=%llu (wide must stay 0) | 8bit decode=%llu verify=%llu (both must stay 0) wide=%llu | iq4_dense_launches=%llu\n", tag, copy, n,
-               static_cast<unsigned long long>(twin_total_.load(std::memory_order_relaxed)), v(3), v(4), v(5), v(0), v(1), v(2), qfn_mmq_iq4_dense_launch_count());
+  gufo::server::Logger::Raw(
+      gufo::server::LogLevel::kInfo,
+      "[twin] %s copy=%s n=%u passes_total=%llu | 4bit decode=%llu verify=%llu "
+      "wide=%llu (wide must stay 0) | 8bit decode=%llu verify=%llu (both must "
+      "stay 0) wide=%llu | iq4_dense_launches=%llu\n",
+      tag, copy, n,
+      static_cast<unsigned long long>(
+          twin_total_.load(std::memory_order_relaxed)),
+      v(3), v(4), v(5), v(0), v(1), v(2), qfn_mmq_iq4_dense_launch_count());
   if (!TwinBatchEnabled()) return;
   const auto bp = [&](unsigned i) {
     return static_cast<unsigned long long>(
@@ -3541,12 +3582,13 @@ void Executor::PrintTwinCounters(const char* tag, const char* copy, std::uint32_
     return static_cast<unsigned long long>(
         twin_batch_rows_[i].load(std::memory_order_relaxed));
   };
-  std::fprintf(stderr,
-               "[twin] batch 4bit_passes=%llu 8bit_passes=%llu 4bit_rows=%llu "
-               "8bit_rows=%llu armed_decode_8bit=%llu (must stay 0)\n",
-               bp(1), bp(0), br(1), br(0),
-               static_cast<unsigned long long>(
-                   twin_batch_mixed_.load(std::memory_order_relaxed)));
+  gufo::server::Logger::Raw(
+      gufo::server::LogLevel::kInfo,
+      "[twin] batch 4bit_passes=%llu 8bit_passes=%llu 4bit_rows=%llu "
+      "8bit_rows=%llu armed_decode_8bit=%llu (must stay 0)\n",
+      bp(1), bp(0), br(1), br(0),
+      static_cast<unsigned long long>(
+          twin_batch_mixed_.load(std::memory_order_relaxed)));
 }
 
 void Executor::LogTwinCounters(const char* tag) const {

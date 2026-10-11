@@ -2270,6 +2270,51 @@ void DebugHooksSettingsEnvironmentTest() {
                "serve flag missing from release table: " + (*match)[1].str());
     }
   }
+  // Explicit serving files; each exception is tied to its exact call text.
+  // Empty today: new sites fail until individually reviewed in the allow-list.
+  const auto read_source = [&](const fs::path& file) {
+    std::ifstream input(file);
+    Expect(input.good(), "stderr scan can read its explicit input");
+    return std::string((std::istreambuf_iterator<char>(input)), {});
+  };
+  const auto allowance = gufo::json::parse(
+      read_source(root / "tools/ci/log_stderr_allowlist.json"));
+  const auto* allowed = allowance.find("sites");
+  Expect(allowed && allowed->is_array(),
+         "stderr allow-list has reviewed sites");
+  std::map<std::string, std::string> exceptions;
+  for (const auto& site : allowed->items()) {
+    const auto path = site.member_str("file");
+    const auto call = site.member_str("call");
+    Expect(!path.empty() && !call.empty() && !site.member_str("reason").empty(),
+           "each stderr allowance names an exact call and a reason");
+    Expect(exceptions.emplace(path + "\n" + call, site.member_str("reason"))
+               .second,
+           "stderr allowances are unique");
+  }
+  const std::regex stderr_calls(
+      R"scan((?:std::)?\bfprintf\s*\(\s*stderr\s*,[\s\S]*?;)scan");
+  for (const char* name :
+       {"src/models/qwen38_flash_next/kernels/rocm/executor.cpp",
+        "src/models/qwen38_flash_next/engine.cpp",
+        "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.hip.cpp",
+        "src/cli/serve/text_generation_scheduler.cpp",
+        "src/cli/serve/http_server.cpp",
+        "src/cli/serve/text_model_runner.cpp"}) {
+    const auto source = read_source(root / name);
+    for (std::sregex_iterator m(source.begin(), source.end(), stderr_calls),
+         end;
+         m != end; ++m) {
+      const auto key = std::string(name) + "\n" + m->str();
+      Expect(exceptions.erase(key) == 1,
+             std::string(name) + ": unreviewed raw stderr call: " + m->str());
+    }
+  }
+  Expect(exceptions.empty(), "stderr allow-list contains no stale exceptions");
+  const std::string new_site = "std::fprintf ( stderr, \"new site\\n\" );";
+  Expect(std::regex_search(new_site, stderr_calls),
+         "stderr scan detects a new call with whitespace");
+
   const auto read_generated = [&](const fs::path& file) {
     std::ifstream input(file);
     Expect(input.good(), "generated release file exists");

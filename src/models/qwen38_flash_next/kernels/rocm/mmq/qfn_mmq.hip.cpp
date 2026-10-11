@@ -2,6 +2,7 @@
 // HIP adapters for the llama.cpp-derived quantized kernels. See VENDOR.md.
 #include "qfn_mmq_prelude.h"
 #include <atomic>
+#include "src/cli/serve/logging.hpp"
 namespace qfn_mmq {
 #include "qfn_mmq.h"
 #include "common.hpp"
@@ -17,18 +18,18 @@ static int g_routed_max_expert_rows = 0;
 static int g_routed_tile_cols = 0;
 extern "C" int qfn_mmq_init(int device) {
     if (device < 0) {
-        fprintf(stderr, "qfn_mmq_init: invalid device %d\n", device);
+        gufo::server::Logger::Raw("qfn_mmq_init: invalid device %d\n", device);
         return -1;
     }
     ggml_hip_set_device(device);
 
     const auto & info = ggml_hip_info();
     if (info.device_count == 0) {
-        fprintf(stderr, "qfn_mmq_init: no HIP devices found\n");
+        gufo::server::Logger::Raw("qfn_mmq_init: no HIP devices found\n");
         return -1;
     }
     if (device >= info.device_count) {
-        fprintf(stderr, "qfn_mmq_init: device %d out of range (have %d)\n",
+        gufo::server::Logger::Raw("qfn_mmq_init: device %d out of range (have %d)\n",
                 device, info.device_count);
         return -1;
     }
@@ -100,16 +101,16 @@ int qfn_mmq_dense_impl(
         hipStream_t  stream) {
 
     if (!W || !X_f32 || !out_f32) {
-        fprintf(stderr, "%s: null pointer\n", tag);
+        gufo::server::Logger::Raw("%s: null pointer\n", tag);
         return -1;
     }
     if (K <= 0 || M <= 0 || N <= 0) {
-        fprintf(stderr, "%s: bad shape M=%d N=%d K=%d\n", tag, M, N, K);
+        gufo::server::Logger::Raw("%s: bad shape M=%d N=%d K=%d\n", tag, M, N, K);
         return -1;
     }
     if (K % 32 != 0) {
 
-        fprintf(stderr, "%s: K=%d must be a multiple of 32\n", tag, K);
+        gufo::server::Logger::Raw("%s: K=%d must be a multiple of 32\n", tag, K);
         return -1;
     }
 
@@ -118,7 +119,7 @@ int qfn_mmq_dense_impl(
 
     ggml_backend_hip_context * ctx = get_ctx_for_device(dev);
     if (!ctx) {
-        fprintf(stderr, "%s: failed to get HIP context for device %d\n", tag, dev);
+        gufo::server::Logger::Raw("%s: failed to get HIP context for device %d\n", tag, dev);
         return -1;
     }
 
@@ -146,7 +147,7 @@ int qfn_mmq_dense_impl(
 
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
-        fprintf(stderr, "%s: quantize failed: %s\n", tag, hipGetErrorString(err));
+        gufo::server::Logger::Raw("%s: quantize failed: %s\n", tag, hipGetErrorString(err));
         return -2;
     }
 
@@ -183,7 +184,7 @@ int qfn_mmq_dense_impl(
 
     err = hipGetLastError();
     if (err != hipSuccess) {
-        fprintf(stderr, "%s: mul_mat_q_case launch failed: %s\n", tag, hipGetErrorString(err));
+        gufo::server::Logger::Raw("%s: mul_mat_q_case launch failed: %s\n", tag, hipGetErrorString(err));
         return -3;
     }
     if (!inline_sanitize) {
@@ -224,20 +225,20 @@ int qfn_mmq_moe_impl(
         const void * W_b = nullptr, float *out_b = nullptr) {
 
     if (!W || !X_f32 || !ids || !out_f32) {
-        fprintf(stderr, "%s: null pointer\n", tag);
+        gufo::server::Logger::Raw("%s: null pointer\n", tag);
         return -1;
     }
     if (M <= 0 || K <= 0 || n_tokens <= 0 || n_experts <= 0 || n_expert_used <= 0) {
-        fprintf(stderr, "%s: bad shape M=%d K=%d ntok=%d nexp=%d nused=%d\n",
+        gufo::server::Logger::Raw("%s: bad shape M=%d K=%d ntok=%d nexp=%d nused=%d\n",
                 tag, M, K, n_tokens, n_experts, n_expert_used);
         return -1;
     }
     if (K % 32 != 0) {
-        fprintf(stderr, "%s: K=%d must be a multiple of 32\n", tag, K);
+        gufo::server::Logger::Raw("%s: K=%d must be a multiple of 32\n", tag, K);
         return -1;
     }
     if (n_expert_used > n_experts) {
-        fprintf(stderr, "%s: n_expert_used=%d > n_experts=%d\n", tag, n_expert_used, n_experts);
+        gufo::server::Logger::Raw("%s: n_expert_used=%d > n_experts=%d\n", tag, n_expert_used, n_experts);
         return -1;
     }
 
@@ -246,7 +247,7 @@ int qfn_mmq_moe_impl(
 
     ggml_backend_hip_context * ctx = get_ctx_for_device(dev);
     if (!ctx) {
-        fprintf(stderr, "%s: failed to get HIP context for device %d\n", tag, dev);
+        gufo::server::Logger::Raw("%s: failed to get HIP context for device %d\n", tag, dev);
         return -1;
     }
 
@@ -275,7 +276,7 @@ int qfn_mmq_moe_impl(
 
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
-        fprintf(stderr, "%s: mm_ids_helper failed: %s\n", tag, hipGetErrorString(err));
+        gufo::server::Logger::Raw("%s: mm_ids_helper failed: %s\n", tag, hipGetErrorString(err));
         return -2;
     }
 
@@ -298,7 +299,7 @@ int qfn_mmq_moe_impl(
 
     err = hipGetLastError();
     if (err != hipSuccess) {
-        fprintf(stderr, "%s: MMQ activation quantize failed: %s\n",
+        gufo::server::Logger::Raw("%s: MMQ activation quantize failed: %s\n",
                 tag, hipGetErrorString(err));
         return -3;
     }
@@ -356,7 +357,7 @@ int qfn_mmq_moe_impl(
 
     err = hipGetLastError();
     if (err != hipSuccess) {
-        fprintf(stderr, "%s: mul_mat_q_case (moe) launch failed: %s\n", tag, hipGetErrorString(err));
+        gufo::server::Logger::Raw("%s: mul_mat_q_case (moe) launch failed: %s\n", tag, hipGetErrorString(err));
         return -4;
     }
 
@@ -375,27 +376,27 @@ static int moe_vector_projection(int weight_type, const void* W,
       type != GGML_TYPE_Q5_1 && type != GGML_TYPE_Q8_0 &&
       type != GGML_TYPE_IQ3_S && type != GGML_TYPE_IQ4_XS &&
       type != GGML_TYPE_IQ4_NL) {
-    fprintf(stderr, "%s: unsupported weight type %d\n", tag, weight_type);
+    gufo::server::Logger::Raw("%s: unsupported weight type %d\n", tag, weight_type);
     return -1;
   }
 
   if (!W || !X_f32 || !ids || !out_f32 ||
       (gated ? !W_b : bool(W_b) != bool(out_b))) {
-    fprintf(stderr, "%s: null pointer\n", tag);
+    gufo::server::Logger::Raw("%s: null pointer\n", tag);
     return -1;
   }
   if (M <= 0 || K <= 0 || n_tokens <= 0 || n_experts <= 0 ||
       n_expert_used <= 0) {
-    fprintf(stderr, "%s: bad shape M=%d K=%d ntok=%d nexp=%d nused=%d\n", tag,
+    gufo::server::Logger::Raw("%s: bad shape M=%d K=%d ntok=%d nexp=%d nused=%d\n", tag,
             M, K, n_tokens, n_experts, n_expert_used);
     return -1;
   }
   if (K % ggml_blck_size(type) != 0) {
-    fprintf(stderr, "%s: K=%d is not a whole weight block\n", tag, K);
+    gufo::server::Logger::Raw("%s: K=%d is not a whole weight block\n", tag, K);
     return -1;
   }
   if (n_expert_used > n_experts) {
-    fprintf(stderr, "%s: n_expert_used=%d > n_experts=%d\n", tag, n_expert_used,
+    gufo::server::Logger::Raw("%s: n_expert_used=%d > n_experts=%d\n", tag, n_expert_used,
             n_experts);
     return -1;
   }
@@ -405,8 +406,7 @@ static int moe_vector_projection(int weight_type, const void* W,
   if (gated && (n_tokens > max_gated_rows || n_expert_used > 32 ||
                 (type != GGML_TYPE_Q4_K && type != GGML_TYPE_Q5_K &&
                  type != GGML_TYPE_Q8_0))) {
-    fprintf(stderr,
-            "%s: gated vector exceeds its format's row or expert limit\n",
+    gufo::server::Logger::Raw("%s: gated vector exceeds its format's row or expert limit\n",
             tag);
     return -1;
   }
@@ -414,7 +414,7 @@ static int moe_vector_projection(int weight_type, const void* W,
   const int dev = ggml_hip_get_device();
   ggml_backend_hip_context* ctx = get_ctx_for_device(dev);
   if (!ctx) {
-    fprintf(stderr, "%s: failed to get HIP context for device %d\n", tag, dev);
+    gufo::server::Logger::Raw("%s: failed to get HIP context for device %d\n", tag, dev);
     return -1;
   }
 
@@ -439,7 +439,7 @@ static int moe_vector_projection(int weight_type, const void* W,
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess) {
-    fprintf(stderr, "%s: quantize_row_q8_1_hip failed: %s\n", tag,
+    gufo::server::Logger::Raw("%s: quantize_row_q8_1_hip failed: %s\n", tag,
             hipGetErrorString(err));
     return -2;
   }
@@ -456,7 +456,7 @@ static int moe_vector_projection(int weight_type, const void* W,
         n_tokens, n_expert_used, input_stride, stream);
     err = hipGetLastError();
     if (err != hipSuccess) {
-      fprintf(stderr, "%s: gated vector launch failed: %s\n", tag,
+      gufo::server::Logger::Raw("%s: gated vector launch failed: %s\n", tag,
               hipGetErrorString(err));
       return -3;
     }
@@ -473,7 +473,7 @@ static int moe_vector_projection(int weight_type, const void* W,
 
     err = hipGetLastError();
     if (err != hipSuccess) {
-      fprintf(stderr, "%s: mul_mat_vec_moe_dispatch launch failed: %s\n", tag,
+      gufo::server::Logger::Raw("%s: mul_mat_vec_moe_dispatch launch failed: %s\n", tag,
               hipGetErrorString(err));
       return -3;
     }
@@ -584,7 +584,7 @@ extern "C" size_t qfn_mmq_q8_1_bytes(int N, int K) {
 extern "C" int qfn_mmq_quantize_q8_1(
         const float * X_f32, void * X_q8, int N, int K, hipStream_t stream) {
     if (!X_f32 || !X_q8 || N <= 0 || K <= 0 || K % 32 != 0) {
-        fprintf(stderr, "qfn_mmq_quantize_q8_1: bad arguments N=%d K=%d\n", N, K);
+        gufo::server::Logger::Raw("qfn_mmq_quantize_q8_1: bad arguments N=%d K=%d\n", N, K);
         return -1;
     }
     const int64_t ne10_padded = GGML_PAD((int64_t)K, MATRIX_ROW_PADDING);
@@ -712,7 +712,7 @@ extern "C" int qfn_mmq_q8_0_hc_down_silu(const void* W, const void* X_q8,
                                          float* out_f32, int N, float scale,
                                          hipStream_t stream) {
     if (!W || !X_q8 || !out_f32 || N <= 0 || N > MMVQ_MAX_BATCH_SIZE) {
-        fprintf(stderr, "qfn_mmq_q8_0_hc_down_silu: bad arguments N=%d\n", N);
+        gufo::server::Logger::Raw("qfn_mmq_q8_0_hc_down_silu: bad arguments N=%d\n", N);
         return -1;
     }
     launch_q8_hc_down<1, true>(W, X_q8, out_f32, N, stream, scale);
@@ -731,8 +731,7 @@ extern "C" int qfn_mmq_q8_0_dense_vec_preq(const void* W, const void* W_gate,
       (N > 32 && !wide_matrix && !grouped_matrix &&
        (M != 320 || K != 10240 || N % 8 != 0)) ||
       (N > MMVQ_MAX_BATCH_SIZE && W_gate)) {
-    fprintf(stderr,
-            "qfn_mmq_q8_0_dense_vec_preq: bad arguments M=%d N=%d K=%d\n", M, N,
+    gufo::server::Logger::Raw("qfn_mmq_q8_0_dense_vec_preq: bad arguments M=%d N=%d K=%d\n", M, N,
             K);
     return -1;
   }
@@ -760,7 +759,7 @@ extern "C" int qfn_mmq_dense_vec_preq(int weight_type, const void* W,
   if ((type != GGML_TYPE_Q4_K && type != GGML_TYPE_Q5_K && type != GGML_TYPE_Q5_1 && type != GGML_TYPE_IQ4_XS && type != GGML_TYPE_IQ4_NL) ||
       !W || !X_q8 || !zero_ids || !out_f32 || M <= 0 || N <= 0 ||
       N > MMVQ_MAX_BATCH_SIZE || K <= 0 || K % ggml_blck_size(type) != 0) {
-    fprintf(stderr, "qfn_mmq_dense_vec_preq: bad arguments type=%d M=%d N=%d K=%d\n", weight_type, M, N, K);
+    gufo::server::Logger::Raw("qfn_mmq_dense_vec_preq: bad arguments type=%d M=%d N=%d K=%d\n", weight_type, M, N, K);
     return -1;
   }
   const int input_stride = GGML_PAD(K, MATRIX_ROW_PADDING) / QK8_1;

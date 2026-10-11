@@ -11,6 +11,7 @@
 #include <optional>
 #include <type_traits>
 
+#include "src/cli/serve/logging.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/platform/tuning.hpp"
 #include "src/models/qwen38_flash_next/batch_twin_policy.hpp"
@@ -304,12 +305,12 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
       if (id >= 0 && static_cast<std::size_t>(id) < m->latin_draft_.size())
         m->latin_draft_[static_cast<std::size_t>(id)] = 1;
     }
-    std::fprintf(stderr,
-                 "qwen38_flash_next: draft vocabulary auto (latin head until "
-                 "%u of the last %u committed tokens leave the latin set; "
-                 "back after %u latin tokens)\n",
-                 m->head_switch_config_.enter, m->head_switch_config_.window,
-                 m->head_switch_config_.leave);
+    gufo::server::Logger::Raw(
+        "qwen38_flash_next: draft vocabulary auto (latin head until "
+        "%u of the last %u committed tokens leave the latin set; "
+        "back after %u latin tokens)\n",
+        m->head_switch_config_.enter, m->head_switch_config_.window,
+        m->head_switch_config_.leave);
   }
   m->executor_ =
       rocm::Executor::Create(*m->device_, m->ngram_.get(), exec, error_msg);
@@ -499,20 +500,20 @@ void Session::UpdateDraftHead() {
     // accepts ~3 %): start the new head from the optimistic prior.
     draft_length_.Reset();
     (head_switch_.full() ? stats_.head_to_full : stats_.head_to_latin) += 1;
-    std::fprintf(stderr,
-                 "qwen38_flash_next: DRAFT_VOCAB_AUTO head=%s position=%zu "
-                 "switches_to_full=%llu switches_to_latin=%llu "
-                 "full_cycles=%llu full_drafted=%llu full_accepted=%llu "
-                 "cycles=%llu drafted=%llu accepted=%llu\n",
-                 head_switch_.full() ? "full" : "latin", head_scanned_ + 1,
-                 static_cast<unsigned long long>(head_switch_.to_full()),
-                 static_cast<unsigned long long>(head_switch_.to_latin()),
-                 static_cast<unsigned long long>(stats_.full_head_cycles),
-                 static_cast<unsigned long long>(stats_.full_head_drafted),
-                 static_cast<unsigned long long>(stats_.full_head_accepted),
-                 static_cast<unsigned long long>(stats_.cycles),
-                 static_cast<unsigned long long>(stats_.drafted),
-                 static_cast<unsigned long long>(stats_.accepted));
+    gufo::server::Logger::Raw(
+        "qwen38_flash_next: DRAFT_VOCAB_AUTO head=%s position=%zu "
+        "switches_to_full=%llu switches_to_latin=%llu "
+        "full_cycles=%llu full_drafted=%llu full_accepted=%llu "
+        "cycles=%llu drafted=%llu accepted=%llu\n",
+        head_switch_.full() ? "full" : "latin", head_scanned_ + 1,
+        static_cast<unsigned long long>(head_switch_.to_full()),
+        static_cast<unsigned long long>(head_switch_.to_latin()),
+        static_cast<unsigned long long>(stats_.full_head_cycles),
+        static_cast<unsigned long long>(stats_.full_head_drafted),
+        static_cast<unsigned long long>(stats_.full_head_accepted),
+        static_cast<unsigned long long>(stats_.cycles),
+        static_cast<unsigned long long>(stats_.drafted),
+        static_cast<unsigned long long>(stats_.accepted));
   }
   model_->executor_->SetDraftHeadFull(*session_, head_switch_.full());
 }
@@ -1488,7 +1489,10 @@ bool Session::FinishDecode(const DecodeRequest& request,
   };
   if (!pending.speculative) {
     draft_length_.ObserveArToken();
-    if (MtpCycleTraceEnabled()) std::fprintf(stderr, "[mtp-ar] t_ms=%.3f base=%zu\n", MtpTraceNowMs(), tokens_.size());
+    if (MtpCycleTraceEnabled())
+      gufo::server::Logger::Raw(gufo::server::LogLevel::kInfo,
+                                "[mtp-ar] t_ms=%.3f base=%zu\n",
+                                MtpTraceNowMs(), tokens_.size());
     hidden_base_ = base;
     tokens_.push_back(anchor);
     sampler.Accept(static_cast<sampling::TokenId>(anchor));
@@ -1683,8 +1687,13 @@ bool Session::FinishDecode(const DecodeRequest& request,
   draft_length_.Observe(mtp_accepted, result->stop ? mtp_accepted : mtp_drafts,
                         base);
   if (MtpCycleTraceEnabled()) {
-    std::fprintf(stderr, "[mtp-cycle] t_ms=%.3f base=%u drafts=%u accepted=%u lookup=%u stop=%d\n", MtpTraceNowMs(), static_cast<unsigned>(base),
-                 static_cast<unsigned>(mtp_drafts), static_cast<unsigned>(mtp_accepted), static_cast<unsigned>(pending.lookup), result->stop ? 1 : 0);
+    gufo::server::Logger::Raw(
+        gufo::server::LogLevel::kInfo,
+        "[mtp-cycle] t_ms=%.3f base=%u drafts=%u accepted=%u lookup=%u "
+        "stop=%d\n",
+        MtpTraceNowMs(), static_cast<unsigned>(base),
+        static_cast<unsigned>(mtp_drafts), static_cast<unsigned>(mtp_accepted),
+        static_cast<unsigned>(pending.lookup), result->stop ? 1 : 0);
   }
 
   // The next call knows the next sampled anchor. Defer draft catch-up until

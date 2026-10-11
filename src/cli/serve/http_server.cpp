@@ -64,7 +64,9 @@ static_assert(std::atomic<int>::is_always_lock_free);
 
 void RequestShutdown(int signal) noexcept {
   // A signal may arrive on any model/HTTP worker. Only a lock-free atomic
-  // operation belongs here; socket shutdown and joins run in the accept loop.
+  // operation belongs here; FlushSync, socket shutdown and joins run in the
+  // accept loop. Taking the log mutex here could deadlock an interrupted
+  // caller.
   shutdown_signal.store(signal, std::memory_order_relaxed);
 }
 
@@ -78,14 +80,27 @@ public:
     if (::sigaction(SIGINT, &action, &previous_interrupt_) != 0)
       throw std::system_error(errno, std::generic_category(),
                               "install SIGINT handler");
+#ifdef SIGBREAK
+    if (::sigaction(SIGBREAK, &action, &previous_break_) != 0) {
+      (void)::sigaction(SIGINT, &previous_interrupt_, nullptr);
+      throw std::system_error(errno, std::generic_category(),
+                              "install SIGBREAK handler");
+    }
+#endif
     if (::sigaction(SIGTERM, &action, &previous_terminate_) != 0) {
       const int error = errno;
+#ifdef SIGBREAK
+      (void)::sigaction(SIGBREAK, &previous_break_, nullptr);
+#endif
       (void)::sigaction(SIGINT, &previous_interrupt_, nullptr);
       throw std::system_error(error, std::generic_category(),
                               "install SIGTERM handler");
     }
   }
   ~ShutdownSignals() {
+#ifdef SIGBREAK
+    (void)::sigaction(SIGBREAK, &previous_break_, nullptr);
+#endif
     (void)::sigaction(SIGTERM, &previous_terminate_, nullptr);
     (void)::sigaction(SIGINT, &previous_interrupt_, nullptr);
   }
@@ -94,6 +109,9 @@ public:
 
 private:
   struct sigaction previous_interrupt_{};
+#ifdef SIGBREAK
+  struct sigaction previous_break_{};
+#endif
   struct sigaction previous_terminate_{};
 };
 
@@ -1879,6 +1897,7 @@ void HttpServer::run(bool handle_signals) {
       if (signal != 0) {
         Logger::Info("server", "event=shutdown_requested signal=" +
                                    std::to_string(signal));
+        Logger::FlushSync(std::chrono::milliseconds(0));
         stop();
         break;
       }
