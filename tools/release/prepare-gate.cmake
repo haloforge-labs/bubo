@@ -1,4 +1,5 @@
-if(CONFIG STREQUAL "Release")
+string(TOUPPER "${CONFIG}" prepare_config)
+if(prepare_config STREQUAL "RELEASE")
   execute_process(COMMAND "${GATE}" --release "${EVIDENCE}"
     RESULT_VARIABLE result)
   if(NOT result EQUAL 0)
