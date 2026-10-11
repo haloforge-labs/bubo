@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cmath>
 #include <limits>
 #include <random>
@@ -249,7 +250,7 @@ bool SamplerState::CanSelectArgmax(TokenId token,
        std::ranges::find(b.marker_ids,token)!=b.marker_ids.end()))return fail("marker_greedy_choice_needs_full_row");
     if(b.loop_breaker&&st.loop.nudging())return fail("loop_nudge_needs_probability_row");
     if(!st.forcing() && eog && st.thinking && (b.think_eog_guard||
-       (b.loop_eog_close&&st.prefix_used)))return fail("thinking_eog_greedy_needs_full_row");
+       eog_closes_think(b,st)))return fail("thinking_eog_greedy_needs_full_row");
     if(!st.thinking && !st.forcing() && !NeedsConstraintMask()) {
       if(st.boundary.deferred_stop && !eog)return fail("deferred_eog_greedy_needs_full_row");
       if(eog && ((b.eog_boundary&&!st.boundary.allowed())||b.eog_min_prob>0))
@@ -581,6 +582,7 @@ void SamplerState::CopyDrawStateFrom(const SamplerState& other) {
   behaviour_state_.close_decision = false;
   behaviour_state_.deferred_at = other.behaviour_state_.deferred_at;
   behaviour_state_.close_at = other.behaviour_state_.close_at;
+  behaviour_state_.guard_blocked_at = other.behaviour_state_.guard_blocked_at;
 }
 
 void SamplerState::ResetHistory(std::span<const TokenId> tokens) {
@@ -1177,6 +1179,8 @@ std::vector<std::string> SamplerState::BehaviourSummary() const {
   auto lines=behaviour_state_.Summary();
   if(!BehaviourEnabled()) return lines;
   const auto& b=*config_.behaviour;
+  lines.push_back("BEHAVIOUR_ENGAGE name=guard_escalation taken="+std::string(behaviour_state_.guard_escalation_taken?"1":"0")+
+    " fallback=0 reason="+(behaviour_state_.guard_escalation_taken?"blocked_attempts_reached_k":"none")+" scope=request");
   std::vector<std::pair<std::string,bool>> enabled={
     {"think_eog_guard",b.think_eog_guard},{"eog_boundary",b.eog_boundary},
     {"eog_min_prob",b.eog_min_prob>0},{"eog_defer",b.eog_defer_p>0},
@@ -1206,10 +1210,42 @@ namespace {
 bool Contains(std::span<const TokenId> ids,TokenId id) {
   return std::ranges::find(ids,id)!=ids.end();
 }
-struct BehaviourLogits {
-  struct Stage { std::string name,reason; };
-  std::vector<Stage> stages;
+// A lease owns its vector until all users of that row are finished. Nested
+// counterfactual / candidate evaluations borrow separate buffers. No scratch
+// is copied with a sampler or shared between threads or speculative states.
+struct BehaviourScratch {
+  static std::vector<std::vector<float>>& Pool() {
+    thread_local std::vector<std::vector<float>> pool;
+    return pool;
+  }
   std::vector<float> logits;
+  BehaviourScratch() {
+    auto& pool = Pool();
+    if (!pool.empty()) {
+      logits = std::move(pool.back());
+      pool.pop_back();
+    }
+  }
+  BehaviourScratch(const BehaviourScratch&) = delete;
+  BehaviourScratch& operator=(const BehaviourScratch&) = delete;
+  BehaviourScratch(BehaviourScratch&&) noexcept = default;
+  BehaviourScratch& operator=(BehaviourScratch&& other) noexcept {
+    logits.swap(other.logits);
+    return *this;
+  }
+  ~BehaviourScratch() {
+    if (logits.capacity() == 0) return;
+    logits.clear();
+    // Recycling must never change exception behaviour (including unwinding).
+    try { Pool().push_back(std::move(logits)); } catch (...) {}
+  }
+};
+struct BehaviourLogits : BehaviourScratch {
+  struct Stage {
+    std::string name, reason;
+    bool counterfactual_identical{false};
+  };
+  std::vector<Stage> stages;
   float temperature{0};
   bool defer{false};
 };
@@ -1219,30 +1255,106 @@ BehaviourLogits TransformBehaviour(std::span<const float> raw,
     std::span<const TokenId> ids,const SamplingConfig& c,
     const BehaviourState& st,bool grammar_active) {
   const auto& b=*c.behaviour;
-  std::vector<float> current(raw.begin(),raw.end());
+  BehaviourLogits result;
+  auto& current = result.logits;
+  current.assign(raw.begin(), raw.end());
   float temperature=c.temperature;
   const auto id=[&](std::size_t i){return ids.empty()?static_cast<TokenId>(i):ids[i];};
-  BehaviourLogits result;
-  const auto stage=[&](std::string name,std::string reason){
-    result.stages.push_back({std::move(name),std::move(reason)});
+  const auto stage = [&](std::string name, std::string reason, bool identical = false) {
+    result.stages.push_back({std::move(name), std::move(reason), identical});
   };
-  const auto mask=[&](TokenId token){for(std::size_t i=0;i<current.size();++i)if(id(i)==token)current[i]=-std::numeric_limits<float>::infinity();};
+  const auto mask = [&](TokenId token) {
+    bool changed_finite = false;
+    const auto at = [&](std::size_t i) {
+      changed_finite |= std::isfinite(current[i]);
+      current[i] = -INFINITY;
+    };
+    if (ids.empty()) {
+      if (token < current.size()) at(token);
+    } else {
+      for (std::size_t i = 0; i < current.size(); ++i)
+        if (id(i) == token) at(i);
+    }
+    return changed_finite;
+  };
   const auto exempt=[&](TokenId token){return b.logit_bias_enabled&&std::ranges::any_of(b.logit_bias,[&](auto v){return v.first==token;});};
   // raw top-k is independent of a device list's capacity, and identical on AR
   // and every target verification row. This subset defines the conservative
   // upper-bound policy; exact mode uses the complete raw vocabulary instead.
-  std::vector<float> denom(raw.begin(),raw.end());
-  std::erase_if(denom,[](float v){return !std::isfinite(v);});
-  if(!b.eog_min_prob_exact&&c.top_k>0&&denom.size()>static_cast<std::size_t>(c.top_k)) {
-    std::partial_sort(denom.begin(),denom.begin()+c.top_k,denom.end(),std::greater<>{});
-    denom.resize(c.top_k);
-  } else std::ranges::sort(denom,std::greater<>{});
-  double maximum=denom.empty()?-INFINITY:denom.front(),sum=0;
-  for(auto v:denom)sum+=std::exp(static_cast<double>(v)-maximum);
-  const auto raw_probability=[&](TokenId token){
-    for(std::size_t i=0;i<raw.size();++i)if(id(i)==token&&std::isfinite(raw[i])&&sum>0)
-      return std::min(1.0,std::exp(static_cast<double>(raw[i])-maximum)/sum);
+  BehaviourScratch denominator;
+  auto& denom = denominator.logits;
+  bool denominator_ready = false;
+  double maximum = -INFINITY, sum = 0;
+  // Nothing else consumes this raw denominator. Preserve its arithmetic and
+  // ordering, but materialize it only on the first finite probability query.
+  const auto ensure_denominator = [&] {
+    if (denominator_ready) return;
+    denom.assign(raw.begin(), raw.end());
+    std::erase_if(denom, [](float v) { return !std::isfinite(v); });
+    if (!b.eog_min_prob_exact && c.top_k > 0 &&
+        denom.size() > static_cast<std::size_t>(c.top_k)) {
+      std::partial_sort(denom.begin(), denom.begin() + c.top_k, denom.end(),
+                        std::greater<>{});
+      denom.resize(c.top_k);
+    } else std::ranges::sort(denom, std::greater<>{});
+    maximum = denom.empty() ? -INFINITY : denom.front();
+    for (auto v : denom) sum += std::exp(static_cast<double>(v) - maximum);
+    denominator_ready = true;
+  };
+  const auto raw_probability = [&](TokenId token) {
+    if (ids.empty()) {
+      if (token >= raw.size() || !std::isfinite(raw[token])) return 0.0;
+      ensure_denominator();
+      if (sum <= 0) return 0.0;
+      return std::min(1.0, std::exp(static_cast<double>(raw[token]) - maximum) / sum);
+    }
+    for (std::size_t i = 0; i < raw.size(); ++i) {
+      if (id(i) == token && std::isfinite(raw[i])) {
+        ensure_denominator();
+        if (sum > 0)
+          return std::min(1.0, std::exp(static_cast<double>(raw[i]) - maximum) / sum);
+      }
+    }
     return 0.0;
+  };
+  // raw_probability is min(1, exp(x - max) / sum), and sum holds the maximum's
+  // own term exp(0) = 1 (adding non-negative terms never rounds below it), so
+  // p <= exp(x - max) holds exactly in double. When this bound settles a
+  // threshold test, skip the denominator: with top_k <= 0 or exact mode it
+  // sorts the whole vocabulary row on every answer-channel token. Tests the
+  // bound does not settle use raw_probability unchanged.
+  bool maximum_ready = false;
+  double finite_maximum = -INFINITY;
+  const auto raw_value = [&](TokenId token) -> std::optional<float> {
+    if (ids.empty()) {
+      if (token >= raw.size() || !std::isfinite(raw[token])) return std::nullopt;
+      return raw[token];
+    }
+    for (std::size_t i = 0; i < raw.size(); ++i)
+      if (id(i) == token && std::isfinite(raw[i])) return raw[i];
+    return std::nullopt;
+  };
+  const auto probability_bound = [&](float value) {
+    if (!maximum_ready) {
+      float best = -INFINITY;
+      for (const float v : raw)
+        if (std::isfinite(v) && v > best) best = v;
+      finite_maximum = best;
+      maximum_ready = true;
+    }
+    return std::exp(static_cast<double>(value) - finite_maximum);
+  };
+  const auto raw_probability_below = [&](TokenId token, double threshold) {
+    const auto value = raw_value(token);
+    if (!value) return 0.0 < threshold;
+    if (probability_bound(*value) < threshold) return true;
+    return raw_probability(token) < threshold;
+  };
+  const auto raw_probability_at_least = [&](TokenId token, double threshold) {
+    const auto value = raw_value(token);
+    if (!value) return 0.0 >= threshold;
+    if (probability_bound(*value) < threshold) return false;
+    return raw_probability(token) >= threshold;
   };
   if(b.logit_bias_enabled && !b.logit_bias.empty()) {
     for(auto [token,bias]:b.logit_bias)for(std::size_t i=0;i<current.size();++i)
@@ -1256,33 +1368,67 @@ BehaviourLogits TransformBehaviour(std::span<const float> raw,
     stage("model_suppress_tokens","gguf_model_suppressed_token_changed_choice");
   }
   if(st.thinking&&b.marker_bias!=0&&!b.marker_ids.empty()&&!st.forcing()) {
-    for(std::size_t i=0;i<current.size();++i)
-      if(Contains(b.marker_ids,id(i))) current[i]+=static_cast<float>(b.marker_bias);
+    if (ids.empty()) {
+      // The request builder creates this list from a std::set: once per token.
+      assert(std::unordered_set<TokenId>(b.marker_ids.begin(), b.marker_ids.end()).size() ==
+             b.marker_ids.size());
+      for (auto token : b.marker_ids)
+        if (token < current.size()) current[token] += static_cast<float>(b.marker_bias);
+    } else {
+      for (std::size_t i = 0; i < current.size(); ++i)
+        if (Contains(b.marker_ids, id(i))) current[i] += static_cast<float>(b.marker_bias);
+    }
     stage("marker_bias","thinking_marker_bias_changed_choice");
   }
   if(!st.thinking && !st.forcing() && !grammar_active) {
     const bool boundary_ok=!b.eog_boundary||st.boundary.allowed();
     if(b.eog_boundary&&!boundary_ok) {
       if(b.eog_defer_p>0&&!st.boundary.deferred_stop)
-        for(auto token:b.eog_ids)if(!exempt(token)&&raw_probability(token)>=b.eog_defer_p)result.defer=true;
-      for(auto token:b.eog_ids)if(!exempt(token))mask(token);
-      stage("eog_boundary","visible_text_not_at_boundary");
+        for(auto token:b.eog_ids)if(!exempt(token)&&raw_probability_at_least(token,b.eog_defer_p))result.defer=true;
+      bool changed_finite = false;
+      for (auto token : b.eog_ids)
+        if (!exempt(token)) changed_finite |= mask(token);
+      // Removing boundary can activate eog_defer when a stop is pending.
+      stage("eog_boundary", "visible_text_not_at_boundary",
+            !changed_finite && !st.boundary.deferred_stop);
     }
     if(boundary_ok&&st.boundary.deferred_stop&&!b.eog_ids.empty() &&
-       [&]{for(std::size_t i=0;i<current.size();++i)if(Contains(b.eog_ids,id(i))&&std::isfinite(current[i]))return true;return false;}()) {
-      for(std::size_t i=0;i<current.size();++i) {
-        if(!Contains(b.eog_ids,id(i)))current[i]=-INFINITY;
-
+       [&] {
+         if (ids.empty()) {
+           for (auto token : b.eog_ids)
+             if (token < current.size() && std::isfinite(current[token])) return true;
+         } else {
+           for (std::size_t i = 0; i < current.size(); ++i)
+             if (Contains(b.eog_ids, id(i)) && std::isfinite(current[i])) return true;
+         }
+         return false;
+       }()) {
+      if (ids.empty()) {
+        // Save before filling; duplicates are restored from the same original
+        // value. Non-finite EOG bits, including NaNs, survive unchanged.
+        std::vector<std::pair<TokenId, float>> saved;
+        for (auto token : b.eog_ids)
+          if (token < current.size()) saved.push_back({token, current[token]});
+        std::ranges::fill(current, -INFINITY);
+        for (auto [token, value] : saved) current[token] = value;
+      } else {
+        for (std::size_t i = 0; i < current.size(); ++i)
+          if (!Contains(b.eog_ids, id(i))) current[i] = -INFINITY;
       }
       stage("eog_defer","confident_eog_reached_visible_boundary");
     } else if(b.eog_min_prob>0) {
-      for(auto token:b.eog_ids)if(!exempt(token)&&raw_probability(token)<b.eog_min_prob)mask(token);
-      stage("eog_min_prob",b.eog_min_prob_exact?"raw_full_probability_below_threshold":"raw_topk_upper_bound_below_threshold");
+      bool changed_finite = false;
+      for (auto token : b.eog_ids)
+        if (!exempt(token) && raw_probability_below(token, b.eog_min_prob))
+          changed_finite |= mask(token);
+      stage("eog_min_prob", b.eog_min_prob_exact ? "raw_full_probability_below_threshold" :
+            "raw_topk_upper_bound_below_threshold", !changed_finite);
     }
   }
-  if(st.thinking&&b.think_eog_guard&&!st.forcing()&&!(b.loop_eog_close&&st.prefix_used)) {
-    for(auto token:b.eog_ids)mask(token);
-    stage("think_eog_guard","eog_inside_open_think");
+  if(st.thinking&&b.think_eog_guard&&!st.forcing()&&!eog_closes_think(b,st)) {
+    bool changed_finite = false;
+    for (auto token : b.eog_ids) changed_finite |= mask(token);
+    stage("think_eog_guard", "eog_inside_open_think", !changed_finite);
   }
   if(b.loop_breaker&&st.loop.nudging()&&!c.constraint&&!b.loop_exempt&&!st.forcing()) {
     temperature=c.temperature+0.5F;
@@ -1293,7 +1439,7 @@ BehaviourLogits TransformBehaviour(std::span<const float> raw,
     for(std::size_t i=0;i<current.size();++i)current[i]=id(i)==forced?0.0F:-INFINITY;
     stage(st.force_reason,"forced_transition_token_"+std::to_string(forced));
   }
-  result.logits=std::move(current);result.temperature=temperature;
+  result.temperature=temperature;
   return result;
 }
 }
@@ -1302,13 +1448,13 @@ TokenLogprob SamplerState::RawLogprobs(std::span<const float> logits,
   if (logits.empty() || token >= logits.size() || top_n > 20)
     throw std::invalid_argument("invalid logprob vocabulary or top_logprobs");
   auto native = WithoutBehaviour();
-  std::vector<float> transformed;
+  std::optional<BehaviourLogits> transformed;
   if (BehaviourEnabled()) {
     if (behaviour_state_.thinking)
       native.config_.constraint.reset();
-    transformed = TransformBehaviour(logits, {}, config_, behaviour_state_,
-                                    NeedsConstraintMask()).logits;
-    logits = transformed;
+    transformed.emplace(TransformBehaviour(logits, {}, config_, behaviour_state_,
+                                           NeedsConstraintMask()));
+    logits = transformed->logits;
   }
   const auto mask = native.config_.constraint
                         ? native.config_.constraint->Allowed(constraint_state_)
@@ -1378,7 +1524,7 @@ SamplerState SamplerState::BehaviourWithoutIntervention(std::string_view name) c
     disabled->loop_breaker=false;variant.behaviour_state_.loop.nudge_left=0;
   } else if(name=="loop_transition")disabled->loop_transition=0;
   if(variant.behaviour_state_.forcing()&&variant.behaviour_state_.force_reason==name) {
-    if(name=="loop_transition")variant.behaviour_state_.Force(b.think_end,"loop_breaker");
+    if(name=="loop_transition")variant.behaviour_state_.Force(b.budget_forced,"loop_breaker");
     else {variant.behaviour_state_.forced.clear();variant.behaviour_state_.force_pos=0;}
   }
   variant.config_.behaviour=std::move(disabled);
@@ -1424,7 +1570,7 @@ SamplingDistribution SamplerState::BehaviourDistributionFor(
   // O/reasoning-budget.cpp:402 is a selected-token rewrite. Its exact port is
   // a push-forward of the entire filtered target probability mass BEFORE
   // min(1,p/q) and residual sampling. Draft q can remain the native proposal.
-  if(b.loop_eog_close&&behaviour_state_.thinking&&behaviour_state_.prefix_used&&
+  if(eog_closes_think(b,behaviour_state_)&&behaviour_state_.thinking&&
      !behaviour_state_.forcing()&&!b.think_end.empty()) {
     const auto end=b.think_end.front();
     std::vector<Probability> entries;double moved=0;
@@ -1451,6 +1597,19 @@ SamplingDistribution SamplerState::BehaviourDistributionFor(
     // with precisely this intervention removed, with every other gate/bias
     // retained. An earlier intermediate choice does not establish engagement.
     for(auto& stage:metadata->stages) {
+      const bool identical = std::ranges::any_of(transforms.stages, [&](const auto& transform) {
+        return transform.name == stage.name && transform.counterfactual_identical;
+      });
+      if (identical && (stage.name != "think_eog_guard" || !config_.constraint)) {
+        // Finite support and every subsequent operation are unchanged. Keep
+        // the stage and its exact before/after distributions for observation.
+        stage.before = current;
+        stage.before.behaviour_.reset();
+        stage.before_random = metadata->random;
+        stage.after = current;
+        stage.after_random = metadata->random;
+        continue;
+      }
       auto variant=BehaviourWithoutIntervention(stage.name);
       try {
         stage.before=variant.BehaviourDistributionFor(logits,ids,vocab);
@@ -1481,7 +1640,7 @@ bool SamplerState::BehaviourTopSafe(std::span<const float> values,
     std::vector<std::string> names;
     for(const auto& stage:transforms.stages)names.push_back(stage.name);
     if(b.production_sampling)names.push_back("production_sampling");
-    if(b.loop_eog_close&&behaviour_state_.thinking&&behaviour_state_.prefix_used)
+    if(eog_closes_think(b,behaviour_state_)&&behaviour_state_.thinking)
       names.push_back("loop_eog_close");
     for(const auto& name:names) {
       auto variant=BehaviourWithoutIntervention(name);
@@ -1536,9 +1695,9 @@ bool SamplerState::BehaviourTopSafe(std::span<const float> values,
     return true;
   }
   if((behaviour_state_.boundary.deferred_stop&&behaviour_state_.boundary.allowed())||
-     (b.loop_eog_close&&behaviour_state_.thinking&&behaviour_state_.prefix_used)) {
+     (eog_closes_think(b,behaviour_state_)&&behaviour_state_.thinking)) {
     for(auto token:b.eog_ids)if(!Contains(ids,token))return fail("forced_eog_not_in_device_candidates");
-    if(b.loop_eog_close&&behaviour_state_.thinking&&behaviour_state_.prefix_used&&
+    if(eog_closes_think(b,behaviour_state_)&&behaviour_state_.thinking&&
        !b.think_end.empty()&&!Contains(ids,b.think_end.front()))return fail("forced_token_not_in_device_candidates");
   }
   double unseen_extra=0;
@@ -1591,6 +1750,8 @@ void SamplerState::ObserveBehaviour(const SamplingDistribution& distribution,
     } else if(decide(stage.after,stage.after_random)==actual&&
               decide(stage.before,stage.before_random)!=actual) {
       behaviour_state_.Taken(stage.name,stage.reason);
+      if(stage.name=="think_eog_guard")
+        behaviour_state_.guard_blocked_at.push_back(behaviour_state_.accepted_count+1);
     }
   }
   if(metadata->defer_stop) {

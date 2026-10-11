@@ -1,4 +1,4 @@
-// Compiled separately against the exact a40d37f sampler and the candidate.
+// Compiled separately against the exact c847e6df sampler and the candidate.
 // The transcript contains every entry's double bits, stages, RNG and state.
 #include <algorithm>
 #include <bit>
@@ -193,6 +193,10 @@ std::shared_ptr<s::BehaviourConfig> Behaviour(std::size_t vocab, int effort,
   b->eog_ids = {eog, eog + 1, static_cast<s::TokenId>(vocab + 7), eog};
   b->think_start = {10};
   b->think_end = {11, 12};
+  // Production shape: budget_forced = Encode(reasoning_budget_message) +
+  // think_end is never empty (inference_backend.cpp). An empty sequence here
+  // would leave the reasoning-budget stage without a forced close.
+  b->budget_forced = b->think_end;
   b->loop_prefix = {4, 5};
   b->marker_bias_by_effort = "low:-2,medium:-1,xhigh:0";
   b->marker_bias = effort == 0 ? -2 : effort == 1 ? -1 : 0;
@@ -677,7 +681,7 @@ int Bench() {
 int main(int argc, char** argv) {
   try {
 #ifdef GUFO_BEHAVIOUR_BASELINE_SHA
-    std::cout << "ORACLE a40d37f sampling.cpp sha256="
+    std::cout << "ORACLE c847e6df sampling.cpp sha256="
               << GUFO_BEHAVIOUR_BASELINE_SHA << '\n';
 #endif
     if (argc == 2 && std::string_view(argv[1]) == "--bench")

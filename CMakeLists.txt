@@ -476,7 +476,7 @@ if (BUILD_TESTING)
   target_link_libraries(loop_breaker_replay PRIVATE gufo_core)
 
   # Separate executables avoid all old/new sampler symbol and type collisions.
-  # The baseline source/header/behaviour header are exact a40d37f Git blobs.
+  # The baseline source/header/behaviour header are exact c847e6df Git blobs.
   add_executable(behaviour_fast_test
     tests/core/behaviour_fast_test.cpp src/core/sampling.cpp)
   target_link_libraries(behaviour_fast_test PRIVATE gufo_core)
