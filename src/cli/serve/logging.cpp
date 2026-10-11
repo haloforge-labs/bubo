@@ -144,7 +144,7 @@ struct AsyncLogSink::State {
   std::deque<Entry> queue;
   std::uint64_t accepted = 0, delivered = 0, dropped = 0, reported = 0;
   std::uint64_t active_lines = 0;
-  std::size_t bytes = 0, active_bytes = 0;
+  std::size_t bytes = 0;
   bool stopping = false, done = false, failed = false;
   std::string timeout_report;
 
@@ -183,7 +183,6 @@ struct AsyncLogSink::State {
         timeout_report.clear();
       }
       active_lines = count;
-      active_bytes = consumed;
       lock.unlock();
       bool ok = true;
       try {
@@ -194,7 +193,7 @@ struct AsyncLogSink::State {
       }
       lock.lock();
       bytes -= consumed;
-      active_lines = active_bytes = 0;
+      active_lines = 0;
       if (ok) {
         delivered = sequence;
         reported = drop_target;
@@ -284,11 +283,12 @@ AsyncLogSink::Stats AsyncLogSink::Shutdown() {
   const auto state = state_;
   std::unique_lock lock(state->mutex);
   if (!state->stopping) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
     state->stopping = true;
     state->wake.notify_one();
     if (!state->synchronous)
-      state->changed.wait_for(lock, std::chrono::seconds(2),
-                              [&] { return state->done; });
+      state->changed.wait_until(lock, deadline, [&] { return state->done; });
     const auto pending = state->accepted - state->delivered;
     if (pending) {
       state->timeout_report = "[log] shutdown: undelivered " +

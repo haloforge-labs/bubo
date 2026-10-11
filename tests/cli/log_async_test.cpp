@@ -170,6 +170,32 @@ void Overflow(std::size_t payload_size, const char* bound) {
          "overflow callers meet the stated 50 ms maximum scheduling-inclusive "
          "bound");
 }
+void HardCap() {
+  auto blocked = std::make_shared<Blocked>();
+  AsyncLogSink sink(
+      [blocked](std::string_view batch) { blocked->Write(batch); });
+  sink.Push("seed\n", LogLevel::kInfo);
+  Expect(blocked->entered.try_acquire_for(2s), "hard-cap sink is blocked");
+  const std::string large(8 * 1024 * 1024, 'E');
+  sink.Push(large, LogLevel::kError);
+  auto fallback = std::async(std::launch::async,
+                             [&] { sink.Push(large, LogLevel::kWarn); });
+  Expect(fallback.wait_for(50ms) == std::future_status::timeout,
+         "WARN over the 16 MiB cap uses the permitted synchronous last resort");
+  Expect(sink.GetStats().pending_bytes <= 16 * 1024 * 1024,
+         "fallback never adds bytes beyond the hard queue cap");
+  blocked->resume.release();
+  Expect(fallback.wait_for(2s) == std::future_status::ready,
+         "last resort completes after the accepted prefix drains");
+  fallback.get();
+  Expect(sink.FlushSync(), "hard-cap final prefix flush succeeds");
+  const auto text = blocked->capture->Text();
+  Expect(text.size() == 5 + 2 * large.size() && text.starts_with("seed\n"),
+         "both large ERROR/WARN messages arrive without truncation or loss");
+  std::cout << "extra hard_cap_bytes=16777216 delivered_bytes=" << text.size()
+            << " dropped=" << sink.GetStats().dropped << " fallback=1\n";
+}
+
 void Ordering() {
   auto capture = std::make_shared<Capture>();
   AsyncLogSink sink(
@@ -280,6 +306,7 @@ int main(int argc, char** argv) {
   SlowSink();
   Overflow(0, "16K-lines");
   Overflow(1024, "4MiB-bytes");
+  HardCap();
   Ordering();
   FlushUnderLoad();
   StuckShutdown();
