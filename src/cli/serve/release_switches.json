@@ -3864,7 +3864,7 @@
       "purpose": "Write one trace line for each decode cycle.",
       "default_text": "off",
       "hardware_scope": "generic",
-      "note": "With stderr redirected by Start-Process, this trace costs about 20 % decode until asynchronous logging is available.",
+      "note": "Trace output uses bounded asynchronous logging. Synchronous trace output can reduce decode speed.",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],

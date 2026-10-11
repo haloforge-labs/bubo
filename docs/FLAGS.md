@@ -173,7 +173,7 @@ Use `--print-effective-settings` to inspect settings without loading tensors or 
 | `GUFO_LOG_SYNC` | Write logs synchronously for crash diagnostics. | off | Use 1 for synchronous logs. A hard crash can lose about 100 ms of asynchronous logs. | any; generic; any |
 | `GUFO_MEM_ACCOUNTING` | Control mem accounting. | off | Inventory classification. | any; generic; any |
 | `GUFO_MOE_BENCH` | Control moe bench. | off | Inventory classification. | any; generic; qwen3.8-flash-next |
-| `GUFO_MTP_TRACE` | Write one trace line for each decode cycle. | off | With stderr redirected by Start-Process, this trace costs about 20 % decode until asynchronous logging is available. | any; generic; qwen3.8-flash-next |
+| `GUFO_MTP_TRACE` | Write one trace line for each decode cycle. | off | Trace output uses bounded asynchronous logging. Synchronous trace output can reduce decode speed. | any; generic; qwen3.8-flash-next |
 | `GUFO_PLATFORM_TUNING` | Control Windows timing and memory placement switches. | All switches on on Windows | GUFO_PLATFORM_TUNING=none is a diagnostic that slows Windows decode. | windows; generic; any |
 | `GUFO_PREFILL_DIAG` | Control prefill diag. | off | Inventory classification. | any; generic; qwen3.8-flash-next |
 | `GUFO_REQUIRE_GFX1151` | Control require hip. | off | Inventory classification. | any; generic; any |
