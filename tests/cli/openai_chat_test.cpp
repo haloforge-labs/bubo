@@ -2275,7 +2275,9 @@ void DebugHooksSettingsEnvironmentTest() {
   const auto read_source = [&](const fs::path& file) {
     std::ifstream input(file);
     Expect(input.good(), "stderr scan can read its explicit input");
-    return std::string((std::istreambuf_iterator<char>(input)), {});
+    std::string text((std::istreambuf_iterator<char>(input)), {});
+    text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
+    return text;
   };
   const auto allowance = gufo::json::parse(
       read_source(root / "tools/ci/log_stderr_allowlist.json"));
