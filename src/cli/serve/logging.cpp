@@ -16,8 +16,10 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <poll.h>
 #include <pthread.h>
 #include <sched.h>
+#include <signal.h>
 #endif
 
 #include <cstdio>
@@ -35,13 +37,21 @@
 namespace gufo::server {
 namespace {
 
-void WriteStderr(std::string_view batch) {
-  // One stream write and flush per batch, to the same stderr stream buffer as
-  // before. This also preserves existing CPU tests that capture clog.
-  std::clog.write(batch.data(), static_cast<std::streamsize>(batch.size()));
-  std::clog.flush();
-  if (!std::clog.good())
-    throw std::runtime_error("stderr write failed");
+bool WriteStderr(std::string_view batch) noexcept {
+  try {
+    std::clog.write(batch.data(), static_cast<std::streamsize>(batch.size()));
+    std::clog.flush();
+    if (std::clog.good())
+      return true;
+  } catch (...) {
+  }
+  // badbit is sticky. Clear it even when stream exceptions are enabled, so
+  // a transient failure does not poison later batches.
+  try {
+    std::clog.clear();
+  } catch (...) {
+  }
+  return false;
 }
 
 AsyncLogSink& ProductionSink() {
@@ -134,51 +144,106 @@ std::string CurrentTimestamp() {
 }  // namespace
 
 struct AsyncLogSink::State {
+  using Clock = std::chrono::steady_clock;
   explicit State(Writer output, bool sync)
       : writer(std::move(output)), synchronous(sync) {}
   struct Entry {
     std::string line;
     std::uint64_t sequence;
   };
-  // Charge the entry and deque bookkeeping as well as its bytes. Otherwise
-  // empty/tiny protected messages could grow without reaching the hard cap.
   static constexpr std::size_t kEntryCharge = sizeof(Entry) + 24;
   Writer writer;
   const bool synchronous;
-  std::mutex mutex, io_mutex;
+  std::mutex mutex;
   std::condition_variable wake, changed;
   std::deque<Entry> queue;
-  std::uint64_t accepted = 0, delivered = 0, dropped = 0, reported = 0;
+  // Only one caller-owned hard-cap record may bypass queue admission. It is
+  // submitted after the accepted prefix retires and still written by Run.
+  std::optional<Entry> fallback;
+  std::uint64_t accepted = 0, completed = 0, delivered = 0;
+  std::uint64_t dropped = 0, reported = 0, failures = 0, failed_lines = 0;
   std::uint64_t active_lines = 0;
   std::size_t bytes = 0;
-  bool stopping = false, done = false, failed = false;
+  bool stopping = false, done = false, destroying = false;
+  bool discard = false, failure_reported = false;
   std::string timeout_report;
+
+  void DiscardAfterTimeout() {
+    if (discard)
+      return;
+    discard = true;
+    changed.notify_all();
+    // Never take a stream lock or write a real handle on the caller. A broken
+    // or full pipe may stall this single detached notice, but not the server.
+    try {
+      std::thread([] {
+        constexpr char notice[] =
+            "[log] sink timeout: subsequent lines discarded and counted\n";
+#ifdef _WIN32
+        const HANDLE handle = GetStdHandle(STD_ERROR_HANDLE);
+        if (handle != nullptr && handle != INVALID_HANDLE_VALUE &&
+            GetFileType(handle) != FILE_TYPE_UNKNOWN) {
+          DWORD written = 0;
+          (void)WriteFile(handle, notice, sizeof(notice) - 1, &written,
+                          nullptr);
+        }
+#else
+        // A closed stderr pipe must not terminate the process with SIGPIPE.
+        sigset_t signals;
+        sigemptyset(&signals);
+        sigaddset(&signals, SIGPIPE);
+        (void)pthread_sigmask(SIG_BLOCK, &signals, nullptr);
+        pollfd handle{STDERR_FILENO, POLLOUT, 0};
+        if (poll(&handle, 1, 0) > 0 && (handle.revents & POLLOUT))
+          (void)::write(STDERR_FILENO, notice, sizeof(notice) - 1);
+#endif
+      }).detach();
+    } catch (...) {
+      // Thread creation failure cannot escape a logging/teardown caller.
+    }
+  }
 
   void Run() {
     std::unique_lock lock(mutex);
     for (;;) {
       wake.wait(lock, [&] {
-        return stopping || !queue.empty() || dropped != reported;
+        return destroying || !queue.empty() || fallback ||
+               dropped != reported || !timeout_report.empty() ||
+               (stopping && !done);
       });
-      if (queue.empty() && dropped == reported && timeout_report.empty() &&
-          stopping) {
-        done = true;
-        changed.notify_all();
-        return;
+      if (queue.empty() && !fallback && dropped == reported &&
+          timeout_report.empty()) {
+        if (stopping && failures && !failure_reported) {
+          timeout_report = "[log] sink failures " + std::to_string(failures) +
+                           " writes, discarded " +
+                           std::to_string(failed_lines) + " lines\n";
+          failure_reported = true;
+        } else {
+          done = stopping;
+          changed.notify_all();
+          if (destroying)
+            return;
+          continue;
+        }
       }
       std::string batch;
       batch.reserve(65536);
-      std::uint64_t sequence = delivered, count = 0;
+      std::uint64_t sequence = completed, count = 0;
       std::size_t consumed = 0;
-      // Cap fragments as well as bytes. Start sparse or burst batches as soon
-      // as the writer is free, then flush each batch without a 100 ms delay.
-      while (!queue.empty() && count < 64 && batch.size() < 65536) {
-        auto& entry = queue.front();
-        batch += entry.line;
-        consumed += entry.line.size() + kEntryCharge;
-        sequence = entry.sequence;
-        queue.pop_front();
-        ++count;
+      if (fallback) {
+        batch = std::move(fallback->line);
+        sequence = fallback->sequence;
+        fallback.reset();
+        count = 1;
+      } else {
+        while (!queue.empty() && count < 64 && batch.size() < 65536) {
+          auto& entry = queue.front();
+          batch += entry.line;
+          consumed += entry.line.size() + kEntryCharge;
+          sequence = entry.sequence;
+          queue.pop_front();
+          ++count;
+        }
       }
       const auto drop_target = dropped;
       if (drop_target != reported)
@@ -190,25 +255,25 @@ struct AsyncLogSink::State {
       }
       active_lines = count;
       lock.unlock();
-      bool ok = true;
+      bool ok = false;
       try {
-        const std::lock_guard io_lock(io_mutex);
-        writer(batch);
+        ok = writer(batch);
       } catch (...) {
-        ok = false;
+        // Injected/third-party writers may throw. No sink exception escapes.
       }
       lock.lock();
       bytes -= consumed;
       active_lines = 0;
-      if (ok) {
-        delivered = sequence;
-        reported = drop_target;
-      } else {
-        // Stop after a sink error: retrying a broken descriptor would spin.
-        failed = done = true;
-        changed.notify_all();
-        return;
+      completed = sequence;
+      reported = drop_target;
+      if (ok)
+        delivered += count;
+      else {
+        ++failures;
+        failed_lines += count;
       }
+      // A failure retires that batch, then waits for fresh work. Never retry
+      // a broken sink in a spin loop or permanently kill the writer.
       changed.notify_all();
     }
   }
@@ -216,57 +281,73 @@ struct AsyncLogSink::State {
 
 AsyncLogSink::AsyncLogSink(Writer writer, bool synchronous)
     : state_(std::make_shared<State>(std::move(writer), synchronous)) {
-  if (!synchronous)
-    std::thread([state = state_] {
+  std::thread([state = state_] {
 #ifdef _WIN32
-      (void)SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+    (void)SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
 #else
-      sched_param priority{};
-      (void)pthread_setschedparam(pthread_self(), SCHED_OTHER, &priority);
+    sched_param priority{};
+    (void)pthread_setschedparam(pthread_self(), SCHED_OTHER, &priority);
 #endif
-      state->Run();
-    }).detach();
+    state->Run();
+  }).detach();
 }
 
 AsyncLogSink::~AsyncLogSink() {
   (void)Shutdown();
+  const std::lock_guard lock(state_->mutex);
+  state_->destroying = true;
+  state_->wake.notify_one();
 }
 
 void AsyncLogSink::Push(std::string line, LogLevel level) {
   const auto state = state_;
-  if (state->synchronous) {
-    const std::lock_guard io_lock(state->io_mutex);
-    state->writer(line);
-    const std::lock_guard lock(state->mutex);
-    ++state->accepted;
-    ++state->delivered;
-    return;
-  }
   std::unique_lock lock(state->mutex);
-  const auto lines = state->queue.size() + state->active_lines;
-  const auto charge = line.size() > 16 * 1024 * 1024
-                          ? 16 * 1024 * 1024 + 1
-                          : line.size() + State::kEntryCharge;
-  if (level < LogLevel::kWarn &&
-      (state->stopping || state->failed || lines >= 16384 ||
-       charge > 4 * 1024 * 1024 || state->bytes > 4 * 1024 * 1024 - charge)) {
+  if (state->discard) {
     ++state->dropped;
     state->wake.notify_one();
     return;
   }
-  if (state->stopping || state->failed || charge > 16 * 1024 * 1024 ||
-      state->bytes > 16 * 1024 * 1024 - charge) {
-    // Only WARN/ERROR can reach this deliberate last-resort synchronous path.
-    // Preserve the already accepted prefix before writing this fatal message.
-    lock.unlock();
-    (void)FlushSync();
-    const std::lock_guard io_lock(state->io_mutex);
-    state->writer(line);
+  const auto lines = state->queue.size() + state->active_lines;
+  const auto charge = line.size() > 16 * 1024 * 1024
+                          ? 16 * 1024 * 1024 + 1
+                          : line.size() + State::kEntryCharge;
+  if (!state->synchronous && level < LogLevel::kWarn &&
+      (state->stopping || lines >= 16384 || charge > 4 * 1024 * 1024 ||
+       state->bytes > 4 * 1024 * 1024 - charge)) {
+    ++state->dropped;
+    state->wake.notify_one();
     return;
   }
-  state->bytes += charge;
-  state->queue.push_back({std::move(line), ++state->accepted});
+  const auto deadline = State::Clock::now() + std::chrono::milliseconds(1950);
+  if (state->stopping || charge > 16 * 1024 * 1024 ||
+      state->bytes > 16 * 1024 * 1024 - charge) {
+    // One total 2 s budget covers both the prefix and the fallback write.
+    // After its first expiry every later call is an immediate counted discard.
+    if (!state->changed.wait_until(lock, deadline,
+                                   [&] {
+                                     return state->discard ||
+                                            state->completed == state->accepted;
+                                   }) ||
+        state->discard) {
+      state->DiscardAfterTimeout();
+      ++state->dropped;
+      state->wake.notify_one();
+      return;
+    }
+    state->fallback = State::Entry{std::move(line), ++state->accepted};
+  } else {
+    state->bytes += charge;
+    state->queue.push_back({std::move(line), ++state->accepted});
+  }
+  state->done = false;
+  const auto target = state->accepted;
   state->wake.notify_one();
+  if (state->synchronous || state->fallback) {
+    if (!state->changed.wait_until(lock, deadline, [&] {
+          return state->discard || state->completed >= target;
+        }))
+      state->DiscardAfterTimeout();
+  }
 }
 
 bool AsyncLogSink::FlushSync(std::chrono::milliseconds timeout) {
@@ -275,14 +356,14 @@ bool AsyncLogSink::FlushSync(std::chrono::milliseconds timeout) {
   const auto target = state->accepted, drop_target = state->dropped;
   state->wake.notify_one();
   const auto ready = [&] {
-    return state->failed ||
-           (state->delivered >= target && state->reported >= drop_target);
+    return state->discard ||
+           (state->completed >= target && state->reported >= drop_target);
   };
-  if (timeout == std::chrono::milliseconds::max())
-    state->changed.wait(lock, ready);
-  else if (!state->changed.wait_for(lock, timeout, ready))
+  // Even an omitted timeout is bounded on a caller path.
+  timeout = std::min(timeout, std::chrono::milliseconds(1950));
+  if (!state->changed.wait_for(lock, timeout, ready))
     return false;
-  return !state->failed;
+  return !state->discard && state->failed_lines == 0;
 }
 
 AsyncLogSink::Stats AsyncLogSink::GetStats() const {
@@ -291,39 +372,38 @@ AsyncLogSink::Stats AsyncLogSink::GetStats() const {
           state_->delivered,
           state_->dropped,
           state_->reported,
-          state_->accepted - state_->delivered,
-          state_->bytes};
+          state_->accepted - state_->completed,
+          state_->bytes,
+          state_->failures,
+          state_->failed_lines};
 }
 
 AsyncLogSink::Stats AsyncLogSink::Shutdown() {
   const auto state = state_;
   std::unique_lock lock(state->mutex);
   if (!state->stopping) {
-    // Reserve 50 ms of the 2 s exit budget for accounting and the loss report.
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(1950);
+    const auto deadline = State::Clock::now() + std::chrono::milliseconds(1950);
     state->stopping = true;
     state->wake.notify_one();
-    if (!state->synchronous)
-      state->changed.wait_until(lock, deadline, [&] { return state->done; });
-    const auto pending = state->accepted - state->delivered;
-    if (pending) {
-      state->timeout_report = "[log] shutdown: undelivered " +
-                              std::to_string(pending) +
+    if (!state->changed.wait_until(lock, deadline,
+                                   [&] { return state->done; })) {
+      const auto queued = state->queue.size() + (state->fallback ? 1 : 0);
+      state->timeout_report = "[log] shutdown: queued at deadline " +
+                              std::to_string(queued) + " lines, in-flight " +
+                              std::to_string(state->active_lines) +
                               " lines (2 s shutdown budget)\n";
-#ifdef _WIN32
-      // A blocked stderr cannot receive a report within the deadline. Also
-      // expose it to the Windows debugger; the writer emits it if it resumes.
-      OutputDebugStringA(state->timeout_report.c_str());
-#endif
+      state->DiscardAfterTimeout();
+      state->wake.notify_one();
     }
   }
   return {state->accepted,
           state->delivered,
           state->dropped,
           state->reported,
-          state->accepted - state->delivered,
-          state->bytes};
+          state->accepted - state->completed,
+          state->bytes,
+          state->failures,
+          state->failed_lines};
 }
 
 void Logger::Raw(const char* format, ...) {

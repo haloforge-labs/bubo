@@ -77,7 +77,12 @@ void SlowSink() {
   for (auto& producer : producers)
     producer.join();
   const auto producer_ms = Ms(Clock::now() - start);
-  Expect(Logger::FlushSync(), "slow-sink flush succeeds");
+  bool drained = false;
+  const auto flush_deadline = Clock::now() + 10s;
+  do {
+    drained = Logger::FlushSync();
+  } while (!drained && Clock::now() < flush_deadline);
+  Expect(drained, "slow-sink flush succeeds within the test drain deadline");
   const auto sink_ms = Ms(Clock::now() - start);
   std::vector<double> sorted;
   for (const auto& part : times)
@@ -305,12 +310,158 @@ void StuckShutdown() {
              lock, 2s,
              [&] {
                return blocked->capture->text.find(
-                          "shutdown: undelivered 1 lines") != std::string::npos;
+                          "shutdown: queued at deadline 0 lines, in-flight 1 "
+                          "lines") != std::string::npos;
              }),
          "shutdown loss report reaches stderr when the blocked sink resumes");
   std::cout << "(e) shutdown_ms=" << shutdown_ms << " wait_bound_ms=2000"
             << " drain_wait_ms=1950 undelivered=" << stats.pending
             << " report_after_resume=1\n";
+}
+
+void ReviewTimeout(bool hard_cap) {
+  auto blocked = std::make_shared<Blocked>();
+  AsyncLogSink sink(
+      [blocked](std::string_view batch) { blocked->Write(batch); });
+  Hook hook(sink);
+  Logger::Error("review", "seed");
+  Expect(blocked->entered.try_acquire_for(2s), "review sink entered write");
+  if (!hard_cap)
+    sink.Shutdown();
+  else
+    sink.Push(std::string(16 * 1024 * 1024 - 512, 'E'), LogLevel::kError);
+  // Rescue even the baseline implementation, so the negative proof terminates.
+  std::thread rescue([blocked] {
+    std::this_thread::sleep_for(2200ms);
+    blocked->resume.release();
+  });
+  const auto start = Clock::now();
+  if (hard_cap)
+    sink.Push(std::string(1024, 'W'), LogLevel::kWarn);
+  for (int i = 0; i < 100; ++i)
+    Logger::Error("review", "after-timeout=" + std::to_string(i));
+  const auto total_ms = Ms(Clock::now() - start);
+  const auto stats = sink.GetStats();
+  rescue.join();
+  std::cout << "review-timeout hard_cap=" << hard_cap
+            << " calls=100 total_ms=" << total_ms
+            << " bound_ms=2000 discarded=" << stats.dropped << '\n';
+  Expect(total_ms < 2000, "100 protected calls share a bounded timeout budget");
+  Expect(stats.dropped == (hard_cap ? 101 : 100),
+         "timeout discards counted exactly");
+}
+void ReviewFailure(bool synchronous) {
+  auto capture = std::make_shared<Capture>();
+  auto calls = std::make_shared<int>(0);
+  AsyncLogSink sink(
+      [capture, calls](std::string_view batch) {
+        if (++*calls % 3 == 0)
+          throw std::runtime_error("injected writer failure");
+        capture->Append(batch);
+      },
+      synchronous);
+  Hook hook(sink);
+  int exceptions = 0;
+  for (int i = 0; i < 9; ++i) {
+    try {
+      Logger::Error("failure", "line=" + std::to_string(i));
+      (void)Logger::FlushSync(100ms);
+    } catch (...) {
+      ++exceptions;
+    }
+  }
+  sink.Shutdown();
+  const auto stats = sink.GetStats();
+  Expect(stats.failures == 3 && stats.failed_lines == 3,
+         "sink failures counted exactly");
+  const auto text = capture->Text();
+  const auto report = text.find("[log] sink failures ");
+  const bool later = text.find("line=7\n") != std::string::npos;
+  const bool once =
+      report != std::string::npos &&
+      text.find("[log] sink failures ", report + 1) == std::string::npos;
+  std::cout << "review-failure sync=" << synchronous
+            << " exceptions=" << exceptions << " later_line=" << later
+            << " failures=" << stats.failures
+            << " failed_lines=" << stats.failed_lines << " report_once=" << once
+            << '\n';
+  Expect(
+      exceptions == 0 && later && once,
+      "writer exceptions contained, later lines delivered, one failure report");
+}
+void ReviewWording() {
+  auto blocked = std::make_shared<Blocked>();
+  AsyncLogSink sink(
+      [blocked](std::string_view batch) { blocked->Write(batch); });
+  sink.Push("stuck\n", LogLevel::kError);
+  Expect(blocked->entered.try_acquire_for(2s), "wording sink entered write");
+  sink.Shutdown();
+  blocked->resume.release();
+  std::unique_lock lock(blocked->capture->mutex);
+  const bool reported = blocked->capture->changed.wait_for(lock, 2s, [&] {
+    return blocked->capture->text.find("shutdown:") != std::string::npos;
+  });
+  const bool accurate =
+      reported &&
+      blocked->capture->text.find(
+          "shutdown: queued at deadline 0 lines, in-flight 1 lines") !=
+          std::string::npos;
+  std::cout << "review-wording accurate=" << accurate << '\n';
+  Expect(accurate,
+         "shutdown report distinguishes queued from in-flight at deadline");
+}
+
+void DefaultFlushBound() {
+  auto blocked = std::make_shared<Blocked>();
+  AsyncLogSink sink(
+      [blocked](std::string_view batch) { blocked->Write(batch); });
+  sink.Push("flush\n", LogLevel::kError);
+  Expect(blocked->entered.try_acquire_for(2s), "default-flush sink entered");
+  const auto start = Clock::now();
+  const bool flushed = sink.FlushSync();
+  const auto elapsed = Ms(Clock::now() - start);
+  blocked->resume.release();
+  std::cout << "review-default-flush completed=" << flushed
+            << " elapsed_ms=" << elapsed << " bound_ms=2000\n";
+  Expect(!flushed && elapsed < 2000, "omitted flush timeout remains bounded");
+  Expect(sink.FlushSync(2s), "bounded flush can recover after a nudge timeout");
+}
+class ThrowingStream : public std::stringbuf {
+public:
+  int calls = 0;
+  std::streamsize xsputn(const char* text, std::streamsize count) override {
+    if (++calls % 3 == 0)
+      throw std::runtime_error("injected streambuf failure");
+    return std::stringbuf::xsputn(text, count);
+  }
+};
+void StreamFailure() {
+  ThrowingStream capture;
+  auto* previous = std::clog.rdbuf(&capture);
+  const auto mask = std::clog.exceptions();
+  std::clog.exceptions(std::ios::badbit | std::ios::failbit);
+  int exceptions = 0;
+  for (int i = 0; i < 9; ++i) {
+    try {
+      Logger::Error("stream", "line=" + std::to_string(i));
+    } catch (...) {
+      ++exceptions;
+    }
+  }
+  Logger::Shutdown();
+  const auto text = capture.str();
+  const bool healthy = std::clog.good();
+  std::clog.exceptions(mask);
+  std::clog.rdbuf(previous);
+  std::cout << "review-stream exceptions=" << exceptions
+            << " healthy=" << healthy << " calls=" << capture.calls << '\n';
+  Expect(
+      exceptions == 0 && healthy && capture.calls == 10,
+      "production stderr clears failed stream state and contains exceptions");
+  Expect(text.find("line=7\n") != std::string::npos &&
+             text.find("[log] sink failures 3 writes, discarded 3 lines\n") !=
+                 std::string::npos,
+         "production stream delivers later lines and exact failure report");
 }
 void SyncSmoke() {
   std::ostringstream capture;
@@ -325,10 +476,42 @@ void SyncSmoke() {
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (argc == 2 && std::string_view(argv[1]) == "--stream-failure") {
+    StreamFailure();
+    return 0;
+  }
+  if (argc == 2 && std::string_view(argv[1]) == "--review-hard-cap") {
+    ReviewTimeout(true);
+    return 0;
+  }
+  if (argc == 2 && std::string_view(argv[1]) == "--review-async-failure") {
+    ReviewFailure(false);
+    return 0;
+  }
   if (argc == 2 && std::string_view(argv[1]) == "--sync-smoke") {
     SyncSmoke();
     return 0;
   }
+  if (argc == 2 && std::string_view(argv[1]) == "--review-timeout") {
+    ReviewTimeout(false);
+    ReviewTimeout(true);
+    return 0;
+  }
+  if (argc == 2 && std::string_view(argv[1]) == "--review-failure") {
+    ReviewFailure(true);
+    ReviewFailure(false);
+    return 0;
+  }
+  if (argc == 2 && std::string_view(argv[1]) == "--review-wording") {
+    ReviewWording();
+    return 0;
+  }
+  ReviewTimeout(false);
+  ReviewTimeout(true);
+  ReviewFailure(true);
+  ReviewFailure(false);
+  ReviewWording();
+  DefaultFlushBound();
   SlowSink();
   Overflow(0, "16K-lines");
   Overflow(1024, "4MiB-bytes");

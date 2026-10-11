@@ -75,6 +75,7 @@ public:
       __attribute__((format(printf, 2, 3)))
 #endif
       ;
+  // All caller waits are capped at 2 seconds, even with an omitted timeout.
   static bool FlushSync(
       std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
   // Exit only: wait at most 2 seconds for the sink, including an active write.
