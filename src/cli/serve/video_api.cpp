@@ -334,12 +334,13 @@ std::optional<json::Value> ParseMultipartBody(const HttpRequest& request,
       try {
         json::Value extension = json::parse(std::string(content));
         if (!extension.is_object()) {
-          *error = "multipart 'gufo' field must contain a JSON object";
+          *error =
+              "multipart '" + field_name + "' field must contain a JSON object";
           return std::nullopt;
         }
         result[field_name] = std::move(extension);
       } catch (const std::exception&) {
-        *error = "multipart 'gufo' field must contain valid JSON";
+        *error = "multipart '" + field_name + "' field must contain valid JSON";
         return std::nullopt;
       }
     } else {
@@ -479,13 +480,17 @@ HttpResponse CreateVideo(const HttpRequest& request, VideoJobService& service) {
   std::optional<int> selected_frame;
   bool preset_explicit = false;
   json::Value merged_options = json::Value::object();
+  json::Value option_sources = json::Value::object();
   bool has_options = false;
   for (const auto key : cli::kApiKeys) {
     if (const auto* options = body.find(std::string(key))) {
       has_options = true;
-      if (!options->is_object())
+      if (!options->is_object() ||
+          !HasOnlyMembers(*options, {"preset", "seed", "frames",
+                                     "output_format", "selected_frame"}))
         return Error(400, "Bad Request",
-                     "'gufo' must contain only supported video options",
+                     "'" + std::string(key) +
+                         "' must contain only supported video options",
                      "invalid_strix_options");
       for (const auto& [name, value] : options->members()) {
         if (const auto* previous = merged_options.find(name);
@@ -493,21 +498,20 @@ HttpResponse CreateVideo(const HttpRequest& request, VideoJobService& service) {
           return Error(400, "Bad Request",
                        "conflicting gufo and bubo video options",
                        "invalid_strix_options");
+        if (!option_sources.contains(name))
+          option_sources[name] = std::string(key);
         merged_options[name] = value;
       }
     }
   }
+  const auto option_name = [&](const std::string& name) {
+    return "'" + option_sources.member_str(name) + "." + name + "'";
+  };
   if (const json::Value* extension = has_options ? &merged_options : nullptr) {
-    if (!extension->is_object() ||
-        !HasOnlyMembers(*extension, {"preset", "seed", "frames",
-                                     "output_format", "selected_frame"})) {
-      return Error(400, "Bad Request",
-                   "'gufo' must contain only supported video options",
-                   "invalid_strix_options");
-    }
     if (extension->contains("preset")) {
       if (!extension->find("preset")->is_string()) {
-        return Error(400, "Bad Request", "'gufo.preset' must be a string",
+        return Error(400, "Bad Request",
+                     option_name("preset") + " must be a string",
                      "invalid_preset");
       }
       preset = extension->member_str("preset");
@@ -515,39 +519,44 @@ HttpResponse CreateVideo(const HttpRequest& request, VideoJobService& service) {
     }
     if (extension->contains("output_format") &&
         !extension->find("output_format")->is_string()) {
-      return Error(400, "Bad Request", "'gufo.output_format' must be a string",
+      return Error(400, "Bad Request",
+                   option_name("output_format") + " must be a string",
                    "invalid_output_format");
     }
     output_format = extension->member_str("output_format", output_format);
     if (extension->contains("seed")) {
       const auto parsed = JsonUnsigned(extension->find("seed"));
       if (!parsed.has_value()) {
-        return Error(400, "Bad Request",
-                     "'gufo.seed' must be a non-negative exact integer",
-                     "invalid_seed");
+        return Error(
+            400, "Bad Request",
+            option_name("seed") + " must be a non-negative exact integer",
+            "invalid_seed");
       }
       seed = *parsed;
     }
     if (extension->contains("frames")) {
       frames = JsonFrame(extension->find("frames"));
       if (!frames.has_value()) {
-        return Error(400, "Bad Request",
-                     "'gufo.frames' must be a positive legal frame count",
-                     "invalid_frames");
+        return Error(
+            400, "Bad Request",
+            option_name("frames") + " must be a positive legal frame count",
+            "invalid_frames");
       }
     }
     if (extension->contains("selected_frame")) {
       selected_frame = JsonFrame(extension->find("selected_frame"));
       if (!selected_frame.has_value()) {
-        return Error(400, "Bad Request",
-                     "'gufo.selected_frame' must be a non-negative integer",
-                     "invalid_selected_frame");
+        return Error(
+            400, "Bad Request",
+            option_name("selected_frame") + " must be a non-negative integer",
+            "invalid_selected_frame");
       }
     }
   }
   if (preset_explicit && !model_preset.empty() && preset != model_preset) {
     return Error(400, "Bad Request",
-                 "model alias and 'gufo.preset' must select the same preset",
+                 "model alias and " + option_name("preset") +
+                     " must select the same preset",
                  "preset_model_mismatch");
   }
 
@@ -574,7 +583,7 @@ HttpResponse CreateVideo(const HttpRequest& request, VideoJobService& service) {
     }
   } else {
     return Error(400, "Bad Request",
-                 "'gufo.output_format' must be 'mp4' or 'ppm'",
+                 option_name("output_format") + " must be 'mp4' or 'ppm'",
                  "invalid_output_format");
   }
   std::string parameter_error;
@@ -583,9 +592,10 @@ HttpResponse CreateVideo(const HttpRequest& request, VideoJobService& service) {
     return Error(400, "Bad Request", parameter_error, "invalid_frames");
   }
   if (parameters->frames != *duration_frames) {
-    return Error(400, "Bad Request",
-                 "'gufo.frames' must match the aligned 'seconds' duration",
-                 "invalid_frames");
+    return Error(
+        400, "Bad Request",
+        option_name("frames") + " must match the aligned 'seconds' duration",
+        "invalid_frames");
   }
 
   const VideoJobCreateResult created = service.Create({

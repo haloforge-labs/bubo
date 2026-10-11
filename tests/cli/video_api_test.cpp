@@ -525,10 +525,13 @@ void TestQueueSaturation(const std::filesystem::path& root) {
 void TestBrandAliases(const std::filesystem::path& root) {
   FakeRunner runner;
   VideoJobService service(Options(root, &runner));
+  std::uint64_t seed = 17;
   for (const auto* key : {"gufo", "bubo"}) {
     for (const bool multipart : {false, true}) {
+      const auto expected_seed = seed++;
       const std::string options =
-          R"({"seed":17,"frames":22,"output_format":"ppm","selected_frame":3})";
+          "{\"seed\":" + std::to_string(expected_seed) +
+          R"(,"frames":22,"output_format":"ppm","selected_frame":3})";
       auto body = gufo::json::Value::object();
       body["model"] = "minimax-h3-dev";
       body["prompt"] = "alias contract";
@@ -548,12 +551,17 @@ void TestBrandAliases(const std::filesystem::path& root) {
             "both JSON/multipart namespace spellings accepted");
       WaitCompleted(service, CreatedId(response));
       const auto request = runner.latest();
-      Check(request.seed == 17 && request.parameters.frames == 22 &&
+      Check(request.seed == expected_seed && request.parameters.frames == 22 &&
                 request.parameters.selected_frames == std::vector<int>{3},
             "namespace aliases preserve effective H3 options");
       for (const auto* invalid :
-           {"7", "null", "[]", R"({"seed":-1})", R"({"unknown":1})"}) {
-        body[key] = gufo::json::parse(invalid);
+           {"7", "null", "[]", "{", R"({"seed":-1})", R"({"unknown":1})",
+            R"({"preset":7})", R"({"output_format":7})", R"({"frames":-1})",
+            R"({"selected_frame":-1})", R"({"output_format":"bad"})",
+            R"({"frames":124,"output_format":"ppm"})",
+            R"({"preset":"exact"})"}) {
+        if (std::string_view(invalid) != "{")
+          body[key] = gufo::json::parse(invalid);
         const auto rejected = Send(
             service, "POST", "/v1/videos",
             multipart
@@ -562,11 +570,48 @@ void TestBrandAliases(const std::filesystem::path& root) {
                                                {"size", "256x256"},
                                                {"seconds", "1"},
                                                {key, invalid}})
-                : body.dump(),
+                : (std::string_view(invalid) == "{" ? "{" : body.dump()),
             {},
             multipart ? "multipart/form-data; boundary=alias-boundary" : "");
         Check(rejected.status == 400,
               "aliases retain validation for objects and options");
+        if (std::string_view(invalid) == "{" && !multipart)
+          continue;
+        std::string message;
+        const std::string prefix = "'" + std::string(key);
+        if (std::string_view(invalid) == "{")
+          message = "multipart " + prefix + "' field must contain valid JSON";
+        else if (std::string_view(invalid) == "7" ||
+                 std::string_view(invalid) == "null" ||
+                 std::string_view(invalid) == "[]")
+          message =
+              multipart
+                  ? "multipart " + prefix + "' field must contain a JSON object"
+                  : prefix + "' must contain only supported video options";
+        else if (std::string_view(invalid) == R"({"unknown":1})")
+          message = prefix + "' must contain only supported video options";
+        else if (std::string_view(invalid) == R"({"seed":-1})")
+          message = prefix + ".seed' must be a non-negative exact integer";
+        else if (std::string_view(invalid) == R"({"preset":7})")
+          message = prefix + ".preset' must be a string";
+        else if (std::string_view(invalid) == R"({"output_format":7})")
+          message = prefix + ".output_format' must be a string";
+        else if (std::string_view(invalid) == R"({"frames":-1})")
+          message = prefix + ".frames' must be a positive legal frame count";
+        else if (std::string_view(invalid) == R"({"selected_frame":-1})")
+          message = prefix + ".selected_frame' must be a non-negative integer";
+        else if (std::string_view(invalid) == R"({"output_format":"bad"})")
+          message = prefix + ".output_format' must be 'mp4' or 'ppm'";
+        else if (std::string_view(invalid) == R"({"preset":"exact"})")
+          message = "model alias and " + prefix +
+                    ".preset' must select the same preset";
+        else
+          message =
+              prefix + ".frames' must match the aligned 'seconds' duration";
+        Check(gufo::json::parse(rejected.body)
+                      .find("error")
+                      ->member_str("message") == message,
+              "exact alias error wording: " + message);
       }
     }
   }
@@ -576,13 +621,48 @@ void TestBrandAliases(const std::filesystem::path& root) {
   Check(conflict.status == 400 &&
             conflict.body.find("conflicting") != std::string::npos,
         "conflicting namespace aliases fail closed");
+  const auto multipart_conflict =
+      Send(service, "POST", "/v1/videos",
+           Multipart("alias-boundary",
+                     {{"model", "minimax-h3-dev"},
+                      {"prompt", "x"},
+                      {"size", "256x256"},
+                      {"seconds", "1"},
+                      {"gufo", R"({"seed":31,"output_format":"ppm"})"},
+                      {"bubo", R"({"seed":32})"}}),
+           {}, "multipart/form-data; boundary=alias-boundary");
+  Check(multipart_conflict.status == 400 &&
+            multipart_conflict.body.find("conflicting") != std::string::npos,
+        "multipart conflicting namespace aliases fail closed");
+  for (const bool multipart : {false, true}) {
+    for (const auto* second : {"bubo", "gufo"}) {
+      const std::string first =
+          std::string_view(second) == "bubo" ? "gufo" : "bubo";
+      const std::string options = R"({"seed":33,"output_format":"ppm"})";
+      const auto non_object = Send(
+          service, "POST", "/v1/videos",
+          multipart ? Multipart("alias-boundary", {{"model", "minimax-h3-dev"},
+                                                   {"prompt", "x"},
+                                                   {"size", "256x256"},
+                                                   {"seconds", "1"},
+                                                   {first, options},
+                                                   {second, "7"}})
+                    : "{\"model\":\"minimax-h3-dev\",\"prompt\":\"x\",\"size\":"
+                      "\"256x256\",\"seconds\":\"1\",\"" +
+                          first + "\":" + options + ",\"" + second + "\":7}",
+          {}, multipart ? "multipart/form-data; boundary=alias-boundary" : "");
+      Check(non_object.status == 400,
+            std::string(multipart ? "multipart" : "JSON") +
+                " second alias non-object rejected: " + second);
+    }
+  }
   const auto same = Send(
       service, "POST", "/v1/videos",
-      R"({"model":"minimax-h3-dev","prompt":"x","size":"256x256","seconds":"1","gufo":{"seed":17},"bubo":{"seed":17,"output_format":"ppm"}})");
+      R"({"model":"minimax-h3-dev","prompt":"x","size":"256x256","seconds":"1","gufo":{"seed":34},"bubo":{"seed":34,"output_format":"ppm"}})");
   Check(same.status == 202,
         "consistent namespace aliases merge without losing options");
   WaitCompleted(service, CreatedId(same));
-  Check(runner.latest().seed == 17, "merged aliases retain seed");
+  Check(runner.latest().seed == 34, "merged aliases retain seed");
   std::cout << "PASS: video API gufo/bubo JSON and multipart aliases; "
                "validation and conflict checks\n";
 }
