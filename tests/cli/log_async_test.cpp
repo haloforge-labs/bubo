@@ -225,6 +225,53 @@ void EmptyProtectedBound() {
             << " dropped=" << full.dropped << '\n';
 }
 
+void FallbackPrefixOrdering() {
+  auto capture = std::make_shared<Capture>();
+  auto first = std::make_shared<std::binary_semaphore>(0);
+  auto second = std::make_shared<std::binary_semaphore>(0);
+  auto resume_first = std::make_shared<std::binary_semaphore>(0);
+  auto resume_second = std::make_shared<std::binary_semaphore>(0);
+  auto writes = std::make_shared<int>(0);
+  AsyncLogSink sink([=](std::string_view batch) {
+    if (++*writes == 1) {
+      first->release();
+      resume_first->acquire();
+    } else if (*writes == 2) {
+      second->release();
+      resume_second->acquire();
+    }
+    capture->Append(batch);
+  });
+  sink.Push("seed\n", LogLevel::kError);
+  Expect(first->try_acquire_for(2s), "prefix sink entered seed write");
+  const std::string large(17 * 1024 * 1024, 'E');
+  auto fallback = std::async(std::launch::async,
+                             [&] { sink.Push(large, LogLevel::kError); });
+  Expect(fallback.wait_for(50ms) == std::future_status::timeout,
+         "oversized fallback waits for its seed prefix");
+  for (int i = 0; i < 100; ++i)
+    sink.Push("later=" + std::to_string(i) + "\n", LogLevel::kError);
+  resume_first->release();
+  Expect(second->try_acquire_for(2s), "later batch entered its separate gate");
+  const auto deadline = Clock::now() + 500ms;
+  while (sink.GetStats().accepted < 102 && Clock::now() < deadline)
+    std::this_thread::sleep_for(1ms);
+  const bool submitted = sink.GetStats().accepted == 102;
+  resume_second->release();
+  Expect(fallback.wait_for(2s) == std::future_status::ready,
+         "prefix fallback completes after later batch resumes");
+  fallback.get();
+  Expect(sink.FlushSync(), "prefix-order final flush succeeds");
+  const auto text = capture->Text();
+  const auto at = text.find(large);
+  std::cout << "review-prefix submitted_while_later_blocked=" << submitted
+            << " delivered=" << sink.GetStats().delivered << '\n';
+  Expect(submitted,
+         "later arrivals do not extend the captured fallback prefix");
+  Expect(text.find("later=99\n") < at && at + large.size() == text.size(),
+         "fallback slot preserves sequence order behind later queued records");
+}
+
 void Ordering() {
   auto capture = std::make_shared<Capture>();
   AsyncLogSink sink(
@@ -521,6 +568,7 @@ int main(int argc, char** argv) {
   Overflow(1024, "4MiB-bytes");
   HardCap();
   EmptyProtectedBound();
+  FallbackPrefixOrdering();
   Ordering();
   FlushUnderLoad();
   StuckShutdown();

@@ -230,13 +230,15 @@ struct AsyncLogSink::State {
       batch.reserve(65536);
       std::uint64_t sequence = completed, count = 0;
       std::size_t consumed = 0;
-      if (fallback) {
+      if (fallback &&
+          (queue.empty() || fallback->sequence < queue.front().sequence)) {
         batch = std::move(fallback->line);
         sequence = fallback->sequence;
         fallback.reset();
         count = 1;
       } else {
-        while (!queue.empty() && count < 64 && batch.size() < 65536) {
+        while (!queue.empty() && count < 64 && batch.size() < 65536 &&
+               (!fallback || queue.front().sequence < fallback->sequence)) {
           auto& entry = queue.front();
           batch += entry.line;
           consumed += entry.line.size() + kEntryCharge;
