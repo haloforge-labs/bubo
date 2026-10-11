@@ -921,7 +921,8 @@ std::string RenderReleaseDocs(std::span<const json::Value> rows) {
       "# Release switches\n\nGenerated from "
       "`src/cli/serve/release_switches.json`.\n\nProfile defaults apply to "
       "Qwen3.8 Flash Next.\nOther model families keep their existing "
-      "defaults.\nExplicit flags and real environment values take "
+      "defaults except for the exact seed.\nExplicit flags and real "
+      "environment values take "
       "precedence.\nEmpty environment values count as unset and produce a "
       "warning.\n\n";
   const auto table = [&](std::initializer_list<std::string_view> classes) {

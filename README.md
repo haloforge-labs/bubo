@@ -27,6 +27,12 @@ It runs at about half the decode speed, and every request prefills its full prom
 Use `--no-cache` to disable RAM and disk prompt caches for all requests in any profile.
 See [Release switches](docs/FLAGS.md) for all settings.
 
+The exact reference command, with a clean environment and matching model and request settings, is:
+
+```sh
+gufo serve --profile stock --speculative off --no-cache --sessions 1 --seed 1 --think on --reasoning-effort medium
+```
+
 ## Models and benchmarks
 
 All model documentation lives under [docs/models](docs/models/README.md):
@@ -236,9 +242,3 @@ The initial design is informed by the following open source projects:
 - [hipEngine](https://github.com/shisa-ai/hipEngine) for torch-free HIP execution, and native speculative-cycle work.
 - [ds4](https://github.com/antirez/ds4) for DeepSeek V4 Flash, MoE scheduling, and DSpark.
 - [audio.cpp](https://github.com/0xShug0/audio.cpp) for audio models for tts and asr tasks.
-
-The exact reference command, with a clean environment and matching model and request settings, is:
-
-```sh
-gufo serve --profile stock --speculative off --no-cache --sessions 1 --seed 1 --think on --reasoning-effort medium
-```

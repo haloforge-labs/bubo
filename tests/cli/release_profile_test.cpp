@@ -493,6 +493,10 @@ void Review2Regression(int finding) {
            "other family receives the exact scope message");
     Expect(result.effective_flags.at("--seed") == "1",
            "other family gets seed 1");
+    Expect(RenderReleaseDocs(ReleaseSwitchTable())
+                   .find("Other model families keep their existing defaults "
+                         "except for the exact seed.") != std::string::npos,
+           "docs state the other-family seed exception");
   } else if (finding == 8) {
     inputs = Inputs("default");
     inputs.explicit_flags["--no-cache"] = "1";

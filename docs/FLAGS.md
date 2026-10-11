@@ -3,7 +3,7 @@
 Generated from `src/cli/serve/release_switches.json`.
 
 Profile defaults apply to Qwen3.8 Flash Next.
-Other model families keep their existing defaults.
+Other model families keep their existing defaults except for the exact seed.
 Explicit flags and real environment values take precedence.
 Empty environment values count as unset and produce a warning.
 
@@ -36,9 +36,9 @@ Empty environment values count as unset and produce a warning.
 | `--min-keep` | Retain a minimum number of sampling candidates. | 0 | Keep zero unless probability filters must retain a minimum number of candidates. | any; generic; any |
 | `--min-p` | Filter tokens by probability relative to the best token. | 0.0 | Keep zero unless the task needs minimum probability filtering. | any; generic; any |
 | `--mmproj` | Set the vision sidecar file. | Unset | Set the matching vision sidecar when the model must process images. | any; strix-halo-tuned; qwen3.8-flash-next |
-| `--mtp-draft-vocab` | Select the MTP draft head vocabulary. | auto | Keep the profile vocabulary unless draft vocabulary tests require another setting. | any; strix-halo-tuned; qwen3.8-flash-next |
+| `--mtp-draft-vocab` | Select the MTP draft head vocabulary. | auto with MTP; otherwise unused | Keep the profile vocabulary unless draft vocabulary tests require another setting. | any; strix-halo-tuned; qwen3.8-flash-next |
 | `--mtp-model` | Set the MTP sidecar file. | Unset | Set the matching MTP sidecar when speculative decoding is required. | any; strix-halo-tuned; qwen3.8-flash-next |
-| `--mtp-policy` | Select the MTP draft length controller. | survival | Keep survival unless draft acceptance tests require the length policy. | any; strix-halo-tuned; qwen3.8-flash-next |
+| `--mtp-policy` | Select the MTP draft length controller. | survival with MTP; otherwise unused | Keep survival unless draft acceptance tests require the length policy. | any; strix-halo-tuned; qwen3.8-flash-next |
 | `--no-behaviour` | Disable the eight behaviour defaults. | Unset | Keep policies enabled unless plain sampling is required outside the exact profile. | any; generic; any |
 | `--no-cache` | Disable RAM and disk prompt caches for all requests. | Off; exact enables it | Enable it when every request must prefill its full prompt for reproducible output. | any; generic; qwen3.8-flash-next |
 | `--no-cache-disk` | Disable the disk snapshot cache. | Unset | Enable it when the supplied disk cache directory must be ignored. | any; generic; any |
@@ -53,7 +53,7 @@ Empty environment values count as unset and produce a warning.
 | `--preserve-thinking` | Select which thinking history to retain. | auto | Keep auto unless the client requires a different policy for retained thinking history. | any; generic; qwen3.8-flash-next |
 | `--print-effective-settings` | Print resolved settings as JSON and exit. | Unset | Enable it when resolved settings must be inspected without loading a model. | any; generic; any |
 | `--profile` | Select the release settings profile. | default | Keep default for normal use, select subagents for concurrency, or select exact for reproducibility. | any; generic; any |
-| `--prompt-lookup` | Propose tokens from an earlier conversation match. | 1 | Keep it enabled with MTP unless prompt lookup comparisons require it off. | any; strix-halo-tuned; qwen3.8-flash-next |
+| `--prompt-lookup` | Propose tokens from an earlier conversation match. | On with MTP; otherwise off | Keep it enabled with MTP unless prompt lookup comparisons require it off. | any; strix-halo-tuned; qwen3.8-flash-next |
 | `--reasoning-effort` | Set the default reasoning effort. | medium | Keep medium unless the task requires a different reasoning effort. | any; strix-halo-tuned; qwen3.8-flash-next |
 | `--repeat-last-n` | Set the recent token window for repetition penalties. | 64 | Keep 64 unless repetition penalties need a different recent token window. | any; generic; any |
 | `--repeat-penalty` | Penalize recently used tokens. | 1.0 (off) | Keep one unless the task needs a penalty for recent repeated tokens. | any; generic; any |
@@ -61,7 +61,7 @@ Empty environment values count as unset and produce a warning.
 | `--seed` | Set the random sampling seed. | -1 (random); exact uses 1 | Use a nonnegative seed for reproducibility; exact uses one unless another nonnegative seed is supplied. | any; generic; any |
 | `--served-model-name` | Set the model identifier exposed by the API. | Unset (uses model metadata name) | Set a name when clients require a model identifier different from the model file name. | any; generic; any |
 | `--sessions` | Set the number of preallocated request sessions. | 1 | Keep one for exact output or select subagents when four requests must run concurrently. | any; strix-halo-tuned; qwen3.8-flash-next |
-| `--speculative` | Select the speculative draft backend. | mtp | Keep MTP with its sidecar or select off when plain autoregressive decoding is required. | any; strix-halo-tuned; qwen3.8-flash-next |
+| `--speculative` | Select the speculative draft backend. | mtp with an MTP sidecar; otherwise off | Keep MTP with its sidecar or select off when plain autoregressive decoding is required. | any; strix-halo-tuned; qwen3.8-flash-next |
 | `--temperature` | Set the randomness of token sampling. | preset (Qwen3.8: 1.0 thinking, 0.7 non-thinking) | Keep the model preset unless the task needs different randomness or greedy decoding with zero. | any; generic; any |
 | `--think` | Set the default reasoning mode. | on | Keep on unless the task does not need reasoning. | any; strix-halo-tuned; qwen3.8-flash-next |
 | `--top-k` | Limit sampling to the highest probability candidates. | preset 20 (Qwen3.8) | Keep the model preset unless the task needs a different sampling candidate limit. | any; generic; any |
@@ -82,7 +82,7 @@ Empty environment values count as unset and produce a warning.
 | `GUFO_EOG_MIN_PROB` | Set the minimum EOG probability required to stop. | 0.2 | Keep the default unless end token probability tests require another minimum. | any; strix-halo-tuned; qwen3.8-flash-next |
 | `GUFO_EOG_MIN_PROB_EXACT` | Compute EOG probability over the full vocabulary. | Off | Keep it off unless end token decisions require full vocabulary probabilities. | any; generic; qwen3.8-flash-next |
 | `GUFO_HOST` | Set the server address through the environment. | Unset | Leave it unset unless the server address must come from this environment variable. | any; generic; any |
-| `GUFO_LENIENT` | Accept near miss MTP drafts inside thinking spans. | bounded | Keep bounded outside exact unless strict speculative acceptance is required. | any; strix-halo-tuned; qwen3.8-flash-next |
+| `GUFO_LENIENT` | Accept near miss MTP drafts inside thinking spans. | bounded with MTP; otherwise off | Keep bounded outside exact unless strict speculative acceptance is required. | any; strix-halo-tuned; qwen3.8-flash-next |
 | `GUFO_LENIENT_LAMBDA` | Set the lenient speculative acceptance bound. | 0.5 | Keep the default unless lenient acceptance tests require a different bound. | any; generic; qwen3.8-flash-next |
 | `GUFO_LENIENT_THINK_ONLY` | Limit lenient acceptance to thinking output. | on | Keep the thinking gate unless lenient acceptance tests must include non-thinking output. | any; generic; qwen3.8-flash-next |
 | `GUFO_LOGIT_BIAS` | Enable request token probability adjustments. | off | Keep it off unless requests must change token probabilities with logit bias. | any; generic; any |
