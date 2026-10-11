@@ -15,6 +15,9 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <pthread.h>
+#include <sched.h>
 #endif
 
 #include <cstdio>
@@ -211,7 +214,15 @@ struct AsyncLogSink::State {
 AsyncLogSink::AsyncLogSink(Writer writer, bool synchronous)
     : state_(std::make_shared<State>(std::move(writer), synchronous)) {
   if (!synchronous)
-    std::thread([state = state_] { state->Run(); }).detach();
+    std::thread([state = state_] {
+#ifdef _WIN32
+      (void)SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+#else
+      sched_param priority{};
+      (void)pthread_setschedparam(pthread_self(), SCHED_OTHER, &priority);
+#endif
+      state->Run();
+    }).detach();
 }
 
 AsyncLogSink::~AsyncLogSink() {
