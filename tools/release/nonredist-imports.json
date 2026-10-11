@@ -1,0 +1,7 @@
+[
+  "libomp140*", "vcomp*", "libiomp*",
+  "concrt140d.dll", "msvcp140_1d.dll", "msvcp140_2d.dll",
+  "msvcp140d_atomic_wait.dll", "msvcp140d_codecvt_ids.dll", "msvcp140d.dll",
+  "vccorlib140d.dll", "vcruntime140_1d.dll", "vcruntime140_threadsd.dll",
+  "vcruntime140d.dll", "vcamp140d.dll"
+]

@@ -11,6 +11,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  windows-release-imports:
+    name: Windows release import scan contracts
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check PE reader and deny-list negative controls
+        shell: pwsh
+        run: tools/release/test-pe-imports.ps1
+
   build-and-test:
     name: CPU contracts & repository checks
     runs-on: ubuntu-latest

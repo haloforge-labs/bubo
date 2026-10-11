@@ -6,6 +6,7 @@ import json
 import hashlib
 from pathlib import Path
 import re
+import subprocess
 
 LEGACY = re.compile(r'\bgufo\b', re.IGNORECASE)
 LITERAL = re.compile(r'"(?:[^"\\]|\\.)*"')
@@ -93,12 +94,19 @@ def check(root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=Path(__file__).resolve().parents[2])
+    parser.add_argument('--package-folder', type=Path,
+                        help='Also scan every shipped Windows EXE/DLL import')
     args = parser.parse_args()
     errors = check(args.root)
     for error in errors:
         print('FAIL: ' + error)
     if not errors:
         print('PASS: Bubo program-name literal scan (src/cli, docs, README, tools/windows/*.ps1, start.cmd, flake.nix, .devops, CMakeLists.txt, cmake; categorized exact-line allow-list)')
+    if args.package_folder:
+        result = subprocess.run(['pwsh', '-NoProfile', '-File',
+                                 str(args.root / 'tools/release/check-package.ps1'),
+                                 '-PackageFolder', str(args.package_folder)], check=False)
+        return bool(errors) or result.returncode != 0
     return bool(errors)
 
 
