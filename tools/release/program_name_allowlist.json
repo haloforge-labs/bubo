@@ -3096,5 +3096,12 @@
     "count": 1,
     "category": "build-target",
     "reason": "Retained CMake target identity; Bubo bootstrap loads the inference DLL lazily on Windows."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "add_dependencies(gufo bubo_prepare_release_gate)",
+    "count": 1,
+    "category": "build-target",
+    "reason": "Retained CMake target identity; production Bubo builds require the prepare pin/evidence gate."
   }
 ]

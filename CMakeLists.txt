@@ -315,8 +315,23 @@ set(bubo_command_sources
 add_library(bubo_prepare STATIC
   src/cli/prepare/prepare.cpp
   src/core/prepare/release_catalogue.cpp
-  src/core/prepare/fingerprint_table.cpp)
+  src/core/prepare/fingerprint_table.cpp
+  src/core/prepare/release_evidence.cpp)
 target_link_libraries(bubo_prepare PUBLIC CURL::libcurl OpenSSL::Crypto ZLIB::ZLIB)
+add_executable(prepare_gate EXCLUDE_FROM_ALL tools/release/prepare_gate.cpp)
+target_link_libraries(prepare_gate PRIVATE bubo_prepare)
+# Release configurations always check the production pins/evidence. Dev builds
+# still compile with explicit OPEN slots, without pretending to be releasable.
+add_custom_target(bubo_prepare_release_gate ALL
+  COMMAND ${CMAKE_COMMAND}
+    "-DCONFIG=$<CONFIG>" "-DGATE=$<TARGET_FILE:prepare_gate>"
+    "-DEVIDENCE=${CMAKE_SOURCE_DIR}/tools/release/prepare-evidence"
+    -P "${CMAKE_SOURCE_DIR}/tools/release/prepare-gate.cmake"
+  DEPENDS prepare_gate VERBATIM)
+add_custom_target(prepare_release_check
+  COMMAND $<TARGET_FILE:prepare_gate> --release
+    "${CMAKE_SOURCE_DIR}/tools/release/prepare-evidence"
+  DEPENDS prepare_gate VERBATIM)
 set(bubo_inference_target gufo)
 if(WIN32 AND GUFO_BRAND STREQUAL "bubo")
   add_library(bubo_engine SHARED ${bubo_command_sources})
@@ -330,6 +345,7 @@ else()
   add_executable(gufo ${bubo_command_sources})
 endif()
 target_link_libraries(${bubo_inference_target} PRIVATE bubo_prepare)
+add_dependencies(gufo bubo_prepare_release_gate)
 target_link_libraries(${bubo_inference_target} PRIVATE gufo_diagnostics gufo_core gufo_llm_cli gufo_http CURL::libcurl)
 set_target_properties(gufo PROPERTIES OUTPUT_NAME "${GUFO_BRAND}")
 if(GUFO_BRAND STREQUAL "bubo")
