@@ -6,15 +6,14 @@ ROCm for Windows (TheRock build, https://github.com/ROCm/TheRock)
   rocm-openblas*.dll, rocblas\library, hipblaslt\library
   - MIT / NCSA / Apache-2.0 with LLVM exception (see the ROCm repositories)
 vcpkg libraries
-  OpenSSL (libcrypto, libssl, legacy) - Apache-2.0
+  OpenSSL (libcrypto) - Apache-2.0
   curl (libcurl) - curl license
-  ICU (icu*.dll) - Unicode License V3
+  ICU (icudt, icuin, icuuc DLLs) - Unicode License V3
   libpng (libpng16) - PNG Reference Library License
   libjpeg-turbo (jpeg62) - IJG / BSD-3-Clause
-  WebP (libwebp*.dll, libsharpyuv.dll) - BSD-3-Clause (licenses/libwebp.txt)
+  WebP (libwebp.dll, libsharpyuv.dll) - BSD-3-Clause (licenses/libwebp.txt)
   zlib, and any other vcpkg runtime DLL present - their own permissive licenses
-Microsoft Visual C++ runtime (msvcp140*.dll, vcruntime140*.dll) and the LLVM
-OpenMP runtime (libomp140.x86_64.dll)
+Microsoft Visual C++ runtime (msvcp140*.dll, vcruntime140*.dll)
   - Microsoft Visual Studio redistributable files, app-local deployment
 
 gufo itself: MIT (LICENSE).
