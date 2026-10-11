@@ -344,10 +344,12 @@ void AsyncLogSink::Push(std::string line, LogLevel level) {
       state->bytes > 16 * 1024 * 1024 - charge) {
     // One total 2 s budget covers both the prefix and the fallback write.
     // After its first expiry every later call is an immediate counted discard.
+    const auto prefix = state->accepted;
     if (!state->changed.wait_until(lock, deadline,
                                    [&] {
                                      return state->discard ||
-                                            state->completed == state->accepted;
+                                            (state->completed >= prefix &&
+                                             !state->fallback);
                                    }) ||
         state->discard) {
       state->DiscardAfterTimeout();
