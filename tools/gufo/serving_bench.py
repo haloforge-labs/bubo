@@ -1635,13 +1635,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--fingerprint",
         type=Path,
-        help="Existing `gufo diagnose --fingerprint --json` output",
+        help="Existing `bubo diagnose --fingerprint --json` output",
     )
     parser.add_argument(
         "--gufo",
         type=Path,
-        default=Path("./result/bin/gufo"),
-        help="Release gufo binary used for automatic fingerprinting",
+        default=Path("./result/bin/bubo"),
+        help="Release Bubo binary used for automatic fingerprinting",
     )
     parser.add_argument("--output", type=Path, help="Write the JSON artifact")
     parser.add_argument("--json", action="store_true", help="Print JSON")

@@ -1,4 +1,4 @@
-Gufo for Windows - prebuilt
+Bubo for Windows - prebuilt
 ===========================
 
 A native Windows build of Bubo (https://github.com/gufo-org/gufo), the ROCm

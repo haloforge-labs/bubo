@@ -18,7 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Measure docs/models/<model>/BENCHMARKS.md tables for Gufo and its reference server.",
     )
     parser.add_argument("--model", required=True, help="docs/models/<model> directory name")
-    parser.add_argument("--gufo", type=Path, default=Path("result/bin/gufo"), help="Gufo binary")
+    parser.add_argument("--gufo", type=Path, default=Path("result/bin/bubo"), help="Bubo binary")
     for role in FILE_ROLES:
         parser.add_argument(f"--{role}", action="append", default=[], metavar="[VARIANT=]PATH")
     parser.add_argument("--log-dir", type=Path, default=Path("artifacts/model-bench"),

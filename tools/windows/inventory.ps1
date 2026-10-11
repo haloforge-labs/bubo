@@ -1,5 +1,5 @@
 # Shared by start.ps1 and check.ps1 (dot-sourced): finds the GGUF files that
-# `gufo serve llm` can run on Windows, reads their headers, pairs each target
+# `bubo serve llm` can run on Windows, reads their headers, pairs each target
 # with its drafts and vision sidecar, and estimates its device memory.
 # Read-only.
 
@@ -214,7 +214,7 @@ function New-GufoRecord($File, [string]$Repo, [string]$Snapshot, $Header, [int64
     $record.HasMtp = $nextn -gt 0
     $record.MatchName = ConvertTo-GufoMatchName $name
   } else {
-    $record.Note = if ($arch) { "architecture '$arch' is not served by gufo on Windows" } else { "no architecture in the header" }
+    $record.Note = if ($arch) { "architecture '$arch' is not served by bubo on Windows" } else { "no architecture in the header" }
   }
   $record
 }

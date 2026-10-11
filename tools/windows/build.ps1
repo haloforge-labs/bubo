@@ -1,4 +1,4 @@
-# Windows build of Gufo against AMD TheRock ROCm (gfx1151).
+# Windows build of Bubo against AMD TheRock ROCm (gfx1151).
 #
 # Prerequisites (paths overridable by parameter; tools\windows\check.ps1
 # checks them all):
@@ -101,4 +101,4 @@ foreach ($dir in @("hipblaslt", "rocblas")) {
   }
 }
 Get-ChildItem "$Vcpkg\installed\x64-windows\bin\*.dll" | Copy-Item -Destination $bin -Force
-Write-Host "gufo: built $build"
+Write-Host "bubo: built $build"

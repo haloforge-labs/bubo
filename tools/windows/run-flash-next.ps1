@@ -1,4 +1,4 @@
-# Qwen3.8-Flash-Next on the Windows build of Gufo. start.ps1 (same folder)
+# Qwen3.8-Flash-Next on the Windows build of Bubo. start.ps1 (same folder)
 # is the interactive launcher for every model; this script is the scriptable one.
 #
 #   powershell -ExecutionPolicy Bypass -File tools\windows\run-flash-next.ps1                # serve: UD-Q4_K_XL, thinking, adaptive MTP

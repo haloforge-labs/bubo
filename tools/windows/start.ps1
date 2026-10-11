@@ -1,6 +1,6 @@
-# Interactive launcher for the Gufo server on Windows. It finds the models on
+# Interactive launcher for the Bubo server on Windows. It finds the models on
 # this machine (Hugging Face cache, models folders, LM Studio), lists the ones
-# gufo can serve with what fits in GPU memory, and asks only for what matters;
+# bubo can serve with what fits in GPU memory, and asks only for what matters;
 # Enter keeps the recommended value everywhere.
 #
 #   powershell -ExecutionPolicy Bypass -File tools\windows\start.ps1            # pick and start

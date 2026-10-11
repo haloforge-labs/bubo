@@ -51,7 +51,7 @@ def reference_tokens(report: dict) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", type=Path, default=ROOT / "result/bin/gufo")
+    parser.add_argument("--binary", type=Path, default=ROOT / "result/bin/bubo")
     parser.add_argument("--baseline-binary", type=Path,
                         help="interleave another release; both must reproduce the same AR tokens")
     for name in ("target-q4", "target-q8", "draft-q4", "draft-q8"):
