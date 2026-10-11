@@ -6,7 +6,7 @@ I1 skeleton: selected steps print 'not implemented in I1' and exit 10.
 Options:
   --output ROOT  Parent folder (default: %LOCALAPPDATA%\Bubo)
   --yes          Accept the displayed plan when implemented
-  --verify       Force runtime verification; model hashing is unconditional
+  --verify       Force full SHA-256 verification when implemented
   --offline      Use local files only when implemented
   --help         Print help without writes, network or engine loading
 
