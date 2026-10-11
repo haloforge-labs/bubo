@@ -371,9 +371,8 @@ void ReviewFailure(bool synchronous) {
     }
   }
   sink.Shutdown();
+  sink.Shutdown();
   const auto stats = sink.GetStats();
-  Expect(stats.failures == 3 && stats.failed_lines == 3,
-         "sink failures counted exactly");
   const auto text = capture->Text();
   const auto report = text.find("[log] sink failures ");
   const bool later = text.find("line=7\n") != std::string::npos;
@@ -385,6 +384,11 @@ void ReviewFailure(bool synchronous) {
             << " failures=" << stats.failures
             << " failed_lines=" << stats.failed_lines << " report_once=" << once
             << '\n';
+  Expect(stats.failures == 3 && stats.failed_lines == 3,
+         "sink failures counted exactly");
+  Expect(text.find("[log] sink failures 3 writes, discarded 3 lines\n") !=
+             std::string::npos,
+         "shutdown reports the exact failure and lost-line counts");
   Expect(
       exceptions == 0 && later && once,
       "writer exceptions contained, later lines delivered, one failure report");

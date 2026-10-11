@@ -319,6 +319,7 @@ void AsyncLogSink::Push(std::string line, LogLevel level) {
     return;
   }
   const auto deadline = State::Clock::now() + std::chrono::milliseconds(1950);
+  bool fallback_write = false;
   if (state->stopping || charge > 16 * 1024 * 1024 ||
       state->bytes > 16 * 1024 * 1024 - charge) {
     // One total 2 s budget covers both the prefix and the fallback write.
@@ -335,6 +336,7 @@ void AsyncLogSink::Push(std::string line, LogLevel level) {
       return;
     }
     state->fallback = State::Entry{std::move(line), ++state->accepted};
+    fallback_write = true;
   } else {
     state->bytes += charge;
     state->queue.push_back({std::move(line), ++state->accepted});
@@ -342,7 +344,7 @@ void AsyncLogSink::Push(std::string line, LogLevel level) {
   state->done = false;
   const auto target = state->accepted;
   state->wake.notify_one();
-  if (state->synchronous || state->fallback) {
+  if (state->synchronous || fallback_write) {
     if (!state->changed.wait_until(lock, deadline, [&] {
           return state->discard || state->completed >= target;
         }))
