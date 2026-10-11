@@ -1213,9 +1213,9 @@ endif()
 
 # Qwen3.6-35B-A3B (qwen35moe): its runtime library and the gufo-a3b driver.
 add_subdirectory(src/models/qwen36_a3b)
-# `gufo serve` runs qwen35moe GGUFs through its text runner
-# (src/cli/serve/inference_backend.cpp); OFF builds gufo.exe without it.
-option(GUFO_WITH_A3B "gufo serve for Qwen3.6-35B-A3B (qwen35moe) GGUFs" ON)
+# `bubo serve` runs qwen35moe GGUFs through its text runner
+# (src/cli/serve/inference_backend.cpp); OFF builds bubo.exe without it.
+option(GUFO_WITH_A3B "bubo serve for Qwen3.6-35B-A3B (qwen35moe) GGUFs" ON)
 if(GUFO_WITH_A3B AND TARGET gufo_qwen36_a3b)
   target_link_libraries(gufo PRIVATE gufo_qwen36_a3b)
   target_compile_definitions(gufo PRIVATE GUFO_WITH_A3B=1)

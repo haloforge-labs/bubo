@@ -1,1992 +1,3135 @@
 [
   {
+    "file": ".devops/nix/mk-serve.nix",
+    "line": "          \"gufo.mkServe: voice '${name}' must set 'wav'\";",
+    "count": 1,
+    "category": "engine",
+    "reason": "Nix metadata or library diagnostic identifies the unchanged engine."
+  },
+  {
+    "file": ".devops/nix/mk-serve.nix",
+    "line": "  \"gufo.mkServe: 'modality' must be one of ${lib.generators.toJSON { } validModalities}, got '${modality}'\";",
+    "count": 1,
+    "category": "engine",
+    "reason": "Nix metadata or library diagnostic identifies the unchanged engine."
+  },
+  {
+    "file": ".devops/nix/mk-serve.nix",
+    "line": "  \"gufo.mkServe: 'model' must be specified (cannot be empty)\";",
+    "count": 1,
+    "category": "engine",
+    "reason": "Nix metadata or library diagnostic identifies the unchanged engine."
+  },
+  {
+    "file": ".devops/nix/mk-serve.nix",
+    "line": "  \"gufo.mkServe: 'preserveThinking' must be one of ${lib.generators.toJSON { } validThinkModes}, got '${toString preserveThinking}'\";",
+    "count": 1,
+    "category": "engine",
+    "reason": "Nix metadata or library diagnostic identifies the unchanged engine."
+  },
+  {
+    "file": ".devops/nix/mk-serve.nix",
+    "line": "  \"gufo.mkServe: 'reasoningEffort' must be one of ${lib.generators.toJSON { } validReasoningEfforts}, got '${toString reasoningEffort}'\";",
+    "count": 1,
+    "category": "engine",
+    "reason": "Nix metadata or library diagnostic identifies the unchanged engine."
+  },
+  {
+    "file": ".devops/nix/mk-serve.nix",
+    "line": "  \"gufo.mkServe: 'speculative' must be one of ${lib.generators.toJSON { } validSpeculativeModes}, got '${toString speculative}'\";",
+    "count": 1,
+    "category": "engine",
+    "reason": "Nix metadata or library diagnostic identifies the unchanged engine."
+  },
+  {
+    "file": ".devops/nix/mk-serve.nix",
+    "line": "  \"gufo.mkServe: 'think' must be one of ${lib.generators.toJSON { } validThinkModes}, got '${toString think}'\";",
+    "count": 1,
+    "category": "engine",
+    "reason": "Nix metadata or library diagnostic identifies the unchanged engine."
+  },
+  {
+    "file": ".devops/nix/mk-serve.nix",
+    "line": "  \"gufo.mkServe: 'voices' requires modality 'tts'\";",
+    "count": 1,
+    "category": "engine",
+    "reason": "Nix metadata or library diagnostic identifies the unchanged engine."
+  },
+  {
+    "file": ".devops/nix/mk-serve.nix",
+    "line": "  \"gufo.mkServe: image and speech requests are queued; 'sessions' is an LLM/video option\";",
+    "count": 1,
+    "category": "engine",
+    "reason": "Nix metadata or library diagnostic identifies the unchanged engine."
+  },
+  {
+    "file": ".devops/nix/mk-serve.nix",
+    "line": "  # Custom gufo package override",
+    "count": 1,
+    "category": "build-target",
+    "reason": "Nix engine package attribute or function argument is retained independently of the executable."
+  },
+  {
+    "file": ".devops/nix/mk-serve.nix",
+    "line": "  gufo ? null,",
+    "count": 1,
+    "category": "build-target",
+    "reason": "Nix engine package attribute or function argument is retained independently of the executable."
+  },
+  {
+    "file": ".devops/nix/mk-serve.nix",
+    "line": "  gufoPackage ? gufo,",
+    "count": 1,
+    "category": "build-target",
+    "reason": "Nix engine package attribute or function argument is retained independently of the executable."
+  },
+  {
+    "file": ".devops/nix/package.nix",
+    "line": "    description = \"Bubo \u2014 gufo engine: local inference runtime for AMD Strix Halo (gfx1151 GPU)\";",
+    "count": 1,
+    "category": "engine",
+    "reason": "Nix metadata or library diagnostic identifies the unchanged engine."
+  },
+  {
+    "file": ".devops/nix/package.nix",
+    "line": "    homepage = \"https://github.com/gufo-org/gufo\";",
+    "count": 1,
+    "category": "upstream-url",
+    "reason": "Upstream source/container URL retains its repository identity."
+  },
+  {
+    "file": ".devops/nix/package.nix",
+    "line": "    test ! -e $out/bin/gufo",
+    "count": 1,
+    "category": "compatibility",
+    "reason": "Package assertion rejects an accidentally shipped legacy/developer executable."
+  },
+  {
+    "file": ".devops/nix/package.nix",
+    "line": "    test ! -e $out/bin/gufo-kernel-bench",
+    "count": 1,
+    "category": "compatibility",
+    "reason": "Package assertion rejects an accidentally shipped legacy/developer executable."
+  },
+  {
+    "file": ".devops/nix/package.nix",
+    "line": "    test ! -e $out/bin/gufo-server",
+    "count": 1,
+    "category": "compatibility",
+    "reason": "Legacy engine-brand build routing is conditional and is absent from Bubo packages."
+  },
+  {
+    "file": ".devops/nix/package.nix",
+    "line": "    test \"$($out/bin/bubo --version)\" = \"bubo ${versionLabel} (${revision}), engine gufo ${versionLabel}\"",
+    "count": 1,
+    "category": "engine",
+    "reason": "Nix metadata or library diagnostic identifies the unchanged engine."
+  },
+  {
+    "file": ".devops/nix/package.nix",
+    "line": "    test -f $out/share/licenses/gufo/LICENSE",
+    "count": 1,
+    "category": "resource-path",
+    "reason": "Installed engine model, evaluation or license resource keeps its existing path."
+  },
+  {
+    "file": ".devops/nix/package.nix",
+    "line": "    test -f $out/share/licenses/gufo/third-party/LICENSE.ds4",
+    "count": 1,
+    "category": "resource-path",
+    "reason": "Installed engine model, evaluation or license resource keeps its existing path."
+  },
+  {
+    "file": ".devops/nix/scope.nix",
+    "line": "  gufo = self.callPackage ./package.nix { inherit releaseVersion revision; };",
+    "count": 1,
+    "category": "build-target",
+    "reason": "Nix engine package attribute or function argument is retained independently of the executable."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "        $<TARGET_FILE:gufo>",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "      \"${GUFO_BRAND} ${GUFO_RELEASE_VERSION} \\\\(${GUFO_BUILD_REVISION}\\\\), engine gufo ${GUFO_RELEASE_VERSION}\")",
+    "count": 1,
+    "category": "engine",
+    "reason": "Build metadata or diagnostics identify the unchanged gufo engine."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "      $<TARGET_FILE:gufo>)",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "      --gufo $<TARGET_FILE:gufo>",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:gufo> ${CMAKE_CURRENT_BINARY_DIR}/gufo-server.exe",
+    "count": 1,
+    "category": "compatibility",
+    "reason": "Legacy engine-brand build routing is conditional and is absent from Bubo packages."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "    COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE_NAME:gufo> ${CMAKE_CURRENT_BINARY_DIR}/gufo-server",
+    "count": 1,
+    "category": "compatibility",
+    "reason": "Legacy engine-brand build routing is conditional and is absent from Bubo packages."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "    DEPENDS gufo",
+    "count": 2,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "    DEPENDS gufo brand_test release_profile_test log_async_test platform_tuning_test openai_chat_test arg_parser_test",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "    add_test(NAME gufo_cpu_probe COMMAND gufo)",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "    add_test(NAME gufo_gpu_probe COMMAND gufo)",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "    message(STATUS \"gufo: rocprofiler-sdk roctx not found; kernel-bench markers disabled\")",
+    "count": 1,
+    "category": "engine",
+    "reason": "Build metadata or diagnostics identify the unchanged gufo engine."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "    target_compile_definitions(gufo-kernel-bench PRIVATE GUFO_NO_ROCTX=1)",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Optional engine developer target remains distinct from the Bubo product."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "    target_include_directories(gufo-kernel-bench SYSTEM PRIVATE",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Optional engine developer target remains distinct from the Bubo product."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "    target_link_libraries(gufo-kernel-bench PRIVATE ${ROCTX_LIBRARY})",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Optional engine developer target remains distinct from the Bubo product."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  DESTINATION share/gufo/eval)",
+    "count": 1,
+    "category": "resource-path",
+    "reason": "Installed engine model, evaluation or license resource keeps its existing path."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  DESTINATION share/gufo/models/minimax_h3)",
+    "count": 1,
+    "category": "resource-path",
+    "reason": "Installed engine model, evaluation or license resource keeps its existing path."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  GUFO_EVAL_INSTALLED_DATA=\"${CMAKE_INSTALL_PREFIX}/share/gufo/eval/antirez-ds4.json\"",
+    "count": 1,
+    "category": "resource-path",
+    "reason": "Installed engine model, evaluation or license resource keeps its existing path."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  GUFO_H3_INSTALLED_SOURCE_MANIFEST=\"${CMAKE_INSTALL_PREFIX}/share/gufo/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json\")",
+    "count": 1,
+    "category": "resource-path",
+    "reason": "Installed engine model, evaluation or license resource keeps its existing path."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  add_custom_target(bubo DEPENDS gufo)",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  add_custom_target(gufo-server ALL",
+    "count": 2,
+    "category": "compatibility",
+    "reason": "Legacy engine-brand build routing is conditional and is absent from Bubo packages."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  add_executable(gufo-kernel-bench",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Optional engine developer target remains distinct from the Bubo product."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  add_test(NAME gufo_help COMMAND gufo --help)",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  add_test(NAME gufo_probe COMMAND gufo probe)",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  add_test(NAME gufo_serve_asr_help COMMAND gufo serve asr --help)",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  add_test(NAME gufo_serve_tts_help COMMAND gufo serve tts --help)",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  add_test(NAME gufo_transcribe_help COMMAND gufo transcribe --help)",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  add_test(NAME gufo_version COMMAND gufo --version)",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  add_test(NAME strix_diagnose_help COMMAND gufo diagnose --help)",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  add_test(NAME strix_diagnose_json COMMAND gufo diagnose --json --section platform)",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  add_test(NAME strix_prompt_help COMMAND gufo prompt --help)",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  add_test(NAME strix_prompt_smoke COMMAND gufo prompt \"Hello world\")",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  add_test(NAME strix_serve_help COMMAND gufo serve --help)",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  add_test(NAME strix_video_help COMMAND gufo video --help)",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  install(CODE \"execute_process(COMMAND \\\"${CMAKE_COMMAND}\\\" -E create_symlink gufo \\\"\\$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/bin/gufo-server\\\")\")",
+    "count": 1,
+    "category": "compatibility",
+    "reason": "Legacy engine-brand build routing is conditional and is absent from Bubo packages."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/gufo-server.exe DESTINATION bin)",
+    "count": 1,
+    "category": "compatibility",
+    "reason": "Legacy engine-brand build routing is conditional and is absent from Bubo packages."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  install(TARGETS gufo-kernel-bench tune_hipblaslt",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Optional engine developer target remains distinct from the Bubo product."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  message(FATAL_ERROR \"GUFO_BRAND must be bubo or gufo\")",
+    "count": 1,
+    "category": "engine",
+    "reason": "Build metadata or diagnostics identify the unchanged gufo engine."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  message(FATAL_ERROR \"Gufo kernels require CMAKE_HIP_ARCHITECTURES=gfx1151\")",
+    "count": 1,
+    "category": "engine",
+    "reason": "Build metadata or diagnostics identify the unchanged gufo engine."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  message(FATAL_ERROR \"Gufo requires Linux or Windows x86-64 with an AMD gfx1151 GPU\")",
+    "count": 1,
+    "category": "engine",
+    "reason": "Build metadata or diagnostics identify the unchanged gufo engine."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  message(STATUS \"gufo: HIP target ${CMAKE_HIP_ARCHITECTURES}\")",
+    "count": 1,
+    "category": "engine",
+    "reason": "Build metadata or diagnostics identify the unchanged gufo engine."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  target_compile_definitions(gufo PRIVATE GUFO_WITH_A3B=1)",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  target_compile_definitions(gufo-kernel-bench PRIVATE",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Optional engine developer target remains distinct from the Bubo product."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  target_link_libraries(gufo PRIVATE gufo_deepseek_v4_flash)",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  target_link_libraries(gufo PRIVATE gufo_qwen36_a3b)",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  target_link_libraries(gufo-kernel-bench PRIVATE",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Optional engine developer target remains distinct from the Bubo product."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "# Qwen3.6-35B-A3B (qwen35moe): its runtime library and the gufo-a3b driver.",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Optional engine developer target remains distinct from the Bubo product."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "add_executable(gufo",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "elseif(GUFO_BRAND STREQUAL \"gufo\")",
+    "count": 3,
+    "category": "compatibility",
+    "reason": "Existing upstream engine-brand build option is preserved; release defaults to Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "if (GUFO_BRAND STREQUAL \"gufo\" AND WIN32)",
+    "count": 2,
+    "category": "compatibility",
+    "reason": "Existing upstream engine-brand build option is preserved; release defaults to Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "install(DIRECTORY licenses/ DESTINATION share/licenses/gufo/third-party)",
+    "count": 1,
+    "category": "resource-path",
+    "reason": "Installed engine model, evaluation or license resource keeps its existing path."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "install(FILES LICENSE NOTICE THIRD_PARTY_NOTICES.md DESTINATION share/licenses/gufo)",
+    "count": 1,
+    "category": "resource-path",
+    "reason": "Installed engine model, evaluation or license resource keeps its existing path."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "install(FILES src/models/deepseek_v4_flash/LICENSE.ds4 DESTINATION share/licenses/gufo/third-party)",
+    "count": 1,
+    "category": "resource-path",
+    "reason": "Installed engine model, evaluation or license resource keeps its existing path."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "install(TARGETS gufo DESTINATION bin)",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "project(gufo LANGUAGES C CXX)",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "set(GUFO_BRAND \"bubo\" CACHE STRING \"Product brand: bubo or gufo\")",
+    "count": 1,
+    "category": "compatibility",
+    "reason": "Existing upstream engine-brand build option is preserved; release defaults to Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "set(GUFO_RELEASE_VERSION \"development\" CACHE STRING \"Gufo release version\")",
+    "count": 1,
+    "category": "engine",
+    "reason": "Build metadata or diagnostics identify the unchanged gufo engine."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "set(GUFO_REVISION \"unknown\" CACHE STRING \"Gufo source revision\")",
+    "count": 1,
+    "category": "engine",
+    "reason": "Build metadata or diagnostics identify the unchanged gufo engine."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "set_property(CACHE GUFO_BRAND PROPERTY STRINGS bubo gufo)",
+    "count": 1,
+    "category": "compatibility",
+    "reason": "Existing upstream engine-brand build option is preserved; release defaults to Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "set_target_properties(gufo PROPERTIES OUTPUT_NAME \"${GUFO_BRAND}\")",
+    "count": 1,
+    "category": "compatibility",
+    "reason": "Existing upstream engine-brand build option is preserved; release defaults to Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "target_compile_definitions(gufo PRIVATE",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "target_link_libraries(gufo PRIVATE gufo_diagnostics gufo_core gufo_llm_cli gufo_http CURL::libcurl)",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "target_link_libraries(gufo PRIVATE gufo_qwen3_tts gufo_qwen3_asr)",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
+  },
+  {
     "file": "README.md",
     "line": "  <img src=\"assets/gufo-logo.jpg\" alt=\"Bubo logo\" width=\"180\">",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "README.md",
     "line": "  ghcr.io/gufo-org/toolboxes/gufo-runtime:latest \\",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "README.md",
     "line": "  system turn, so Gufo moves them there. The request that introduces one is",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "README.md",
     "line": "> This tree combines upstream v0.6.0 with the **[Windows port](https://github.com/pixmaate/gufo)**. **[Gufo RDMA for Dual Strix Halo](https://github.com/neuhaus/gufo)** is a separate variant.",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "README.md",
     "line": "Bubo uses the gufo vertical local inference engine specifically built and optimized for the AMD Strix Halo hardware:",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "README.md",
     "line": "Gufo's original code is [MIT licensed](LICENSE). Adapted code and dependencies",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "README.md",
     "line": "See the [changelog](CHANGELOG.md) and [GitHub Releases](https://github.com/gufo-org/gufo/releases)",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "README.md",
     "line": "The default profile follows upstream gufo practice: fast output that is not byte-exact.",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "README.md",
     "line": "and `licenses/`, installed under `share/licenses/gufo`. Model weights are not",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Installed engine model, evaluation or license resource keeps its existing path.",
+    "category": "resource-path"
   },
   {
     "file": "README.md",
     "line": "podman pull ghcr.io/gufo-org/toolboxes/gufo-runtime:latest",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
+  },
+  {
+    "file": "cmake/Checks.cmake",
+    "line": "  DEPENDS gufo ${gufo_pr_targets} cache_disk_faults",
+    "count": 1,
+    "category": "build-target",
+    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
   },
   {
     "file": "docs/BENCHMARKS.md",
     "line": "./build/gpu-test/gufo-kernel-bench --help",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/BENCHMARKS.md",
     "line": "./build/gpu-test/gufo-kernel-bench \\",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/BENCHMARKS.md",
     "line": "Reference runtimes are explicitly selected Nix packages, excluded from Gufo,",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/BENCHMARKS.md",
     "line": "`cmake --build --preset gpu-test --target gufo-kernel-bench tune_hipblaslt`.",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/BENCHMARKS.md",
     "line": "`gufo-kernel-bench` exercises production HIP entry points without loading a",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/BENCHMARKS.md",
     "line": "`tools/serving/gufo-serving-bench.py` measures HTTP serving with synchronized",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/BENCHMARKS.md",
     "line": "over HTTP for Gufo and for the reference project of its category (llama.cpp",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/BENCHMARKS.md",
     "line": "peers' long prefills outside llama.cpp's elapsed generation timer; Gufo reports",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/DEVELOPMENT.md",
     "line": "repository checks need no GPU and no Gufo build.",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/FLAGS.md",
     "line": "The default profile follows upstream gufo practice: fast output that is not byte-exact.",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/FLAGS.md",
     "line": "| `GPU_MAX_HW_QUEUES` | Set the hardware queue cap. | gufo sets | The engine manages this queue cap; a real environment value wins. | any; generic; any |",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/KV-CACHE.md",
     "line": "  client omits it when sending the conversation back. Gufo retains each turn's",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/KV-CACHE.md",
     "line": "Per-request outcomes appear in the completion log and in `usage.gufo`:",
     "count": 1,
-    "reason": "Legacy API namespace/schema spelling: existing response fields remain unchanged; inputs accept the alias where applicable."
+    "reason": "Documented client-visible API namespace retains its existing spelling.",
+    "category": "api-contract"
   },
   {
     "file": "docs/KV-CACHE.md",
     "line": "The second is where the important subtlety lives. What Gufo retains is **not**",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/PERFORMANCE.md",
     "line": "  -- ./build/gpu-test/gufo-kernel-bench \\",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Optional kernel developer executable remains unchanged and is not the product.",
+    "category": "developer-tool"
   },
   {
     "file": "docs/PERFORMANCE.md",
     "line": "  --out /tmp/gufo-hipblaslt-plans.bin \\",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "docs/PERFORMANCE.md",
     "line": "  --output-directory /tmp/gufo-profile \\",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "docs/PERFORMANCE.md",
     "line": "./build/gpu-test/gufo-kernel-bench --help",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Optional kernel developer executable remains unchanged and is not the product.",
+    "category": "developer-tool"
   },
   {
     "file": "docs/PERFORMANCE.md",
     "line": "./build/gpu-test/gufo-kernel-bench \\",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Optional kernel developer executable remains unchanged and is not the product.",
+    "category": "developer-tool"
   },
   {
     "file": "docs/PERFORMANCE.md",
     "line": "GUFO_DISPATCH_TELEMETRY=1 ./build/gpu-test/gufo-kernel-bench ...",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Optional kernel developer executable remains unchanged and is not the product.",
+    "category": "developer-tool"
   },
   {
     "file": "docs/PERFORMANCE.md",
     "line": "GUFO_HIPBLASLT_PLAN_CACHE=/tmp/gufo-hipblaslt-plans.bin \\",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "docs/PERFORMANCE.md",
     "line": "nix develop -c cmake --build --preset gpu-test --target gufo-kernel-bench tune_hipblaslt",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Optional kernel developer executable remains unchanged and is not the product.",
+    "category": "developer-tool"
   },
   {
     "file": "docs/PERFORMANCE.md",
     "line": "tools/serving/gufo-serving-bench.py \\",
     "count": 3,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "docs/RELEASING.md",
     "line": "Before `1.0.0`, Gufo uses this policy:",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/RELEASING.md",
     "line": "Gufo uses squash merges and Conventional Commit pull request titles to keep",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/RELEASING.md",
     "line": "Rolling Toolboxes images remain separate: they follow Gufo `main` and use `edge`",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/RELEASING.md",
     "line": "`bubo X.Y.Z (<revision>), engine gufo X.Y.Z`. Both package outputs retain the exact flake",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/RELEASING.md",
     "line": "a development build and reports `bubo development (<revision>), engine gufo development`.",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/SERVER.md",
     "line": "  for this field, so a name outside `[A-Za-z0-9_-]` is portable to gufo but not",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/SERVER.md",
     "line": "Clients supply the complete conversation, including prior Gufo `output` items",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/SERVER.md",
     "line": "For numerical gates, requested timelines also include `gufo.token_ids`: the",
     "count": 1,
-    "reason": "Legacy API namespace/schema spelling: existing response fields remain unchanged; inputs accept the alias where applicable."
+    "reason": "Documented client-visible API namespace retains its existing spelling.",
+    "category": "api-contract"
   },
   {
     "file": "docs/SERVER.md",
     "line": "The timeline remains the existing `gufo.timeline` event array; `debug.timeline`",
     "count": 1,
-    "reason": "Legacy API namespace/schema spelling: existing response fields remain unchanged; inputs accept the alias where applicable."
+    "reason": "Documented client-visible API namespace retains its existing spelling.",
+    "category": "api-contract"
   },
   {
     "file": "docs/SERVER.md",
     "line": "Tool definitions and generated tool calls are treated as data. `gufo`",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/SERVER.md",
     "line": "Video options accept either `gufo` or `bubo` as the JSON object or multipart field name.",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/SERVER.md",
     "line": "`Server-Timing`, generation `timings`, and Chat Completions `usage.gufo`",
     "count": 1,
-    "reason": "Legacy API namespace/schema spelling: existing response fields remain unchanged; inputs accept the alias where applicable."
+    "reason": "Documented client-visible API namespace retains its existing spelling.",
+    "category": "api-contract"
   },
   {
     "file": "docs/SERVER.md",
     "line": "`bubo eval` and `tools/serving/gufo-serving-bench.py` send `OPENAI_API_KEY`",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "docs/SERVER.md",
     "line": "`tools/serving/gufo-serving-bench.py`: queue, prefill, decode, TTFT and ITL timing;",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "docs/SERVER.md",
     "line": "as upstream does. An explicit `gufo.frames` must match the aligned duration.",
     "count": 1,
-    "reason": "Legacy API namespace/schema spelling: existing response fields remain unchanged; inputs accept the alias where applicable."
+    "reason": "Documented client-visible API namespace retains its existing spelling.",
+    "category": "api-contract"
   },
   {
     "file": "docs/SERVER.md",
     "line": "capped at 4096; `gufo.timeline_truncated` and the finish event indicate omitted",
     "count": 1,
-    "reason": "Legacy API namespace/schema spelling: existing response fields remain unchanged; inputs accept the alias where applicable."
+    "reason": "Documented client-visible API namespace retains its existing spelling.",
+    "category": "api-contract"
   },
   {
     "file": "docs/SERVER.md",
     "line": "ceiling on one device, gufo or otherwise.",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/SERVER.md",
     "line": "compiled into Gufo. See [model cards](models/README.md) for concrete paths",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/SERVER.md",
     "line": "disabled unspecified filters are Gufo defaults.",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/SERVER.md",
     "line": "diversity. Request totals appear in `usage.gufo.prefill_diag` and completion",
     "count": 1,
-    "reason": "Legacy API namespace/schema spelling: existing response fields remain unchanged; inputs accept the alias where applicable."
+    "reason": "Documented client-visible API namespace retains its existing spelling.",
+    "category": "api-contract"
   },
   {
     "file": "docs/SERVER.md",
     "line": "includes processes gufo does not own, then exports `GPU_MAX_HW_QUEUES` before",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/SERVER.md",
     "line": "preceding tool cycle. Gufo retains the state before that cycle and processes",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/SERVER.md",
     "line": "receive `gufo.timeline`. Events have `event` and `t_ms` relative to request",
     "count": 1,
-    "reason": "Legacy API namespace/schema spelling: existing response fields remain unchanged; inputs accept the alias where applicable."
+    "reason": "Documented client-visible API namespace retains its existing spelling.",
+    "category": "api-contract"
   },
   {
     "file": "docs/SERVER.md",
     "line": "responses include `gufo.settings`; the first JSON SSE data object carries the settings once.",
     "count": 1,
-    "reason": "Legacy API namespace/schema spelling: existing response fields remain unchanged; inputs accept the alias where applicable."
+    "reason": "Documented client-visible API namespace retains its existing spelling.",
+    "category": "api-contract"
   },
   {
     "file": "docs/SERVER.md",
     "line": "shape and is versioned independently as `gufo.video-api.v1`. Its supported",
     "count": 1,
-    "reason": "Legacy API namespace/schema spelling: existing response fields remain unchanged; inputs accept the alias where applicable."
+    "reason": "Documented client-visible API namespace retains its existing spelling.",
+    "category": "api-contract"
   },
   {
     "file": "docs/SERVER.md",
     "line": "turn. Gufo-specific details stay in `usage.gufo`.",
     "count": 1,
-    "reason": "Legacy API namespace/schema spelling: existing response fields remain unchanged; inputs accept the alias where applicable."
+    "reason": "Documented client-visible API namespace retains its existing spelling.",
+    "category": "api-contract"
   },
   {
     "file": "docs/SERVER.md",
     "line": "usage chunk also includes a namespaced `usage.gufo` object. It reports",
     "count": 1,
-    "reason": "Legacy API namespace/schema spelling: existing response fields remain unchanged; inputs accept the alias where applicable."
+    "reason": "Documented client-visible API namespace retains its existing spelling.",
+    "category": "api-contract"
   },
   {
     "file": "docs/TESTING.md",
     "line": "documentation/dependency checks run on the editing host without building Gufo;",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/TESTING.md",
     "line": "official runtime. A promoted Gufo build is a regression reference; agreement",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/WINDOWS.md",
     "line": "  - NTFS serializes direct reads of a file that is also mapped, and Gufo maps",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/WINDOWS.md",
     "line": "  per GiB allocated), which made Gufo refuse to size its sessions.",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/WINDOWS.md",
     "line": "- `compat/win32/include` shadows the POSIX headers Gufo uses (`unistd.h`,",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/WINDOWS.md",
     "line": "Choices are kept in `%LOCALAPPDATA%\\gufo\\launcher.json`.",
     "count": 1,
-    "reason": "Unchanged per-user cache/config location: existing files continue to be read."
+    "reason": "Retain the existing per-user cache/config location so saved state remains readable.",
+    "category": "cache-config"
   },
   {
     "file": "docs/WINDOWS.md",
     "line": "Choices are kept in `%LOCALAPPDATA%\\gufo\\start.json` (never the API key);",
     "count": 1,
-    "reason": "Unchanged per-user cache/config location: existing files continue to be read."
+    "reason": "Retain the existing per-user cache/config location so saved state remains readable.",
+    "category": "cache-config"
   },
   {
     "file": "docs/WINDOWS.md",
     "line": "Each [release](https://github.com/pixmaate/gufo/releases) carries",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "- **Disk** ([diskbench.py](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/diskbench.py), NVMe under dm-crypt):",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "- **GPU copies** ([copybench.hip](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/copybench.hip), 56 MiB\u201310 GiB):",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "- **Prefill model** ([fit_prefill.py](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/fit_prefill.py)), fitted on 150",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "- **Restoring from chunks** ([chunkcopy.hip](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/chunkcopy.hip)): 8 GiB",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "- Host-cache supersession needs care for Gufo's useful older branch points.",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "- Published upstream throughput or latency results do not qualify Gufo's",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "- [Cache package and model adapters](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/cache-package.md).",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "- [Cost model](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/cost-model.md).",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "- [Current design](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/current-design.md).",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "- [Evaluated options](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/options.md).",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "- [Experiments and evidence](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/experiments.md), especially E8 revision 2.",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "- [Hybrid design research](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/hybrid-design.md).",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "- [Implementation checklist](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/implementation-PLAN.MD).",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "- [Other engines](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/external-engines.md).",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "A Gufo adaptation would make shared tree storage more directly responsible",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "Actual measurements require Strix Halo, the model/sidecar files and a Gufo",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "Applied to Gufo, this would introduce block-managed live KV and corresponding",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "Applied to Gufo, this would keep efficient same-slot continuation and cheap",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "Cleanup is confined to files recognized as Gufo-managed cache files in the",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "Disadvantages for Gufo:",
     "count": 2,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "Do not refill a pool opportunistically while peers execute: [PR #445](https://github.com/gufo-org/gufo/pull/445)",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "Gufo serves models locally on a Linux AMD Strix Halo machine. Conversations",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "Gufo's restart semantics.",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "Issue [#275](https://github.com/gufo-org/gufo/issues/275) motivated investigating",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "The columns describe architectural adaptations to Gufo, not a benchmark ranking",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "These back the [cost model](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/cost-model.md) **(measured)**:",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "This RFC evaluates how to retain and reuse that work across all Gufo model",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "[#336](https://github.com/gufo-org/gufo/issues/336) and",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "[#409](https://github.com/gufo-org/gufo/pull/409) proposed covered-intermediate",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "[#462](https://github.com/gufo-org/gufo/issues/462), asserting compatible restored",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "[`research/cache-redesign-2026-10-08`](https://github.com/gufo-org/gufo/tree/research/cache-redesign-2026-10-08),",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "[metadata](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/results/metadata.json)",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "[simulate_e8.py](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/simulate_e8.py) revision 2 models:",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "[summarize_e8.py](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/summarize_e8.py) produces the source tables. The RFC retains current-versus-hybrid",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "`cache_snapshot_ms` in `usage.gufo` is not used as a capture cost. It is",
     "count": 1,
-    "reason": "Legacy API namespace/schema spelling: existing response fields remain unchanged; inputs accept the alias where applicable."
+    "reason": "Documented client-visible API namespace retains its existing spelling.",
+    "category": "api-contract"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "about their measured performance on Gufo.",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "additional integration references, rather than a sixth complete Gufo design.",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "context and four parallel clients ([run_e6.sh](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/run_e6.sh)). Workloads:",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "contracts. Architectural inference about adapting them to Gufo is identified",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "earlier measurements in [KV-CACHE.md](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/KV-CACHE.md) were 280 s for 101,545",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "gh api repos/gufo-org/gufo/git/ref/tags/research/cache-redesign-2026-10-08 \\",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream repository/container identity remains unchanged.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "gh api repos/gufo-org/gufo/tarball/a32fc43bcb9ec66264f166b5162d93a9223557d5 \\",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream repository/container identity remains unchanged.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "gh api repos/gufo-org/gufo/tarball/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33 \\",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream repository/container identity remains unchanged.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "infrastructure was unnecessary merely because Gufo has few slots are superseded",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "record a fresh matched baseline. See [Current design](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/current-design.md) for",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "recurrent/private state for Gufo's hybrid models and cannot restore a coherent",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "specified requirement if Gufo's deployment model changes.",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "the original source inventory and [Experiments](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/experiments.md) for evidence.",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "them from a Gufo checkout; the application source is not modified.",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "| A short RAM hit hid a longer disk checkpoint, causing 22,558 tokens of repeated prefill | Measured E2 W2 workflow; see E3 in [Experiments](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/experiments.md). |",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "| Assembling a session from chunks in memory | 106 GB/s for 4 MiB pieces, 88 GB/s for 1 MiB, vs 103 GB/s for one copy | [chunkcopy.hip](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/chunkcopy.hip), 8 GiB as many device copies | Per-layer pieces of a 2,048-token chunk are an estimated 1\u20134 MiB |",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "| Device copy (device to device) | 104\u2013110 GB/s | [copybench.hip](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/copybench.hip) | Real RAM restores: 27B 33k tokens (2.4 GB) in 25 ms, 96 GB/s |",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "| Disk write + fsync, raw | 0.58\u20130.60 GB/s at every size | [diskbench.py](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/diskbench.py) | \u2014 |",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "| Disk write in gufo | 0.44 GB/s (serialize + checksum + write + fsync) | E2 `write_ms` against `file_bytes`, about 170 writes | Per-write medians 0.36 GB/s (27B) and 0.52 GB/s (Flash-Next). One unexplained outlier at concurrency 4: 1.67 GB in 782 s |",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "| Incremental delivery through Gufo PRs | \ud83d\udfe2 Package, backing, RAM, disk, adapters | \ud83d\udfe2 Smaller execution changes | \ud83d\udfe1 Wider allocator/execution changes | \ud83d\udfe1 Wider allocator/kernel changes | \ud83d\udfe2 Existing implementation |",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "| Prefill N tokens on D cached | Flash-Next 0.36 s + 0.79 ms/token + small depth term; 27B 0.52 s + 2.66 ms/token + 16.5 ns \u00d7 N \u00d7 (D + N/2) | [fit_prefill.py](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/fit_prefill.py), 150 requests each; median error 9.8% and 3.9% | Simulated prefill time matches measured within 3\u20138% (E7) |",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "| `a32fc43bcb9ec66264f166b5162d93a9223557d5` | All 133 original result files: token arrays, per-request metadata, server logs, measured fits and generated outputs | [Browse results](https://github.com/gufo-org/gufo/tree/a32fc43bcb9ec66264f166b5162d93a9223557d5/docs/cache-redesign/results), [download](https://github.com/gufo-org/gufo/archive/a32fc43bcb9ec66264f166b5162d93a9223557d5.tar.gz). |",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
     "line": "| `b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33` | Last supporting documents, 24 script/document files, 14 small measurement/fit inputs, run metadata and the original-data checksum manifest | [Browse](https://github.com/gufo-org/gufo/tree/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign), [download](https://github.com/gufo-org/gufo/archive/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33.tar.gz). |",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/cards/01-functional-coverage.md",
     "line": "Local evidence: `/tmp/gufo-card01-lifecycle-fn-ar`. Harness SHA-256:",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "docs/cache-redesign/cards/01-functional-coverage.md",
     "line": "Local evidence: `/tmp/gufo-card01-lifecycle-fn-mtp`. Harness SHA-256:",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "docs/cache-redesign/cards/01-functional-coverage.md",
     "line": "Raw artifacts: `/tmp/gufo-card01-compaction-fn-ar-03` and",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "docs/cache-redesign/cards/01-functional-coverage.md",
     "line": "Status: **failed**. 106 requests. Local evidence: `/tmp/gufo-card01-all-fn-ar`.",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "docs/cache-redesign/cards/01-functional-coverage.md",
     "line": "Status: **failed**. 98 requests. Local evidence: `/tmp/gufo-card01-pressure-messages-mtp`.",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "docs/cache-redesign/cards/01-functional-coverage.md",
     "line": "Status: **passed**. 28 requests. Local evidence: `/tmp/gufo-card01-final-transforms-ar`.",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "docs/cache-redesign/cards/01-functional-coverage.md",
     "line": "Status: **passed**. 28 requests. Local evidence: `/tmp/gufo-card01-transforms-mtp`.",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "docs/cache-redesign/cards/01-functional-coverage.md",
     "line": "Status: **passed**. 48 requests. Local evidence: `/tmp/gufo-card01-all-fn-ar`.",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "docs/cache-redesign/cards/01-functional-coverage.md",
     "line": "Status: **passed**. 48 requests. Local evidence: `/tmp/gufo-card01-pressure-messages-mtp`.",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "docs/cache-redesign/cards/01-functional-coverage.md",
     "line": "`/tmp/gufo-card01-compaction-fn-mtp`. Earlier attempts remain retained: the",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "docs/cache-redesign/cards/01-functional-coverage.md",
     "line": "| 8 | **Claude Code over `/v1/messages`** with tools and streaming. | gufo #469. | A long tool loop reuses history turn after turn. |",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/cache-redesign/cards/02-package-and-adapter-api.md",
     "line": "namespace gufo::cache {",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/cache-redesign/cards/02-package-and-adapter-api.md",
     "line": "}  // namespace gufo::cache",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/cache-redesign/cards/06-slot-leases-and-mutation.md",
     "line": "Its source/report remain in `/tmp/gufo-pr501-review-persistence.cpp` and",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "docs/cache-redesign/cards/06-slot-leases-and-mutation.md",
     "line": "[PR #501](https://github.com/gufo-org/gufo/pull/501). The independent race",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/cards/06-slot-leases-and-mutation.md",
     "line": "`/tmp/gufo-card06-final-pr.log`.",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing log filenames retain compatibility with user and developer tooling.",
+    "category": "logging"
   },
   {
     "file": "docs/cache-redesign/cards/06-slot-leases-and-mutation.md",
     "line": "`/tmp/gufo-pr501-review-persistence-tsan.log`; the final local hosted report is",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing log filenames retain compatibility with user and developer tooling.",
+    "category": "logging"
   },
   {
     "file": "docs/cache-redesign/cards/07-retention-policy.md",
     "line": "  as seen in [#445](https://github.com/gufo-org/gufo/pull/445), alongside any",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/cards/07-retention-policy.md",
     "line": "The original summary and CSV logs remain in `/tmp/gufo-card07-initial-replay/`;",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "docs/cache-redesign/cards/07-retention-policy.md",
     "line": "[PR #503](https://github.com/gufo-org/gufo/pull/503).",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/cards/07-retention-policy.md",
     "line": "`/tmp/gufo-card07-{fn,q27}-{w1,w2,w3,w4}.csv`. This is a correction of CPU replay",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "docs/cache-redesign/cards/07-retention-policy.md",
     "line": "`build/` directories or `/tmp/gufo-card07-*`. No GPU/model qualification is",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "docs/cache-redesign/cards/07-retention-policy.md",
     "line": "build/cpu-test/tests/cache/cache_retention_replay /tmp/gufo-card07-fn-w1.csv < /tmp/gufo-card07-fn-w1.tokens",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "docs/cache-redesign/cards/07-retention-policy.md",
     "line": "corrected files are `/tmp/gufo-card07-replay-summary.json` and",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "docs/cache-redesign/cards/07-retention-policy.md",
     "line": "python3 tests/cache/retention_trace.py \"$CACHE_EXP_DIR/results\" fn w1 > /tmp/gufo-card07-fn-w1.tokens",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "docs/cache-redesign/cards/07-retention-policy.md",
     "line": "under `/tmp/gufo-pr503-r3-*`. The fixed policy is validated with the focused",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "docs/cache-redesign/cards/09-idle-spill.md",
     "line": "[PR #505](https://github.com/gufo-org/gufo/pull/505).",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/cards/10-disk-format-and-index.md",
     "line": "  the `GUFO` magic, `.tmp-*`) and remove them within the disk budget. Never",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/cache-redesign/cards/10-disk-format-and-index.md",
     "line": "whose first four bytes are `GUFO`. Unknown files, symlinks, hard links and all",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/cache-redesign/cards/17-deepseek-adapter.md",
     "line": "- [ds4](https://github.com/antirez/ds4): the upstream of Gufo's DeepSeek port and its session state; already listed in `THIRD_PARTY_NOTICES.md`.",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/cards/d4-options-and-budgets.md",
     "line": "  block other HIP calls ([PR #445](https://github.com/gufo-org/gufo/pull/445)",
     "count": 1,
-    "reason": "Upstream engine repository/container reference: source location and upstream identity remain unchanged."
+    "reason": "Upstream source/container URL retains its repository identity.",
+    "category": "upstream-url"
   },
   {
     "file": "docs/models/README.md",
     "line": "from consistency between Gufo execution modes. Greedy speculative decoding",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/models/deepseek-v4-flash/BENCHMARKS.md",
     "line": "DSpark at C>1. Gufo DSpark is not faster than AR in the largest cohorts here.",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/BENCHMARKS.md",
     "line": "Measured 2026-09-23\u201324. One warmed sample per point. Positive gain favors Gufo.",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/BENCHMARKS.md",
     "line": "| DS4 Flash IQ2XXS AR<br>Depth (tokens) | Gufo pp (tok/s) | antirez/ds4 pp (tok/s) | Gain | Gufo tg (tok/s) | antirez/ds4 tg (tok/s) | Gain |",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/BENCHMARKS.md",
     "line": "| DS4 Flash IQ2XXS AR<br>Users | Gufo AR (tok/s) | antirez/ds4 AR (tok/s) | Gain |",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/BENCHMARKS.md",
     "line": "| DS4 Flash IQ2XXS AR<br>Workload | Gufo GiB | antirez/ds4 GiB | Gain |",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/BENCHMARKS.md",
     "line": "| DS4 Flash IQ2XXS DSpark<br>Depth (tokens) | Gufo pp (tok/s) | antirez/ds4 pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | antirez/ds4 tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | antirez/ds4 tg repetitive (tok/s) | Gain repetitive |",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/BENCHMARKS.md",
     "line": "| DS4 Flash IQ2XXS DSpark<br>Users | Gufo mixed (tok/s) | antirez/ds4 mixed (tok/s) | Gain | Gufo repetitive (tok/s) | antirez/ds4 repetitive (tok/s) | Gain |",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/BENCHMARKS.md",
     "line": "| DS4 Flash IQ2XXS<br>Target | Gufo ready (s) | antirez/ds4 ready (s) | Gain |",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/QUALITY.md",
     "line": "**DSpark matches Gufo AR on the retained greedy checks, including C>1.",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/QUALITY.md",
     "line": "Gufo-path agreement cannot detect shared target errors. Sampled DSpark need not",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/artifacts/antirez-ds4-ar-comparison.json",
     "sha256": "5447125bee2639de71baac5e9db937358de70e6a8f2b42baf2445e472b54aebb",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/artifacts/bench.json",
     "sha256": "ee562ee06453f17e21eaf040579dad91221a09d6bf455eacd6c40e757802726a",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/artifacts/captured-operator-audit.json",
     "sha256": "db2b240140517259eab337b2f3fa02fcc2d3dc52495ad76bb9d7f83e84da5876",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/artifacts/cost-calibration.json",
     "sha256": "6b6f645d9a222a8fd50c27dd9fab10beabd5f8045ee42fad8c7fa0f3754098c2",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/artifacts/dspark-sampling.json",
     "sha256": "4630fd0cd2faec9601c8404cb49a476421d02ab9692a161b7b77b4d2a0dd639f",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/artifacts/indexer-boundary.json",
     "sha256": "24c79b7f0ecca6389a063c1e5915db9b46b7f2b6a3291822ccc299d9db011313",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/artifacts/loading-gufo.json",
     "sha256": "86f737de9d61590f479f461beaf8721e4881df0ecec99e538abd2d1e82e9397c",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/artifacts/memory-gufo.json",
     "sha256": "ba2c8aef81997b5f60d6c03833a00aeb4b9684e637b6313003fd75029b7769f4",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/artifacts/model-identities.json",
     "sha256": "ae46d44aa968ad1e57dbeb3c4ee32b55d92ce30a279f48642e9d52fbc811320c",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/artifacts/multi-ar-gufo-ar.json",
     "sha256": "9a94b90ae3625d10a1536f6cd7dec2a1cdf1c10f1e50fb35540c37bc2059435a",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/artifacts/multi-ar-reference.json",
     "sha256": "61ebaee2f0e6dc710a104675a2d762dbe9e53662e9cf5375764ac4c3f1f854e4",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/artifacts/multi-mixed-gufo-ar.json",
     "sha256": "4e9bc1f0a9541efcd05e75e41462e5b8b8f54ef21194a87110cac2973b62468d",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/artifacts/multi-mixed-gufo-dspark.json",
     "sha256": "852a2a89d552728eda38235d2ee87785619436f025bf805d850229bab648d0b5",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/artifacts/multi-repetition-gufo-ar.json",
     "sha256": "8f23752ffed2684cb5f6e3622a5a4a1b135d33db4775d30e401e72c00d0de2f9",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/artifacts/multi-repetition-gufo-dspark.json",
     "sha256": "2099b664e2892fc10fb73d9fba94a649a23aee2993934c8d9f85d12b488d2579",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/artifacts/prefill-formula-audit.json",
     "sha256": "7f85cce90fe907ef84f02059c3f7515c53143e51fea0ebaf7f6ddbe2b192dafd",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/artifacts/quality-qualification.json",
     "sha256": "537f8aff10f28b991648e092d4b672eca42ea91fa7df077e66fb9b00acd9d60f",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/artifacts/reference-qualification.json",
     "sha256": "a78d4b9e59895ba11a06b9712f0fc632dd828dfe68be800eb5fd3860d5261b58",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/artifacts/reference-smoke.json",
     "sha256": "00689c202b9e2bbd110aab48c331e02c38710e831e180f4f42ba768df81fa0cb",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/artifacts/single-ar-gufo.json",
     "sha256": "f007fd39f3a59631a4c08b41a27758d79e7c17b26f4acfef78bb2ab81db330ed",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/artifacts/single-dspark-gufo.json",
     "sha256": "ab40a08a9c6ee0644d9f4df122441a4d419155351f8a34e9d705f1a6c24e34ce",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/deepseek-v4-flash/artifacts/single-dspark-repetition-gufo.json",
     "sha256": "8b99ed54cce09309832b2b4e1267718ed60a9d15a2ef7ae7c78387e96e7227c2",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/minimax-h3/BENCHMARKS.md",
     "line": "`tools/gufo/h3_profile.py` handles telemetry; full generation requires explicit",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/minimax-h3/QUALITY.md",
     "line": "identical input tensors. Equal Gufo/PyTorch seeds do not generate equal noise.",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/minimax-h3/README.md",
     "line": "  \"gufo\": {\"seed\": 42}",
     "count": 1,
-    "reason": "Legacy API namespace/schema spelling: existing response fields remain unchanged; inputs accept the alias where applicable."
+    "reason": "Documented client-visible API namespace retains its existing spelling.",
+    "category": "api-contract"
   },
   {
     "file": "docs/models/minimax-h3/README.md",
     "line": "  --video-root /var/llms/huggingface/gufo-h3-jobs --video-ttl 3600",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "docs/models/minimax-h3/README.md",
     "line": "Gufo distributes engine code and binaries, without H3 weights, tokenizer",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/models/minimax-h3/README.md",
     "line": "Gufo runs the text-only FL2VA path on Linux gfx1151: prompt encoding, the",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/models/minimax-h3/README.md",
     "line": "The video-options object or multipart field accepts both `gufo` and `bubo`.",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/models/minimax-h3/README.md",
     "line": "`gufo.frames` must match the aligned duration. Unsupported conditioning and",
     "count": 1,
-    "reason": "Legacy API namespace/schema spelling: existing response fields remain unchanged; inputs accept the alias where applicable."
+    "reason": "Documented client-visible API namespace retains its existing spelling.",
+    "category": "api-contract"
   },
   {
     "file": "docs/models/minimax-h3/README.md",
     "line": "`gufo.output_format: \"ppm\"` and returns one selected frame. An explicit",
     "count": 1,
-    "reason": "Legacy API namespace/schema spelling: existing response fields remain unchanged; inputs accept the alias where applicable."
+    "reason": "Documented client-visible API namespace retains its existing spelling.",
+    "category": "api-contract"
   },
   {
     "file": "docs/models/minimax-h3/README.md",
     "line": "nix develop -c python3 tools/h3/gufo-h3-manifest.py \\",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "docs/models/minimax-h3/artifacts/native-attention.json",
     "sha256": "c44f23ae57e4925ff980f6098f469672e98fe82f64369823a9fcc2ba101d4df3",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen-image-2.1/README.md",
     "line": "OpenAI SDK clients use the local `/v1` base URL; `seed` and `steps` are Gufo",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/models/qwen-image-2.1/README.md",
     "line": "The official repository recommends 2048\u00b2; Gufo follows the pinned Diffusers",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/models/qwen-image-2.1/README.md",
     "line": "Weights use the **non-commercial Qwen Research License**, separate from Gufo's",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/models/qwen-image-2.1/README.md",
     "line": "therefore differ from older Gufo releases; generation seeds are unchanged.",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/models/qwen-image-2.1/artifacts/qualification.json",
     "sha256": "ef85c5fce1a1efe61a716463ee2cee0af2ca9a322d844ec4360801d963e0dcc1",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3-asr/README.md",
     "line": "Send mono PCM16 at 24 kHz; Gufo resamples to 16 kHz. Append messages can arrive",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/models/qwen3-asr/artifacts/native-convolution.json",
     "sha256": "e2da954242890a30901dac8ad3b0a0575780cde2e7be2715da1042c8510095ca",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3-tts/BENCHMARKS.md",
     "line": "Short seed-42 control, \u201cHello from Gufo.\u201d: warm complete WAV latency is",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3-tts/QUALITY.md",
     "line": "- Gufo and PyTorch use different RNGs. Equal seeds across runtimes need not",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3-tts/README.md",
     "line": "  -d '{\"model\":\"qwen3-tts\",\"voice\":\"narrator\",\"input\":\"Hello from Gufo.\",\"response_format\":\"pcm\"}' \\",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/models/qwen3-tts/README.md",
     "line": "  -d '{\"model\":\"qwen3-tts-12hz-1.7b-base\",\"voice\":\"narrator\",\"input\":\"Hello from Gufo.\"}' \\",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/models/qwen3-tts/README.md",
     "line": "{\"type\":\"input.text\",\"text\":\"Hello from Gufo. \"}",
     "count": 1,
-    "reason": "Engine name: describes upstream runtime behavior, implementation, or upstream project policy; not the Bubo program name."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "docs/models/qwen3.6-35b-a3b/README.md",
     "line": "Prefill runs about 1.5-1.8K tokens/s. `gufo-a3b` (target `gufo-a3b`) is the",
     "count": 1,
-    "reason": "Engine tool, resource, license location, or artifact filename: preserve the existing path/target."
+    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
+    "category": "resource-path"
   },
   {
     "file": "docs/models/qwen3.8-27b/BENCHMARKS.md",
     "line": "AMD Strix Halo `gfx1151`, 128 GB unified memory. Gufo `628ed18e`",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/BENCHMARKS.md",
     "line": "Both use the Q4_K_M DFlash2 draft; Gufo uses its adaptive controller.",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/BENCHMARKS.md",
     "line": "Positive gain favors Gufo.",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/BENCHMARKS.md",
     "line": "text. Gufo retains AR output; llama.cpp differs in some controls",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/BENCHMARKS.md",
     "line": "| Qwen27B Q4 AR<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/BENCHMARKS.md",
     "line": "| Qwen27B Q4 AR<br>Users | Gufo AR (tok/s) | llama.cpp AR (tok/s) | Gain |",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/BENCHMARKS.md",
     "line": "| Qwen27B Q4 AR<br>Workload | Gufo GiB | llama.cpp GiB | Gain |",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/BENCHMARKS.md",
     "line": "| Qwen27B Q4 DFlash2<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/BENCHMARKS.md",
     "line": "| Qwen27B Q4 DFlash2<br>Users | Gufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | Gufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/BENCHMARKS.md",
     "line": "| Qwen27B Q8 AR<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/BENCHMARKS.md",
     "line": "| Qwen27B Q8 AR<br>Users | Gufo AR (tok/s) | llama.cpp AR (tok/s) | Gain |",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/BENCHMARKS.md",
     "line": "| Qwen27B Q8 AR<br>Workload | Gufo GiB | llama.cpp GiB | Gain |",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/BENCHMARKS.md",
     "line": "| Qwen27B Q8 DFlash2<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/BENCHMARKS.md",
     "line": "| Qwen27B Q8 DFlash2<br>Users | Gufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | Gufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/BENCHMARKS.md",
     "line": "| Qwen27B<br>Target | Gufo ready (s) | llama.cpp ready (s) | Gain |",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/QUALITY.md",
     "line": "Matching Gufo AR/speculative tokens or completion hashes tests consistency.",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/QUALITY.md",
     "line": "September 24, 2026: short teacher-forced comparison against **Gufo's BF16 target**, with identical",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/bench.json",
     "sha256": "3fcaa38e95ad3f6dabe778eb343cc578046497040a2b9d36460b64a1e1f7821d",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/loading-gufo.json",
     "sha256": "1e9081e841e4a2cd01d069691019a66cb0dbabdc1988cff7c529b6297fd83801",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/memory-q4-gufo.json",
     "sha256": "2f8a9a184b2ac8a4eef715b02f5f49a8ec0c50cd646eafdb1fe6ea033d704eeb",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/memory-q8-gufo.json",
     "sha256": "e59e7edc042e654b3cef44068ac85520aefe5ab85a398151c9792d9c091d73b3",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/model-identities.json",
     "sha256": "fd358cb1201b420de718c5010b5ac6b1faab8cb9077f21e09530f55c27ca4b35",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/multi-ar-q4-gufo-ar.json",
     "sha256": "14c3e87e7af27749e2404f1e725ed9e804738c4230b8e50aa558c3d471141ff6",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/multi-ar-q4-reference.json",
     "sha256": "b7a7dc8cdc4d5e9c6488f8fc6d02ec673c71d158dec2791e6afb2ca89f22cab6",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/multi-ar-q8-gufo-ar.json",
     "sha256": "f70f4f5e98efa0ff60194f454bb0121340a972120eae1435a0709bd0b047b31c",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/multi-ar-q8-reference.json",
     "sha256": "78dccc355b76b558fb45d0cd1ff5abf5b955b37d74fc566477197f35f612799a",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/multi-mixed-q4-gufo-ar.json",
     "sha256": "d02a56418a0dae1e1a72d53efb906aec41626e932a697da264ced60fe688c49b",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/multi-mixed-q4-gufo-dflash2.json",
     "sha256": "b9f188215fb1a8735292df9f2b8877781fdc2278f6ce8eda69b024cbfc948f15",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/multi-mixed-q4-reference-dflash2.json",
     "sha256": "b85b5df8f952d779386cb13d42718afa5026c616fa0579c5be536d5610dca004",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/multi-mixed-q8-gufo-ar.json",
     "sha256": "caade151fc08d433671e9ac436fb235ed830046471b8f9e87a5a1f6c58376876",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/multi-mixed-q8-gufo-dflash2.json",
     "sha256": "b5c9a1a0b7a0fd5825dd04706725025847c89d2a09a2051bb58ba3addf20087b",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/multi-mixed-q8-reference-dflash2.json",
     "sha256": "9bba239e4e5af82adbfafc9fbcecad0add4423053d42ff20245d02973188976a",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/multi-repetition-q4-gufo-ar.json",
     "sha256": "fb454db1fd80c76deaac6c9da4c9433da7c655b56cdfc5b3221b4a50523750a1",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/multi-repetition-q4-gufo-dflash2.json",
     "sha256": "fc438a01bda0582d0a3ce8c29b4be1bad2fa9af10ce2de6abec9ee06a6fa8e78",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/multi-repetition-q4-reference-dflash2.json",
     "sha256": "56e53eca39b7137a7fa318cfe619f017513bbcc1465057cf6bc059a0aca266be",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/multi-repetition-q8-gufo-ar.json",
     "sha256": "37952e6000f4146da602a1494d574d604b5f9fb81dbf14cd017139e7a7a7589c",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/multi-repetition-q8-gufo-dflash2.json",
     "sha256": "75d0f48c54737ea59ea0168e7b1b863de7bb8b7b79e315731cf22a907bb43305",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/multi-repetition-q8-reference-dflash2.json",
     "sha256": "dc14fe41941f1bcac00113a374be359912b46c72cc6f4e37f8b680170c7a8af9",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/q4-ar-c1-pruning.json",
     "sha256": "f838471450460e9b43a42f18b1802a87bbd5e2a9a9b61cbaaf4ace98a246e191",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/q4-dflash2-c1-focused.json",
     "sha256": "b59d087f0b5e0b0a7313f049555cb15bc35550a3729a3da0a2d5d5e15f99f7fd",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/q8-tg-focused.json",
     "sha256": "183a0f408de30a473a581f907049ed87721371ff39c4318cc49b36ed7ce9b0c0",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/quantization-quality.json",
     "sha256": "64f3e85cb631c63d4745ec549089679ca2b28d57902a3e37c8795a2e6775348b",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/single-ar-q4-gufo.json",
     "sha256": "0816806abfd38da92eccd2cc901d4e8bc80c1dc86001ba2a5a4bee6b52fa7b64",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/single-ar-q8-gufo.json",
     "sha256": "c46e19c5f766cb6076d167fe7461bf0d349735effae06ba77e5c375a3464b7f2",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/single-dflash2-q4-gufo.json",
     "sha256": "206e4b5b3abbf35d71b3b28d2d336fa8757b302a26a0c6b9c9c80f68722bf068",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/single-dflash2-q8-gufo.json",
     "sha256": "dae32f460cb4302ea50bfaf0f6857ee4f901e005d034ab33fa29e988ed8e1630",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/single-dflash2-repetition-q4-gufo.json",
     "sha256": "e782a6f88ceb1e24bcf807d08668912ee73f725dbdb6dcc16db3e753f7669ad1",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/single-dflash2-repetition-q8-gufo.json",
     "sha256": "f2e552c961047b1d506ce218a9519d5429147eefe3824524416dcba878b72487",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/speculative-adaptive-corpus.json",
     "sha256": "214f8f75a6d70d77da7e998f50ff7abbff38c660ae5346aa59223161a73b2289",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/speculative-corpus.json",
     "sha256": "b88da26d719c0fa810935f91ea03109e4019c4da6ae35fa339776446dfc049e7",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/BENCHMARKS.md",
     "line": "Gufo pp/tg, concurrency and memory: October 8\u20139, 2026, production Nix build.",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/BENCHMARKS.md",
     "line": "Positive gain favors Gufo.",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/BENCHMARKS.md",
     "line": "shared-Q8_0 MTP sidecar; Gufo uses adaptive MTP. HTTP, greedy, thinking off.",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/BENCHMARKS.md",
     "line": "text, including Gufo predictor catch-up.",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/BENCHMARKS.md",
     "line": "| Flash-Next Q4 AR<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/BENCHMARKS.md",
     "line": "| Flash-Next Q4 AR<br>Users | Gufo AR (tok/s) | llama.cpp AR (tok/s) | Gain |",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/BENCHMARKS.md",
     "line": "| Flash-Next Q4 AR<br>Workload | Gufo GiB | llama.cpp GiB | Gain |",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/BENCHMARKS.md",
     "line": "| Flash-Next Q4 MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/BENCHMARKS.md",
     "line": "| Flash-Next Q4 MTP<br>Users | Gufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | Gufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/BENCHMARKS.md",
     "line": "| Flash-Next Q4<br>Target | Gufo ready (s) | llama.cpp ready (s) | Gain |",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/QUALITY.md",
     "line": "**One Gufo encoder comparison fails:** relative L2 **6.47%** versus official",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/QUALITY.md",
     "line": "Both use the same converted GGUF weights. Against FP32, Gufo and Transformers",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/QUALITY.md",
     "line": "Gufo pp/tg, concurrency and memory refreshed October 8\u20139, 2026 using the production",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/QUALITY.md",
     "line": "workloads. Gufo capacity is 133760; reference capacity is 35456 through 32K,",
     "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/bench.json",
     "sha256": "a8c70e48be58ff68e54651014030deb6298589e42fee0530e6463bd467cd9ff3",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/loading-gufo.json",
     "sha256": "8eb90346cbe84bf04b8213a0f04fbf1660c235ce26a7e72c7323765042ace37d",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/memory-gufo.json",
     "sha256": "22cfd279fdef8b7a4aa564a55ded69f5472d2e9b14d2c96956efe3547fe3cbb2",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/model-identities.json",
     "sha256": "acd284229417f012fc853beab75c729ed4aa78764b253fa4de7e2d66c9b329f4",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/mtp-cache-replay.json",
     "sha256": "a628a98da914a7706d7b8659b37eb354e46c0baadfa975ed645a75c759798e32",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/multi-ar-gufo-ar.json",
     "sha256": "e8093bd24c1946cfae8c54fd59ae80eccc451a0bb0ae1dc6246f7688e95a312a",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/multi-ar-reference.json",
     "sha256": "cfe5456eed01e8f373e1f0e4809ef3f032181d6e5c94bd2ccc505f2717468244",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/multi-mixed-gufo-ar.json",
     "sha256": "8fa35f117ba43c2d8441f21b2b7d405224f72fab08c2a558a61e3265ae75c623",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/multi-mixed-gufo-mtp.json",
     "sha256": "f310c02581c3f3049c95efb189e5dfd119449c2de4afdca69ad2164c1229b49d",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/multi-mixed-reference-mtp.json",
     "sha256": "4480227c7264edde873ea00f1dd190a392601ce03c1fc3a9f4c52de419c5ea0e",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/multi-repetition-gufo-ar.json",
     "sha256": "6af8b865fa5d6ef68268df11ebe743ac53358ac5e11441e92ded17fd1bab5e69",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/multi-repetition-gufo-mtp.json",
     "sha256": "f8182c6778523f883d6813d3e43e4fc15df39a78a2a6aabe6568c18f4d03d5bc",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/multi-repetition-reference-mtp.json",
     "sha256": "ac560c6bbac8f273e24ecea9be9634c0639febc2bd148ac59cddc720915cd008",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/penalty-verification.json",
     "sha256": "fedba693bd7aa9f174b079ef82dd775423a87903145ba7d66c6600e2f88bc694",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/prefill-deep-context.json",
     "sha256": "4261170c7a668f436a4617ac82dae2c1a58ef97892bc4ea0ffae0c62ec20377a",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/prefill-final-rows.json",
     "sha256": "e4228779d750eecb26e5610f755da888760f049535a04008b5378b509b1ded2c",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/prefill-long-context.json",
     "sha256": "c82594f141abf6f112219eb0f33a66aa6ce91e4f3ca853a8b076eba7073a259e",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/prefill-normalization.json",
     "sha256": "4b37a86c93e9f3796e5a3f2fb32daaf10df8b491ca36ea681cd9d0be77a3386d",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/single-ar-gufo.json",
     "sha256": "94ce9dcb5ba54abc4170d079d89832f68b1571a848328aa4fa7f511360b8b73c",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/single-mtp-gufo.json",
     "sha256": "f9a4fe0d12112b0e868667c576016b69faa76c87f5741504ddc9c9a14e5f8da6",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/single-mtp-repetition-gufo.json",
     "sha256": "65be277af4bacf90783b4160924cfb9deb0fa1d7e67c3fb8c38a7b7e2306de41",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/vision-parity.json",
     "sha256": "0081dda89190691bbfc76932d6d12ab4409f4d9b1e52488a277d6b5a51d85959",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity."
+    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
+    "category": "historic-fixture"
+  },
+  {
+    "file": "flake.nix",
+    "line": "                cacheDisk = \"/var/cache/gufo\";",
+    "count": 1,
+    "category": "cache-config",
+    "reason": "Existing compiler/runtime cache directory remains unchanged."
+  },
+  {
+    "file": "flake.nix",
+    "line": "              \"tools/gufo\"",
+    "count": 2,
+    "category": "developer-tool",
+    "reason": "Developer Python package/script path retains its engine identity."
+  },
+  {
+    "file": "flake.nix",
+    "line": "              \"tools/h3/gufo-h3-manifest.py\"",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Developer Python package/script path retains its engine identity."
+  },
+  {
+    "file": "flake.nix",
+    "line": "              \"tools/h3/gufo-h3-quality.py\"",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Developer Python package/script path retains its engine identity."
+  },
+  {
+    "file": "flake.nix",
+    "line": "              echo \"$cmd_str\" | grep -F -- \"--cache-disk /var/cache/gufo\"",
+    "count": 1,
+    "category": "cache-config",
+    "reason": "Existing compiler/runtime cache directory remains unchanged."
+  },
+  {
+    "file": "flake.nix",
+    "line": "              inherit gufo;",
+    "count": 1,
+    "category": "build-target",
+    "reason": "Nix engine package attribute or function argument is retained independently of the executable."
+  },
+  {
+    "file": "flake.nix",
+    "line": "              mkServe = args: self.lib.${system}.mkGufoServe (args // { gufo = \"/gufo-test\"; });",
+    "count": 1,
+    "category": "build-target",
+    "reason": "Nix engine package attribute or function argument is retained independently of the executable."
+  },
+  {
+    "file": "flake.nix",
+    "line": "            ccache_dir=/tmp/gufo-ccache",
+    "count": 1,
+    "category": "cache-config",
+    "reason": "Existing compiler/runtime cache directory remains unchanged."
+  },
+  {
+    "file": "flake.nix",
+    "line": "            fnArgs = builtins.removeAttrs args [ \"pkgs\" \"system\" \"gufo\" ];",
+    "count": 1,
+    "category": "build-target",
+    "reason": "Nix engine package attribute or function argument is retained independently of the executable."
+  },
+  {
+    "file": "flake.nix",
+    "line": "            gufo ? self.packages.${system}.default,",
+    "count": 1,
+    "category": "build-target",
+    "reason": "Nix engine package attribute or function argument is retained independently of the executable."
+  },
+  {
+    "file": "flake.nix",
+    "line": "          # Optional benchmark packages: excluded from Gufo, the default",
+    "count": 1,
+    "category": "build-target",
+    "reason": "Nix engine package attribute or function argument is retained independently of the executable."
+  },
+  {
+    "file": "flake.nix",
+    "line": "          base = gufoPackages.${system}.gufo;",
+    "count": 1,
+    "category": "build-target",
+    "reason": "Nix engine package attribute or function argument is retained independently of the executable."
+  },
+  {
+    "file": "flake.nix",
+    "line": "  description = \"gufo - Gufo Engine for AMD Strix Halo (gfx1151 GPU)\";",
+    "count": 1,
+    "category": "engine",
+    "reason": "Nix metadata or library diagnostic identifies the unchanged engine."
   },
   {
     "file": "src/cli/README.md",
     "line": "  1. Create `src/cli/<command>/<command>.hpp` and `<command>.cpp` in `namespace gufo::cli`.",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Developer instructions refer to the unchanged C++ namespace or CMake engine target.",
+    "category": "build-target"
   },
   {
     "file": "src/cli/README.md",
     "line": "  4. Add the source files to `CMakeLists.txt` under `add_executable(gufo ...)` and write unit tests in `tests/cli/`.",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Developer instructions refer to the unchanged C++ namespace or CMake engine target.",
+    "category": "build-target"
   },
   {
     "file": "src/cli/bench/kernel_bench_main.cpp",
     "line": "    std::cerr << \"gufo-kernel-bench: \" << error.what() << \"\\n\";",
     "count": 1,
-    "reason": "Engine developer tool executable: not the product binary; target remains unchanged."
+    "reason": "Optional kernel developer executable remains unchanged and is not the product.",
+    "category": "developer-tool"
   },
   {
     "file": "src/cli/bench/kernel_bench_main.cpp",
     "line": "    throw std::runtime_error(\"gufo-kernel-bench requires gfx1151\");",
     "count": 1,
-    "reason": "Engine developer tool executable: not the product binary; target remains unchanged."
+    "reason": "Optional kernel developer executable remains unchanged and is not the product.",
+    "category": "developer-tool"
   },
   {
     "file": "src/cli/brand.hpp.in",
     "line": "inline constexpr std::string_view kApiKeys[] = {\"gufo\", \"bubo\"};",
     "count": 1,
-    "reason": "Fixed engine name, unchanged cache directory, or accepted legacy API spelling; independent of the product brand."
+    "reason": "Existing request/response API key remains accepted or emitted for client compatibility.",
+    "category": "api"
   },
   {
     "file": "src/cli/brand.hpp.in",
     "line": "inline constexpr std::string_view kCacheDirName = \"gufo\";",
     "count": 1,
-    "reason": "Fixed engine name, unchanged cache directory, or accepted legacy API spelling; independent of the product brand."
+    "reason": "Retain the existing per-user cache/config location so saved state remains readable.",
+    "category": "cache-config"
   },
   {
     "file": "src/cli/brand.hpp.in",
     "line": "inline constexpr std::string_view kEngineName = \"gufo\";",
     "count": 1,
-    "reason": "Fixed engine name, unchanged cache directory, or accepted legacy API spelling; independent of the product brand."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "src/cli/eval/eval.cpp",
     "line": "    const Value* gufo = model.find(\"gufo\");",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Existing request/response API key remains accepted or emitted for client compatibility.",
+    "category": "api"
   },
   {
     "file": "src/cli/eval/eval.cpp",
     "line": "  report[\"schema\"] = \"gufo.eval-result.v1\";",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Versioned output or persistence schema retains its compatibility identifier.",
+    "category": "schema"
   },
   {
     "file": "src/cli/main.cpp",
     "line": "       std::string_view(args[0]).ends_with(\"gufo-server.exe\"))) {",
     "count": 1,
-    "reason": "Historic executable compatibility: optional GUFO_BRAND=gufo build only; never shipped by the Bubo package."
+    "reason": "Legacy engine-brand build routing is conditional and is absent from Bubo packages.",
+    "category": "compatibility"
   },
   {
     "file": "src/cli/main.cpp",
     "line": "      (std::string_view(args[0]).ends_with(\"gufo-server\") ||",
     "count": 1,
-    "reason": "Historic executable compatibility: optional GUFO_BRAND=gufo build only; never shipped by the Bubo package."
+    "reason": "Legacy engine-brand build routing is conditional and is absent from Bubo packages.",
+    "category": "compatibility"
   },
   {
     "file": "src/cli/main.cpp",
     "line": "  if (gufo::cli::kProductName == \"gufo\" &&",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Legacy engine-brand build routing is conditional and is absent from Bubo packages.",
+    "category": "compatibility"
   },
   {
     "file": "src/cli/prompt/prompt.cpp",
     "line": "        << \"gufo prompt: prompt received: \\\"\" << opt.prompt_text << \"\\\"\\n\"",
     "count": 1,
-    "reason": "Existing informational log line: preserve its bytes by owner instruction."
+    "reason": "Existing informational engine log bytes are preserved by owner instruction.",
+    "category": "logging"
   },
   {
     "file": "src/cli/serve/audio_asr_api.cpp",
     "line": "                        {\"X-Gufo-Schema\", std::string(kAudioAsrApiSchema)}};",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Existing response header name is a client-visible compatibility contract.",
+    "category": "api-contract"
   },
   {
     "file": "src/cli/serve/audio_asr_api.cpp",
     "line": "  response.headers.emplace_back(\"X-Gufo-ASR-Backend\", service.backend_name());",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Existing response header name is a client-visible compatibility contract.",
+    "category": "api-contract"
   },
   {
     "file": "src/cli/serve/audio_asr_api.cpp",
     "line": "  response.headers.emplace_back(\"X-Gufo-Schema\",",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Existing response header name is a client-visible compatibility contract.",
+    "category": "api-contract"
   },
   {
     "file": "src/cli/serve/audio_asr_api.hpp",
     "line": "inline constexpr std::string_view kAudioAsrApiSchema = \"gufo.audio-asr-api.v1\";",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Versioned output or persistence schema retains its compatibility identifier.",
+    "category": "schema"
   },
   {
     "file": "src/cli/serve/audio_tts_api.cpp",
     "line": "              {\"X-Gufo-Codec-Steps\",",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Existing response header name is a client-visible compatibility contract.",
+    "category": "api-contract"
   },
   {
     "file": "src/cli/serve/audio_tts_api.cpp",
     "line": "              {\"X-Gufo-Schema\", std::string(kAudioTtsApiSchema)},",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Existing response header name is a client-visible compatibility contract.",
+    "category": "api-contract"
   },
   {
     "file": "src/cli/serve/audio_tts_api.cpp",
     "line": "              {\"X-Gufo-TTS-Backend\", service.backend_name()},",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Existing response header name is a client-visible compatibility contract.",
+    "category": "api-contract"
   },
   {
     "file": "src/cli/serve/audio_tts_api.cpp",
     "line": "        {\"X-Gufo-TTS-Backend\", service.backend_name()}};",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Existing response header name is a client-visible compatibility contract.",
+    "category": "api-contract"
   },
   {
     "file": "src/cli/serve/audio_tts_api.hpp",
     "line": "inline constexpr std::string_view kAudioTtsApiSchema = \"gufo.audio-tts-api.v1\";",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Versioned output or persistence schema retains its compatibility identifier.",
+    "category": "schema"
   },
   {
     "file": "src/cli/serve/debug_response.hpp",
     "line": "      response[\"gufo\"][\"token_ids\"].push_back(static_cast<std::size_t>(token));",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Existing request/response API key remains accepted or emitted for client compatibility.",
+    "category": "api"
   },
   {
     "file": "src/cli/serve/debug_response.hpp",
     "line": "    response[\"gufo\"][\"timeline\"] = result.debug_timeline->Serialize();",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Existing request/response API key remains accepted or emitted for client compatibility.",
+    "category": "api"
   },
   {
     "file": "src/cli/serve/debug_response.hpp",
     "line": "    response[\"gufo\"][\"timeline_truncated\"] = result.debug_timeline->truncated();",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Existing request/response API key remains accepted or emitted for client compatibility.",
+    "category": "api"
   },
   {
     "file": "src/cli/serve/debug_response.hpp",
     "line": "    response[\"gufo\"][\"token_ids\"] = json::Value::array();",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Existing request/response API key remains accepted or emitted for client compatibility.",
+    "category": "api"
   },
   {
     "file": "src/cli/serve/http_server.cpp",
     "line": "          value[\"response\"][\"gufo\"][\"settings\"] = *settings;",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Existing request/response API key remains accepted or emitted for client compatibility.",
+    "category": "api"
   },
   {
     "file": "src/cli/serve/http_server.cpp",
     "line": "        value[\"gufo\"][\"settings\"] = *settings;",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Existing request/response API key remains accepted or emitted for client compatibility.",
+    "category": "api"
   },
   {
     "file": "src/cli/serve/http_server.cpp",
     "line": "      model[\"gufo\"][\"settings\"] = *settings;",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Existing request/response API key remains accepted or emitted for client compatibility.",
+    "category": "api"
   },
   {
     "file": "src/cli/serve/http_server.cpp",
     "line": "    AddPrefillDiagUsage(usage[\"gufo\"], result.prefill_diag);",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Existing request/response API key remains accepted or emitted for client compatibility.",
+    "category": "api"
   },
   {
     "file": "src/cli/serve/http_server.cpp",
     "line": "    model[\"owned_by\"] = \"gufo\";",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Existing model owner value is a client-visible compatibility contract.",
+    "category": "api-contract"
   },
   {
     "file": "src/cli/serve/inference_backend.cpp",
     "line": "  identity << \"schema=gufo-text-continuation-v2\\n\"",
     "count": 3,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Versioned output or persistence schema retains its compatibility identifier.",
+    "category": "schema"
   },
   {
     "file": "src/cli/serve/openai_chat.cpp",
     "line": "  usage[\"gufo\"] = std::move(metrics);",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Existing request/response API key remains accepted or emitted for client compatibility.",
+    "category": "api"
   },
   {
     "file": "src/cli/serve/release_profile.cpp",
     "line": "      \"The default profile follows upstream gufo practice: fast output that is \"",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
+    "category": "engine"
   },
   {
     "file": "src/cli/serve/video_api.cpp",
     "line": "                       \"conflicting gufo and bubo video options\",",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Conflict diagnostic names both supported API namespaces.",
+    "category": "api-contract"
   },
   {
     "file": "src/cli/serve/video_api.cpp",
     "line": "                      {\"model\", \"prompt\", \"size\", \"seconds\", \"gufo\", \"bubo\"})) {",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Existing request/response API key remains accepted or emitted for client compatibility.",
+    "category": "api"
   },
   {
     "file": "src/cli/serve/video_api.cpp",
     "line": "    if ((field_name == \"gufo\" || field_name == \"bubo\") && !filename_present) {",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Existing request/response API key remains accepted or emitted for client compatibility.",
+    "category": "api"
   },
   {
     "file": "src/cli/serve/video_api.hpp",
     "line": "inline constexpr std::string_view kVideoApiSchema = \"gufo.video-api.v1\";",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Versioned output or persistence schema retains its compatibility identifier.",
+    "category": "schema"
   },
   {
     "file": "src/cli/serve/video_jobs.cpp",
     "line": "        if (child.path().filename().string().find(\".gufo-partial-\") !=",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Temporary artifact naming is shared with existing cleanup and persistence logic.",
+    "category": "resource-path"
   },
   {
     "file": "src/cli/serve/video_jobs.cpp",
     "line": "        if (value.member_str(\"schema\") != \"gufo.video-job.v1\" ||",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Versioned output or persistence schema retains its compatibility identifier.",
+    "category": "schema"
   },
   {
     "file": "src/cli/serve/video_jobs.cpp",
     "line": "  const std::filesystem::path partial = path.string() + \".gufo-partial-\" +",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Temporary artifact naming is shared with existing cleanup and persistence logic.",
+    "category": "resource-path"
   },
   {
     "file": "src/cli/serve/video_jobs.cpp",
     "line": "  root[\"schema\"] = \"gufo.video-job.v1\";",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Versioned output or persistence schema retains its compatibility identifier.",
+    "category": "schema"
   },
   {
     "file": "src/cli/transcribe/transcribe.cpp",
     "line": "  report[\"schema\"] = \"gufo.qwen3-asr.transcription.v1\";",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Versioned output or persistence schema retains its compatibility identifier.",
+    "category": "schema"
   },
   {
     "file": "src/cli/video/video.cpp",
     "line": "  \"share/gufo/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json\"",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Installed engine model, evaluation or license resource keeps its existing path.",
+    "category": "resource-path"
   },
   {
     "file": "src/cli/video/video.cpp",
     "line": "  const std::filesystem::path partial = path.string() + \".gufo-partial-\" +",
     "count": 1,
-    "reason": "Legacy API spelling, output schema/owner, metric, or persisted engine format: retain compatibility and existing output."
+    "reason": "Temporary artifact naming is shared with existing cleanup and persistence logic.",
+    "category": "resource-path"
+  },
+  {
+    "file": "tools/windows/check.ps1",
+    "line": "$running = @(Get-Process -Name \"bubo\", \"gufo\", \"gufo-a3b\" -ErrorAction SilentlyContinue)",
+    "count": 1,
+    "category": "compatibility",
+    "reason": "Detect existing legacy/developer processes as well as Bubo before launching."
+  },
+  {
+    "file": "tools/windows/launcher.ps1",
+    "line": "  $running = @(Get-Process -Name \"bubo\", \"gufo\" -ErrorAction SilentlyContinue)",
+    "count": 1,
+    "category": "compatibility",
+    "reason": "Detect existing legacy/developer processes as well as Bubo before launching."
+  },
+  {
+    "file": "tools/windows/launcher.ps1",
+    "line": "  Write-Host (\"Move it to a shorter path, e.g. C:\\gufo (at most {0} characters for the folder).\" -f (259 - ($longest.FullName.Length - (Split-Path $exe).Length))) -ForegroundColor Red",
+    "count": 1,
+    "category": "resource-path",
+    "reason": "Example short installation folder is an arbitrary existing path, not an executable name."
+  },
+  {
+    "file": "tools/windows/launcher.ps1",
+    "line": "# Choices are remembered in %LOCALAPPDATA%\\gufo\\launcher.json. The full",
+    "count": 1,
+    "category": "cache-config",
+    "reason": "Retain the existing per-user cache/config location so saved state remains readable."
+  },
+  {
+    "file": "tools/windows/launcher.ps1",
+    "line": "$settingsPath = Join-Path $env:LOCALAPPDATA \"gufo\\launcher.json\"",
+    "count": 1,
+    "category": "cache-config",
+    "reason": "Retain the existing per-user cache/config location so saved state remains readable."
+  },
+  {
+    "file": "tools/windows/package.ps1",
+    "line": "Add-Content (Join-Path $stage \"README.txt\") \"`r`nBuilt from https://github.com/pixmaate/gufo commit $commit ($Version).\"",
+    "count": 1,
+    "category": "upstream-url",
+    "reason": "Upstream source/container URL retains its repository identity."
+  },
+  {
+    "file": "tools/windows/run-flash-next.ps1",
+    "line": "# -Greedy: temperature 0, the method of gufo's published tables, for",
+    "count": 1,
+    "category": "engine",
+    "reason": "Comment describes engine behavior or published engine methodology."
+  },
+  {
+    "file": "tools/windows/run-flash-next.ps1",
+    "line": "# gufo finds the vision sidecar only beside the model or one folder up, i.e.",
+    "count": 1,
+    "category": "engine",
+    "reason": "Comment describes engine behavior or published engine methodology."
+  },
+  {
+    "file": "tools/windows/start.ps1",
+    "line": "      $logFile = Join-Path $logDir (\"gufo-{0}-{1:yyyyMMdd-HHmmss}.log\" -f $Plan.ServedName, (Get-Date))",
+    "count": 1,
+    "category": "logging",
+    "reason": "Existing log filenames retain compatibility with user and developer tooling."
+  },
+  {
+    "file": "tools/windows/start.ps1",
+    "line": "    Start-Gufo $plan",
+    "count": 1,
+    "category": "compatibility",
+    "reason": "Internal PowerShell helper name is retained; its executable is Bubo."
+  },
+  {
+    "file": "tools/windows/start.ps1",
+    "line": "  $running = @(Get-Process -Name \"bubo\", \"gufo\", \"gufo-a3b\" -ErrorAction SilentlyContinue)",
+    "count": 1,
+    "category": "compatibility",
+    "reason": "Detect existing legacy/developer processes as well as Bubo before launching."
+  },
+  {
+    "file": "tools/windows/start.ps1",
+    "line": "  Start-Gufo $plan",
+    "count": 1,
+    "category": "compatibility",
+    "reason": "Internal PowerShell helper name is retained; its executable is Bubo."
+  },
+  {
+    "file": "tools/windows/start.ps1",
+    "line": "  Write-Host (\"  Log       {0}\" -f $(if ($state.Log) { \"console + logs\\gufo-$($info.ServedName)-<time>.log\" } else { \"console only\" }))",
+    "count": 1,
+    "category": "logging",
+    "reason": "Existing log filenames retain compatibility with user and developer tooling."
+  },
+  {
+    "file": "tools/windows/start.ps1",
+    "line": "# Choices are remembered in %LOCALAPPDATA%\\gufo\\start.json (never the API key).",
+    "count": 1,
+    "category": "cache-config",
+    "reason": "Retain the existing per-user cache/config location so saved state remains readable."
+  },
+  {
+    "file": "tools/windows/start.ps1",
+    "line": "$settingsFile = Join-Path $env:LOCALAPPDATA \"gufo\\start.json\"",
+    "count": 1,
+    "category": "cache-config",
+    "reason": "Retain the existing per-user cache/config location so saved state remains readable."
+  },
+  {
+    "file": "tools/windows/start.ps1",
+    "line": "Start-Gufo $plan",
+    "count": 1,
+    "category": "compatibility",
+    "reason": "Internal PowerShell helper name is retained; its executable is Bubo."
+  },
+  {
+    "file": "tools/windows/start.ps1",
+    "line": "function Start-Gufo($Plan) {",
+    "count": 1,
+    "category": "compatibility",
+    "reason": "Internal PowerShell helper name is retained; its executable is Bubo."
   }
 ]
