@@ -166,6 +166,8 @@ struct AsyncLogSink::State {
   std::size_t bytes = 0;
   bool stopping = false, done = false, destroying = false;
   bool discard = false, failure_reported = false;
+  unsigned failure_report_attempts = 0;
+  Clock::time_point next_failure_report{};
   std::string timeout_report;
 
   void DiscardAfterTimeout() {
@@ -211,13 +213,20 @@ struct AsyncLogSink::State {
                dropped != reported || !timeout_report.empty() ||
                (stopping && !done);
       });
+      bool reporting_failure = false;
       if (queue.empty() && !fallback && dropped == reported &&
           timeout_report.empty()) {
-        if (stopping && failures && !failure_reported) {
+        if (stopping && failures && !failure_reported &&
+            failure_report_attempts < 3) {
+          if (Clock::now() < next_failure_report) {
+            wake.wait_until(lock, next_failure_report);
+            continue;
+          }
           timeout_report = "[log] sink failures " + std::to_string(failures) +
                            " writes, discarded " +
                            std::to_string(failed_lines) + " lines\n";
-          failure_reported = true;
+          reporting_failure = true;
+          ++failure_report_attempts;
         } else {
           done = stopping;
           changed.notify_all();
@@ -268,11 +277,20 @@ struct AsyncLogSink::State {
       active_lines = 0;
       completed = sequence;
       reported = drop_target;
-      if (ok)
+      if (ok) {
         delivered += count;
-      else {
+        if (reporting_failure)
+          failure_reported = true;
+        else if (count && !failure_reported) {
+          // A fresh successful batch permits another bounded reporting attempt.
+          failure_report_attempts = 0;
+          next_failure_report = {};
+        }
+      } else {
         ++failures;
         failed_lines += count;
+        if (reporting_failure)
+          next_failure_report = Clock::now() + std::chrono::milliseconds(50);
       }
       // A failure retires that batch, then waits for fresh work. Never retry
       // a broken sink in a spin loop or permanently kill the writer.

@@ -397,7 +397,7 @@ void ReviewTimeout(bool hard_cap) {
   Expect(stats.dropped == (hard_cap ? 101 : 100),
          "timeout discards counted exactly");
 }
-void ReviewFailure(bool synchronous) {
+void ReviewFailure(bool synchronous, int records = 9) {
   auto capture = std::make_shared<Capture>();
   auto calls = std::make_shared<int>(0);
   AsyncLogSink sink(
@@ -409,7 +409,7 @@ void ReviewFailure(bool synchronous) {
       synchronous);
   Hook hook(sink);
   int exceptions = 0;
-  for (int i = 0; i < 9; ++i) {
+  for (int i = 0; i < records; ++i) {
     try {
       Logger::Error("failure", "line=" + std::to_string(i));
       (void)Logger::FlushSync(100ms);
@@ -426,16 +426,18 @@ void ReviewFailure(bool synchronous) {
   const bool once =
       report != std::string::npos &&
       text.find("[log] sink failures ", report + 1) == std::string::npos;
-  std::cout << "review-failure sync=" << synchronous
+  std::cout << "review-failure sync=" << synchronous << " records=" << records
             << " exceptions=" << exceptions << " later_line=" << later
             << " failures=" << stats.failures
             << " failed_lines=" << stats.failed_lines << " report_once=" << once
             << '\n';
-  Expect(stats.failures == 3 && stats.failed_lines == 3,
+  Expect(stats.failures == 3 &&
+             stats.failed_lines == static_cast<std::uint64_t>(records / 3),
          "sink failures counted exactly");
-  Expect(text.find("[log] sink failures 3 writes, discarded 3 lines\n") !=
-             std::string::npos,
-         "shutdown reports the exact failure and lost-line counts");
+  Expect(
+      text.find("[log] sink failures 3 writes, discarded " +
+                std::to_string(records / 3) + " lines\n") != std::string::npos,
+      "shutdown reports the exact failure and lost-line counts");
   Expect(
       exceptions == 0 && later && once,
       "writer exceptions contained, later lines delivered, one failure report");
@@ -591,6 +593,8 @@ int main(int argc, char** argv) {
   ReviewTimeout(true);
   ReviewFailure(true);
   ReviewFailure(false);
+  ReviewFailure(true, 8);
+  ReviewFailure(false, 8);
   SummaryFailure();
   ReviewWording();
   DefaultFlushBound();

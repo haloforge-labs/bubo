@@ -377,7 +377,7 @@
       "file": "src/cli/serve/logging.cpp",
       "call": "::write(STDERR_FILENO, notice, sizeof(notice) - 1);",
       "reason": "Dedicated sink writer stream output or detached one-shot real stderr timeout notice; no caller I/O.",
-      "line": "198"
+      "line": "200"
     }
   ],
   "reason": "Reviewed cold diagnostics, fatal prints with bounded drains, signal-safe writes, and sink-owned output. Exact call bytes and reasons are mandatory."
