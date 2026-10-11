@@ -63,6 +63,7 @@ endif()
 find_package(ICU REQUIRED COMPONENTS uc i18n)
 find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
+find_package(ZLIB REQUIRED)
 find_package(PNG REQUIRED)
 find_package(JPEG REQUIRED)
 find_package(PkgConfig REQUIRED)
@@ -296,7 +297,7 @@ add_library(gufo_http STATIC
 )
 target_link_libraries(gufo_http PUBLIC gufo_logging gufo_core gufo_qwen3_tts gufo_qwen3_asr gufo_qwen_image_21)
 
-add_executable(gufo
+set(bubo_command_sources
   src/cli/main.cpp
   src/cli/banner.cpp
   src/cli/eval/eval.cpp
@@ -311,12 +312,29 @@ add_executable(gufo
   src/cli/serve/inference_backend.cpp
   src/eval/http_client.cpp
 )
-target_link_libraries(gufo PRIVATE gufo_diagnostics gufo_core gufo_llm_cli gufo_http CURL::libcurl)
+add_library(bubo_prepare STATIC
+  src/cli/prepare/prepare.cpp
+  src/core/prepare/release_catalogue.cpp)
+target_link_libraries(bubo_prepare PUBLIC CURL::libcurl OpenSSL::Crypto ZLIB::ZLIB)
+set(bubo_inference_target gufo)
+if(WIN32 AND GUFO_BRAND STREQUAL "bubo")
+  add_library(bubo_engine SHARED ${bubo_command_sources})
+  set_target_properties(bubo_engine PROPERTIES PREFIX "" OUTPUT_NAME "bubo-engine")
+  target_compile_definitions(bubo_engine PRIVATE BUBO_ENGINE_DLL=1)
+  set(bubo_inference_target bubo_engine)
+  add_executable(gufo src/cli/bootstrap.cpp)
+  target_link_libraries(gufo PRIVATE bubo_prepare)
+  add_dependencies(gufo bubo_engine)
+else()
+  add_executable(gufo ${bubo_command_sources})
+endif()
+target_link_libraries(${bubo_inference_target} PRIVATE bubo_prepare)
+target_link_libraries(${bubo_inference_target} PRIVATE gufo_diagnostics gufo_core gufo_llm_cli gufo_http CURL::libcurl)
 set_target_properties(gufo PROPERTIES OUTPUT_NAME "${GUFO_BRAND}")
 if(GUFO_BRAND STREQUAL "bubo")
   add_custom_target(bubo DEPENDS gufo)
 endif()
-target_compile_definitions(gufo PRIVATE
+target_compile_definitions(${bubo_inference_target} PRIVATE
   GUFO_RELEASE_VERSION="${GUFO_RELEASE_VERSION}"
   GUFO_REVISION="${GUFO_REVISION}"
   GUFO_EVAL_SOURCE_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json"
@@ -325,9 +343,9 @@ target_compile_definitions(gufo PRIVATE
   GUFO_H3_INSTALLED_SOURCE_MANIFEST="${CMAKE_INSTALL_PREFIX}/share/gufo/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json")
 
 if (ENGINE_ENABLE_HIP)
-  target_link_libraries(gufo PRIVATE gufo_deepseek_v4_flash)
+  target_link_libraries(${bubo_inference_target} PRIVATE gufo_deepseek_v4_flash)
 endif()
-target_link_libraries(gufo PRIVATE gufo_qwen3_tts gufo_qwen3_asr)
+target_link_libraries(${bubo_inference_target} PRIVATE gufo_qwen3_tts gufo_qwen3_asr)
 
 if (GUFO_BRAND STREQUAL "gufo" AND WIN32)
   # Symlinks need Developer Mode or elevation on Windows; ship a copy.
@@ -383,6 +401,9 @@ if (ENGINE_ENABLE_HIP AND GUFO_BUILD_TOOLS)
 endif()
 
 install(TARGETS gufo DESTINATION bin)
+if(TARGET bubo_engine)
+  install(TARGETS bubo_engine RUNTIME DESTINATION bin LIBRARY DESTINATION bin)
+endif()
 install(FILES
   src/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json
   DESTINATION share/gufo/models/minimax_h3)
@@ -1220,6 +1241,6 @@ add_subdirectory(src/models/qwen36_a3b)
 # (src/cli/serve/inference_backend.cpp); OFF builds bubo.exe without it.
 option(GUFO_WITH_A3B "bubo serve for Qwen3.6-35B-A3B (qwen35moe) GGUFs" ON)
 if(GUFO_WITH_A3B AND TARGET gufo_qwen36_a3b)
-  target_link_libraries(gufo PRIVATE gufo_qwen36_a3b)
-  target_compile_definitions(gufo PRIVATE GUFO_WITH_A3B=1)
+  target_link_libraries(${bubo_inference_target} PRIVATE gufo_qwen36_a3b)
+  target_compile_definitions(${bubo_inference_target} PRIVATE GUFO_WITH_A3B=1)
 endif()

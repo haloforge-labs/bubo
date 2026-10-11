@@ -85,7 +85,7 @@
   },
   {
     "file": ".devops/nix/package.nix",
-    "line": "    description = \"Bubo \u2014 gufo engine: local inference runtime for AMD Strix Halo (gfx1151 GPU)\";",
+    "line": "    description = \"Bubo — gufo engine: local inference runtime for AMD Strix Halo (gfx1151 GPU)\";",
     "count": 1,
     "category": "engine",
     "reason": "Nix metadata or library diagnostic identifies the unchanged engine."
@@ -414,31 +414,10 @@
   },
   {
     "file": "CMakeLists.txt",
-    "line": "  target_compile_definitions(gufo PRIVATE GUFO_WITH_A3B=1)",
-    "count": 1,
-    "category": "build-target",
-    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
-  },
-  {
-    "file": "CMakeLists.txt",
     "line": "  target_compile_definitions(gufo-kernel-bench PRIVATE",
     "count": 1,
     "category": "developer-tool",
     "reason": "Optional engine developer target remains distinct from the Bubo product."
-  },
-  {
-    "file": "CMakeLists.txt",
-    "line": "  target_link_libraries(gufo PRIVATE gufo_deepseek_v4_flash)",
-    "count": 1,
-    "category": "build-target",
-    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
-  },
-  {
-    "file": "CMakeLists.txt",
-    "line": "  target_link_libraries(gufo PRIVATE gufo_qwen36_a3b)",
-    "count": 1,
-    "category": "build-target",
-    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
   },
   {
     "file": "CMakeLists.txt",
@@ -453,13 +432,6 @@
     "count": 1,
     "category": "developer-tool",
     "reason": "Optional engine developer target remains distinct from the Bubo product."
-  },
-  {
-    "file": "CMakeLists.txt",
-    "line": "add_executable(gufo",
-    "count": 1,
-    "category": "build-target",
-    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
   },
   {
     "file": "CMakeLists.txt",
@@ -530,27 +502,6 @@
     "count": 1,
     "category": "compatibility",
     "reason": "Existing upstream engine-brand build option is preserved; release defaults to Bubo."
-  },
-  {
-    "file": "CMakeLists.txt",
-    "line": "target_compile_definitions(gufo PRIVATE",
-    "count": 1,
-    "category": "build-target",
-    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
-  },
-  {
-    "file": "CMakeLists.txt",
-    "line": "target_link_libraries(gufo PRIVATE gufo_diagnostics gufo_core gufo_llm_cli gufo_http CURL::libcurl)",
-    "count": 1,
-    "category": "build-target",
-    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
-  },
-  {
-    "file": "CMakeLists.txt",
-    "line": "target_link_libraries(gufo PRIVATE gufo_qwen3_tts gufo_qwen3_asr)",
-    "count": 1,
-    "category": "build-target",
-    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
   },
   {
     "file": "README.md",
@@ -1030,7 +981,7 @@
   },
   {
     "file": "docs/cache-redesign/RFC.md",
-    "line": "- **GPU copies** ([copybench.hip](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/copybench.hip), 56 MiB\u201310 GiB):",
+    "line": "- **GPU copies** ([copybench.hip](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/copybench.hip), 56 MiB–10 GiB):",
     "count": 1,
     "reason": "Upstream source/container URL retains its repository identity.",
     "category": "upstream-url"
@@ -1373,21 +1324,21 @@
   },
   {
     "file": "docs/cache-redesign/RFC.md",
-    "line": "| Assembling a session from chunks in memory | 106 GB/s for 4 MiB pieces, 88 GB/s for 1 MiB, vs 103 GB/s for one copy | [chunkcopy.hip](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/chunkcopy.hip), 8 GiB as many device copies | Per-layer pieces of a 2,048-token chunk are an estimated 1\u20134 MiB |",
+    "line": "| Assembling a session from chunks in memory | 106 GB/s for 4 MiB pieces, 88 GB/s for 1 MiB, vs 103 GB/s for one copy | [chunkcopy.hip](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/chunkcopy.hip), 8 GiB as many device copies | Per-layer pieces of a 2,048-token chunk are an estimated 1–4 MiB |",
     "count": 1,
     "reason": "Upstream source/container URL retains its repository identity.",
     "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
-    "line": "| Device copy (device to device) | 104\u2013110 GB/s | [copybench.hip](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/copybench.hip) | Real RAM restores: 27B 33k tokens (2.4 GB) in 25 ms, 96 GB/s |",
+    "line": "| Device copy (device to device) | 104–110 GB/s | [copybench.hip](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/copybench.hip) | Real RAM restores: 27B 33k tokens (2.4 GB) in 25 ms, 96 GB/s |",
     "count": 1,
     "reason": "Upstream source/container URL retains its repository identity.",
     "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
-    "line": "| Disk write + fsync, raw | 0.58\u20130.60 GB/s at every size | [diskbench.py](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/diskbench.py) | \u2014 |",
+    "line": "| Disk write + fsync, raw | 0.58–0.60 GB/s at every size | [diskbench.py](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/diskbench.py) | — |",
     "count": 1,
     "reason": "Upstream source/container URL retains its repository identity.",
     "category": "upstream-url"
@@ -1401,14 +1352,14 @@
   },
   {
     "file": "docs/cache-redesign/RFC.md",
-    "line": "| Incremental delivery through Gufo PRs | \ud83d\udfe2 Package, backing, RAM, disk, adapters | \ud83d\udfe2 Smaller execution changes | \ud83d\udfe1 Wider allocator/execution changes | \ud83d\udfe1 Wider allocator/kernel changes | \ud83d\udfe2 Existing implementation |",
+    "line": "| Incremental delivery through Gufo PRs | 🟢 Package, backing, RAM, disk, adapters | 🟢 Smaller execution changes | 🟡 Wider allocator/execution changes | 🟡 Wider allocator/kernel changes | 🟢 Existing implementation |",
     "count": 1,
     "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
     "category": "engine"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
-    "line": "| Prefill N tokens on D cached | Flash-Next 0.36 s + 0.79 ms/token + small depth term; 27B 0.52 s + 2.66 ms/token + 16.5 ns \u00d7 N \u00d7 (D + N/2) | [fit_prefill.py](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/fit_prefill.py), 150 requests each; median error 9.8% and 3.9% | Simulated prefill time matches measured within 3\u20138% (E7) |",
+    "line": "| Prefill N tokens on D cached | Flash-Next 0.36 s + 0.79 ms/token + small depth term; 27B 0.52 s + 2.66 ms/token + 16.5 ns × N × (D + N/2) | [fit_prefill.py](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/fit_prefill.py), 150 requests each; median error 9.8% and 3.9% | Simulated prefill time matches measured within 3–8% (E7) |",
     "count": 1,
     "reason": "Upstream source/container URL retains its repository identity.",
     "category": "upstream-url"
@@ -1660,7 +1611,7 @@
   },
   {
     "file": "docs/models/deepseek-v4-flash/BENCHMARKS.md",
-    "line": "Measured 2026-09-23\u201324. One warmed sample per point. Positive gain favors Gufo.",
+    "line": "Measured 2026-09-23–24. One warmed sample per point. Positive gain favors Gufo.",
     "count": 1,
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
@@ -1938,7 +1889,7 @@
   },
   {
     "file": "docs/models/qwen-image-2.1/README.md",
-    "line": "The official repository recommends 2048\u00b2; Gufo follows the pinned Diffusers",
+    "line": "The official repository recommends 2048²; Gufo follows the pinned Diffusers",
     "count": 1,
     "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
     "category": "engine"
@@ -1978,7 +1929,7 @@
   },
   {
     "file": "docs/models/qwen3-tts/BENCHMARKS.md",
-    "line": "Short seed-42 control, \u201cHello from Gufo.\u201d: warm complete WAV latency is",
+    "line": "Short seed-42 control, “Hello from Gufo.”: warm complete WAV latency is",
     "count": 1,
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
@@ -2337,7 +2288,7 @@
   },
   {
     "file": "docs/models/qwen3.8-flash-next/BENCHMARKS.md",
-    "line": "Gufo pp/tg, concurrency and memory: October 8\u20139, 2026, production Nix build.",
+    "line": "Gufo pp/tg, concurrency and memory: October 8–9, 2026, production Nix build.",
     "count": 1,
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
@@ -2421,7 +2372,7 @@
   },
   {
     "file": "docs/models/qwen3.8-flash-next/QUALITY.md",
-    "line": "Gufo pp/tg, concurrency and memory refreshed October 8\u20139, 2026 using the production",
+    "line": "Gufo pp/tg, concurrency and memory refreshed October 8–9, 2026 using the production",
     "count": 1,
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
@@ -3110,5 +3061,40 @@
     "count": 1,
     "category": "engine",
     "reason": "Version output identifies the engine separately from the Bubo product."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  add_dependencies(gufo bubo_engine)",
+    "count": 1,
+    "category": "build-target",
+    "reason": "Retained CMake target identity; Bubo bootstrap loads the inference DLL lazily on Windows."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  add_executable(gufo ${bubo_command_sources})",
+    "count": 1,
+    "category": "build-target",
+    "reason": "Retained CMake target identity; Bubo bootstrap loads the inference DLL lazily on Windows."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  add_executable(gufo src/cli/bootstrap.cpp)",
+    "count": 1,
+    "category": "build-target",
+    "reason": "Retained CMake target identity; Bubo bootstrap loads the inference DLL lazily on Windows."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  target_link_libraries(gufo PRIVATE bubo_prepare)",
+    "count": 1,
+    "category": "build-target",
+    "reason": "Retained CMake target identity; Bubo bootstrap loads the inference DLL lazily on Windows."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "set(bubo_inference_target gufo)",
+    "count": 1,
+    "category": "build-target",
+    "reason": "Retained CMake target identity; Bubo bootstrap loads the inference DLL lazily on Windows."
   }
 ]
