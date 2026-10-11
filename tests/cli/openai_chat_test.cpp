@@ -2271,7 +2271,7 @@ void DebugHooksSettingsEnvironmentTest() {
     }
   }
   // Explicit serving files; each exception is tied to its exact call text.
-  // Empty today: new sites fail until individually reviewed in the allow-list.
+  // New sites fail until individually reviewed in the allow-list.
   const auto read_source = [&](const fs::path& file) {
     std::ifstream input(file);
     Expect(input.good(), "stderr scan can read its explicit input");
@@ -2286,34 +2286,70 @@ void DebugHooksSettingsEnvironmentTest() {
   for (const auto& site : allowed->items()) {
     const auto path = site.member_str("file");
     const auto call = site.member_str("call");
-    Expect(!path.empty() && !call.empty() && !site.member_str("reason").empty(),
+    const auto line = site.member_str("line");
+    Expect(!path.empty() && !call.empty() && !line.empty() &&
+               !site.member_str("reason").empty(),
            "each stderr allowance names an exact call and a reason");
-    Expect(exceptions.emplace(path + "\n" + call, site.member_str("reason"))
+    Expect(exceptions
+               .emplace(path + "\n" + line + "\n" + call,
+                        site.member_str("reason"))
                .second,
            "stderr allowances are unique");
   }
   const std::regex stderr_calls(
-      R"scan((?:std::)?\bfprintf\s*\(\s*stderr\s*,[\s\S]*?;)scan");
+      R"scan((?:std::)?\bfprintf\s*\(\s*stderr\s*,[\s\S]*?;|(?:std::)?\bfputs\s*\([^;]*?\bstderr\s*\)[\s\S]*?;|std::(?:cerr|clog)\s*(?:<<|\.write\s*\()[\s\S]*?;|(?:::)?\bwrite\s*\(\s*STDERR_FILENO\s*,[\s\S]*?;)scan");
   for (const char* name :
        {"src/models/qwen38_flash_next/kernels/rocm/executor.cpp",
         "src/models/qwen38_flash_next/engine.cpp",
         "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.hip.cpp",
         "src/cli/serve/text_generation_scheduler.cpp",
-        "src/cli/serve/http_server.cpp",
-        "src/cli/serve/text_model_runner.cpp"}) {
+        "src/cli/serve/http_server.cpp", "src/cli/serve/text_model_runner.cpp",
+        "src/models/qwen38_flash_next/kernels/rocm/trace.hpp",
+        "src/models/qwen38_flash_next/kernels/rocm/mmq/mmq.hpp",
+        "src/models/qwen38_flash_next/kernels/rocm/device_model.cpp",
+        "src/models/qwen38_flash_next/mtp_sampling.hpp",
+        "src/cli/serve/continuation_disk_store.cpp",
+        "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_ggml_stubs.hip.cpp",
+        "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_ggml_stubs.h",
+        "src/cli/serve/serve.cpp", "src/cli/serve/logging.cpp"}) {
     const auto source = read_source(root / name);
     for (std::sregex_iterator m(source.begin(), source.end(), stderr_calls),
          end;
          m != end; ++m) {
-      const auto key = std::string(name) + "\n" + m->str();
+      const auto line =
+          1 + std::count(source.begin(), source.begin() + m->position(), '\n');
+      const auto key =
+          std::string(name) + "\n" + std::to_string(line) + "\n" + m->str();
       Expect(exceptions.erase(key) == 1,
              std::string(name) + ": unreviewed raw stderr call: " + m->str());
+    }
+  }
+  for (const char* name :
+       {"src/models/qwen38_flash_next/kernels/rocm/mmq/mmq.hpp",
+        "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_ggml_stubs.hip.cpp",
+        "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_ggml_stubs.h"}) {
+    const auto source = read_source(root / name);
+    const std::regex fatal_print(
+        R"scan(fprintf\(stderr, "(?:mmq_x_best=|HIP error:|qfn_stack_pool:|GGML_ASSERT|GGML_ABORT))scan");
+    for (std::sregex_iterator m(source.begin(), source.end(), fatal_print), end;
+         m != end; ++m) {
+      const auto prefix = source.substr(0, m->position());
+      const auto flush =
+          prefix.rfind("Logger::FlushSync(std::chrono::seconds(2))");
+      Expect(
+          flush != std::string::npos && prefix.size() - flush < 100,
+          std::string(name) + ": fatal print must have a bounded prefix drain");
     }
   }
   Expect(exceptions.empty(), "stderr allow-list contains no stale exceptions");
   const std::string new_site = "std::fprintf ( stderr, \"new site\\n\" );";
   Expect(std::regex_search(new_site, stderr_calls),
          "stderr scan detects a new call with whitespace");
+  Expect(
+      std::regex_search(std::string("std::fputs(line, stderr);"), stderr_calls),
+      "stderr scan detects fputs");
+  Expect(std::regex_search(std::string("std::cerr << line;"), stderr_calls),
+         "stderr scan detects stream output");
 
   const auto read_generated = [&](const fs::path& file) {
     std::ifstream input(file);

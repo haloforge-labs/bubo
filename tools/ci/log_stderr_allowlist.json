@@ -1,5 +1,384 @@
 {
   "schema": 1,
-  "sites": [],
-  "reason": "All fprintf(stderr) sites in the guarded serving files are routed through Logger::Raw. No exceptions."
+  "sites": [
+    {
+      "file": "src/models/qwen38_flash_next/kernels/rocm/trace.hpp",
+      "call": "std::fprintf(stderr,\r\n                 \"qwen38_flash_next: trace %.1f s, %llu cycles: GPU busy \"\r\n                 \"%.1f%% (%.2f ms/cycle busy, %.2f idle) | GPU ms per \"\r\n                 \"phase:%s\\n\",\r\n                 span_ms * 1e-3, static_cast<unsigned long long>(cycles),\r\n                 100.0 * busy_total / span_ms, busy_total * per_cycle,\r\n                 (span_ms - busy_total) * per_cycle, line.c_str());",
+      "reason": "Opt-in GUFO_TRACE aggregate summary; cold shutdown diagnostic retains its existing bytes.",
+      "line": "289"
+    },
+    {
+      "file": "src/models/qwen38_flash_next/kernels/rocm/trace.hpp",
+      "call": "std::fprintf(stderr,\r\n                 \"qwen38_flash_next: trace idle ms/cycle (count x ms each, \"\r\n                 \"host work each):%s\\n\",\r\n                 line.c_str());",
+      "reason": "Opt-in GUFO_TRACE aggregate summary; cold shutdown diagnostic retains its existing bytes.",
+      "line": "304"
+    },
+    {
+      "file": "src/models/qwen38_flash_next/kernels/rocm/trace.hpp",
+      "call": "std::fprintf(stderr,\r\n                 \"qwen38_flash_next: trace latency ms (start = GPU start after \"\r\n                 \"the host queued it;",
+      "reason": "Opt-in GUFO_TRACE aggregate summary; cold shutdown diagnostic retains its existing bytes.",
+      "line": "314"
+    },
+    {
+      "file": "src/models/qwen38_flash_next/kernels/rocm/mmq/mmq.hpp",
+      "call": "fprintf(stderr, \"mmq_x_best=%d\\n\", mmq_x_best);",
+      "reason": "Fatal dispatch diagnostic; bounded prefix drain precedes this print and GGML_ABORT.",
+      "line": "4286"
+    },
+    {
+      "file": "src/models/qwen38_flash_next/kernels/rocm/device_model.cpp",
+      "call": "std::fprintf(stderr, \"[draftout] loaded output.weight %s %ux%u, %zu bytes resident (trunk head stays %zu bytes Q8_0)\\n\", t.type == core::GgmlType::kQ4_K ? \"Q4_K\" : \"Q5_K\", t.cols, t.rows, bytes_ - before, std::size_t{t.cols} / 32 * 34 * t.rows);",
+      "reason": "Cold tensor/head loading diagnostic; synchronous bytes retained (can precede queued logs).",
+      "line": "503"
+    },
+    {
+      "file": "src/models/qwen38_flash_next/kernels/rocm/device_model.cpp",
+      "call": "std::fprintf(stderr, \"[twin] shadow check armed: %zu 4-bit tensors paired with their fake-quant Q8_0 copy\\n\", shadow_map_.size());",
+      "reason": "Cold tensor/head loading diagnostic; synchronous bytes retained (can precede queued logs).",
+      "line": "539"
+    },
+    {
+      "file": "src/models/qwen38_flash_next/kernels/rocm/device_model.cpp",
+      "call": "std::fprintf(stderr, \"[twin] loaded tensors=%zu resident_4bit_bytes=%zu (incl. 4 KiB tail pads) mirrors_8bit_bytes=%zu saved_per_pass_bytes=%zu kept_q8_tensors=%zu kept_q8_bytes=%zu\\n\", twin.tensors,\r\n               twin_bytes_, twin.bytes_8bit, twin.bytes_8bit - twin.bytes_4bit, twin.kept_tensors, twin.kept_bytes);",
+      "reason": "Cold tensor/head loading diagnostic; synchronous bytes retained (can precede queued logs).",
+      "line": "612"
+    },
+    {
+      "file": "src/models/qwen38_flash_next/mtp_sampling.hpp",
+      "call": "std::fprintf(stderr, \"[lenient] REJECTED GUFO_LENIENT_LAMBDA='%s' (need 0 < lambda <= 2): lenient acceptance is OFF\\n\", l);",
+      "reason": "Lenient startup or final counter diagnostic; synchronous bytes retained (can precede queued logs).",
+      "line": "128"
+    },
+    {
+      "file": "src/models/qwen38_flash_next/mtp_sampling.hpp",
+      "call": "std::fprintf(stderr, \"[lenient] active mode=bounded lambda=%.12g think_only=%d (new MtpLenient helpers in use)\\n\", c.lambda, c.think_only ? 1 : 0);",
+      "reason": "Lenient startup or final counter diagnostic; synchronous bytes retained (can precede queued logs).",
+      "line": "136"
+    },
+    {
+      "file": "src/models/qwen38_flash_next/mtp_sampling.hpp",
+      "call": "std::fputs(line, stderr);",
+      "reason": "Lenient startup or final counter diagnostic; synchronous bytes retained (can precede queued logs).",
+      "line": "160"
+    },
+    {
+      "file": "src/cli/serve/continuation_disk_store.cpp",
+      "call": "std::fprintf(stderr, \"[disk-cache] warning: unsupported GUFO_DISK_EVICT_SKIP_TOKENS value '%s' (accepted 0..1000000);",
+      "reason": "Cold invalid disk-cache setting warning; synchronous bytes retained.",
+      "line": "91"
+    },
+    {
+      "file": "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_ggml_stubs.hip.cpp",
+      "call": "fprintf(stderr, \"ggml_hip_info: hipGetDeviceCount failed: %s\\n\", hipGetErrorString(err));",
+      "reason": "Cold HIP discovery diagnostic or fatal HIP/pool error; all abort prints have a bounded prefix drain.",
+      "line": "40"
+    },
+    {
+      "file": "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_ggml_stubs.hip.cpp",
+      "call": "fprintf(stderr, \"ggml_hip_info: unsupported HIP architecture '%s'\\n\", p.gcnArchName);",
+      "reason": "Cold HIP discovery diagnostic or fatal HIP/pool error; all abort prints have a bounded prefix drain.",
+      "line": "50"
+    },
+    {
+      "file": "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_ggml_stubs.hip.cpp",
+      "call": "fprintf(stderr, \"HIP error: %s\\n  call: %s\\n  in: %s at %s:%d\\n\", msg, stmt, func, file, line);",
+      "reason": "Cold HIP discovery diagnostic or fatal HIP/pool error; all abort prints have a bounded prefix drain.",
+      "line": "98"
+    },
+    {
+      "file": "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_ggml_stubs.hip.cpp",
+      "call": "fprintf(stderr, \"qfn_stack_pool: arena exhausted with live allocations\\n\");",
+      "reason": "Cold HIP discovery diagnostic or fatal HIP/pool error; all abort prints have a bounded prefix drain.",
+      "line": "133"
+    },
+    {
+      "file": "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_ggml_stubs.hip.cpp",
+      "call": "fprintf(stderr, \"qfn_stack_pool: non-LIFO free\\n\");",
+      "reason": "Cold HIP discovery diagnostic or fatal HIP/pool error; all abort prints have a bounded prefix drain.",
+      "line": "159"
+    },
+    {
+      "file": "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_ggml_stubs.h",
+      "call": "fprintf(stderr, \"GGML_ASSERT(%s) failed at %s:%d\\n\", #cond, __FILE__, __LINE__);",
+      "reason": "Fatal GGML assertion/abort macro; bounded prefix drain precedes its existing print.",
+      "line": "53"
+    },
+    {
+      "file": "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_ggml_stubs.h",
+      "call": "fprintf(stderr, \"GGML_ABORT: \" fmt \" at %s:%d\\n\", ##__VA_ARGS__, __FILE__, __LINE__);",
+      "reason": "Fatal GGML assertion/abort macro; bounded prefix drain precedes its existing print.",
+      "line": "62"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "::write(STDERR_FILENO, kPrefix, sizeof(kPrefix) - 1);",
+      "reason": "Fatal signal descriptor write; async-signal-safe, so a mutex drain would risk deadlock.",
+      "line": "131"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "::write(STDERR_FILENO, digits, length);",
+      "reason": "Fatal signal descriptor write; async-signal-safe, so a mutex drain would risk deadlock.",
+      "line": "132"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "::write(STDERR_FILENO, \"\\n\", 1);",
+      "reason": "Fatal signal descriptor write; async-signal-safe, so a mutex drain would risk deadlock.",
+      "line": "133"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: \" << release.error << '\\n';",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "831"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << line << '\\n';",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "837"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: \" << error.what() << '\\n';",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "944"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: unknown serve command '\" << topic << \"'\\n\";",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "969"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: --host must be an IPv4 address\\n\";",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "988"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: --port must be between 0 and 65535\\n\";",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "993"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: --max-score-tokens must be positive\\n\";",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "998"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr\r\n          << \"GUFO_DEBUG_HOOKS/--debug-hooks ignored for non-text server\\n\";",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1003"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: server limits must be positive\\n\";",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1010"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: --verbose is shorthand for --log-level=debug, so \"\r\n                   \"it cannot combine with --log-level\\n\";",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1020"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: \" << parse_err << '\\n';",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1081"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: --model <DIR> is required for image server\\n\";",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1092"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error loading Qwen-Image-2.1: \" << error.what() << '\\n';",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1100"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: \" << parse_err << \"\\n\";",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1128"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: --ttl must be a positive duration\\n\";",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1144"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: --model <DIR> is required for video server\\n\";",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1150"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error enabling MiniMax H3 video service: \"\r\n                << video_jobs->initialization_error() << '\\n';",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1171"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: \" << parse_err << '\\n';",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1187"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: --model <DIR> is required for \" << subcommand\r\n                << \" server\\n\";",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1198"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: --context must be at least \" << (is_tts ? 1 : 32)\r\n                << '\\n';",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1204"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: \" << parse_err << '\\n';",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1215"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error loading Qwen3-TTS: \" << error.what() << '\\n';",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1230"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error enabling Qwen3-TTS service: \"\r\n                  << tts->initialization_error() << '\\n';",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1235"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error loading Qwen3-ASR: \" << error.what() << '\\n';",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1253"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error enabling Qwen3-ASR service: \"\r\n                  << asr->initialization_error() << '\\n';",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1258"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: \" << error.what() << '\\n';",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1441"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: \" << parse_err << \"\\n\";",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1446"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: --log-progress needs --log-level=info or \"\r\n                   \"--log-level=debug\\n\";",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1479"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: cannot open --trace file '\" << trace_path\r\n                  << \"': \" << *error << \"\\n\";",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1488"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: sampling and scheduling limits are invalid\\n\";",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1511"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: speculative draft limits are invalid\\n\";",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1518"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: \" << parse_err << \"\\n\";",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1525"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: speculative backend '\" << speculative_backend\r\n                << \"' is not supported by the HTTP server\\n\";",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1543"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: \" << exception.what() << '\\n';",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1555"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: DFlash2 requires --dflash-model and \"\r\n                   \"--min-draft-tokens 1;",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1561"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: --model <PATH> is required\\n\";",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1577"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error: --mtp-policy is length or survival, \"\r\n                   \"--mtp-draft-vocab is full, latin or auto\\n\";",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1584"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error loading model '\" << model << \"': \" << err << \"\\n\";",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1626"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error enabling debug hooks: \" << error.what() << '\\n';",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1738"
+    },
+    {
+      "file": "src/cli/serve/serve.cpp",
+      "call": "std::cerr << \"Error starting HTTP server: \" << err << \"\\n\";",
+      "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
+      "line": "1779"
+    },
+    {
+      "file": "src/cli/serve/logging.cpp",
+      "call": "std::clog.write(batch.data(), static_cast<std::streamsize>(batch.size()));",
+      "reason": "Dedicated sink writer stream output or detached one-shot real stderr timeout notice; no caller I/O.",
+      "line": "42"
+    },
+    {
+      "file": "src/cli/serve/logging.cpp",
+      "call": "::write(STDERR_FILENO, notice, sizeof(notice) - 1);",
+      "reason": "Dedicated sink writer stream output or detached one-shot real stderr timeout notice; no caller I/O.",
+      "line": "198"
+    }
+  ],
+  "reason": "Reviewed cold diagnostics, fatal prints with bounded drains, signal-safe writes, and sink-owned output. Exact call bytes and reasons are mandatory."
 }

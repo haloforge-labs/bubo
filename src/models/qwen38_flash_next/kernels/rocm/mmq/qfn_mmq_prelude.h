@@ -4,6 +4,7 @@
 // the runtime headers stay global. The wrap keeps this copy from clashing
 // with the identical tier linked for DeepSeek V4 Flash.
 #pragma once
+#include "src/cli/serve/logging.hpp"
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_bf16.h>

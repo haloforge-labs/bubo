@@ -49,6 +49,7 @@
 #ifndef GGML_ASSERT
 #define GGML_ASSERT(cond) \
     do { if (!(cond)) { \
+        (void)::gufo::server::Logger::FlushSync(std::chrono::seconds(2)); \
         fprintf(stderr, "GGML_ASSERT(%s) failed at %s:%d\n", #cond, __FILE__, __LINE__); \
         abort(); \
     } } while (0)
@@ -57,6 +58,7 @@
 #ifndef GGML_ABORT
 #define GGML_ABORT(fmt, ...) \
     do { \
+        (void)::gufo::server::Logger::FlushSync(std::chrono::seconds(2)); \
         fprintf(stderr, "GGML_ABORT: " fmt " at %s:%d\n", ##__VA_ARGS__, __FILE__, __LINE__); \
         abort(); \
     } while (0)

@@ -4282,6 +4282,7 @@ void mul_mat_q_case(ggml_backend_hip_context & ctx, const mmq_args & args, hipSt
             launch_mul_mat_q<type, 128>(ctx, args, stream);
             break;
         default:
+            (void)::gufo::server::Logger::FlushSync(std::chrono::seconds(2));
             fprintf(stderr, "mmq_x_best=%d\n", mmq_x_best);
             GGML_ABORT("fatal error");
             break;

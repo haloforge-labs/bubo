@@ -94,6 +94,7 @@ int64_t ggml_time_us() {
 // ----------------------------------------------------------------------------
 
 [[noreturn]] void ggml_hip_error(const char * stmt, const char * func, const char * file, int line, const char * msg) {
+    (void)::gufo::server::Logger::FlushSync(std::chrono::seconds(2));
     fprintf(stderr, "HIP error: %s\n  call: %s\n  in: %s at %s:%d\n", msg, stmt, func, file, line);
     fflush(stderr);
     abort();
@@ -128,6 +129,7 @@ struct qfn_stack_pool : public ggml_hip_pool {
         /* Growing invalidates outstanding pointers, so it only happens while
          * nothing is live; the arena starts generous to keep that true. */
         if (top != 0) {
+            (void)::gufo::server::Logger::FlushSync(std::chrono::seconds(2));
             fprintf(stderr, "qfn_stack_pool: arena exhausted with live allocations\n");
             abort();
         }
@@ -153,6 +155,7 @@ struct qfn_stack_pool : public ggml_hip_pool {
     void free(void * ptr, size_t /*size*/) override {
         if (!ptr) return;
         if (live.empty() || live.back().first != ptr) {
+            (void)::gufo::server::Logger::FlushSync(std::chrono::seconds(2));
             fprintf(stderr, "qfn_stack_pool: non-LIFO free\n");
             abort();
         }
