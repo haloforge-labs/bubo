@@ -19,7 +19,7 @@ function Test-ShippedPath([string]$Path) {
     }
   }
   $name = $parts[-1]
-  if ($name -in $amdFiles -or $Path -match '[\\/]bin[\\/](rocblas|hipblaslt)[\\/]') {
+  if ($name -in $amdFiles -or $Path -match '(^|[\\/])bin[\\/](rocblas|hipblaslt)[\\/]') {
     $errors.Add("${Path}: AMD payload is acquired separately by bubo prepare runtime")
   }
   foreach ($pattern in $deny) {

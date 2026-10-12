@@ -48,7 +48,7 @@ try {
     }
     [IO.File]::WriteAllBytes($Path, $bytes)
   }
-  foreach ($kind in @('folder-clean', 'folder-crt', 'folder-parent')) {
+  foreach ($kind in @('folder-clean', 'folder-crt', 'folder-parent', 'folder-amd')) {
     if ($Case -ne 'all' -and $Case -ne $kind) { continue }
     $parent = if ($kind -eq 'folder-parent') { 'Microsoft.VC143.CRT-parent/vcruntime140.dll' } else { $kind }
     $folder = Join-Path $scratch "$parent/package"
@@ -57,12 +57,19 @@ try {
     [IO.File]::WriteAllText((Join-Path $folder 'concrete.txt'), 'unrelated')
     [IO.File]::WriteAllText((Join-Path $folder 'vcompat.md'), 'unrelated')
     if ($kind -eq 'folder-crt') { New-PeFixture (Join-Path $folder 'vcruntime140.dll') }
+    if ($kind -eq 'folder-amd') {
+      $data = Join-Path $folder 'bin\rocblas\library'
+      [IO.Directory]::CreateDirectory($data) | Out-Null
+      [IO.File]::WriteAllText((Join-Path $data 'payload.dat'), 'AMD payload fixture')
+    }
     $output = & pwsh -NoProfile -File $Gate -PackageFolder $folder 2>&1
     $rc = $LASTEXITCODE
     Write-Output "FOLDER $kind rc=$rc"
     $output | Write-Output
     if ($kind -eq 'folder-crt') {
       if ($rc -ne 1 -or "$output" -notmatch 'FAIL:.*vcruntime140.dll: VC\+\+ prerequisite') { throw 'folder CRT must fail' }
+    } elseif ($kind -eq 'folder-amd') {
+      if ($rc -ne 1 -or "$output" -notmatch 'AMD payload is acquired separately') { throw 'folder AMD payload must fail' }
     } elseif ($rc -ne 0 -or "$output" -notmatch 'PASS: release PE') { throw "$kind must pass" }
   }
   # Release CRT/UCRT system imports stay distinct from shipped files.
