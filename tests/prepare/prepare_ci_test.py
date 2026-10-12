@@ -3,6 +3,8 @@
 import importlib.util
 from pathlib import Path
 import tempfile
+import subprocess
+import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location(
@@ -42,6 +44,9 @@ def main():
     print('PASS: prepare CI rejects WinHTTP/BCrypt/own inflater/hasher; '
           'unguarded fixture overrides and planted production archive hooks; '
           'guarded test code and linked zlib accepted')
+    if sys.platform == 'win32':
+        subprocess.run(['pwsh', '-NoProfile', '-File',
+                        str(ROOT / 'tests/prepare/package_policy_test.ps1')], check=True)
 
 
 if __name__ == '__main__':
