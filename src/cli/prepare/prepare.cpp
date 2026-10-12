@@ -1,12 +1,55 @@
 #include "src/cli/prepare/prepare.hpp"
 
+#include <atomic>
+#include <csignal>
 #include <filesystem>
 #include <ostream>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+#include "src/cli/prepare/model_prepare.hpp"
 #include "src/core/prepare/release_catalogue.hpp"
 
 namespace bubo::prepare {
 namespace {
+std::atomic<bool> gCancelled{false};
+#ifdef _WIN32
+BOOL WINAPI PrepareControl(DWORD type) {
+  if (type != CTRL_C_EVENT && type != CTRL_BREAK_EVENT)
+    return FALSE;
+  gCancelled.store(true, std::memory_order_relaxed);
+  return TRUE;
+}
+#else
+void PrepareControl(int) {
+  gCancelled.store(true, std::memory_order_relaxed);
+}
+#endif
+class CancellationScope {
+public:
+  CancellationScope() {
+    gCancelled.store(false, std::memory_order_relaxed);
+#ifdef _WIN32
+    SetConsoleCtrlHandler(PrepareControl, TRUE);
+#else
+    previous_ = std::signal(SIGINT, PrepareControl);
+#endif
+  }
+  ~CancellationScope() {
+#ifdef _WIN32
+    SetConsoleCtrlHandler(PrepareControl, FALSE);
+#else
+    std::signal(SIGINT, previous_);
+#endif
+  }
+
+private:
+#ifndef _WIN32
+  void (*previous_)(int) = SIG_DFL;
+#endif
+};
 std::string Join(std::string_view root, std::string_view part) {
   const auto path =
       std::filesystem::u8path(root) / std::filesystem::u8path(part);
@@ -49,7 +92,26 @@ ParseResult Parse(std::span<const char* const> args,
       result.options.verify = true;
     else if (arg == "--offline")
       result.options.offline = true;
-    else if (arg == "--help")
+    else if (arg == "--resume")
+      result.options.resume = true;
+    else if (arg == "--no-resume")
+      result.options.resume = false;
+    else if (arg == "--mtp-model" || arg == "--mmproj" ||
+             arg == "--cache-dir" || arg == "--runtime-dir") {
+      if (i + 1 == args.size() || !ValidPath(args[i + 1])) {
+        result.error = std::string(arg) + " requires one nonempty PATH";
+        return result;
+      }
+      auto* target = arg == "--mtp-model"   ? &result.options.mtp_model
+                     : arg == "--mmproj"    ? &result.options.mmproj
+                     : arg == "--cache-dir" ? &result.options.cache_dir
+                                            : &result.options.runtime_dir;
+      if (!target->empty()) {
+        result.error = std::string(arg) + " cannot repeat";
+        return result;
+      }
+      *target = args[++i];
+    } else if (arg == "--help")
       result.options.help = true;
     else if (arg == "--output") {
       if (explicit_output || i + 1 == args.size() || !ValidPath(args[i + 1])) {
@@ -70,6 +132,11 @@ ParseResult Parse(std::span<const char* const> args,
     }
     result.options.root = Join(local_app_data, "Bubo");
   }
+  if (result.options.step == Step::Runtime &&
+      (!result.options.mtp_model.empty() || !result.options.mmproj.empty()))
+    result.error = "runtime-only rejects --mtp-model and --mmproj";
+  if (result.options.step == Step::Model && !result.options.runtime_dir.empty())
+    result.error = "model-only rejects --runtime-dir";
   return result;
 }
 
@@ -80,13 +147,20 @@ std::string ModelRoot(const Options& options) {
 void PrintHelp(std::ostream& out) {
   out << "Usage: bubo prepare [all|runtime|model] [OPTIONS]\n\n"
          "Prepare pinned runtime and model files. The default step is all.\n"
-         "I1 skeleton: selected steps print 'not implemented in I1' and exit "
-         "10.\n\n"
+         "The model step downloads and verifies the eight pinned model files.\n"
+         "The runtime step is pending J3 and currently exits 10.\n\n"
          "Options:\n"
          "  --output ROOT  Parent folder (default: %LOCALAPPDATA%\\Bubo)\n"
-         "  --yes          Accept the displayed plan when implemented\n"
-         "  --verify       Force full SHA-256 verification when implemented\n"
-         "  --offline      Use local files only when implemented\n"
+         "  --yes          Accept the displayed download plan\n"
+         "  --verify       Force full SHA-256 verification of model files\n"
+         "  --offline      Use local files only; missing files fail before "
+         "network\n"
+         "  --resume       Resume tool-owned partial downloads (default)\n"
+         "  --no-resume    Restart partial downloads\n"
+         "  --mtp-model PATH  Copy a hash-matching existing MTP file\n"
+         "  --mmproj PATH     Copy a hash-matching existing vision projector\n"
+         "  --cache-dir PATH  Runtime archive cache (runtime step pending J3)\n"
+         "  --runtime-dir PATH  Runtime destination (runtime step pending J3)\n"
          "  --help         Print help without writes, network or engine "
          "loading\n\n"
          "Model layout: "
@@ -97,7 +171,8 @@ void PrintHelp(std::ostream& out) {
          "consent/cancel;\n"
          "  4 offline/missing pin; 5 transport/TLS; 6 integrity; 7 "
          "storage/access;\n"
-         "  8 prepare lock; 9 archive/internal; 10 I1 step not implemented.\n";
+         "  8 prepare lock; 9 archive/internal; 10 runtime step not "
+         "implemented.\n";
 }
 
 int Run(std::span<const char* const> args, std::string_view local_app_data,
@@ -111,10 +186,12 @@ int Run(std::span<const char* const> args, std::string_view local_app_data,
     PrintHelp(out);
     return 0;
   }
-  if (parsed.options.step != Step::Model)
-    out << "prepare runtime: not implemented in I1\n";
-  if (parsed.options.step != Step::Runtime)
-    out << "prepare model: not implemented in I1\n";
-  return static_cast<int>(ExitCode::NotImplemented);
+  if (parsed.options.step != Step::Model) {
+    out << "prepare runtime: not implemented in J2 (pending J3)\n";
+    return static_cast<int>(ExitCode::NotImplemented);
+  }
+  CancellationScope cancellation;
+  return RunModel(parsed.options, out, err,
+                  [] { return gCancelled.load(std::memory_order_relaxed); });
 }
 }  // namespace bubo::prepare

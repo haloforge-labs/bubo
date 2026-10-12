@@ -312,12 +312,27 @@ set(bubo_command_sources
   src/cli/serve/inference_backend.cpp
   src/eval/http_client.cpp
 )
-add_library(bubo_prepare STATIC
+set(bubo_prepare_sources
   src/cli/prepare/prepare.cpp
+  src/cli/prepare/model_prepare.cpp
   src/core/prepare/release_catalogue.cpp
   src/core/prepare/fingerprint_table.cpp
-  src/core/prepare/release_evidence.cpp)
+  src/core/prepare/gguf_fingerprint.cpp
+  src/core/prepare/release_evidence.cpp
+  src/core/prepare/file_ops.cpp
+  src/core/prepare/hash_file.cpp
+  src/core/prepare/transport.cpp
+  src/core/prepare/download.cpp
+  src/core/crypto/sha256.cpp
+  src/core/quant/ggml_dequant.cpp)
+add_library(bubo_prepare STATIC ${bubo_prepare_sources})
 target_link_libraries(bubo_prepare PUBLIC CURL::libcurl OpenSSL::Crypto ZLIB::ZLIB)
+add_executable(prepare_fingerprints EXCLUDE_FROM_ALL tools/release/prepare_fingerprints.cpp
+  src/core/prepare/gguf_fingerprint.cpp src/core/prepare/fingerprint_table.cpp
+  src/core/prepare/release_catalogue.cpp src/core/crypto/sha256.cpp
+  src/core/quant/ggml_dequant.cpp)
+target_link_libraries(prepare_fingerprints PRIVATE OpenSSL::Crypto)
+set_target_properties(prepare_fingerprints PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_executable(prepare_gate EXCLUDE_FROM_ALL tools/release/prepare_gate.cpp)
 target_link_libraries(prepare_gate PRIVATE bubo_prepare)
 # Release configurations always check the production pins/evidence. Dev builds

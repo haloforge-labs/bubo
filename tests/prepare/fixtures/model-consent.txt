@@ -1,0 +1,17 @@
+Bubo will prepare these files.
+Total file size: 0 bytes (0.000 GiB).
+Total download size: 0 bytes (0.000 GiB).
+Free space: 4294967296 bytes. Required space: 2147483648 bytes. Volume: fixture.
+The derived files are hosted by the Bubo project.
+Qwen Community License 1.0 applies to the model files. They are not MIT
+licensed.
+Read M/licenses/LICENSE and M/licenses/NOTICE.
+Read the MaaS and AI Work Assistant conditions in the licence.
+The main shards total 0 bytes (0.000 GiB).
+Estimated download time: unknown; download speed is not known.
+Bubo checks each download's full SHA-256 while it receives the file.
+Existing main shards use GGUF and tensor fingerprint checks; --verify checks
+full SHA-256.
+HF downloads can redirect to allowed hosts under huggingface.co or hf.co.
+Bubo will not build a model on this computer.
+Download and prepare all files in this plan? [y/N]

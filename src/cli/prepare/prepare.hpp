@@ -22,6 +22,11 @@ enum class ExitCode {
 struct Options {
   Step step = Step::All;
   std::string root;
+  std::string mtp_model;
+  std::string mmproj;
+  std::string cache_dir;
+  std::string runtime_dir;
+  bool resume = true;
   bool yes = false;
   bool verify = false;
   bool offline = false;
