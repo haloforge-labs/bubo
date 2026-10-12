@@ -44,6 +44,10 @@ std::string Read(const fs::path& path) {
   std::ifstream file(path, std::ios::binary);
   return {(std::istreambuf_iterator<char>(file)), {}};
 }
+std::string Utf8(const fs::path& path) {
+  const auto text = path.u8string();
+  return {text.begin(), text.end()};
+}
 std::string Gguf(unsigned index, bool main) {
   std::string bytes;
   const auto integer = [&](std::uint64_t value, unsigned count) {
@@ -178,12 +182,12 @@ void ManifestCases(const fs::path& directory) {
   Expect(!package.MainIdentity().empty(), "current full verification authorizes identity");
   const auto override_path = fixture.root / "override.gguf";
   Write(override_path, Read(fixture.root / fixture.entries[6].destination));
-  CheckPackageOverrides(package, {{"GUFO_DENSE_TWIN_MODEL", override_path.string()}}, true);
+  CheckPackageOverrides(package, {{"GUFO_DENSE_TWIN_MODEL", Utf8(override_path)}}, true);
   Expect(package.hashed_files == 9 && package.hashed_bytes == total + fixture.entries[6].size, "verify distinct selected override once");
-  CheckPackageOverrides(package, {{"GUFO_DENSE_TWIN_MODEL", override_path.string()}}, true);
+  CheckPackageOverrides(package, {{"GUFO_DENSE_TWIN_MODEL", Utf8(override_path)}}, true);
   Expect(package.hashed_files == 9, "same override deduplicated");
   Reject([&] { CheckPackageOverrides(package,
-      {{"GUFO_DENSE_TWIN_MODEL", package.files.front().path.string()}}, true); },
+      {{"GUFO_DENSE_TWIN_MODEL", Utf8(package.files.front().path)}}, true); },
       "override manifest entry mismatch");
   package = {};
   auto corrupt = Read(fixture.root / fixture.entries[2].destination); corrupt.back() ^= 1;
