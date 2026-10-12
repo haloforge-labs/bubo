@@ -24,12 +24,12 @@ SECOND_STACK = re.compile(
     r'SHA256_Transform|sha256_compress)\b', re.IGNORECASE)
 FIXTURE_OVERRIDE = re.compile(
     r'\b(?:(?:RunModel|RunRuntime|RunAll|\w*(?:Manifest|Catalogue|Package))ForTesting|'
-    r'(?:Model|Runtime|Package|Manifest)TestEnvironment|test_loopback|origin_override|'
+    r'(?:Model|Runtime|Package|Manifest)TestEnvironment|test_loopback|origin_override|synthetic_disclosure|'
     r'PIN_OVERRIDE|CATALOGUE_OVERRIDE|BUBO_FIXTURE\w*)\b')
 BINARY_HOOKS = (b'RunModelForTesting', b'RunRuntimeForTesting',
                 b'RunAllForTesting', b'origin_override', b'test_loopback',
                 b'RuntimeReadyErrorForTesting', b'LoadModelPackageForTesting',
-                b'http,https')
+                b'synthetic_disclosure', b'http,https')
 
 
 def production_lines(text):
