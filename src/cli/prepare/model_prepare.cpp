@@ -70,8 +70,13 @@ std::string GiB(std::uint64_t size) {
 void Wrap(std::ostringstream& output, std::string_view line) {
   while (line.size() > 80) {
     auto end = line.rfind(' ', 80);
-    if (end == 0 || end == line.npos)
+    if (end == 0 || end == line.npos) {
       end = 80;
+      // Long native path tokens can contain multibyte UTF-8. Keep each
+      // wrapped line valid rather than splitting a character at byte 80.
+      while (end && (static_cast<unsigned char>(line[end]) & 0xc0) == 0x80)
+        --end;
+    }
     output << line.substr(0, end) << '\n';
     line.remove_prefix(end);
     if (!line.empty() && line.front() == ' ')

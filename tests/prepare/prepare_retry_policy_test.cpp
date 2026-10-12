@@ -306,6 +306,63 @@ int main() {
           << "PASS elapsed per-file deadline makes zero transport calls\n";
     }
 #ifdef _WIN32
+    for (const bool resume : {true, false}) {
+      for (const bool sidecar_input : {false, true}) {
+        const auto path = owned.Path(
+            std::string("offline-") + (sidecar_input ? "marker-" : "partial-") +
+            (resume ? "resume.partial" : "restart.partial"));
+        Seed(entry, path);
+        auto sidecar = path;
+        sidecar += ".json";
+        const auto prefix = Read(path), marker = Read(sidecar);
+        const auto prefix_time = std::filesystem::last_write_time(path);
+        const auto marker_time = std::filesystem::last_write_time(sidecar);
+        const auto input = sidecar_input ? sidecar : path;
+        {
+          const auto attributes = GetFileAttributesW(input.c_str());
+          Require(attributes != INVALID_FILE_ATTRIBUTES,
+                  "cannot inspect owned offline fixture attributes");
+          struct RestoreAttributes {
+            std::filesystem::path path;
+            DWORD attributes;
+            ~RestoreAttributes() {
+              SetFileAttributesW(path.c_str(), attributes);
+            }
+          } restore{input, attributes};
+          Require(
+              SetFileAttributesW(input.c_str(),
+                                 attributes | FILE_ATTRIBUTE_OFFLINE) &&
+                  (GetFileAttributesW(input.c_str()) & FILE_ATTRIBUTE_OFFLINE),
+              "cannot mark owned native fixture offline");
+          bool rejected = false;
+          try {
+            (void)RetainedPrefix(entry, path);
+          } catch (const std::exception& error) {
+            rejected =
+                std::string_view(error.what()).find("Use a local folder") !=
+                std::string_view::npos;
+          }
+          Require(rejected,
+                  "RetainedPrefix read or swallowed an offline input");
+          Fake fake;
+          auto options = Options();
+          options.resume = resume;
+          const auto result = Download(entry, path, fake, options);
+          Require(
+              result.code == 7 && fake.calls == 0 &&
+                  result.error.find("Use a local folder") != std::string::npos,
+              "offline resume input was opened or entered transport");
+        }
+        // The fixture restores its owned attribute before inspecting data;
+        // the production calls must leave both existing byte streams intact.
+        Require(Read(path) == prefix && Read(sidecar) == marker &&
+                    std::filesystem::last_write_time(path) == prefix_time &&
+                    std::filesystem::last_write_time(sidecar) == marker_time,
+                "offline refusal changed the partial or sidecar");
+      }
+    }
+    std::cout << "PASS native offline partial/sidecar refused before reads or "
+                 "writes; resume/restart; zero transport calls\n";
     {
       const auto path = owned.Path("read-lease.partial");
       Seed(entry, path);

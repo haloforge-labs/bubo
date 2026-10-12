@@ -710,6 +710,20 @@ int main(int argc, char** argv) {
                             std::chrono::milliseconds(750),
             "real sharing-violation rename retry");
 #endif
+#ifdef _WIN32
+    std::string unicode_root = "ROOT/";
+    for (unsigned i = 0; i < 70; ++i)
+      unicode_root += "\xe7\x95\x8c";
+    const auto unicode_consent =
+        ModelConsent(kEntries, fs::u8path(unicode_root), {}, 24, {}, true);
+    Require(MultiByteToWideChar(
+                CP_UTF8, MB_ERR_INVALID_CHARS, unicode_consent.data(),
+                static_cast<int>(unicode_consent.size()), nullptr, 0) > 0,
+            "long Unicode path consent must remain valid UTF-8 after wrapping");
+    std::istringstream unicode_lines(unicode_consent);
+    for (std::string line; std::getline(unicode_lines, line);)
+      Require(line.size() <= 80, "Unicode consent byte width exceeds 80");
+#endif
     std::cout << "prepare_model_test: PASS consent snapshot/all rows/wrap; "
                  "eight-file acquisition; manifest-last crash/failure; "
                  "read-only no-op/stamps/verify; planted-byte refusal; "

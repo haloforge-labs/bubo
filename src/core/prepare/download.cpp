@@ -54,7 +54,18 @@ std::filesystem::path Sidecar(const std::filesystem::path& partial) {
   result += ".json";
   return result;
 }
+void RequireLocalResumeInputs(const std::filesystem::path& path) {
+  for (const auto& input : {path, Sidecar(path)}) {
+    const auto error = CheckLocalPath(input);
+    if (!error.empty())
+      throw std::runtime_error(error);
+  }
+}
 Partial Load(const Entry& entry, const std::filesystem::path& path) {
+  // Locality failures are storage errors, not invalid resumable metadata.
+  // Keep this outside the metadata catch so a caller cannot silently restart
+  // and open/hydrate an offline input after losing its retained-prefix marker.
+  RequireLocalResumeInputs(path);
   Partial result;
   try {
     if (!std::filesystem::exists(path) ||
@@ -259,6 +270,8 @@ DownloadResult Download(const Entry& entry,
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
   };
   try {
+    // Also applies to --no-resume, which deliberately skips Load.
+    RequireLocalResumeInputs(path);
     auto partial = options.resume ? Load(entry, path) : Partial{};
     std::filesystem::create_directories(path.parent_path());
     Writer writer(path);  // Deny other writers/deletion before prefix hashing.
