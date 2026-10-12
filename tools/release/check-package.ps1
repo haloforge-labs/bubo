@@ -17,7 +17,7 @@ foreach ($file in Get-ChildItem -LiteralPath $PackageFolder -Recurse -File) {
 foreach ($file in $files) {
   if ($file.Name -in @('bubo.exe', 'bubo-engine.dll')) {
     $imageText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($file.FullName))
-    if ($imageText -match 'Run(Model|Runtime|All)ForTesting|test_loopback|origin_override') {
+    if ($imageText -match 'Run(Model|Runtime|All)ForTesting|RuntimeReadyErrorForTesting|LoadModelPackageForTesting|test_loopback|origin_override|http,https') {
       $errors.Add("$($file.FullName): fixture override symbol in release binary")
     }
   }
