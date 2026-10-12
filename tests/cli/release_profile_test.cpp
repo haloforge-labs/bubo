@@ -379,6 +379,11 @@ void ReviewRegression(int finding) {
     }
     Expect(Find(exact, "--no-cache").value == std::optional<std::string>("1"),
            "exact injects no-cache");
+    auto ignored_disk = Inputs("exact");
+    ignored_disk.explicit_flags["--cache-disk"] = "cache";
+    Expect(!ResolveReleaseSettings(ignored_disk)
+                .effective_flags.contains("--cache-disk"),
+           "exact accepts and ignores disk cache flags");
     gufo::cli::ArgParser parser("test");
     bool disabled = false;
     parser.AddFlag("", "--no-cache", "Disable caches", "Cache", &disabled);

@@ -19,12 +19,15 @@ struct PackageFile {
   std::uint64_t size = 0;
   bool observed_verified = false;
   std::shared_ptr<bubo::prepare::ReadLease> lease;
+  bubo::prepare::FileStamp verified_stamp;
+  bool freshly_verified = false;
 };
 struct ModelPackage {
   std::filesystem::path manifest_path;
   std::map<std::string, std::string> defaults;
   std::vector<PackageFile> files;
   std::uint64_t hashed_files = 0, hashed_bytes = 0;
+  bool stamp_save_failed = false;
   std::string MainIdentity() const;
   std::string IdentityFor(const std::filesystem::path&) const;
 };
@@ -40,6 +43,11 @@ ModelPackage LoadModelPackage(const std::filesystem::path& model_path,
 void CheckPackageOverrides(ModelPackage& package,
                            const std::map<std::string, std::string>& paths,
                            bool verify, std::ostream* progress = nullptr);
+// Verify only missing identities for the main shards and selected artefacts.
+// Empty packages require preparation or an explicit pinned manifest.
+void EnsureDiskCacheIdentity(
+    ModelPackage& package, std::span<const std::filesystem::path> selected,
+    std::ostream* progress = nullptr);
 #ifdef BUBO_PREPARE_TESTING
 ModelPackage LoadModelPackageForTesting(
     const std::filesystem::path& model_path, const std::string& profile,

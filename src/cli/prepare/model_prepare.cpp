@@ -18,6 +18,7 @@
 #include "src/core/prepare/metadata_json.hpp"
 #include "src/core/prepare/model_notices.hpp"
 #include "src/core/prepare/transport.hpp"
+#include "src/core/prepare/verified_state.hpp"
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -518,6 +519,22 @@ int CopySupplied(const fs::path& source, const fs::path& partial,
       std::move(output);  // Original writer remains open through promotion.
   return 0;
 }
+void SavePreparedVerification(const fs::path& root,
+                              std::span<const Entry> entries,
+                              const Plan& plan, bool verify,
+                              std::ostream& err) {
+  VerifiedStamps rows;
+  for (std::size_t i = 0; i < entries.size(); ++i)
+    if (verify || plan.missing[i])
+      rows[{std::string(entries[i].logical_name),
+            std::string(entries[i].sha256)}] = plan.stamps[i];
+  std::string error;
+  if (!SaveVerifiedStamps(root, rows, error)) {
+    std::replace_if(error.begin(), error.end(),
+                    [](unsigned char c) { return c < 32 || c == 127; }, ' ');
+    err << "verification stamp not saved: " << error << '\n';
+  }
+}
 int RunImpl(const Options& options, const Environment& env, std::istream& input,
             std::ostream& out, std::ostream& err, PreparationPlan* preview,
             bool approved) {
@@ -563,6 +580,8 @@ int RunImpl(const Options& options, const Environment& env, std::istream& input,
     }
     // mutation-anchor: initial-readonly-check
     if (initial.ready) {
+      if (options.verify)
+        SavePreparedVerification(root, env.entries, initial, true, err);
       out << "prepare: already prepared; nothing to do\n";
       return 0;
     }
@@ -590,6 +609,8 @@ int RunImpl(const Options& options, const Environment& env, std::istream& input,
     if (const auto code = MakePlan(options, env, root, plan, out, err))
       return code;
     if (plan.ready) {
+      if (options.verify)
+        SavePreparedVerification(root, env.entries, plan, true, err);
       out << "prepare: already prepared; nothing to do\n";
       return 0;
     }
@@ -670,6 +691,7 @@ int RunImpl(const Options& options, const Environment& env, std::istream& input,
         return Different(err, path, "notice pin mismatch");
     }
     const auto state_path = root / ".bubo" / "prepare-state.json";
+    SavePreparedVerification(root, env.entries, plan, options.verify, err);
     const auto state_text = State(env.entries, plan.stamps);
     if (!AtomicWrite(state_path, state_text, error))
       return Error(err, 7, error);

@@ -396,7 +396,10 @@ void TestRestartRestoreAndCompatibilityIdentity() {
 
   const FakeRunner compatible_reader("artifact-A", "fake-new-executable");
   auto compatible_state = compatible_reader.CreateState();
-  ContinuationDiskStore restarted(StoreOptions(directory.path()));
+  std::vector<ContinuationDiskEvent> events;
+  ContinuationDiskStore restarted(
+      StoreOptions(directory.path()),
+      [&](const ContinuationDiskEvent& event) { events.push_back(event); });
   const auto restored = RestoreTokens(restarted, compatible_reader,
                                       *compatible_state, {1, 2, 3, 4, 5});
   Expect(restored.restored && restored.token_count == 3,
@@ -411,6 +414,21 @@ void TestRestartRestoreAndCompatibilityIdentity() {
                         {1, 2, 3, 4})
               .restored,
          "different compatibility identity is a deterministic cache miss");
+  Expect(!RestoreTokens(restarted, incompatible_reader, *incompatible_state,
+                        {1, 2, 3, 4})
+              .restored,
+         "repeated incompatible restore remains a miss");
+  Expect(std::ranges::count_if(events, [](const auto& event) {
+           return event.reason == ContinuationDiskEventReason::kIdentityMismatch;
+         }) == 1,
+         "identity mismatch emits exactly one sanitized event per store");
+  Expect(restarted.entry_count() == 1 &&
+             CacheFiles(directory.path()).size() == 1,
+         "identity mismatch preserves the other model's snapshot");
+  Expect(RestoreTokens(restarted, compatible_reader, *compatible_state,
+                       {1, 2, 3, 4})
+             .restored,
+         "ignored identity remains restorable by its original model");
 }
 
 void TestLongestPrefixAndForcedHashCollision() {

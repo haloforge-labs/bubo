@@ -53,6 +53,7 @@ enum class ContinuationDiskEventReason : std::uint8_t {
   kAlreadyPersisted,
   kSuperseded,
   kPrefixPersisted,
+  kIdentityMismatch,
 };
 
 /// Sanitized disk-cache event. Prompt contents, token values, paths, model

@@ -91,6 +91,35 @@ set_target_properties(model_manifest_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "$
 add_test(NAME model_manifest_test COMMAND model_manifest_test)
 set_tests_properties(model_manifest_test PROPERTIES LABELS "cpu;prepare;release;resolver")
 
+# Mutated implementations must fail the intact manifest/cache identity cases.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  "${CMAKE_SOURCE_DIR}/src/cli/serve/model_manifest.cpp")
+file(READ "${CMAKE_SOURCE_DIR}/src/cli/serve/model_manifest.cpp" manifest_source)
+foreach(kind stamp_match automatic_hash)
+  if(kind STREQUAL "stamp_match")
+    set(anchor "stored != stamps.end() && stored->second == stamp")
+    set(replacement "stored != stamps.end()")
+  else()
+    set(anchor "Verify(*file, package, output);")
+    set(replacement "(void)file;")
+  endif()
+  string(FIND "${manifest_source}" "${anchor}" found)
+  if(found EQUAL -1)
+    message(FATAL_ERROR "manifest ${kind} mutation anchor missing")
+  endif()
+  string(REPLACE "${anchor}" "${replacement}" mutated "${manifest_source}")
+  set(copy "${CMAKE_CURRENT_BINARY_DIR}/manifest_mutation_${kind}.cpp")
+  file(WRITE "${copy}" "${mutated}")
+  set(name "model_manifest_mutant_${kind}")
+  add_executable(${name} ../serve/model_manifest_test.cpp "${copy}"
+    ../../src/cli/serve/release_profile.cpp)
+  target_link_libraries(${name} PRIVATE bubo_prepare_test gufo_core gufo_logging)
+  set_target_properties(${name} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  add_test(NAME ${name} COMMAND ${name})
+  set_tests_properties(${name} PROPERTIES WILL_FAIL TRUE
+    LABELS "cpu;prepare;release;resolver;mutation")
+endforeach()
+
 add_executable(prepare_integration_test prepare_integration_test.cpp
   ../../src/cli/serve/model_manifest.cpp ../../src/cli/serve/release_profile.cpp)
 target_link_libraries(prepare_integration_test PRIVATE bubo_prepare_test gufo_core gufo_logging)

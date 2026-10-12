@@ -13,7 +13,7 @@ Empty environment values count as unset and produce a warning.
 | --- | --- | --- | --- | --- |
 | `--allow-unmeasured-memory` | Allow subagent context above the measured token limit. | Unset | Keep it off unless the required context exceeds the measured memory limit. | any; generic; any |
 | `--api-key` | Require an API key from clients. | Unset | Set a key when clients must authenticate to the server. | any; generic; any |
-| `--cache-disk` | Set the disk prompt cache directory. | Off | Set a directory when prompt snapshots must persist across server restarts. | any; generic; any |
+| `--cache-disk` | Set the disk prompt cache directory. | Off | Opt in for fast restarts. Prepared model bytes are verified once; matching verification stamps skip later hashes. | any; generic; any |
 | `--cache-disk-bytes` | Limit disk prompt cache storage. | 8,589,934,592 | Keep 8 GiB unless the disk cache must retain more prompt snapshots. | any; generic; any |
 | `--cache-disk-staging-bytes` | Limit RAM used to stage disk prompt snapshots. | 0 = auto (<= disk budget, <= 1/8 available RAM) | Keep automatic sizing unless disk persistence needs a different RAM limit. | any; generic; any |
 | `--cache-ram-bytes` | Set the RAM snapshot cache budget. | 6442450944 | Keep the profile limit unless available host RAM requires a smaller cache. | any; strix-halo-tuned; qwen3.8-flash-next |

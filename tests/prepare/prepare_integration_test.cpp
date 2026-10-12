@@ -321,6 +321,8 @@ int main(int argc, char** argv) {
         model_root / fs::u8path(entries[0].destination), "default", entries);
     Check(package.files.size() == 8 && package.defaults.size() == 4,
           "resolver consumes prepare's exact eight-file manifest");
+    Check(package.hashed_files == 0 && !package.MainIdentity().empty(),
+          "fresh streaming preparation supplies a zero-hash cache identity");
     ReleaseInputs inputs;
     inputs.model_path = model_root / fs::u8path(entries[0].destination);
     inputs.model_family = "qwen3.8-flash-next";

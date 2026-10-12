@@ -1,6 +1,7 @@
 #include "src/cli/serve/release_profile.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <charconv>
 #include <cmath>
@@ -521,7 +522,9 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
       setting.value = "0";
       setting.origin = "flag";
     }
-    if ((name == "--cache-disk" && enabled("--no-cache-disk")) ||
+    if ((name == "--cache-disk" &&
+         (enabled("--no-cache-disk") || enabled("--no-cache") ||
+          exact_controls)) ||
         (name == "--mmproj" && enabled("--no-vision")) ||
         (name == "--mtp-model" && enabled("--no-mtp"))) {
       setting.value.reset();
@@ -575,7 +578,6 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
     if (exact_controls && match &&
         ((name == "--sessions" &&
           setting.value != std::optional<std::string>("1")) ||
-         (name == "--cache-disk" && setting.value) ||
          (name == "GUFO_PREFILL_FORWARD_TOKENS" && setting.value &&
           std::strtol(setting.value->c_str(), nullptr, 10) != 4096) ||
          (name == "--no-cache" &&
@@ -1009,29 +1011,19 @@ ReleaseStartup PrepareReleaseSettings(
           std::string(manifest_path.begin(), manifest_path.end()) +
           "; size + pinned header/tensor table checked; payload hashes are "
           "opt-in");
-      const auto cache = startup.resolved.effective_flags.find("--cache-disk");
-      if (cache != startup.resolved.effective_flags.end() &&
-          !cache->second.empty()) {
-        if (startup.package.MainIdentity().empty())
-          throw std::invalid_argument(
-              "bubo-package.json: --cache-disk requires observed whole-file "
-              "digests; run serve --verify-model");
-        if (!startup.resolved.artefacts.mtp.empty() &&
-            startup.package
-                .IdentityFor(
-                    std::filesystem::u8path(startup.resolved.artefacts.mtp))
-                .empty())
-          throw std::invalid_argument(startup.resolved.artefacts.mtp +
-                                      ": --cache-disk requires --verify-model "
-                                      "for the selected override");
-      }
-    } else if (const auto cache =
-                   startup.resolved.effective_flags.find("--cache-disk");
-               cache != startup.resolved.effective_flags.end() &&
-               !cache->second.empty())
-      throw std::invalid_argument(
-          "bubo-package.json: --cache-disk requires a prepared manifest and "
-          "--verify-model; no implicit startup payload hashing");
+    }
+    if (const auto cache =
+            startup.resolved.effective_flags.find("--cache-disk");
+        cache != startup.resolved.effective_flags.end() &&
+        !cache->second.empty()) {
+      const auto& artefacts = startup.resolved.artefacts;
+      const std::array<std::filesystem::path, 4> paths{
+          std::filesystem::u8path(artefacts.mtp),
+          std::filesystem::u8path(artefacts.mmproj),
+          std::filesystem::u8path(artefacts.twin),
+          std::filesystem::u8path(artefacts.draft_head)};
+      EnsureDiskCacheIdentity(startup.package, paths, &std::cerr);
+    }
     ApplyInjections(startup.resolved);
   } catch (const std::exception& error) {
     startup.error = error.what();

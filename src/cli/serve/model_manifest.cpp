@@ -12,6 +12,7 @@
 #include "src/core/prepare/gguf_fingerprint.hpp"
 #include "src/core/prepare/hash_file.hpp"
 #include "src/core/prepare/metadata_json.hpp"
+#include "src/core/prepare/verified_state.hpp"
 
 namespace gufo::server {
 namespace {
@@ -62,6 +63,7 @@ void CheckHeader(const fs::path& path) {
     Fail(path, "invalid GGUF header/tensor table: " + error);
 }
 void Verify(PackageFile& file, ModelPackage& package, std::ostream* output) {
+  const auto stamp = file.lease->Snapshot();
   if (output)
     *output << "verify-model: " << Display(file.path) << " (" << file.size
             << " bytes)\n";
@@ -79,35 +81,29 @@ void Verify(PackageFile& file, ModelPackage& package, std::ostream* output) {
   package.hashed_bytes += file.size;
   if (digest != file.sha256)
     Fail(file.path, "SHA-256 mismatch");
+  if (file.lease->Snapshot() != stamp)
+    Fail(file.path, "file identity changed during verification");
+  file.verified_stamp = stamp;
+  file.freshly_verified = true;
   file.observed_verified = true;
 }
-std::map<std::string, prep::FileStamp> Stamps(const fs::path& root) {
-  std::map<std::string, prep::FileStamp> result;
-  try {
-    const auto state =
-        meta::Parse(meta::Read(root / ".bubo" / "prepare-state.json"));
-    meta::Keys(state, {"schema_version", "package_id", "files"});
-    if (meta::Integer(meta::Required(state, "schema_version")) != 1 ||
-        meta::String(meta::Required(state, "package_id")) != prep::kPackageId)
-      return {};
-    const auto& files = meta::Required(state, "files");
-    if (!files.is_array() || files.size() != 8)
-      return {};
-    for (const auto& row : files.items()) {
-      meta::Keys(row, {"file", "sha256", "size", "modified", "identity"});
-      const auto key = meta::String(meta::Required(row, "file")) + ":" +
-                       meta::String(meta::Required(row, "sha256"));
-      prep::FileStamp stamp{meta::Integer(meta::Required(row, "size")),
-                            meta::String(meta::Required(row, "modified")),
-                            meta::String(meta::Required(row, "identity"))};
-      if (stamp.modified.empty() || stamp.identity.empty() ||
-          !result.emplace(key, std::move(stamp)).second)
-        return {};
+void SaveVerification(ModelPackage& package, std::ostream* output) {
+  prep::VerifiedStamps rows;
+  for (const auto& file : package.files)
+    if (file.freshly_verified)
+      rows[{file.logical_name, file.sha256}] = file.verified_stamp;
+  std::string error;
+  if (!prep::SaveVerifiedStamps(package.manifest_path.parent_path(), rows,
+                               error)) {
+    if (output && !package.stamp_save_failed) {
+      std::replace_if(error.begin(), error.end(),
+                      [](unsigned char c) { return c < 32 || c == 127; }, ' ');
+      *output << "verification stamp not saved: " << error << '\n';
     }
-  } catch (...) {
-    return {};  // A missing/stale stamp never causes default payload hashing.
+    package.stamp_save_failed = true;
   }
-  return result;
+  for (auto& file : package.files)
+    file.freshly_verified = false;
 }
 std::array<unsigned, 3> Version(std::string_view value) {
   std::array<unsigned, 3> result{};
@@ -133,8 +129,8 @@ ModelPackage Load(
   if (model.empty() && selected.empty()) {
     if (verify)
       Fail("bubo-package.json",
-           "--verify-model requires --manifest or a discovered "
-           "bubo-package.json");
+           "prepared model manifest required; run bubo prepare or provide "
+           "--manifest bubo-package.json");
     return result;
   }
   const bool model_directory = !model.empty() && fs::is_directory(model);
@@ -153,8 +149,8 @@ ModelPackage Load(
   if (!fs::exists(manifest)) {
     if (!selected.empty() || verify)
       Fail(manifest,
-           "--verify-model requires --manifest or a discovered "
-           "bubo-package.json; file is missing");
+           "prepared model manifest is missing; run bubo prepare or provide "
+           "--manifest bubo-package.json");
     return result;
   }
   result.manifest_path = Absolute(manifest);
@@ -202,7 +198,7 @@ ModelPackage Load(
     if (!shards.is_array() || shards.size() != 4)
       Fail(manifest, "model files must name exactly four shards");
     meta::Keys(artefacts, {"mtp", "mmproj", "twin", "draft_head"});
-    const auto stamps = Stamps(root);
+    const auto stamps = prep::ReadVerifiedStamps(root);
     std::size_t shard_index = 0;
     std::optional<std::uint64_t> total_tensors;
     bool model_named = model.empty() || model_directory;
@@ -240,7 +236,8 @@ ModelPackage Load(
       }
       PackageFile file{std::string(entry.logical_name),
                        std::string(entry.sha256),
-                       Absolute(root / fs::u8path(name)), entry.size};
+                       Absolute(root / fs::u8path(name)), entry.size,
+                       false, {}, {}, false};
       try {
         file.lease =
             std::make_shared<prep::ReadLease>(prep::NativePath(file.path));
@@ -278,11 +275,11 @@ ModelPackage Load(
           }
           ++shard_index;
         }
-        const auto stored = stamps.find(name + ":" + std::string(entry.sha256));
-        // J2's default shard fingerprint stamp records a target digest, not
-        // an observed whole-file digest. Matching it cannot authorize a disk
-        // cache content identity. Default startup only consumes cheap checks.
-        (void)stored;
+        const auto stored = stamps.find({file.logical_name, file.sha256});
+        // Fingerprint-only preparation records target digests. Only a full
+        // hash stamp matching this held read lease authorizes cache identity.
+        file.observed_verified =
+            stored != stamps.end() && stored->second == stamp;
         if (verify)
           Verify(file, result, output);
         if (file.lease->Snapshot() != stamp)
@@ -310,6 +307,8 @@ ModelPackage Load(
   } catch (const std::exception& error) {
     Fail(result.manifest_path, error.what());
   }
+  if (verify)
+    SaveVerification(result, output);
   return result;
 }
 std::string Aggregate(std::span<const PackageFile* const> files) {
@@ -342,11 +341,15 @@ ModelPackage LoadModelPackageForTesting(
 void CheckPackageOverrides(ModelPackage& package,
                            const std::map<std::string, std::string>& paths,
                            bool verify, std::ostream* output) {
+  if (package.manifest_path.empty())
+    return;
   const std::map<std::string, std::string> names = {
       {"--mtp-model", "mtp"},
       {"--mmproj", "mmproj"},
       {"GUFO_DENSE_TWIN_MODEL", "twin"},
       {"GUFO_DRAFT_OUT_MODEL", "draft_head"}};
+  const auto stamps =
+      prep::ReadVerifiedStamps(package.manifest_path.parent_path());
   for (const auto& [key, path] : paths) {
     if (!names.contains(key) || path.empty())
       continue;
@@ -367,19 +370,67 @@ void CheckPackageOverrides(ModelPackage& package,
       continue;
     }
     PackageFile file{original->logical_name, original->sha256, absolute,
-                     original->size};
+                     original->size, false, {}, {}, false};
     try {
       file.lease =
           std::make_shared<prep::ReadLease>(prep::NativePath(file.path));
-      if (file.lease->Snapshot().size != file.size)
+      const auto stamp = file.lease->Snapshot();
+      if (stamp.size != file.size)
         Fail(file.path, "override size mismatch");
       CheckHeader(file.path);
+      const auto stored = stamps.find({file.logical_name, file.sha256});
+      file.observed_verified =
+          stored != stamps.end() && stored->second == stamp;
       if (verify)
         Verify(file, package, output);
+      if (file.lease->Snapshot() != stamp)
+        Fail(file.path, "file identity changed during validation");
     } catch (const std::exception& error) {
       Fail(file.path, error.what());
     }
     package.files.push_back(std::move(file));
+  }
+  if (verify)
+    SaveVerification(package, output);
+}
+void EnsureDiskCacheIdentity(ModelPackage& package,
+                            std::span<const fs::path> selected,
+                            std::ostream* output) {
+  if (package.manifest_path.empty())
+    throw std::invalid_argument(
+        "--cache-disk requires a prepared model package; run bubo prepare "
+        "or provide --manifest bubo-package.json");
+  std::vector<PackageFile*> needed;
+  for (auto& file : package.files)
+    if (file.logical_name.starts_with("main_") ||
+        std::ranges::any_of(selected, [&](const auto& path) {
+          return !path.empty() && file.path == Absolute(path);
+        }))
+      needed.push_back(&file);
+  for (const auto& path : selected)
+    if (!path.empty() &&
+        std::ranges::none_of(needed, [&](const auto* file) {
+          return file->path == Absolute(path);
+        }))
+      Fail(path, "selected file is not named by the pinned manifest");
+  const bool missing = std::ranges::any_of(needed, [](const auto* file) {
+    return !file->observed_verified;
+  });
+  if (output) {
+    if (missing)
+      *output << "disk cache: verifying model files once (about 2-4 minutes); "
+                 "later starts skip this\n";
+    else
+      *output << "disk cache: model identity from verification stamp\n";
+  }
+  for (auto* file : needed)
+    if (!file->observed_verified)
+      Verify(*file, package, output);
+  if (missing) {
+    if (output)
+      *output << "verify-model: checked " << package.hashed_files << " files, "
+              << package.hashed_bytes << " bytes\n";
+    SaveVerification(package, output);
   }
 }
 std::string ModelPackage::MainIdentity() const {

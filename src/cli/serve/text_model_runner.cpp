@@ -446,6 +446,8 @@ std::string_view DiskEventReasonName(
       return "hit";
     case ContinuationDiskEventReason::kNotFound:
       return "not_found";
+    case ContinuationDiskEventReason::kIdentityMismatch:
+      return "identity_mismatch_ignored";
     case ContinuationDiskEventReason::kUnsupported:
       return "unsupported";
     case ContinuationDiskEventReason::kByteCapacity:
@@ -527,7 +529,8 @@ void EmitDiskEvent(const ContinuationDiskEvent& event) noexcept {
            << " hash_ms=" << event.phase_hash_ms
            << " fsync_ms=" << event.phase_fsync_ms;
       Logger::Info("cache", line.str());
-    } else if (event.reason == ContinuationDiskEventReason::kLru ||
+    } else if (event.reason == ContinuationDiskEventReason::kIdentityMismatch ||
+               event.reason == ContinuationDiskEventReason::kLru ||
                event.reason == ContinuationDiskEventReason::kMinStep) {
       // Staying inside a configured budget or skipping a checkpoint that
       // barely advances is expected operation, but it has to be visible:

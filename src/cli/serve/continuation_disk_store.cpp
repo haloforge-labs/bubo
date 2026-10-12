@@ -1728,6 +1728,15 @@ struct ContinuationDiskStore::Impl {
       const EntryIterator candidate = FindLongestInputCandidate(
           runner, prompt, input_identity, input_prefixes);
       if (candidate == entries.end()) {
+        if (!identity_mismatch_reported &&
+            std::ranges::any_of(entries, [&](const auto& entry) {
+              return !entry.persistence.compatibility_identity.empty() &&
+                     entry.persistence != *descriptor.persistence;
+            })) {
+          identity_mismatch_reported = true;
+          Emit(ContinuationDiskEventAction::kSkipped,
+               ContinuationDiskEventReason::kIdentityMismatch, 0, 0, 0);
+        }
         Emit(ContinuationDiskEventAction::kMiss,
              ContinuationDiskEventReason::kNotFound, 0, 0, 0);
         return {};
@@ -1925,6 +1934,7 @@ struct ContinuationDiskStore::Impl {
   mutable std::binary_semaphore operation_gate{1};
   std::mutex write_mutex;
   std::list<Entry> entries;
+  bool identity_mismatch_reported = false;
   std::unordered_multimap<std::string, EntryIterator> index;
   std::map<PersistenceKey, PrefixNode> prefixes;
   std::atomic<std::size_t> retained{0};

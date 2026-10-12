@@ -69,7 +69,7 @@
       "purpose": "Set the disk prompt cache directory.",
       "default_text": "Off",
       "hardware_scope": "generic",
-      "note": "Set a directory when prompt snapshots must persist across server restarts.",
+      "note": "Opt in for fast restarts. Prepared model bytes are verified once; matching verification stamps skip later hashes.",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],

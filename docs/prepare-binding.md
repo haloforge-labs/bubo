@@ -79,29 +79,36 @@ with other required settings supplied separately.
 
 At ordinary startup, all eight named files receive size and GGUF header/tensor
 checks and their manifest entries must match compiled pins. Main header/table
-bytes also match J2's immutable header/table pins. Default startup reads no
-tensor payload for hashing, including the first start. J2's measured warm
-fingerprint time (about 1.4 seconds) does not authorize cold-start payload
-hashing; fingerprints remain part of `prepare`. These checks cover wrong file,
-wrong variant, and truncation; same-size valid-header payload corruption needs
-an explicit full byte check. `prepare --verify` checks complete bytes;
+bytes also match immutable header/table pins. Without `--cache-disk` or
+`--verify-model`, startup never hashes tensor payloads, including the first
+start. These cheap checks cover wrong files, wrong variants and truncation;
+same-size valid-header payload corruption needs a full byte check.
+`prepare --verify` checks complete bytes;
 `serve --verify-model` hashes all eight manifest files even when disabled,
 plus distinct selected overrides, before engine creation, with file/byte
 progress (about 2–4 minutes on SSD; slower storage takes longer). A manifest
 is required for `--verify-model`. Runtime files, JSON and unrelated files are
 outside that hash extent. No imatrix is prepared or verified.
 
-J2's default shard stamp has a target digest rather than an independently
-observed whole-file digest. It cannot authorize persistent disk-cache identity.
-Manifest-backed `--cache-disk` therefore requires full `--verify-model` in the
-current invocation; missing/stale stamps never trigger a full first-start hash.
-The default check does not promise full payload equality. Read leases deny
-concurrent write/delete while preparation checks and engine mapping complete.
-No sidecar cold-start hash cache is created.
-With no manifest, an explicit disk cache is rejected rather than triggering
-the older backend's implicit whole-file identity scan. This applies the
-owner's no-startup-payload-hashing rule before the older design's compatibility
-exception for unprepared disk caches.
+The fingerprint-only `prepare-state.json` records target digests and cannot
+authorize persistent disk-cache identity. Full checks that match catalogue
+pins save separate rows in `.bubo/verified-state.json`, keyed by logical name
+and pinned SHA-256. A row authorizes identity only when size, modification
+stamp and file identity match the file's held read lease. Read leases deny
+concurrent write/delete while validation and engine mapping complete.
+
+Opt-in `--cache-disk` automatically hashes unstamped main shards and selected
+artefacts once (about 2–4 minutes), then later matching starts skip hashing.
+Changed stamps trigger re-verification; mismatching bytes fail with a SHA-256
+error. Streaming preparation and `prepare --verify` also save verified rows.
+Stamp writes are best effort: an unwritable destination logs one line and
+serving continues; a later start re-verifies the unstamped files.
+`--verify-model` always forces its complete hash extent, even with valid rows.
+Without a manifest, disk caching requires `bubo prepare` or `--manifest`.
+The exact profile's `--no-cache` control ignores disk-cache flags.
+Snapshots carry the aggregate model identity in their compatibility key and
+header. Other identities are ignored with one log line and retained under
+the existing cache eviction policy.
 
 Manifest paths are relative to its folder and must exactly match compiled
 entries. Lexical traversal (`..`), absolute/drive/UNC paths and colons are

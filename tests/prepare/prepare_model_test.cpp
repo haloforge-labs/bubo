@@ -15,6 +15,7 @@
 #include "src/core/prepare/hash_file.hpp"
 #include "src/core/prepare/metadata_json.hpp"
 #include "src/core/prepare/transport.hpp"
+#include "src/core/prepare/verified_state.hpp"
 #include "tests/prepare/loopback_stub.hpp"
 
 #ifdef _WIN32
@@ -390,8 +391,15 @@ int main(int argc, char** argv) {
     Require(Run(options, env, out, err) == 0 &&
                 out.find("prepare verify: 8/8") != out.npos,
             "verify eight files progress");
-    Require(transport.requests == 8 && snapshot == Files(model),
-            "verify read-only no-op");
+    const auto after_verify = Files(model);
+    for (const auto& [path, stamp] : snapshot)
+      if (fs::is_regular_file(path) &&
+          path.filename() != "verified-state.json" &&
+          path.filename() != "verified-state.lock")
+        Require(after_verify.at(path) == stamp,
+                "verify preserves payloads and preparation metadata");
+    Require(transport.requests == 8 && ReadVerifiedStamps(model).size() == 8,
+            "verify refreshes eight observed stamp rows without transfers");
     options.verify = false;
     Write(model / ".bubo" / "prepare-state.json", "{ malformed state }");
     fingerprints = 0;

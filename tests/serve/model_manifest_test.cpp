@@ -1,6 +1,8 @@
 #include "src/cli/serve/model_manifest.hpp"
 
+#include <algorithm>
 #include <array>
+#include <chrono>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -10,6 +12,8 @@
 #include "src/cli/serve/release_profile.hpp"
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/prepare/gguf_fingerprint.hpp"
+#include "src/core/prepare/metadata_json.hpp"
+#include "src/core/prepare/verified_state.hpp"
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
@@ -147,9 +151,10 @@ struct Fixture {
     Save();
   }
   void Save() { Write(root / "bubo-package.json", manifest.dump()); }
-  ModelPackage Load(bool verify = false, const fs::path& selected = {}) {
+  ModelPackage Load(bool verify = false, const fs::path& selected = {},
+                    std::ostream* progress = nullptr) {
     return LoadModelPackageForTesting(
-        root / entries[0].destination, "default", entries, verify, nullptr,
+        root / entries[0].destination, "default", entries, verify, progress,
         [&](const prep::Entry& entry) {
           return pins.at(std::string(entry.logical_name));
         },
@@ -389,7 +394,7 @@ void ManifestCases(const fs::path& directory) {
   Write(fixture.root / fixture.entries[6].destination, Gguf(6, false));
   fs::remove(fixture.root / "bubo-package.json");
   Expect(fixture.Load().files.empty(), "no manifest keeps legacy flags/env");
-  Reject([&] { fixture.Load(true); }, "requires --manifest");
+  Reject([&] { fixture.Load(true); }, "bubo prepare");
   Write(fixture.root / "legacy.bubo.json", "broken legacy ignored");
   Expect(fixture.Load().files.empty(), "only canonical filename discovered");
   fixture.Save();
@@ -405,6 +410,196 @@ void ManifestCases(const fs::path& directory) {
   Expect(directory_package.files.size() == 8, "prepare output ROOT discovery");
   directory_package = {};
 }
+void DiskStampCases(const fs::path& directory) {
+  Fixture fixture(directory);
+  const auto state_path = fixture.root / ".bubo" / "verified-state.json";
+  const std::array<fs::path, 4> selected{
+      fixture.root / fixture.entries[4].destination,
+      fixture.root / fixture.entries[5].destination,
+      fixture.root / fixture.entries[6].destination,
+      fixture.root / fixture.entries[7].destination};
+  auto package = fixture.Load();
+  Expect(package.hashed_files == 0 && package.MainIdentity().empty(),
+         "default startup without cache never hashes missing stamps");
+  std::ostringstream progress;
+  EnsureDiskCacheIdentity(package, selected, &progress);
+  Expect(package.hashed_files == 8 && !package.MainIdentity().empty() &&
+             fs::exists(state_path),
+         "disk cache automatically verifies and writes all needed rows");
+  Expect(progress.str().find("disk cache: verifying model files once") !=
+             std::string::npos &&
+             progress.str().find("verify-model:") != std::string::npos,
+         "automatic verification explains its cost and reports hash progress");
+  const auto identity = package.MainIdentity();
+  const auto baseline = prep::metadata::Parse(Read(state_path));
+  Expect(baseline.member_str("package_id") == prep::kPackageId &&
+             baseline.find("schema_version")->as_size() == 1 &&
+             baseline.find("files")->size() == 8,
+         "verification stamp schema and one row per verified file");
+  package = {};
+  package = fixture.Load();
+  progress.str("");
+  EnsureDiskCacheIdentity(package, selected, &progress);
+  Expect(package.hashed_files == 0 && package.MainIdentity() == identity &&
+             std::ranges::all_of(package.files, [](const auto& file) {
+               return file.observed_verified;
+             }),
+         "matching lease snapshots authorize exact identity without hashing");
+  Expect(progress.str() ==
+             "disk cache: model identity from verification stamp\n",
+         "warm disk cache emits one stamp identity line");
+  package = {};
+  package = fixture.Load(true);
+  Expect(package.hashed_files == 8,
+         "explicit verify-model always hashes despite matching stamps");
+  package = {};
+  // A prepare fingerprint stamp with identical rows still proves no full hash.
+  fs::rename(state_path, fixture.root / ".bubo" / "prepare-state.json");
+  package = fixture.Load();
+  Expect(package.hashed_files == 0 && package.MainIdentity().empty(),
+         "fingerprint-only prepare state cannot authorize identity");
+  const std::array<fs::path, 0> main_only{};
+  EnsureDiskCacheIdentity(package, main_only);
+  Expect(package.hashed_files == 4 && !package.files[4].observed_verified,
+         "automatic verification hashes only four shards without artefacts");
+  package = {};
+  // Each malformed row/schema mutation must lose trust before hashing.
+  for (const auto* field : {"schema_version", "package_id", "file", "sha256",
+                            "size", "modified", "identity", "duplicate"}) {
+    auto mutated = baseline;
+    auto rows = mutated["files"].items();
+    auto& row = *std::ranges::find_if(rows, [&](const auto& candidate) {
+      return candidate.member_str("file") == fixture.entries[0].logical_name;
+    });
+    const std::string name(field);
+    if (name == "schema_version")
+      mutated[name] = 2;
+    else if (name == "package_id")
+      mutated[name] = "another-package";
+    else if (name == "size")
+      row[name] = static_cast<unsigned long long>(fixture.entries[0].size + 1);
+    else if (name == "sha256")
+      row[name] = std::string(64, '0');
+    else if (name == "duplicate") {
+      const auto copied = row;
+      rows.push_back(copied);
+    } else
+      row[name] = "changed";
+    mutated["files"] = Value::array();
+    for (const auto& item : rows)
+      mutated["files"].push_back(item);
+    Write(state_path, mutated.dump());
+    package = fixture.Load();
+    Expect(package.hashed_files == 0 && package.MainIdentity().empty(),
+           "stale or invalid stamp never authorizes main identity: " + name);
+    EnsureDiskCacheIdentity(package, main_only);
+    Expect(package.hashed_files > 0 && package.MainIdentity() == identity,
+           "disk cache replaces stale rows after hashing: " + name);
+    package = {};
+  }
+  Write(state_path, baseline.dump());
+  const auto shard = fixture.root / fixture.entries[0].destination;
+  fs::last_write_time(shard, fs::last_write_time(shard) +
+                                std::chrono::seconds(2));
+  package = fixture.Load();
+  Expect(package.hashed_files == 0 && !package.files[0].observed_verified,
+         "mtime change revokes only the stale file's verification");
+  EnsureDiskCacheIdentity(package, main_only);
+  Expect(package.hashed_files == 1 && package.MainIdentity() == identity,
+         "unchanged bytes with changed mtime are rehashed and restamped");
+  package = {};
+  auto corrupt = Read(shard);
+  corrupt.back() ^= 1;
+  Write(shard, corrupt);
+  package = fixture.Load();
+  Expect(package.hashed_files == 0,
+         "stale stamp never forces hashing on the default no-cache path");
+  const auto before_failure = Read(state_path);
+  Reject([&] { EnsureDiskCacheIdentity(package, main_only); },
+         "SHA-256 mismatch");
+  Expect(Read(state_path) == before_failure,
+         "failed full hash cannot replace a verified stamp row");
+  package = {};
+  Write(shard, Gguf(0, true));
+  Write(shard, Read(shard) + "x");
+  Reject([&] { fixture.Load(); }, "size mismatch");
+  Write(shard, Gguf(0, true));
+  fs::remove(state_path);
+  fs::create_directory(state_path);
+  fs::permissions(state_path, fs::perms::owner_read | fs::perms::owner_exec,
+                  fs::perm_options::replace);
+  package = fixture.Load();
+  progress.str("");
+  EnsureDiskCacheIdentity(package, main_only, &progress);
+  Expect(package.hashed_files == 4 && !package.MainIdentity().empty() &&
+             progress.str().find("verification stamp not saved: ") !=
+                 std::string::npos,
+         "read-only stamp destination keeps serving with one failure line");
+  const auto failure = progress.str().find("verification stamp not saved: ");
+  Expect(progress.str().find("verification stamp not saved: ", failure + 1) ==
+             std::string::npos,
+         "stamp save failure logs once");
+  package = {};
+  package = fixture.Load();
+  EnsureDiskCacheIdentity(package, main_only);
+  Expect(package.hashed_files == 4,
+         "unpersisted verification hashes again on the next start");
+  package = {};
+  progress.str("");
+  package = fixture.Load(true, {}, &progress);
+  Expect(package.hashed_files == 8 && !package.MainIdentity().empty() &&
+             progress.str().find("verification stamp not saved: ") !=
+                 std::string::npos,
+         "explicit verification also succeeds with an unwritable stamp");
+  package = {};
+  fs::permissions(state_path, fs::perms::owner_all, fs::perm_options::replace);
+  fs::remove(state_path);
+  package = fixture.Load(true);
+  package = {};
+  const auto override_path = fixture.root / "selected-twin.gguf";
+  Write(override_path, Read(selected[2]));
+  const std::array<fs::path, 1> override_selected{override_path};
+  package = fixture.Load();
+  CheckPackageOverrides(package,
+                        {{"GUFO_DENSE_TWIN_MODEL", Utf8(override_path)}}, false);
+  EnsureDiskCacheIdentity(package, override_selected);
+  Expect(package.hashed_files == 1 &&
+             !package.IdentityFor(override_path).empty(),
+         "distinct selected override is automatically verified once");
+  package = {};
+  package = fixture.Load();
+  CheckPackageOverrides(package,
+                        {{"GUFO_DENSE_TWIN_MODEL", Utf8(override_path)}}, false);
+  EnsureDiskCacheIdentity(package, override_selected);
+  Expect(package.hashed_files == 0 && package.files.back().observed_verified,
+         "override lease also reuses its matching verification row");
+  Expect(!package.files[6].observed_verified,
+         "same pinned bytes at another file identity cannot borrow the row");
+  package = {};
+  fs::remove(fixture.root / "bubo-package.json");
+  package = fixture.Load();
+  Reject([&] { EnsureDiskCacheIdentity(package, main_only); }, "bubo prepare");
+  const char* args[] = {"llm", "--cache-disk", "cache"};
+  const auto absent = PrepareReleaseSettings(args);
+  Expect(absent.error.find("bubo prepare") != std::string::npos &&
+             absent.error.find("--verify-model") == std::string::npos,
+         "startup without manifest directs disk cache users to preparation");
+  const auto plain_model = Utf8(shard);
+  const char* plain_args[] = {"llm", "--model", plain_model.c_str(),
+                             "--profile", "stock", "--cache-disk", "cache"};
+  const auto plain = PrepareReleaseSettings(plain_args);
+  Expect(plain.error.find("bubo prepare") != std::string::npos &&
+             plain.package.hashed_files == 0,
+         "plain model without manifest refuses before any full hash");
+  ReleaseInputs exact;
+  exact.profile = "exact";
+  exact.model_family = "qwen3.8-flash-next";
+  exact.explicit_flags["--cache-disk"] = "ignored-cache";
+  const auto resolved = ResolveReleaseSettings(exact);
+  Expect(!resolved.effective_flags.contains("--cache-disk") &&
+             resolved.effective_flags.at("--no-cache") == "1",
+         "exact ignores disk cache flags through its no-cache control");
+}
 }  // namespace
 int main() {
   const auto scratch = fs::temp_directory_path() / "bubo-manifest-test";
@@ -412,6 +607,7 @@ int main() {
     fs::remove_all(scratch);
     fs::create_directories(scratch);
     Matrix();
+    DiskStampCases(scratch / "disk-stamps");
     ManifestCases(scratch / fs::u8path("models with spaces-\xc3\xa9"));
     fs::remove_all(scratch);
     std::cout
