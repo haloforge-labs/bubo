@@ -2,6 +2,10 @@
 $ErrorActionPreference = 'Stop'
 $repository = (Resolve-Path "$PSScriptRoot\..\..").Path
 $source = Get-Content -LiteralPath "$repository\tools\windows\package.ps1" -Raw
+if (!$source.Contains('Built from https://github.com/haloforge-labs/bubo commit')) { throw 'packaged README repository URL' }
+$readme = Get-Content -LiteralPath "$repository\tools\windows\prebuilt\README.txt" -Raw
+if (!$readme.Contains('downloads 8 files, about 108.6 GiB in total') -or
+    !$readme.Contains('about 113 GiB of free disk space')) { throw 'packaged model preparation facts' }
 $match = [regex]::Match($source, '\$missing = @\(\$closure\.Edges \| Where-Object (\{[\s\S]*?\})\s*\)')
 if (-not $match.Success) { throw 'Missing production closure predicate anchor' }
 $predicate = [ScriptBlock]::Create($match.Groups[1].Value.Substring(1, $match.Groups[1].Value.Length - 2))

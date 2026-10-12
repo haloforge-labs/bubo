@@ -2,5 +2,6 @@
 rem Bubo on Windows: pick a model and its features with number keys.
 rem   start.cmd          menu        start.cmd -Last     the previous choice again
 rem   start.cmd -DryRun  print the command instead of starting the server
+rem   start.cmd -CacheDisk BuboCache   keep prompt snapshots for fast restarts
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\windows\launcher.ps1" %*
 exit /b %errorlevel%

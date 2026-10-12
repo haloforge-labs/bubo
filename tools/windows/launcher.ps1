@@ -7,6 +7,7 @@
 #   start.cmd -Last      start the previous choice again
 #   start.cmd -DryRun    print the bubo command instead of starting it
 #   start.cmd -Bin DIR   use bubo.exe from DIR
+#   start.cmd -CacheDisk BuboCache   keep prompt snapshots for fast restarts
 #
 # Choices are remembered in %LOCALAPPDATA%\gufo\launcher.json. The full
 # question-by-question launcher is tools\windows\start.ps1.
@@ -14,10 +15,18 @@ param(
   [switch]$Last,
   [switch]$DryRun,
   [string]$Bin = "",
+  [string]$CacheDisk = "",
   # Testing: key presses to replay instead of reading the keyboard (E = Enter).
   [string]$Keys = ""
 )
 $ErrorActionPreference = "Stop"
+if ($PSBoundParameters.ContainsKey('CacheDisk')) {
+  if ([string]::IsNullOrWhiteSpace($CacheDisk) -or
+      $CacheDisk.IndexOfAny([IO.Path]::GetInvalidPathChars()) -ge 0) {
+    throw '-CacheDisk requires a non-empty valid folder path'
+  }
+  [void][IO.Path]::GetFullPath($CacheDisk)
+}
 . (Join-Path $PSScriptRoot "vc-runtime.ps1")
 if (-not (Confirm-BuboVcRuntime)) { exit 4 }
 . (Join-Path $PSScriptRoot "inventory.ps1")
@@ -70,6 +79,11 @@ function Get-PortOwner([int]$Port) {
 
 function Start-Plan($Plan) {
   $gufoArgs = @($Plan.Args)
+  $title = $Plan.Title
+  if ($CacheDisk) {
+    $gufoArgs += @("--cache-disk", $CacheDisk)
+    $title += ", disk cache"
+  }
   $port = [int]$Plan.Port
   $owner = Get-PortOwner $port
   if ($owner) {
@@ -85,10 +99,10 @@ function Start-Plan($Plan) {
   # Diagnostic switches from the shell must not leak into a normal start.
   foreach ($variable in Get-GufoEnvSwitches) { Remove-Item "Env:$($variable.Name)" -ErrorAction SilentlyContinue }
   foreach ($property in $Plan.Env.PSObject.Properties) { Set-Item "Env:$($property.Name)" $property.Value }
-  $shown = ($gufoArgs | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join " "
+  $shown = ($gufoArgs | ForEach-Object { if ($_ -match '\s') { '"' + ($_ -replace '(\\+)$', '$1$1') + '"' } else { $_ } }) -join " "
   $envText = ($Plan.Env.PSObject.Properties | ForEach-Object { "set $($_.Name)=$($_.Value) && " }) -join ""
   Write-Host ""
-  Write-Host $Plan.Title -ForegroundColor Cyan
+  Write-Host $title -ForegroundColor Cyan
   Write-Host "$envText`"$exe`" $shown" -ForegroundColor DarkGray
   if ($DryRun) { return }
   Write-Host ("OpenAI API: http://{0}:{1}/v1  model `"{2}`"   (ready at event=listening; Ctrl+C stops)" -f

@@ -36,9 +36,8 @@ PREPARE
   Full notices are saved in bin\licenses\, including NOTICE-windows.md.
   Keep the runtime wheel cache if offline repair is needed.
 
-  Production model preparation requires approved source pins and model notices.
-  An OPEN gate fails before transfer. Public download/provenance qualification
-  and the final production HIP package are separate release checks.
+  The model step downloads 8 files, about 108.6 GiB in total,
+  and needs about 113 GiB of free disk space.
 
 EXISTING MODEL
   Place the four exact catalogue-named shards in:

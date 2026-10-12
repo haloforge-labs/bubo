@@ -66,7 +66,7 @@ New-Item -ItemType Directory -Force (Join-Path $stage "licenses") | Out-Null
 Copy-Item (Join-Path $Vcpkg "installed\x64-windows\share\libwebp\copyright") (Join-Path $stage "licenses\libwebp.txt")
 Copy-Item (Join-Path $Vcpkg "installed\x64-windows\share\zlib\copyright") (Join-Path $stage "licenses\zlib.txt")
 $commit = (& git -C $root rev-parse --short HEAD 2>$null)
-Add-Content (Join-Path $stage "README.txt") "`r`nBuilt from https://github.com/pixmaate/gufo commit $commit ($Version)."
+Add-Content (Join-Path $stage "README.txt") "`r`nBuilt from https://github.com/haloforge-labs/bubo commit $commit ($Version)."
 
 & "$root\tools\release\check-package.ps1" -PackageFolder $stage
 if ($LASTEXITCODE -ne 0) { throw 'Release import deny-list failed' }

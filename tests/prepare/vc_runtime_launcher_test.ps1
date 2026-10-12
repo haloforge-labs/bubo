@@ -114,5 +114,41 @@ try {
   Write-Output "start.ps1 mock rc=$rc"
   $output | Write-Output
   if ($rc -ne 4 -or "$output" -notmatch 'https://aka.ms/vs/17/release/vc_redist.x64.exe') { throw 'start.ps1 missing-runtime refusal' }
+  # Exercise the real start.cmd forwarding and launcher with a remembered plan.
+  # An empty placeholder executable is never invoked under -DryRun.
+  [IO.File]::WriteAllText((Join-Path $windows 'vc-runtime.ps1'),
+    'function Confirm-BuboVcRuntime { return $true }')
+  [IO.File]::WriteAllText((Join-Path $windows 'inventory.ps1'),
+    '$GufoRoot = Split-Path (Split-Path $PSScriptRoot); function Get-GufoEnvSwitches { return @() }')
+  [IO.File]::WriteAllText((Join-Path $scratch 'bubo.exe'), '')
+  $savedLocal = $env:LOCALAPPDATA
+  $env:LOCALAPPDATA = Join-Path $scratch 'settings'
+  $settingsDirectory = Join-Path $env:LOCALAPPDATA 'gufo'
+  [IO.Directory]::CreateDirectory($settingsDirectory) | Out-Null
+  $plan = @{ Title = 'Fixture model'; Args = @('serve', '--port', '8080', 'llm', '--model', 'fixture.gguf')
+    Env = @{}; Port = 8080; Host = '127.0.0.1'; ServedName = 'fixture' }
+  @{ Last = $plan; Features = @{} } | ConvertTo-Json -Depth 6 |
+    Set-Content -LiteralPath (Join-Path $settingsDirectory 'launcher.json') -Encoding UTF8
+  $cacheFolder = Join-Path $scratch 'cache folder'
+  $env:PATH = "$scratch;$oldPath"
+  Push-Location -LiteralPath $scratch
+  try {
+    $output = & cmd.exe /d /c start.cmd -Last -DryRun -Bin $scratch -CacheDisk $cacheFolder 2>&1
+    if ($LASTEXITCODE -ne 0 -or
+        "$output" -notmatch ('--cache-disk "' + [regex]::Escape($cacheFolder) + '"') -or
+        "$output" -notmatch 'disk cache') { throw 'start.cmd disk cache forwarding/quoting/summary' }
+    $trailingFolder = $cacheFolder + '\'
+    $output = & cmd.exe /d /c start.cmd -Last -DryRun -Bin $scratch -CacheDisk $trailingFolder 2>&1
+    if ($LASTEXITCODE -ne 0 -or
+        "$output" -notmatch ('--cache-disk "' + [regex]::Escape($trailingFolder + '\') + '"')) { throw 'trailing separator quoting' }
+    $output = & cmd.exe /d /c start.cmd -Last -DryRun -Bin $scratch 2>&1
+    if ($LASTEXITCODE -ne 0 -or "$output" -match '--cache-disk') { throw 'disk cache must default off' }
+    $output = & cmd.exe /d /c start.cmd -Last -DryRun -Bin $scratch -CacheDisk '   ' 2>&1
+    if ($LASTEXITCODE -eq 0 -or "$output" -notmatch 'non-empty valid folder path') { throw 'blank cache folder accepted' }
+  } finally {
+    Pop-Location
+    $env:PATH = $oldPath
+    $env:LOCALAPPDATA = $savedLocal
+  }
   Write-Output 'PASS: start.cmd and start.ps1 use prerequisite detector before inventory/engine'
 } finally { Remove-Item -LiteralPath $scratch -Recurse -Force }

@@ -2951,13 +2951,6 @@
     "reason": "Retain the existing per-user cache/config location so saved state remains readable."
   },
   {
-    "file": "tools/windows/package.ps1",
-    "line": "Add-Content (Join-Path $stage \"README.txt\") \"`r`nBuilt from https://github.com/pixmaate/gufo commit $commit ($Version).\"",
-    "count": 1,
-    "category": "upstream-url",
-    "reason": "Upstream source/container URL retains its repository identity."
-  },
-  {
     "file": "tools/windows/run-flash-next.ps1",
     "line": "# -Greedy: temperature 0, the method of gufo's published tables, for",
     "count": 1,
