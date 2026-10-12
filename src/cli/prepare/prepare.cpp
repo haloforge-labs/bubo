@@ -280,8 +280,27 @@ int RunAll(const Options& options, const PreparePhase& model,
     if (const auto code = runtime(options, input, out, err, nullptr, true))
       return code;
   }
-  if (!model_plan.ready)
-    return model(options, input, out, err, nullptr, true);
+  if (!model_plan.ready) {
+    if (const auto code = model(options, input, out, err, nullptr, true))
+      return code;
+  }
+  // A phase that was ready in the preview may change while the other phase
+  // downloads. Revalidate a skipped model phase read-only; newly acquired
+  // model files were protected through the final manifest publication.
+  PreparationPlan final_model, final_runtime;
+  if (model_plan.ready) {
+    if (const auto code = model(options, input, out, err, &final_model, false))
+      return code;
+  } else
+    final_model.ready = true;
+  if (const auto code =
+          runtime(options, input, out, err, &final_runtime, false))
+    return code;
+  if (!final_model.ready || !final_runtime.ready) {
+    err << "prepare: E7 prepared files changed during the combined "
+           "preparation; run bubo prepare again\n";
+    return 7;
+  }
   return 0;
 }
 }  // namespace bubo::prepare

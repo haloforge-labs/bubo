@@ -555,11 +555,9 @@ int RunImpl(const Options& options, const Environment& env, std::istream& input,
     if (preview) {
       preview->ready = initial.ready;
       preview->volumes = initial.volumes;
-      preview->text = initial.ready
-                          ? std::string{}
-                          : ModelConsent(env.entries, root, initial.status,
-                                         initial.remaining, initial.volumes,
-                                         options.step != Step::Runtime);
+      preview->text =
+          ModelConsent(env.entries, root, initial.status, initial.remaining,
+                       initial.volumes, options.step != Step::Runtime);
       return 0;
     }
     // mutation-anchor: initial-readonly-check
