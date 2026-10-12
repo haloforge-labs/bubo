@@ -10,7 +10,7 @@ try {
     'vcruntime140_1.dll', 'concrt140.dll', 'vccorlib140.dll', 'vcomp140.dll',
     'MSVCP140_ATOMIC_WAIT.dll', 'Microsoft.VC143.CRT/anything.txt',
     'libomp140.x86_64.dll', 'ucrtbase.dll', 'api-ms-win-crt-runtime-l1-1-0.dll',
-    'concrete.txt', 'vcompat.md', 'clean')
+    'concrete.txt', 'concrt-notes.txt', 'vcompat.md', 'clean')
   foreach ($variant in $variants) {
     if ($Case -ne 'all' -and $Case -ne $variant) { continue }
     $zip = Join-Path $scratch (($variant -replace '[/\\]', '_') + '.zip')
@@ -24,7 +24,7 @@ try {
     $rc = $LASTEXITCODE
     Write-Output "ZIP $variant rc=$rc"
     $output | Write-Output
-    if ($variant -in @('clean', 'concrete.txt', 'vcompat.md')) {
+    if ($variant -in @('clean', 'concrete.txt', 'concrt-notes.txt', 'vcompat.md')) {
       if ($rc -ne 0 -or "$output" -notmatch 'PASS: release ZIP') { throw 'clean zip must pass' }
     } elseif ($rc -ne 1 -or "$output" -notmatch 'FAIL:.*(prerequisite|denied shipped)') {
       throw "zip containing $variant must fail the shipped-file gate"
