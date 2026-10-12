@@ -18,6 +18,8 @@ param(
   [string]$Keys = ""
 )
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "vc-runtime.ps1")
+if (-not (Confirm-BuboVcRuntime)) { exit 4 }
 . (Join-Path $PSScriptRoot "inventory.ps1")
 $invariant = [Globalization.CultureInfo]::InvariantCulture
 

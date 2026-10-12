@@ -7,13 +7,25 @@ builds are unaffected: the port lives in `compat/win32`, Windows-only files and
 
 ## Prebuilt
 
-Each [release](https://github.com/pixmaate/gufo/releases) carries
-`bubo-<product>-windows-x64.zip`: `bubo.exe` with the ROCm, vcpkg and Visual C++
-runtimes in `bin\`, and `start.cmd`. It needs only a Strix Halo (gfx1151)
-machine, a current AMD driver and the models; its `README.txt` lists the
-downloads. `tools\windows\package.ps1` makes the zip from a release build.
+The archive is `bubo-v<product-version>-windows-x64-gfx1151.zip`: `bubo.exe`,
+the matching lazy engine and non-AMD vcpkg dependencies in `bin\`, plus
+`start.cmd`. Prerequisite: VC++ v14 x64 Redistributable (not shipped).
+Install it separately from
+[Microsoft](https://aka.ms/vs/17/release/vc_redist.x64.exe).
+The launchers and `bubo prepare` check the x64 runtime registration or both
+`vcruntime140.dll` and `msvcp140.dll` in System32, and fail with that link if
+it is missing. Bubo never downloads the redistributable.
+Inference also needs a Strix Halo (gfx1151) machine and a current AMD driver.
+AMD runtime files and models are acquired separately by `bubo prepare`;
+`README.txt` lists the steps. `tools\windows\package.ps1` makes the zip from
+a release build and checks both the staged folder and final ZIP contents.
 Its product version comes from `tools/release/product_version.txt` and must
 match the configured build metadata.
+
+The Bubo brand defaults to `GUFO_ENABLE_OPENMP=OFF`. The package gate rejects
+libomp files/imports, so this package needs no libomp licence. Release CRT
+system imports are permitted; CRT files, including `concrt`, `vccorlib` and
+`vcomp`, are forbidden inside the archive. Debug CRT imports remain denied.
 
 ## Prerequisites
 

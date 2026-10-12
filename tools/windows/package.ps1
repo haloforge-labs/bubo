@@ -1,7 +1,7 @@
 # Packs the release build into a prebuilt zip for people who do not build:
 #   bubo-v<product-version>-windows-x64-gfx1151\
 #     start.cmd                    the launcher (number keys)
-#     bin\bubo.exe + DLLs          lazy engine, vcpkg libraries and app-local VC runtime
+#     bin\bubo.exe + DLLs          lazy engine and vcpkg libraries; VC++ v14 x64 is a prerequisite
 #                                  AMD files are acquired by bubo prepare runtime
 #     tools\windows\launcher.ps1, inventory.ps1
 #     README.txt, LICENSE, THIRD-PARTY.txt
@@ -56,17 +56,10 @@ Get-ChildItem (Join-Path $build "*.dll") | Where-Object {
   $_.Name -in $bootstrapDlls
 } | Copy-Item -Destination $bin
 
-# Visual C++ runtime (app-local deployment of the redistributable files).
-$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-$vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-if (-not $vs) { throw 'Visual Studio C++ build tools not found' }
-$redist = Get-ChildItem -Path (Join-Path $vs 'VC\Redist\MSVC\*\x64\Microsoft.VC14*.CRT') -Directory |
-  Sort-Object FullName -Descending | Select-Object -First 1
-if (-not $redist) { throw "Visual C++ redistributable files not found (Visual Studio Build Tools)" }
-Get-ChildItem (Join-Path $redist.FullName "*.dll") | Where-Object { $_.Name -match "^(msvcp140|vcruntime140)" } | Copy-Item -Destination $bin
+# VC++ v14 x64 Redistributable is a prerequisite, never shipped.
 
 Copy-Item (Join-Path $root "start.cmd") $stage
-Copy-Item (Join-Path $root "tools\windows\launcher.ps1"), (Join-Path $root "tools\windows\inventory.ps1") (Join-Path $stage "tools\windows")
+Copy-Item (Join-Path $root "tools\windows\launcher.ps1"), (Join-Path $root "tools\windows\inventory.ps1"), (Join-Path $root "tools\windows\vc-runtime.ps1") (Join-Path $stage "tools\windows")
 Copy-Item (Join-Path $root "LICENSE") $stage
 Copy-Item (Join-Path $root "tools\windows\prebuilt\README.txt"), (Join-Path $root "tools\windows\prebuilt\THIRD-PARTY.txt") $stage
 New-Item -ItemType Directory -Force (Join-Path $stage "licenses") | Out-Null
@@ -99,4 +92,6 @@ if (Test-Path $zip) { Remove-Item -Force $zip }
 # Windows' bsdtar writes zip; a GNU tar earlier on PATH (Git) does not.
 & (Join-Path $env:SystemRoot "System32\tar.exe") -a -c -f $zip -C $Out $name
 if ($LASTEXITCODE -ne 0) { throw "zip failed" }
+& "$root\tools\release\check-package.ps1" -PackageZip $zip
+if ($LASTEXITCODE -ne 0) { throw 'Release ZIP contents gate failed' }
 "{0}  {1:N0} MB" -f $zip, ((Get-Item $zip).Length / 1MB)

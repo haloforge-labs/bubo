@@ -1,0 +1,4 @@
+[
+  "msvcp140*", "vcruntime140*", "concrt*", "vccorlib*", "vcomp*",
+  "Microsoft.VC143.CRT*"
+]

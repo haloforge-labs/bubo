@@ -966,13 +966,6 @@
     "category": "cache-config"
   },
   {
-    "file": "docs/WINDOWS.md",
-    "line": "Each [release](https://github.com/pixmaate/gufo/releases) carries",
-    "count": 1,
-    "reason": "Upstream source/container URL retains its repository identity.",
-    "category": "upstream-url"
-  },
-  {
     "file": "docs/cache-redesign/RFC.md",
     "line": "- **Disk** ([diskbench.py](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/diskbench.py), NVMe under dm-crypt):",
     "count": 1,

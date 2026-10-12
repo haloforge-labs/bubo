@@ -1,18 +1,46 @@
-# Release binary scan: reject non-redistributable and OpenMP imports in Bubo.
-param([Parameter(Mandatory)][string]$PackageFolder)
+# Release inventory and PE scan. CRT prerequisites may be system imports only.
+[CmdletBinding(DefaultParameterSetName='Folder')]
+param(
+  [Parameter(Mandatory, ParameterSetName='Folder')][string]$PackageFolder,
+  [Parameter(Mandatory, ParameterSetName='Zip')][string]$PackageZip
+)
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\pe-imports.ps1"
 $deny = Get-Content -LiteralPath "$PSScriptRoot\nonredist-imports.json" -Raw | ConvertFrom-Json
+$shippedDeny = @(Get-Content -LiteralPath "$PSScriptRoot\nonredist-shipped.json" -Raw | ConvertFrom-Json)
+$runtimeRows = Get-Content -LiteralPath "$PSScriptRoot\runtime-members.tsv" | Select-Object -Skip 1
+$amdFiles = @($runtimeRows | ForEach-Object { ($_ -split "`t")[2] })
+$errors = [Collections.Generic.List[string]]::new()
+function Test-ShippedPath([string]$Path) {
+  $parts = $Path -split '[\\/]'
+  foreach ($part in $parts) {
+    foreach ($pattern in $shippedDeny) {
+      if ($part -like $pattern) { $errors.Add("${Path}: VC++ prerequisite must not be shipped ($pattern)") }
+    }
+  }
+  $name = $parts[-1]
+  if ($name -in $amdFiles -or $Path -match '[\\/]bin[\\/](rocblas|hipblaslt)[\\/]') {
+    $errors.Add("${Path}: AMD payload is acquired separately by bubo prepare runtime")
+  }
+  foreach ($pattern in $deny) {
+    if ($name -like $pattern) { $errors.Add("${Path}: denied shipped file ($pattern)") }
+  }
+}
+if ($PackageZip) {
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $archive = [IO.Compression.ZipFile]::OpenRead((Resolve-Path -LiteralPath $PackageZip).Path)
+  try {
+    foreach ($entry in $archive.Entries) { Test-ShippedPath $entry.FullName }
+    if ($errors.Count) { $errors | ForEach-Object { Write-Output "FAIL: $_" }; exit 1 }
+    Write-Output "PASS: release ZIP shipped-file gate ($($archive.Entries.Count) entries)"
+  } finally { $archive.Dispose() }
+  exit 0
+}
 $files = @(Get-ChildItem -LiteralPath $PackageFolder -Recurse -File |
   Where-Object { $_.Extension -in @('.exe', '.dll') })
 if (-not $files.Count) { throw "No release binaries in $PackageFolder" }
-$errors = [Collections.Generic.List[string]]::new()
-$runtimeRows = Get-Content -LiteralPath "$PSScriptRoot\runtime-members.tsv" | Select-Object -Skip 1
-$amdFiles = @($runtimeRows | ForEach-Object { ($_ -split "`t")[2] })
 foreach ($file in Get-ChildItem -LiteralPath $PackageFolder -Recurse -File) {
-  if ($file.Name -in $amdFiles -or $file.FullName -match '[\\/]bin[\\/](rocblas|hipblaslt)[\\/]') {
-    $errors.Add("$($file.FullName): AMD payload is acquired separately by bubo prepare runtime")
-  }
+  Test-ShippedPath $file.FullName
 }
 foreach ($file in $files) {
   if ($file.Name -in @('bubo.exe', 'bubo-engine.dll')) {

@@ -2,10 +2,14 @@ Bubo for Windows - prebuilt
 ===========================
 
 This archive contains bubo.exe, the matching lazy bubo-engine.dll,
-non-AMD runtime dependencies and the app-local Visual C++ runtime.
+non-AMD runtime dependencies.
+Prerequisite: VC++ v14 x64 Redistributable (not shipped).
 Bubo does not include AMD files or model weights.
 
 NEEDS
+  - Microsoft VC++ v14 x64 Redistributable installed separately:
+    https://aka.ms/vs/17/release/vc_redist.x64.exe
+    Bubo checks for it and never downloads or installs it.
   - Windows 11 and an AMD Strix Halo gfx1151 GPU for inference.
   - A current AMD Software: Adrenalin Edition driver installed separately.
   - Local disk space for the prepared runtime and eight-file model package.
