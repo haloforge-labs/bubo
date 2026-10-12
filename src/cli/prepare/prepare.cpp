@@ -9,6 +9,8 @@
 #include <map>
 #include <ostream>
 
+#include "src/cli/prepare/vc_runtime.hpp"
+
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -182,7 +184,8 @@ void PrintHelp(std::ostream& out) {
 }
 
 int Run(std::span<const char* const> args, std::string_view local_app_data,
-        std::ostream& out, std::ostream& err) {
+        std::ostream& out, std::ostream& err,
+        const VcRuntimeProbe* prerequisite_probe) {
   const auto parsed = Parse(args, local_app_data);
   if (!parsed) {
     err << "prepare: E2 " << parsed.error << "; run bubo prepare --help\n";
@@ -192,6 +195,10 @@ int Run(std::span<const char* const> args, std::string_view local_app_data,
     PrintHelp(out);
     return 0;
   }
+  if (const auto code = CheckVcRuntime(
+          prerequisite_probe ? *prerequisite_probe : NativeVcRuntimeProbe(),
+          err))
+    return code;
   CancellationScope cancellation;
   if (parsed.options.step == Step::All) {
     const auto cancelled = [] {

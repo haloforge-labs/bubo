@@ -23,6 +23,12 @@ $windows = Join-Path $scratch 'tools\windows'
 [IO.Directory]::CreateDirectory($windows) | Out-Null
 try {
   Copy-Item -LiteralPath (Join-Path $Root 'start.cmd') -Destination $scratch
+  # An executable returns to its caller; a batch mock needs CALL to do so.
+  # Adapt only the isolated dispatch, leaving the production status line intact.
+  $cmdPath = Join-Path $scratch 'start.cmd'
+  $cmdSource = [IO.File]::ReadAllText($cmdPath)
+  if (!$cmdSource.Contains('powershell -NoProfile')) { throw 'start.cmd dispatch missing' }
+  [IO.File]::WriteAllText($cmdPath, $cmdSource.Replace('powershell -NoProfile', 'call powershell -NoProfile'))
   foreach ($launcher in @('launcher.ps1', 'start.ps1')) {
     Copy-Item -LiteralPath (Join-Path $Root "tools\windows\$launcher") -Destination $windows
   }

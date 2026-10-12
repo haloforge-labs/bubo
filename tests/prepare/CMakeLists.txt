@@ -1,4 +1,4 @@
-foreach(name prepare_args_test prepare_catalogue_test prepare_gate_test
+foreach(name prepare_vc_runtime_test prepare_args_test prepare_catalogue_test prepare_gate_test
              prepare_fingerprint_test prepare_dependencies_test prepare_zip_test)
   add_executable(${name} ${name}.cpp)
   target_link_libraries(${name} PRIVATE bubo_prepare)
@@ -15,7 +15,7 @@ add_library(bubo_prepare_test STATIC ${bubo_prepare_test_sources})
 target_link_libraries(bubo_prepare_test PUBLIC CURL::libcurl OpenSSL::Crypto ZLIB::ZLIB)
 target_compile_definitions(bubo_prepare_test PUBLIC BUBO_PREPARE_TESTING=1)
 if(WIN32)
-  target_link_libraries(bubo_prepare_test PUBLIC Rstrtmgr)
+  target_link_libraries(bubo_prepare_test PUBLIC Rstrtmgr Advapi32)
 endif()
 add_executable(prepare_runtime_test prepare_runtime_test.cpp loopback_stub.cpp)
 target_link_libraries(prepare_runtime_test PRIVATE bubo_prepare_test)
@@ -103,3 +103,13 @@ add_custom_target(prepare_ci_test
 add_test(NAME prepare_ci_test
   COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/prepare_ci_test.py")
 set_tests_properties(prepare_ci_test PROPERTIES WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" LABELS "cpu;prepare;release;ci")
+include(vc_runtime_mutations.cmake)
+if(WIN32)
+  find_program(BUBO_PWSH pwsh REQUIRED)
+  foreach(script package_crt_test vc_runtime_launcher_test)
+    add_test(NAME ${script} COMMAND "${BUBO_PWSH}" -NoProfile -File
+      "${CMAKE_CURRENT_SOURCE_DIR}/${script}.ps1")
+    set_tests_properties(${script} PROPERTIES WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+      LABELS "cpu;prepare;release")
+  endforeach()
+endif()

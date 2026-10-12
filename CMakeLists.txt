@@ -318,6 +318,7 @@ set(bubo_prepare_sources
   src/cli/prepare/runtime_prepare.cpp
   src/core/prepare/zip_reader.cpp
   src/core/prepare/runtime_table.cpp
+  src/cli/prepare/vc_runtime.cpp
   src/cli/prepare/prepare.cpp
   src/cli/prepare/model_prepare.cpp
   src/core/prepare/release_catalogue.cpp
@@ -333,7 +334,7 @@ set(bubo_prepare_sources
 add_library(bubo_prepare STATIC ${bubo_prepare_sources})
 target_link_libraries(bubo_prepare PUBLIC CURL::libcurl OpenSSL::Crypto ZLIB::ZLIB)
 if(WIN32)
-  target_link_libraries(bubo_prepare PUBLIC Rstrtmgr)
+  target_link_libraries(bubo_prepare PUBLIC Rstrtmgr Advapi32)
 endif()
 add_executable(prepare_runtime_table EXCLUDE_FROM_ALL tools/release/prepare_runtime_table.cpp)
 target_link_libraries(prepare_runtime_table PRIVATE bubo_prepare)

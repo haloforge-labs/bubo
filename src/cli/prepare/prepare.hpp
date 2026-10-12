@@ -9,6 +9,7 @@
 #include <vector>
 
 namespace bubo::prepare {
+struct VcRuntimeProbe;
 enum class Step { All, Runtime, Model };
 enum class ExitCode {
   Success = 0,
@@ -62,5 +63,6 @@ ParseResult Parse(std::span<const char* const> args,
 std::string ModelRoot(const Options& options);
 void PrintHelp(std::ostream& out);
 int Run(std::span<const char* const> args, std::string_view local_app_data,
-        std::ostream& out, std::ostream& err);
+        std::ostream& out, std::ostream& err,
+        const VcRuntimeProbe* prerequisite_probe = nullptr);
 }  // namespace bubo::prepare
