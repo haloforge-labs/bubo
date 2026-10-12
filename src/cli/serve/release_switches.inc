@@ -140,6 +140,7 @@ json::parse(R"switch({"name":"GUFO_EVAL_MODEL_REVISION","kind":"env","class":"IN
 json::parse(R"switch({"name":"GUFO_EVAL_SERVER_COMMIT","kind":"env","class":"INTERNAL","model_family":"any","platform":"any","requires":[],"values":{"default":null,"subagents":null,"exact":null},"exact_off":false,"inject_with":null,"suppressed_by":[],"purpose":"Control eval server commit.","default_text":"Unset","hardware_scope":"generic","note":"unclassified","built_in":null,"value_rule":"text","aliases":[],"takes_value":true,"echo":false})switch"),
 json::parse(R"switch({"name":"GUFO_EVAL_SERVER_CONFIG","kind":"env","class":"INTERNAL","model_family":"any","platform":"any","requires":[],"values":{"default":null,"subagents":null,"exact":null},"exact_off":false,"inject_with":null,"suppressed_by":[],"purpose":"Control eval server config.","default_text":"Unset","hardware_scope":"generic","note":"unclassified","built_in":null,"value_rule":"text","aliases":[],"takes_value":true,"echo":false})switch"),
 json::parse(R"switch({"name":"GUFO_EVAL_SERVER_LABEL","kind":"env","class":"INTERNAL","model_family":"any","platform":"any","requires":[],"values":{"default":null,"subagents":null,"exact":null},"exact_off":false,"inject_with":null,"suppressed_by":[],"purpose":"Control eval server label.","default_text":"Unset","hardware_scope":"generic","note":"unclassified","built_in":null,"value_rule":"text","aliases":[],"takes_value":true,"echo":false})switch"),
+json::parse(R"switch({"name":"GUFO_EXPERT_V2K","kind":"env","class":"DEFAULT","model_family":"qwen3.8-flash-next","platform":"any","requires":[],"values":{"default":"1","subagents":"1","exact":"0"},"exact_off":true,"inject_with":null,"suppressed_by":[],"purpose":"Run decode experts in the grouped expert kernel.","default_text":"1 (0 with profile exact or stock)","hardware_scope":"strix-halo-tuned","note":"Keep it on unless a test requires the per-slot expert kernels.","built_in":"0","value_rule":"bool","aliases":[],"takes_value":true,"echo":true})switch"),
 json::parse(R"switch({"name":"GUFO_FFMPEG","kind":"env","class":"OTHER_MODEL","model_family":"minimax-h3","platform":"any","requires":[],"values":{"default":null,"subagents":null,"exact":null},"exact_off":false,"inject_with":null,"suppressed_by":[],"purpose":"Control ffmpeg.","default_text":"-","hardware_scope":"generic","note":"Use this switch with its model family.","built_in":null,"value_rule":"text","aliases":[],"takes_value":true,"echo":false})switch"),
 json::parse(R"switch({"name":"GUFO_FFPROBE","kind":"env","class":"OTHER_MODEL","model_family":"minimax-h3","platform":"any","requires":[],"values":{"default":null,"subagents":null,"exact":null},"exact_off":false,"inject_with":null,"suppressed_by":[],"purpose":"Control ffprobe.","default_text":"-","hardware_scope":"generic","note":"Use this switch with its model family.","built_in":null,"value_rule":"text","aliases":[],"takes_value":true,"echo":false})switch"),
 json::parse(R"switch({"name":"GUFO_GROUPED_DOWN","kind":"env","class":"REMOVED","model_family":"qwen3.8-flash-next","platform":"any","requires":[],"values":{"default":null,"subagents":null,"exact":null},"exact_off":false,"inject_with":null,"suppressed_by":[],"purpose":"Control grouped down.","default_text":"Removed","hardware_scope":"generic","note":"This experiment has no source reader.","built_in":null,"value_rule":"text","aliases":[],"takes_value":true,"echo":false})switch"),
@@ -271,6 +272,7 @@ environment["GUFO_EVAL_MODEL_REVISION"] = CopyEnvironmentValue(std::getenv("GUFO
 environment["GUFO_EVAL_SERVER_COMMIT"] = CopyEnvironmentValue(std::getenv("GUFO_EVAL_SERVER_COMMIT"));
 environment["GUFO_EVAL_SERVER_CONFIG"] = CopyEnvironmentValue(std::getenv("GUFO_EVAL_SERVER_CONFIG"));
 environment["GUFO_EVAL_SERVER_LABEL"] = CopyEnvironmentValue(std::getenv("GUFO_EVAL_SERVER_LABEL"));
+environment["GUFO_EXPERT_V2K"] = CopyEnvironmentValue(std::getenv("GUFO_EXPERT_V2K"));
 environment["GUFO_FFMPEG"] = CopyEnvironmentValue(std::getenv("GUFO_FFMPEG"));
 environment["GUFO_FFPROBE"] = CopyEnvironmentValue(std::getenv("GUFO_FFPROBE"));
 environment["GUFO_HIPBLASLT_PLAN_CACHE"] = CopyEnvironmentValue(std::getenv("GUFO_HIPBLASLT_PLAN_CACHE"));
@@ -361,6 +363,7 @@ environment["XDG_CACHE_HOME"] = CopyEnvironmentValue(std::getenv("XDG_CACHE_HOME
 "GUFO_EOG_DEFER_P",
 "GUFO_EOG_MIN_PROB",
 "GUFO_EOG_MIN_PROB_EXACT",
+"GUFO_EXPERT_V2K",
 "GUFO_HOST",
 "GUFO_IQ4_WIDE_VARIANT",
 "GUFO_IQ4_WMMA_WAVES",

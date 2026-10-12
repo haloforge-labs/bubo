@@ -301,6 +301,7 @@ void ReviewRegression(int finding) {
         {"GUFO_DENSE_TWIN_MODEL", std::nullopt},
         {"GUFO_DENSE_TWIN_BATCH", "0"},
         {"GUFO_DENSE_TWIN_MAX_N", std::nullopt},
+        {"GUFO_EXPERT_V2K", "0"},
         {"GUFO_DRAFT_OUT_MODEL", std::nullopt},
         {"--speculative", "off"}};
     const auto exact = ResolveReleaseSettings(Inputs("exact"));
@@ -787,7 +788,8 @@ void TestResolver() {
                                           {"--cache-ram-bytes", "4294967296"},
                                           {"--prefill-chunk", "512"},
                                           {"--mtp-draft-vocab", "latin"},
-                                          {"GUFO_DENSE_TWIN_BATCH", "1"}})
+                                          {"GUFO_DENSE_TWIN_BATCH", "1"},
+                                          {"GUFO_EXPERT_V2K", "1"}})
     Expect(Find(sub, name).value == std::optional(value),
            "subagent setting: " + name);
   Expect(Find(sub, "GUFO_LENIENT").value ==

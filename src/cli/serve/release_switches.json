@@ -3568,6 +3568,31 @@
       "echo": false
     },
     {
+      "name": "GUFO_EXPERT_V2K",
+      "kind": "env",
+      "class": "DEFAULT",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": "1",
+        "subagents": "1",
+        "exact": "0"
+      },
+      "exact_off": true,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Run decode experts in the grouped expert kernel.",
+      "default_text": "1 (0 with profile exact or stock)",
+      "hardware_scope": "strix-halo-tuned",
+      "note": "Keep it on unless a test requires the per-slot expert kernels.",
+      "built_in": "0",
+      "value_rule": "bool",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true
+    },
+    {
       "name": "GUFO_FFMPEG",
       "kind": "env",
       "class": "OTHER_MODEL",

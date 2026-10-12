@@ -669,6 +669,7 @@ private:
   /// Back to the primary stream, after draining the current one if needed.
   [[nodiscard]] bool UsePrimaryStream(std::string* error_msg) const;
   hipEvent_t counts_ready_{nullptr};
+  bool expert_v2k_{false};  ///< startup-cached opt-in decode expert chain
   hipblasHandle_t blas_{nullptr};
   std::unique_ptr<BlasLt> blaslt_;
 
@@ -738,6 +739,7 @@ private:
     float* gate_e;
     float* up_e;
     float* down_e;
+    void* expert_v2k;  ///< persistent plan/xq/hq, retained at base in row views
     float* shexp_gate;
     float* shexp_up;
     float* shexp_out;

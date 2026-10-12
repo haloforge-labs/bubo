@@ -83,6 +83,14 @@ struct BenchEvents {
 };
 struct NoBenchEvents {};
 
+bool ExpertV2kEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("GUFO_EXPERT_V2K");
+    return value != nullptr && std::strcmp(value, "1") == 0;
+  }();
+  return enabled;
+}
+
 bool RoutedLanerowEnabled() {
   static const bool enabled = [] {
     const char* value = std::getenv("GUFO_ROUTED_LANEROW");
@@ -1081,6 +1089,7 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   e->model_ = &model;
   e->ngram_ = ngram;
   e->options_ = options;
+  e->expert_v2k_ = ExpertV2kEnabled();
   e->options_.max_batch = std::max<std::uint32_t>(1, options.max_batch);
   e->options_.max_logit_rows = std::clamp<std::uint32_t>(
       options.max_logit_rows, 1, e->options_.max_batch);
@@ -1261,6 +1270,11 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   s.gate_e = take(slots * c.expert_ff);
   s.up_e = take(slots * c.expert_ff);
   s.down_e = take(slots * hidden);
+  s.expert_v2k = e->expert_v2k_
+                     ? Alloc<std::uint8_t>(
+                           a, qfn_mmq_expert_v2k_scratch_bytes(kVecBatch),
+                           error_msg)
+                     : nullptr;
   s.shexp_gate = f32(T * c.shared_expert_ff);
   s.shexp_up = f32(T * c.shared_expert_ff);
   s.shexp_out = f32(T * hidden);
@@ -3195,6 +3209,27 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
                       c.expert_ff, stream_);
     if (!down_ok) {
       AssignError(error_msg, "routed F16 down GEMM failed");
+      return false;
+    }
+  } else if (expert_v2k_ && !prefill_phase && n_tokens >= 2 &&
+             n_tokens <= kVecBatch && used == 10 && c.hidden_size == 2560 &&
+             c.expert_ff == 640 && c.num_experts == 512 &&
+             l.ffn_gate_exps.type == GgmlType::kQ4_K &&
+             l.ffn_up_exps.type == GgmlType::kQ4_K &&
+             l.ffn_gate_exps.cols == 2560 && l.ffn_gate_exps.rows == 640 &&
+             l.ffn_gate_exps.experts == 512 && l.ffn_up_exps.cols == 2560 &&
+             l.ffn_up_exps.rows == 640 && l.ffn_up_exps.experts == 512 &&
+             l.ffn_down_exps.cols == 640 && l.ffn_down_exps.rows == 2560 &&
+             l.ffn_down_exps.experts == 512 &&
+             (l.ffn_down_exps.type == GgmlType::kQ5_1 ||
+              l.ffn_down_exps.type == GgmlType::kQ8_0)) {
+    if (qfn_mmq_expert_v2k(
+            static_cast<int>(l.ffn_gate_exps.type),
+            static_cast<int>(l.ffn_down_exps.type), l.ffn_gate_exps.data,
+            l.ffn_up_exps.data, l.ffn_down_exps.data, x, s_.ids, s_.gate_e,
+            s_.up_e, s_.down_e, static_cast<int>(n_tokens), s_.expert_v2k,
+            qfn_mmq_expert_v2k_scratch_bytes(kVecBatch), stream_) != 0) {
+      AssignError(error_msg, "grouped expert V2K projection failed");
       return false;
     }
   } else {

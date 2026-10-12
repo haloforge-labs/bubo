@@ -44,6 +44,26 @@ int qfn_mmq_moe_gated_vec(int weight_type, const void* gate, const void* up,
                           int k, int tokens, int experts, int experts_used,
                           hipStream_t stream);
 
+// Fixed 2560/640, top-10, 512-expert decode chain. Q4_K gate/up and
+// Q5_1/Q8_0 down, N=2..8. Caller scratch persists across graph replay.
+size_t qfn_mmq_expert_v2k_scratch_bytes(int max_tokens);
+int qfn_mmq_expert_v2k(int gu_type, int down_type, const void* gate_w,
+                       const void* up_w, const void* down_w, const float* x,
+                       const int32_t* ids, float* gate, float* up, float* out,
+                       int n_tokens, void* scratch, size_t scratch_bytes,
+                       hipStream_t stream);
+// Stages used by the whole chain and the opt-in routed microbench.
+// GU outputs and hq are in compact entry order; down restores slot order.
+int qfn_mmq_expert_v2k_gu(const void* gate_w, const void* up_w, const float* x,
+                          const int32_t* ids, float* gate, float* up,
+                          int n_tokens, void* scratch, size_t scratch_bytes,
+                          hipStream_t stream);
+int qfn_mmq_expert_v2k_bridge(const float* gate, const float* up, void* hq,
+                              int entries, hipStream_t stream);
+int qfn_mmq_expert_v2k_down(int down_type, const void* weights, float* out,
+                            int n_tokens, void* scratch, size_t scratch_bytes,
+                            hipStream_t stream);
+
 size_t qfn_mmq_q8_1_bytes(int N, int K);
 
 int qfn_mmq_quantize_q8_1(const float* X_f32, void* X_q8, int N, int K,
