@@ -4,6 +4,7 @@
 #     bin\bubo.exe + DLLs          lazy engine and vcpkg libraries; VC++ v14 x64 is a prerequisite
 #                                  AMD files are acquired by bubo prepare runtime
 #     tools\windows\launcher.ps1, inventory.ps1
+#     tools\npu\ NPU prefill kernel files and their sources
 #     README.txt, LICENSE, THIRD-PARTY.txt
 #
 #   powershell -ExecutionPolicy Bypass -File tools\windows\package.ps1 [-Out dist]
@@ -63,6 +64,9 @@ Copy-Item (Join-Path $root "tools\windows\launcher.ps1"), (Join-Path $root "tool
 Copy-Item (Join-Path $root "LICENSE") $stage
 Copy-Item (Join-Path $root "tools\windows\prebuilt\README.txt"), (Join-Path $root "tools\windows\prebuilt\THIRD-PARTY.txt") $stage
 New-Item -ItemType Directory -Force (Join-Path $stage "licenses") | Out-Null
+New-Item -ItemType Directory -Force (Join-Path $stage "tools\npu") | Out-Null
+Copy-Item (Join-Path $root "tools\npu\*") (Join-Path $stage "tools\npu")
+Copy-Item (Join-Path $root "licenses\mlir-aie-Apache-2.0-LLVM-exception.txt"), (Join-Path $root "licenses\strata-MIT.txt") (Join-Path $stage "licenses")
 Copy-Item (Join-Path $Vcpkg "installed\x64-windows\share\libwebp\copyright") (Join-Path $stage "licenses\libwebp.txt")
 Copy-Item (Join-Path $Vcpkg "installed\x64-windows\share\zlib\copyright") (Join-Path $stage "licenses\zlib.txt")
 $commit = (& git -C $root rev-parse --short HEAD 2>$null)

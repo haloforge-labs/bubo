@@ -35,6 +35,8 @@ Non-Nix builds must retain the notices of the versions they actually distribute.
 | DS4 GB10/GX10 fork | Adapted paired MoE launch code, now HIP | `MIT` | `910501e` | [xangel82/DS4](https://github.com/xangel82/DS4-GB10-GX10-DSpark-CUDA) |
 | h3.c | Adapted H3 geometry, scheduling and sampler; implementation reference | `MIT` | `8974cc055ea9c02fcd14cc27dfda3e1027c05153` | [antirez/h3.c](https://github.com/antirez/h3.c) |
 | ccv TensorOps ancestry | Attribution retained through h3.c | `BSD-3-Clause` | h3.c pin above | [liuliu/ccv](https://github.com/liuliu/ccv) |
+| NPU GEMM kernel, design and compiled xclbin (tools/npu) | AIE kernel source, placement script, instruction stream and xclbin used for NPU prefill offload | `Apache-2.0 WITH LLVM-exception` (AMD mlir-aie programming examples, Copyright (C) 2026 Advanced Micro Devices, Inc.); fork packaging `MIT` | mikealanni/gufo `tools/npu`; mlir-aie licence text from commit `766aca40deaf57b2a12b14e1e15985b878e7faae` | [mikealanni/gufo](https://github.com/mikealanni/gufo), [Xilinx/mlir-aie](https://github.com/Xilinx/mlir-aie) |
+| Strata | Adapted grouped decode expert kernels (HIP) | `MIT` | PR #1360, measured base `82f46a8`; introduction `04e1e11afb45c040960e90c834e0fe85a475a4ab` | [Niko1221/Strata](https://github.com/Niko1221/Strata) |
 
 Upstream license texts are retained in `licenses/` and
 [src/models/deepseek_v4_flash/LICENSE.ds4](src/models/deepseek_v4_flash/LICENSE.ds4).

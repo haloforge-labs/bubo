@@ -36,3 +36,7 @@ redistributed packages. Gufo's MIT license does not replace those obligations.
 Model weights are not included. Operators acquire them separately under the
 publisher's terms. Python reference/evaluation tools and their models belong
 to the development environment, not the production Gufo installation.
+
+NPU prefill and Strata decode components:
+- NPU GEMM kernel and design (tools/npu: final_4096x2560x1024_128x64x128.xclbin, insts_4096x2560x1024_128x64x128.txt, mm_bfp_mixed.cc, n32_core_placed.py): from mikealanni/gufo (MIT), derived from AMD mlir-aie programming examples. Copyright (C) 2026 Advanced Micro Devices, Inc. Apache-2.0 WITH LLVM-exception (licenses/mlir-aie-Apache-2.0-LLVM-exception.txt). The compiled xclbin ships as built by the fork.
+- Strata grouped decode experts (Q4_K gate/up decode kernel): adapted from Niko1221/Strata (PR #1360, measured base 82f46a8), Copyright (c) 2026 Niko1221 and the Strata contributors, MIT (licenses/strata-MIT.txt).

@@ -15,6 +15,11 @@ The archive includes these unmodified non-AMD dependencies:
   WebP libwebp and libsharpyuv - BSD-3-Clause (licenses/libwebp.txt)
   zlib z.dll - zlib licence (licenses/zlib.txt)
 
+NPU prefill kernel files in tools\npu (xclbin as built by the fork, with sources):
+  from mikealanni/gufo (MIT), derived from AMD mlir-aie examples,
+  Apache-2.0 WITH LLVM-exception (licenses/mlir-aie-Apache-2.0-LLVM-exception.txt)
+Strata grouped decode expert kernel (adapted from Niko1221/Strata) - MIT (licenses/strata-MIT.txt)
+
 Prerequisite: Microsoft VC++ v14 x64 Redistributable (not shipped).
 Install it separately from Microsoft's official installer:
   https://aka.ms/vs/17/release/vc_redist.x64.exe
