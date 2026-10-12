@@ -11,6 +11,7 @@
 #include "src/cli/brand.hpp"
 #include "src/cli/cli_info.hpp"
 #include "src/cli/prepare/prepare.hpp"
+#include "src/cli/prepare/runtime_prepare.hpp"
 
 namespace {
 std::string Utf8(std::wstring_view text) {
@@ -81,6 +82,13 @@ int Run(std::span<const char* const> args) {
   // No engine import, HIP registration or inference initialisation precedes
   // here.
   const auto path = EnginePath();
+  if (command == "serve") {
+    const auto readiness = bubo::prepare::RuntimeReadyError(path.parent_path());
+    if (!readiness.empty()) {
+      std::cerr << "bubo: " << readiness << '\n';
+      return 2;
+    }
+  }
   const auto module = LoadLibraryExW(
       path.c_str(), nullptr,
       LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);

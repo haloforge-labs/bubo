@@ -54,6 +54,7 @@ struct Environment {
   std::function<bool()> cancelled;
 #ifdef BUBO_PREPARE_TESTING
   std::array<std::string, 3> origins;
+  bool synthetic_disclosure = false;
 #endif
 };
 std::string Utf8(const fs::path& p) {
@@ -355,6 +356,18 @@ int RunImpl(const Options& options, Environment e, std::istream& input,
         CheckInstalled(root, e)) {
       if (preview) {
         preview->ready = true;
+        std::ostringstream disclosure;
+        disclosure << "Runtime status: reuse; already prepared.\n";
+        for (const auto& notice : e.notices)
+          disclosure << "Licence/notice: " << notice.path << '\n'
+                     << notice.text << '\n';
+#ifdef BUBO_PREPARE_TESTING
+        if (e.synthetic_disclosure)
+          disclosure << RuntimeDisclosure(e.wheels, root, root / "licenses");
+        else
+#endif
+          disclosure << RuntimeConsent(root, root / "licenses");
+        preview->text = disclosure.str();
         return 0;
       }
       out << "prepare runtime: already prepared; nothing to do\n";
@@ -426,7 +439,12 @@ int RunImpl(const Options& options, Environment e, std::istream& input,
     // Exact notice texts are available before the affirmative prompt.
     for (const auto& n : e.notices)
       disclosure << "Licence/notice: " << n.path << '\n' << n.text << '\n';
-    disclosure << RuntimeDisclosure(e.wheels, root, root / "licenses");
+#ifdef BUBO_PREPARE_TESTING
+    if (e.synthetic_disclosure)
+      disclosure << RuntimeDisclosure(e.wheels, root, root / "licenses");
+    else
+#endif
+      disclosure << RuntimeConsent(root, root / "licenses");
     if (preview) {
       preview->ready = false;
       preview->text = disclosure.str();
@@ -614,6 +632,34 @@ int RunImpl(const Options& options, Environment e, std::istream& input,
     return 9;
   }
 }
+std::string ReadyError(const fs::path& root, const Environment& e) {
+  try {
+    const auto journal = root / Path(".bubo/runtime/journal.json");
+    const auto marker = root / Path(".bubo/runtime-ready.json");
+    if (fs::exists(journal))
+      throw Failure(2, Utf8(journal) + ": unfinished runtime transaction");
+    if (!fs::exists(marker))
+      return {};  // Explicit legacy manual installation remains supported.
+    if (metadata::Read(marker) != Ready(e))
+      throw Failure(2, Utf8(marker) + ": runtime readiness entry mismatch");
+    for (const auto& member : e.members) {
+      const auto path = root / Path(member.destination);
+      if (!fs::is_regular_file(path) || fs::file_size(path) != member.size)
+        throw Failure(2,
+                      Utf8(path) + ": missing runtime file or size mismatch");
+    }
+    for (const auto& notice : e.notices) {
+      const auto path = root / "licenses" / Path(notice.path);
+      if (!fs::is_regular_file(path) ||
+          fs::file_size(path) != notice.text.size())
+        throw Failure(2,
+                      Utf8(path) + ": missing runtime notice or size mismatch");
+    }
+    return {};
+  } catch (const std::exception& error) {
+    return std::string(error.what()) + "; run bubo prepare runtime";
+  }
+}
 }  // namespace
 namespace {
 std::string RuntimeDisclosure(std::span<const WheelPin> wheels,
@@ -768,6 +814,21 @@ int RunRuntime(const Options& options, std::ostream& out, std::ostream& err,
   }
 #endif
 }
+std::string RuntimeReadyError(const fs::path& root) {
+  try {
+    // Avoid catalogue work on the legacy absent-marker path.
+    if (!fs::exists(root / Path(".bubo/runtime-ready.json")) &&
+        !fs::exists(root / Path(".bubo/runtime/journal.json")))
+      return {};
+    Environment env;
+    env.wheels = RuntimeWheels();
+    env.members = CompiledRuntimeTable();
+    env.notices = RuntimeNotices();
+    return ReadyError(root, env);
+  } catch (const std::exception& error) {
+    return std::string(error.what()) + "; run bubo prepare runtime";
+  }
+}
 #ifdef BUBO_PREPARE_TESTING
 int RunRuntimeForTesting(const Options& options,
                          const RuntimeTestEnvironment& t, std::istream& input,
@@ -783,9 +844,18 @@ int RunRuntimeForTesting(const Options& options,
   e.holders = t.holders;
   e.after_install = t.after_install;
   e.cancelled = t.cancelled;
+  e.synthetic_disclosure = t.synthetic_disclosure;
   if (t.volume)
     e.volume = t.volume;
   return RunImpl(options, std::move(e), input, out, err, preview, approved);
+}
+std::string RuntimeReadyErrorForTesting(const fs::path& root,
+                                        const RuntimeTestEnvironment& test) {
+  Environment env;
+  env.wheels = test.wheels;
+  env.members = test.members;
+  env.notices = test.notices;
+  return ReadyError(root, env);
 }
 #endif
 }  // namespace bubo::prepare

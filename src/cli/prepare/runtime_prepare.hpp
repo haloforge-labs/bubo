@@ -15,6 +15,9 @@ std::string RuntimeConsent(const std::filesystem::path& runtime,
 std::vector<std::string> RuntimeHolders(
     const std::filesystem::path& root,
     const std::vector<RuntimeMember>& members);
+// Legacy manually installed runtimes have no marker. A present tool marker or
+// journal is authoritative: cheap metadata/length checks precede engine load.
+std::string RuntimeReadyError(const std::filesystem::path& root);
 int RunRuntime(const Options&, std::ostream&, std::ostream&,
                const std::function<bool()>& cancelled = {},
                PreparationPlan* preview = nullptr, bool approved = false);
@@ -31,10 +34,15 @@ struct RuntimeTestEnvironment {
   // Return false to fail after a namespace move. Same transaction/rollback.
   std::function<bool(std::size_t)> after_install;
   std::function<bool()> cancelled;
+  // End-to-end fake-wheel plans can disclose their synthetic pins explicitly.
+  // Existing binding-text fixtures continue to render the production block.
+  bool synthetic_disclosure = false;
 };
 int RunRuntimeForTesting(const Options&, const RuntimeTestEnvironment&,
                          std::istream&, std::ostream&, std::ostream&,
                          PreparationPlan* preview = nullptr,
                          bool approved = false);
+std::string RuntimeReadyErrorForTesting(const std::filesystem::path& root,
+                                        const RuntimeTestEnvironment&);
 #endif
 }  // namespace bubo::prepare
