@@ -274,7 +274,8 @@ public:
   /// Called once per finished request (any outcome); the default does nothing.
   virtual void OnRequestFinished() const {}
   [[nodiscard]] virtual json::Value DebugSettings() const {
-    throw std::invalid_argument("debug settings are not supported for this model");
+    throw std::invalid_argument(
+        "debug settings are not supported for this model");
   }
   [[nodiscard]] virtual bool SupportsLogprobs() const noexcept { return false; }
   [[nodiscard]] virtual TextRunnerResourceClaim ResourceClaim() const = 0;
@@ -304,7 +305,8 @@ public:
       const sampling::SamplingConfig& config, const ChatRequest*,
       std::span<const TextRunnerToken>) const {
     if (config.behaviour)
-      throw std::invalid_argument("behaviour switches require Qwen3.8-Flash-Next");
+      throw std::invalid_argument(
+          "behaviour switches require Qwen3.8-Flash-Next");
     return config;
   }
   [[nodiscard]] virtual std::optional<TextPreparedPrompt> PreparePrompt(
@@ -335,7 +337,8 @@ public:
   [[nodiscard]] virtual std::vector<std::optional<sampling::TokenLogprob>>
   ScorePrompt(std::span<const TextRunnerToken>, const sampling::SamplingConfig&,
               const TextRunnerState::CancellationCheck&) const {
-    throw std::invalid_argument("prompt logprobs are not supported for this model");
+    throw std::invalid_argument(
+        "prompt logprobs are not supported for this model");
   }
 
   [[nodiscard]] virtual std::string Decode(
@@ -366,6 +369,14 @@ public:
   }
   /// Processes at most max_input_tokens, yielding after one model-owned
   /// chunk even when the scheduler grants the whole remaining prompt.
+  [[nodiscard]] virtual std::size_t PrefillBoundaryFallbackChunk()
+      const noexcept {
+    return 0;
+  }
+  // Preferred soft scheduling budget; prefix/checkpoint boundaries still clip.
+  [[nodiscard]] virtual std::size_t PrefillPreferredChunk() const noexcept {
+    return 0;
+  }
   [[nodiscard]] virtual TextPrefillStep Prefill(
       TextRunnerState& state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t max_input_tokens) const = 0;

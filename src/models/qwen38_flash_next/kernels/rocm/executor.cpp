@@ -22,6 +22,11 @@
 #include <type_traits>
 #include <vector>
 
+#ifdef GUFO_NPU
+#include "src/npu/linear_z_hip.hpp"
+#include "src/npu/projection.hpp"
+#endif
+
 #include "qfn_mmq.h"
 #include "src/cli/serve/logging.hpp"
 #include "src/core/hip/snapshot_transfer.hpp"
@@ -98,7 +103,9 @@ bool RoutedLanerowEnabled() {
 void CopyReferenceOnce(hipStream_t stream) {
   static std::once_flag once;
   std::call_once(once, [stream] {
-    std::size_t bytes = std::size_t{4} << 30;   // falls back to 2 and 1 GiB when memory is short (review F3)
+    std::size_t bytes =
+        std::size_t{4}
+        << 30;  // falls back to 2 and 1 GiB when memory is short (review F3)
     constexpr std::size_t reserve = std::size_t{1} << 30;
     std::size_t free = 0, total = 0;
     struct Buffers {
@@ -218,9 +225,12 @@ bool MatrixRows(std::uint32_t rows) {
 bool ExpertMatrixRows(std::uint32_t rows) {
   return prefill_phase || rows > 4 * kVecBatch;
 }
-/// Decode twin: the 4-bit dense types (only the twin ever holds a dense tensor of these types).
+/// Decode twin: the 4-bit dense types (only the twin ever holds a dense tensor
+/// of these types).
 bool IsTwinDenseType(GgmlType type) {
-  return type == GgmlType::kQ4_K || type == GgmlType::kQ5_K || type == GgmlType::kQ5_1 || type == GgmlType::kIQ4_XS || type == GgmlType::kIQ4_NL;
+  return type == GgmlType::kQ4_K || type == GgmlType::kQ5_K ||
+         type == GgmlType::kQ5_1 || type == GgmlType::kIQ4_XS ||
+         type == GgmlType::kIQ4_NL;
 }
 
 /// Key-tile splits per row of a narrow attention batch (decode at depth).
@@ -1018,9 +1028,12 @@ void Session::Reset() {
 }
 
 Executor::~Executor() {
-  if (model_ != nullptr && model_->has_twin()) PrintTwinCounters("final", "-", 0);
-  if (model_ != nullptr && model_->has_draft_out()) PrintDraftOutCounters("final");
-  if (model_ != nullptr && model_->has_shadow()) PrintShadowStats();
+  if (model_ != nullptr && model_->has_twin())
+    PrintTwinCounters("final", "-", 0);
+  if (model_ != nullptr && model_->has_draft_out())
+    PrintDraftOutCounters("final");
+  if (model_ != nullptr && model_->has_shadow())
+    PrintShadowStats();
   // Readers write pinned staging memory; drain them before freeing it,
   // including when a forward failed before reaching PLE.
   if (ple_pending_ || prefetch_.pending) {
@@ -1110,10 +1123,13 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   if (model.has_twin() || model.has_draft_out()) {
     if (model.has_shadow()) {
       s.shadow_out = Alloc<float>(a, std::size_t{16384} * kVecBatch, error_msg);
-      if (s.shadow_out == nullptr) return nullptr;
+      if (s.shadow_out == nullptr)
+        return nullptr;
     }
     s.zero_ids = Alloc<std::int32_t>(a, kVecBatch, error_msg);
-    if (s.zero_ids == nullptr || hipMemset(s.zero_ids, 0, kVecBatch * sizeof(std::int32_t)) != hipSuccess) {
+    if (s.zero_ids == nullptr ||
+        hipMemset(s.zero_ids, 0, kVecBatch * sizeof(std::int32_t)) !=
+            hipSuccess) {
       AssignError(error_msg, "decode twin: zero ids allocation failed");
       return nullptr;
     }
@@ -1331,7 +1347,8 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
     // distribution is unchanged; only acceptance can drop when the target
     // wants a token outside the list.
     if (!options.draft_vocab.empty()) {
-      const DeviceTensor& out = model.has_draft_out() ? model.draft_out() : model.output();
+      const DeviceTensor& out =
+          model.has_draft_out() ? model.draft_out() : model.output();
       std::vector<std::int32_t> ids;
       for (const std::int32_t id : options.draft_vocab) {
         if (id >= 0 && static_cast<std::uint32_t>(id) < out.rows) {
@@ -1340,14 +1357,18 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
       }
       std::sort(ids.begin(), ids.end());
       ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
-      if (ids.size() < kMtpCandidates || (out.type != GgmlType::kQ8_0 && !model.has_draft_out()) ||
+      if (ids.size() < kMtpCandidates ||
+          (out.type != GgmlType::kQ8_0 && !model.has_draft_out()) ||
           out.experts != 1 || out.cols % 32 != 0) {
         AssignError(error_msg,
                     "the draft vocabulary needs at least 64 valid token ids "
                     "and a Q8_0 output head");
         return nullptr;
       }
-      const std::size_t row_bytes = out.type == GgmlType::kQ4_K ? std::size_t{out.cols} / 256 * 144 : out.type == GgmlType::kQ5_K ? std::size_t{out.cols} / 256 * 176 : std::size_t{out.cols} / 32 * 34;
+      const std::size_t row_bytes =
+          out.type == GgmlType::kQ4_K   ? std::size_t{out.cols} / 256 * 144
+          : out.type == GgmlType::kQ5_K ? std::size_t{out.cols} / 256 * 176
+                                        : std::size_t{out.cols} / 32 * 34;
       auto* rows =
           Alloc<std::uint8_t>(a, ids.size() * row_bytes + 256, error_msg);
       auto* map = Alloc<std::int32_t>(a, ids.size(), error_msg);
@@ -1616,20 +1637,19 @@ std::string Executor::SessionBytesBreakdown(
   const std::size_t recurrent = linear * (conv + state) * sizeof(float);
   const std::size_t total = SessionBytes(mode, max_context, rollback_depth);
   const std::size_t accounted = target_kv + indexer + mtp_state + recurrent +
-                                sizeof(Session::Control) +
-                                ple * sizeof(float);
+                                sizeof(Session::Control) + ple * sizeof(float);
   const std::size_t rollback = total > accounted ? total - accounted : 0;
   const auto mib = [](std::size_t b) { return b / (1024.0 * 1024.0); };
   char buf[512];
-  std::snprintf(buf, sizeof(buf),
-                "mode=%s context=%u rollback_depth=%u total_mib=%.1f "
-                "target_kv_mib=%.1f indexer_keys_mib=%.1f mtp_state_mib=%.1f "
-                "recurrent_mib=%.1f rollback_mib=%.1f per_token_kib=%.2f",
-                spec ? "speculative" : "autoregressive", max_context,
-                rollback_depth, mib(total), mib(target_kv), mib(indexer),
-                mib(mtp_state), mib(recurrent), mib(rollback),
-                max_context ? static_cast<double>(total) / max_context / 1024.0
-                            : 0.0);
+  std::snprintf(
+      buf, sizeof(buf),
+      "mode=%s context=%u rollback_depth=%u total_mib=%.1f "
+      "target_kv_mib=%.1f indexer_keys_mib=%.1f mtp_state_mib=%.1f "
+      "recurrent_mib=%.1f rollback_mib=%.1f per_token_kib=%.2f",
+      spec ? "speculative" : "autoregressive", max_context, rollback_depth,
+      mib(total), mib(target_kv), mib(indexer), mib(mtp_state), mib(recurrent),
+      mib(rollback),
+      max_context ? static_cast<double>(total) / max_context / 1024.0 : 0.0);
   return buf;
 }
 
@@ -1697,14 +1717,19 @@ bool Executor::Dense(const DeviceTensor& w, const Q8Input& q, float* out,
                      std::string* error_msg) const {
   if (IsTwinDenseType(w.type) && q.data != nullptr) {
     if (w.cols != q.k || s_.zero_ids == nullptr) {
-      AssignError(error_msg, "decode twin: quantized input width mismatch or no zero ids");
+      AssignError(error_msg,
+                  "decode twin: quantized input width mismatch or no zero ids");
       return false;
     }
-    if (qfn_mmq_dense_vec_preq(static_cast<int>(w.type), w.data, q.data, s_.zero_ids, out, static_cast<int>(w.rows), static_cast<int>(q.n), static_cast<int>(w.cols), stream_) != 0) {
+    if (qfn_mmq_dense_vec_preq(static_cast<int>(w.type), w.data, q.data,
+                               s_.zero_ids, out, static_cast<int>(w.rows),
+                               static_cast<int>(q.n), static_cast<int>(w.cols),
+                               stream_) != 0) {
       AssignError(error_msg, "4-bit dense GEMV failed");
       return false;
     }
-    if (model_->has_shadow() && !ShadowCompare(w, q, out, error_msg)) return false;
+    if (model_->has_shadow() && !ShadowCompare(w, q, out, error_msg))
+      return false;
     return true;
   }
   if (w.type == GgmlType::kQ8_0 && q.data != nullptr) {
@@ -1802,11 +1827,14 @@ bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
                      std::uint32_t n_tokens, std::string* error_msg) const {
   if (IsTwinDenseType(w.type)) {
     if (MatrixRows(n_tokens)) {
-      AssignError(error_msg, "decode twin: a 4-bit dense tensor reached a wide / prefill pass (forbidden, no fallback)");
+      AssignError(error_msg,
+                  "decode twin: a 4-bit dense tensor reached a wide / prefill "
+                  "pass (forbidden, no fallback)");
       return false;
     }
     Q8Input q;
-    return Quantize(x, n_tokens, w.cols, &q, error_msg) && Dense(w, q, out, error_msg);
+    return Quantize(x, n_tokens, w.cols, &q, error_msg) &&
+           Dense(w, q, out, error_msg);
   }
   if (w.type == GgmlType::kQ8_0) {
     if (!MatrixRows(n_tokens)) {
@@ -2403,15 +2431,18 @@ bool Executor::WaitPle(std::string* error_msg) const {
       active_diag_->totals.fetch_elapsed_us =
           DiagMicroseconds(prefetch_.read_finished - prefetch_.read_started);
       active_diag_->totals.fetch_hidden_us = std::max(
-          0.0, DiagMicroseconds(std::min(prefetch_.read_finished, wait_started) -
-                               prefetch_.read_started));
+          0.0,
+          DiagMicroseconds(std::min(prefetch_.read_finished, wait_started) -
+                           prefetch_.read_started));
     } else {
-      active_diag_->totals.fetch_elapsed_us = ngram_->DiagnosticFetchElapsedUs();
+      active_diag_->totals.fetch_elapsed_us =
+          ngram_->DiagnosticFetchElapsedUs();
       active_diag_->totals.fetch_hidden_us =
           ngram_->DiagnosticFetchHiddenUs(wait_started);
     }
     active_diag_->totals.fetch_exposed_us =
-        active_diag_->totals.fetch_elapsed_us - active_diag_->totals.fetch_hidden_us;
+        active_diag_->totals.fetch_elapsed_us -
+        active_diag_->totals.fetch_hidden_us;
   }
   ple_pending_ = false;
   if (!ok) {
@@ -2499,8 +2530,12 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
                                const float* x, float* out,
                                std::uint32_t n_tokens, bool speculative,
                                std::string* error_msg, bool projections_ready,
-                               bool project_output,
-                               GdnCheckpoint checkpoint) const {
+                               bool project_output, GdnCheckpoint checkpoint
+#ifdef GUFO_NPU
+                               ,
+                               bool npu_prefill, int layer
+#endif
+) const {
   const Config& c = config();
   const std::uint32_t channels = c.SsmConvChannels();
   const float* qkv = s_.qkv;
@@ -2508,19 +2543,69 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
   std::uint32_t qkv_stride = channels;
   std::uint32_t z_stride = c.SsmValueDim();
   bool convolved = false;
+#ifdef GUFO_NPU
+  std::unique_ptr<npu::HipLinearZTransfer> npu_transfer;
+  std::unique_ptr<npu::LinearZWork> npu_work;
+  const auto prefill = model_->npu_prefill();
+#endif
   if (!l.ssm_in.empty()) {
     // Wide prefill convolves QKV in the projection's LDS tile. The raw
     // boundary rows remain available for the rolling history update.
     if (!projections_ready && !speculative && n_tokens >= 1024 &&
         n_tokens <= options_.max_batch && DenseF16Route(l.ssm_in, n_tokens)) {
       PrepareHalfInput(x, n_tokens, l.ssm_in.cols);
+#ifdef GUFO_NPU
+      if (prefill && prefill->ready() &&
+          npu::LinearZQualified(n_tokens, options_.max_batch, npu_prefill,
+                                speculative, projections_ready,
+                                l.npu_z.get())) {
+        try {
+          npu_transfer = std::make_unique<npu::HipLinearZTransfer>(
+              prefill, static_cast<const std::uint16_t*>(s_.x_half), s_.qkvz,
+              n_tokens, stream_);
+          npu_work = npu::BeginLinearZ(
+              l.npu_z, *npu_transfer, layer,
+              [prefill](auto a, auto b, auto info) {
+                return prefill->session().Dispatch(a, b, std::move(info));
+              },
+              [prefill](std::string error) {
+                prefill->Reject(std::move(error));
+              },
+              [prefill](auto a, const auto& b, const auto& consume) {
+                return prefill->session().DispatchBatch(a, b, consume);
+              });
+        } catch (const std::exception& e) {
+          prefill->Reject(e.what());
+          npu_work.reset();
+          npu_transfer.reset();
+        }
+      }
+#endif
       convolved = DenseF16SsmGemm(
           l.ssm_in.data, static_cast<const __half*>(s_.x_half),
           l.ssm_conv1d.f32(), s.conv_state, s_.qkvz, s_.conv_scratch, n_tokens,
           l.ssm_in.rows, l.ssm_in.cols, channels, c.ssm_conv_kernel, stream_,
-          checkpoint.tokens);
+          checkpoint.tokens
+#ifdef GUFO_NPU
+          ,
+          npu_work ? l.npu_z->gpu_rows : 0
+#endif
+      );
+#ifdef GUFO_NPU
+      if (npu_work) {
+        if (!convolved) {
+          prefill->Reject("NPU linear GPU prefix launch rejected");
+          AssignError(error_msg, "NPU linear GPU prefix launch rejected");
+          return false;
+        }
+        convolved = l.npu_z->gpu_rows >= channels;
+      }
+#endif
     }
     if (!projections_ready && !convolved &&
+#ifdef GUFO_NPU
+        !npu_work &&
+#endif
         !Dense(l.ssm_in, x, s_.qkvz, n_tokens, error_msg)) {
       return false;
     }
@@ -2537,6 +2622,10 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
   }
   if (!projections_ready &&
       !Dense(l.ssm_alpha_beta, x, s_.alpha_beta, n_tokens, error_msg)) {
+#ifdef GUFO_NPU
+    if (npu_work)
+      prefill->Reject("GPU alpha/beta failed with linear NPU work pending");
+#endif
     return false;
   }
   // Keep the same activation precision across prefill chunk boundaries.
@@ -2553,6 +2642,19 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
   // The existing F32 scratch has room for these slightly padded F16 rows.
   const std::uint32_t half_stride =
       half_output && n_tokens >= 1024 ? l.ssm_out.cols + 32 : 0;
+#ifdef GUFO_NPU
+  if (npu_work) {
+    // Stream wait, then mapped-C decode, then GDN. The CPU keeps enqueueing;
+    // callback and sticky numerical failures are checked at chunk completion.
+    auto result =
+        npu::FinishLinearZ(*npu_work, *npu_transfer, 16384 - l.npu_z->gpu_rows);
+    if (!result.valid) {
+      prefill->Reject(result.error);
+      AssignError(error_msg, result.error);
+      return false;
+    }
+  }
+#endif
   GatedDeltaNet(qkv, qkv_stride, z, z_stride, s_.alpha_beta, l.ssm_conv1d.f32(),
                 l.ssm_a.f32(), l.ssm_dt.f32(), l.ssm_norm.f32(), s.conv_state,
                 s_.conv_scratch, s_.qn, s_.kn, s_.gdn_raw, s.state, s_.gdn_out,
@@ -2594,7 +2696,12 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
                          std::uint32_t max_context, bool sparse,
                          std::string* error_msg, bool last_only,
                          bool projections_ready, bool project_output,
-                         std::uint32_t checkpoint_tokens) const {
+                         std::uint32_t checkpoint_tokens
+#ifdef GUFO_NPU
+                         ,
+                         bool npu_prefill, int layer
+#endif
+) const {
   const Config& c = config();
   const std::uint32_t kv_row = c.AttentionKvDim();
   const std::uint32_t index_capacity =
@@ -2607,7 +2714,52 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
         l.attn_qkv.rows == 13312 && l.attn_qkv.cols == 2560 &&
         c.num_heads == 24 && c.num_kv_heads == 2 && c.head_dim == 256 &&
         c.rotary_dim == 64;
-    if (fused_projection) {
+#ifdef GUFO_NPU
+    const auto prefill = model_->npu_prefill();
+    if (fused_projection && prefill && prefill->ready() &&
+        npu::ProjectionQualified(n_tokens, options_.max_batch, npu_prefill,
+                                 false, projections_ready, last_only,
+                                 l.npu_gate.get())) {
+      try {
+        PrepareHalfInput(x, n_tokens, l.attn_qkv.cols);
+        npu::HipLinearZTransfer transfer(
+            prefill, static_cast<const std::uint16_t*>(s_.x_half), s_.qg,
+            n_tokens, stream_, 13312, 0);
+        auto work = npu::BeginProjection(
+            l.npu_gate, transfer, layer,
+            [prefill](auto a, auto b, auto info) {
+              return prefill->session().Dispatch(a, b, info);
+            },
+            [prefill](auto error) { prefill->Reject(std::move(error)); },
+            [prefill](auto a, const auto& b, const auto& consume) {
+              return prefill->session().DispatchBatch(a, b, consume);
+            });
+        if (!QueryGateGpuGemm(l.attn_qkv.data,
+                              static_cast<const __half*>(s_.x_half), s_.qg,
+                              n_tokens, l.npu_gate->rows, stream_))
+          throw std::runtime_error("NPU attention GPU suffix refused");
+        auto result = npu::FinishProjection(*work, transfer, l.npu_gate->rows);
+        if (!result.valid) {
+          prefill->Reject(result.error);
+          AssignError(error_msg, result.error);
+          return false;
+        }
+        // The stream wait/decode precedes norm/RoPE/KV.
+        prepared = PrepareAttention(
+            s_.qg, 13312, l.attn_q_norm.f32(), l.attn_k_norm.f32(), s_.q,
+            s_.attn_gate, s.k_cache, s.v_cache, n_tokens, c.num_heads,
+            c.num_kv_heads, c.head_dim, c.rotary_dim, pos, c.rope_theta,
+            c.rms_eps, stream_, s.rope, prefill_phase);
+        if (!prepared)
+          throw std::runtime_error("NPU attention preparation refused");
+      } catch (const std::exception& e) {
+        prefill->Reject(e.what());
+        AssignError(error_msg, e.what());
+        return false;
+      }
+    } else
+#endif
+        if (fused_projection) {
       PrepareHalfInput(x, n_tokens, l.attn_qkv.cols);
       prepared = AttentionF16Gemm(
           l.attn_qkv.data, static_cast<const __half*>(s_.x_half),
@@ -2783,8 +2935,13 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
 
 template<bool Benchmark>
 bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
-                       std::uint32_t n_tokens, std::string* error_msg,
-                       bool last_only) const {
+                   std::uint32_t n_tokens, std::string* error_msg,
+                   bool last_only
+#ifdef GUFO_NPU
+                   ,
+                   bool npu_prefill, int layer
+#endif
+) const {
   const Config& c = config();
   const std::uint32_t used = c.num_experts_used;
   // Router logits and the shared-expert gate come out of one GEMM.
@@ -2809,21 +2966,75 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
   // routing. Queue its GEMMs after the count download, then prepare the
   // routed dispatch on the CPU without waiting for these GEMMs to finish.
   shexp_half_ready_ = false;
-  if (!GatedDense(l.shexp_up, l.shexp_gate, x, s_.shexp_up, n_tokens,
-                  &l.shexp_down, error_msg)) {
-    return false;
+#ifdef GUFO_NPU
+  const auto prefill = model_->npu_prefill();
+  std::unique_ptr<npu::HipLinearZTransfer> transfer;
+  std::unique_ptr<npu::ProjectionWork> work;
+  if (prefill && prefill->ready() &&
+      npu::ProjectionQualified(n_tokens, options_.max_batch, npu_prefill, false,
+                               false, last_only, l.npu_shared.get())) {
+    try {
+      PrepareHalfInput(x, n_tokens, c.hidden_size);
+      transfer = std::make_unique<npu::HipLinearZTransfer>(
+          prefill, static_cast<const std::uint16_t*>(s_.x_half), s_.shexp_up,
+          n_tokens, stream_, l.npu_shared->rows, 0, s_.shexp_gate);
+      work = npu::BeginProjection(
+          l.npu_shared, *transfer, layer,
+          [prefill](auto a, auto b, auto info) {
+            return prefill->session().Dispatch(a, b, info);
+          },
+          [prefill](auto error) { prefill->Reject(std::move(error)); },
+          [prefill](auto a, const auto& b, const auto& consume) {
+            return prefill->session().DispatchBatch(a, b, consume);
+          });
+    } catch (const std::exception& e) {
+      prefill->Reject(e.what());
+      work.reset();
+      transfer.reset();
+    }
   }
-  if (shexp_half_ready_) {
-    shexp_half_ready_ = false;
-    if (!DenseF16Gemm(l.shexp_down.data, s_.shexp_half, s_.shexp_out, n_tokens,
-                      l.shexp_down.rows, l.shexp_down.cols, stream_)) {
-      AssignError(error_msg, "shared expert F16 GEMM failed");
+  if (!work) {
+#endif
+    if (!GatedDense(l.shexp_up, l.shexp_gate, x, s_.shexp_up, n_tokens,
+                    &l.shexp_down, error_msg)) {
       return false;
     }
-  } else if (!Dense(l.shexp_down, s_.shexp_up, s_.shexp_out, n_tokens,
-                    error_msg)) {
-    return false;
+    if (shexp_half_ready_) {
+      shexp_half_ready_ = false;
+      if (!DenseF16Gemm(l.shexp_down.data, s_.shexp_half, s_.shexp_out,
+                        n_tokens, l.shexp_down.rows, l.shexp_down.cols,
+                        stream_)) {
+        AssignError(error_msg, "shared expert F16 GEMM failed");
+        return false;
+      }
+    } else if (!Dense(l.shexp_down, s_.shexp_up, s_.shexp_out, n_tokens,
+                      error_msg)) {
+      return false;
+    }
+#ifdef GUFO_NPU
   }
+  const std::function<bool()> finish_shared = work ? std::function<bool()>([&] {
+    auto result =
+        npu::FinishProjection(*work, *transfer, 2 * l.npu_shared->rows);
+    if (!result.valid) {
+      prefill->Reject(result.error);
+      AssignError(error_msg, result.error);
+      return false;
+    }
+    // Gate is decoded to shexp_up (the existing gated output scratch), up
+    // to shexp_gate. The first consumer is SwiGLU, before the down projection.
+    SwigluHalf(s_.shexp_up, s_.shexp_gate, s_.shexp_half,
+               std::size_t{n_tokens} * l.npu_shared->rows, stream_);
+    if (!DenseF16Gemm(l.shexp_down.data, s_.shexp_half, s_.shexp_out, n_tokens,
+                      l.shexp_down.rows, l.shexp_down.cols, stream_)) {
+      prefill->Reject("NPU shared down refused");
+      AssignError(error_msg, "NPU shared down refused");
+      return false;
+    }
+    return true;
+  })
+                                                   : std::function<bool()>{};
+#endif
   if (last_only && l.ffn_gate_exps.type == GgmlType::kQ8_0 &&
       l.ffn_up_exps.type == GgmlType::kQ8_0 &&
       l.ffn_down_exps.type == GgmlType::kQ8_0) {
@@ -2845,13 +3056,22 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
       throw;
     }
   }
-  return MoeExperts<Benchmark>(l, x, out, n_tokens, error_msg);
+  return MoeExperts<Benchmark>(l, x, out, n_tokens, error_msg
+#ifdef GUFO_NPU
+                               ,
+                               finish_shared
+#endif
+  );
 }
 
 template<bool Benchmark>
 bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
-                              std::uint32_t n_tokens,
-                              std::string* error_msg) const {
+                          std::uint32_t n_tokens, std::string* error_msg
+#ifdef GUFO_NPU
+                          ,
+                          const std::function<bool()>& finish_shared
+#endif
+) const {
   const Config& c = config();
   const std::uint32_t used = c.num_experts_used;
   const std::uint32_t slots = n_tokens * used;
@@ -3015,6 +3235,10 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
           lanerow ? routed_pair_rows_ : 0, lanerow ? routed_tile_rows_ : 0,
           layer_us);
   }
+#ifdef GUFO_NPU
+  if (finish_shared && !finish_shared())
+    return false;
+#endif
   if (wmma_experts) {
     // The combine that follows folds this epilogue into its own pass when
     // it takes the F16 route (Combine); otherwise it runs here.
@@ -3038,9 +3262,19 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
 
 // Batch callers instantiate the untimed declarations from executor.hpp.
 template bool Executor::Moe<false>(const DeviceLayer&, const float*, float*,
-                                   std::uint32_t, std::string*, bool) const;
-template bool Executor::MoeExperts<false>(const DeviceLayer&, const float*, float*,
-                                          std::uint32_t, std::string*) const;
+                                   std::uint32_t, std::string*, bool
+#ifdef GUFO_NPU
+                                   ,
+                                   bool, int
+#endif
+) const;
+template bool Executor::MoeExperts<false>(const DeviceLayer&, const float*,
+                                          float*, std::uint32_t, std::string*
+#ifdef GUFO_NPU
+                                          ,
+                                          const std::function<bool()>&
+#endif
+) const;
 
 bool Executor::CopyTrunkHidden(const Session& session, std::span<float> hidden,
                                std::string* error_msg) const {
@@ -3066,10 +3300,17 @@ bool Executor::MtpHead(const DeviceMixer& head, const float* res, bool token,
   // token ids before the host reads them. full_head (DraftVocabulary::kAuto
   // in full mode) drafts from the whole draft head instead.
   const bool subset = draft_ids_ != nullptr && !full_head;
-  const DeviceTensor& output = subset ? draft_head_ : (model_->has_draft_out() ? model_->draft_out() : model_->output());
+  const DeviceTensor& output =
+      subset
+          ? draft_head_
+          : (model_->has_draft_out() ? model_->draft_out() : model_->output());
   if (model_->has_draft_out()) {
-    const auto n = draft_out_steps_[IsTwinDenseType(output.type) ? 1 : 0].fetch_add(1, std::memory_order_relaxed) + 1;
-    if (n == 1 || (n & 0x1FF) == 0) PrintDraftOutCounters("periodic");
+    const auto n =
+        draft_out_steps_[IsTwinDenseType(output.type) ? 1 : 0].fetch_add(
+            1, std::memory_order_relaxed) +
+        1;
+    if (n == 1 || (n & 0x1FF) == 0)
+      PrintDraftOutCounters("periodic");
   }
   if (!HcMix(head, res, false, s_.mixed, nullptr, 1, error_msg) ||
       !Dense(output, s_.mixed, s_.logits, 1, error_msg)) {
@@ -3181,8 +3422,7 @@ bool Executor::Run(Session& session, std::uint64_t key, bool graph,
 
 bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
                        std::uint32_t n_logits, float* logits, ForwardMode mode,
-                       std::string* error_msg,
-                       PrefillCheckpoint* checkpoint,
+                       std::string* error_msg, PrefillCheckpoint* checkpoint,
                        bool verify_candidates,
                        std::span<const std::int32_t> next) const {
   verify_candidates_ready_ = 0;
@@ -3199,6 +3439,10 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   if (mode == ForwardMode::kPrefill) {
     prefetch_next_ = next;
   }
+#ifdef GUFO_NPU
+  if (mode == ForwardMode::kPrefill && model_->npu_prefill())
+    model_->npu_prefill()->BeginChunk();
+#endif
   const bool speculative = mode == ForwardMode::kVerify;
   PrefillPhase phase(mode == ForwardMode::kPrefill);
   CountTwinPass(static_cast<std::uint32_t>(tokens.size()));
@@ -3257,10 +3501,14 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
       CopyReferenceOnce(stream_);
     }
   }
-  if (diagnostic) diagnostic_prefill_ = true;
+  if (diagnostic)
+    diagnostic_prefill_ = true;
   struct EndDiagnostic {
     bool& active;
-    ~EndDiagnostic() { if (active) active = false; }
+    ~EndDiagnostic() {
+      if (active)
+        active = false;
+    }
   } end_diagnostic{diagnostic_prefill_};
   // Failed eager/captured work can still be reading pinned inputs. Drain it
   // before another request reuses those buffers; successful forwards already
@@ -3355,16 +3603,18 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   }
   if (first_layer > 0) {
     const auto prefix = [&] {
-      return ForwardBody<false>(session, n, 0, false, speculative, sparse, start_pos,
-                         graph_pool_grid, 0, first_layer, error_msg);
+      return ForwardBody<false>(session, n, 0, false, speculative, sparse,
+                                start_pos, graph_pool_grid, 0, first_layer,
+                                error_msg);
     };
     constexpr std::uint64_t kPrefixKey = std::uint64_t{1} << 35;
     if (!Run(session, key | kPrefixKey, graph, prefix, error_msg, false)) {
       return false;
     }
-    // Upstream (#445) now starts the n-gram read BEFORE the forward (PleFetch above); calling it
-    // again here, as the Windows port did, advanced the n-gram window twice and corrupted the PLE rows.
-    // The Windows flush still submits the queued prefix launches (HIP on Windows batches them).
+    // Upstream (#445) now starts the n-gram read BEFORE the forward (PleFetch
+    // above); calling it again here, as the Windows port did, advanced the
+    // n-gram window twice and corrupted the PLE rows. The Windows flush still
+    // submits the queued prefix launches (HIP on Windows batches them).
     flush();
   }
   if (traced) {
@@ -3374,11 +3624,12 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
     if (diagnostic)
       return ForwardBody<true>(session, n, n_logits, logits != nullptr,
                                speculative, sparse, start_pos, pool_grid,
-                               first_layer, c.num_layers, error_msg, checkpoint);
+                               first_layer, c.num_layers, error_msg,
+                               checkpoint);
     return ForwardBody<false>(session, n, n_logits, logits != nullptr,
                               speculative, sparse, start_pos,
-                              graph ? graph_pool_grid : pool_grid,
-                              first_layer, c.num_layers, error_msg, checkpoint);
+                              graph ? graph_pool_grid : pool_grid, first_layer,
+                              c.num_layers, error_msg, checkpoint);
   };
   // Only the suffix waits for its pinned n-gram rows. During eager
   // execution and capture, Ple performs this wait at the same boundary.
@@ -3403,6 +3654,15 @@ bool Executor::Forward(Session& session, std::span<const std::int32_t> tokens,
   if (!ran || (flag_wait && !WaitBumped("forward", error_msg))) {
     return false;
   }
+#ifdef GUFO_NPU
+  // Run already waited for this chunk's stream. Check before publishing
+  // logits, advancing position or committing the engine's token frontier.
+  if (mode == ForwardMode::kPrefill && model_->npu_prefill() &&
+      !npu::CheckHipPrefillChunk(*model_->npu_prefill(), error_msg)) {
+    pinned_inputs.completed = true;
+    return false;
+  }
+#endif
   if (traced) {
     Tl().Host(Timeline::kSynced);
     Tl().MaybeReport(stream_);
@@ -3446,8 +3706,10 @@ std::uint32_t TwinMaxN() {
 }  // namespace
 
 const std::vector<DeviceLayer>& Executor::PassLayers(std::uint32_t n) const {
-  if (!model_->has_twin()) return model_->layers();
-  return (MatrixRows(n) || n > TwinMaxN()) ? model_->layers() : model_->twin_layers();
+  if (!model_->has_twin())
+    return model_->layers();
+  return (MatrixRows(n) || n > TwinMaxN()) ? model_->layers()
+                                           : model_->twin_layers();
 }
 
 const std::vector<DeviceLayer>& Executor::BatchPassLayers(
@@ -3470,21 +3732,29 @@ const std::vector<DeviceLayer>& Executor::BatchPassLayers(
   return twin ? model_->twin_layers() : model_->layers();
 }
 
-bool Executor::ShadowCompare(const DeviceTensor& w, const Q8Input& q, const float* out, std::string* error_msg) const {
+bool Executor::ShadowCompare(const DeviceTensor& w, const Q8Input& q,
+                             const float* out, std::string* error_msg) const {
   const auto* entry = model_->ShadowFor(w.data);
-  if (entry == nullptr) return true;
+  if (entry == nullptr)
+    return true;
   const std::size_t count = static_cast<std::size_t>(w.rows) * q.n;
   if (s_.shadow_out == nullptr || count > std::size_t{16384} * kVecBatch) {
     AssignError(error_msg, "shadow check: scratch too small");
     return false;
   }
-  if (qfn_mmq_q8_0_dense_vec_preq(entry->shadow->data, nullptr, q.data, s_.shadow_out, static_cast<int>(w.rows), static_cast<int>(q.n), static_cast<int>(w.cols), stream_) != 0) {
+  if (qfn_mmq_q8_0_dense_vec_preq(entry->shadow->data, nullptr, q.data,
+                                  s_.shadow_out, static_cast<int>(w.rows),
+                                  static_cast<int>(q.n),
+                                  static_cast<int>(w.cols), stream_) != 0) {
     AssignError(error_msg, "shadow check: Q8_0 GEMV failed");
     return false;
   }
   std::vector<float> a(count), b(count);
-  if (hipStreamSynchronize(stream_) != hipSuccess || hipMemcpy(a.data(), out, count * sizeof(float), hipMemcpyDeviceToHost) != hipSuccess ||
-      hipMemcpy(b.data(), s_.shadow_out, count * sizeof(float), hipMemcpyDeviceToHost) != hipSuccess) {
+  if (hipStreamSynchronize(stream_) != hipSuccess ||
+      hipMemcpy(a.data(), out, count * sizeof(float), hipMemcpyDeviceToHost) !=
+          hipSuccess ||
+      hipMemcpy(b.data(), s_.shadow_out, count * sizeof(float),
+                hipMemcpyDeviceToHost) != hipSuccess) {
     AssignError(error_msg, "shadow check: copy failed");
     return false;
   }
@@ -3507,8 +3777,11 @@ bool Executor::ShadowCompare(const DeviceTensor& w, const Q8Input& q, const floa
 
 void Executor::PrintShadowStats() const {
   std::vector<const ShadowStat*> v;
-  for (const auto& kv : shadow_stats_) v.push_back(&kv.second);
-  std::sort(v.begin(), v.end(), [](const ShadowStat* x, const ShadowStat* y) { return x->d2 / (x->r2 + 1e-30) > y->d2 / (y->r2 + 1e-30); });
+  for (const auto& kv : shadow_stats_)
+    v.push_back(&kv.second);
+  std::sort(v.begin(), v.end(), [](const ShadowStat* x, const ShadowStat* y) {
+    return x->d2 / (x->r2 + 1e-30) > y->d2 / (y->r2 + 1e-30);
+  });
   gufo::server::Logger::Raw(
       gufo::server::LogLevel::kInfo,
       "[shadow] %zu tensors compared (4-bit kernel vs fake-quant Q8_0 on the "
@@ -3520,7 +3793,9 @@ void Executor::PrintShadowStats() const {
         v[i]->label.c_str(), std::sqrt(v[i]->d2 / (v[i]->r2 + 1e-30)),
         v[i]->maxabs, static_cast<unsigned long long>(v[i]->passes));
   std::map<std::string, std::vector<double>> by_class;
-  for (const auto* s : v) by_class[s->label.substr(s->label.find('.', 4) + 1)].push_back(std::sqrt(s->d2 / (s->r2 + 1e-30)));
+  for (const auto* s : v)
+    by_class[s->label.substr(s->label.find('.', 4) + 1)].push_back(
+        std::sqrt(s->d2 / (s->r2 + 1e-30)));
   for (auto& kv : by_class) {
     std::sort(kv.second.begin(), kv.second.end());
     gufo::server::Logger::Raw(
@@ -3562,8 +3837,12 @@ void Executor::PrintDraftOutCounters(const char* tag) const {
           draft_out_steps_[0].load(std::memory_order_relaxed)));
 }
 
-void Executor::PrintTwinCounters(const char* tag, const char* copy, std::uint32_t n) const {
-  const auto v = [&](unsigned i) { return static_cast<unsigned long long>(twin_passes_[i].load(std::memory_order_relaxed)); };
+void Executor::PrintTwinCounters(const char* tag, const char* copy,
+                                 std::uint32_t n) const {
+  const auto v = [&](unsigned i) {
+    return static_cast<unsigned long long>(
+        twin_passes_[i].load(std::memory_order_relaxed));
+  };
   gufo::server::Logger::Raw(
       gufo::server::LogLevel::kInfo,
       "[twin] %s copy=%s n=%u passes_total=%llu | 4bit decode=%llu verify=%llu "
@@ -3573,7 +3852,8 @@ void Executor::PrintTwinCounters(const char* tag, const char* copy, std::uint32_
       static_cast<unsigned long long>(
           twin_total_.load(std::memory_order_relaxed)),
       v(3), v(4), v(5), v(0), v(1), v(2), qfn_mmq_iq4_dense_launch_count());
-  if (!TwinBatchEnabled()) return;
+  if (!TwinBatchEnabled())
+    return;
   const auto bp = [&](unsigned i) {
     return static_cast<unsigned long long>(
         twin_batch_passes_[i].load(std::memory_order_relaxed));
@@ -3592,20 +3872,25 @@ void Executor::PrintTwinCounters(const char* tag, const char* copy, std::uint32_
 }
 
 void Executor::LogTwinCounters(const char* tag) const {
-  if (model_ != nullptr && model_->has_twin()) PrintTwinCounters(tag, "-", 0);
+  if (model_ != nullptr && model_->has_twin())
+    PrintTwinCounters(tag, "-", 0);
 }
 
 void Executor::CountTwinPass(std::uint32_t n) const {
-  if (!model_->has_twin()) return;
+  if (!model_->has_twin())
+    return;
   static const bool trace = [] {
     const char* e = std::getenv("GUFO_DENSE_TWIN_TRACE");
     return e != nullptr && e[0] == '1' && e[1] == '\0';
   }();
   const bool twin = !MatrixRows(n) && n <= TwinMaxN();
-  const unsigned kind = prefill_phase ? 2u : (n <= 1 ? 0u : (n <= kVecBatch ? 1u : 2u));
+  const unsigned kind =
+      prefill_phase ? 2u : (n <= 1 ? 0u : (n <= kVecBatch ? 1u : 2u));
   twin_passes_[(twin ? 3u : 0u) + kind].fetch_add(1, std::memory_order_relaxed);
   const auto total = twin_total_.fetch_add(1, std::memory_order_relaxed) + 1;
-  if (total == 1 || (total & 0x3FF) == 0 || trace) PrintTwinCounters(total == 1 ? "first" : "periodic", twin ? "4bit" : "8bit", n);
+  if (total == 1 || (total & 0x3FF) == 0 || trace)
+    PrintTwinCounters(total == 1 ? "first" : "periodic", twin ? "4bit" : "8bit",
+                      n);
 }
 
 template<bool Diagnostic>
@@ -3663,7 +3948,12 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
                                      checkpoint->tokens}
                      : GdnCheckpoint{};
       if (!LinearAttention(l, session.linear_[il], s_.mixed, s_.block_out, n,
-                           speculative, error_msg, false, true, capture)) {
+                           speculative, error_msg, false, true, capture
+#ifdef GUFO_NPU
+                           ,
+                           prefill_phase, static_cast<int>(il)
+#endif
+                               )) {
         return false;
       }
     } else if (!Attention(l, session.attention_[il], s_.mixed, s_.block_out, n,
@@ -3671,7 +3961,12 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
                           &session.control_->blocks, start_pos, pool_grid,
                           session.max_context_, sparse, error_msg,
                           last_attention, false, true,
-                          checkpoint ? checkpoint->tokens : 0)) {
+                          checkpoint ? checkpoint->tokens : 0
+#ifdef GUFO_NPU
+                          ,
+                          prefill_phase && !speculative, static_cast<int>(il)
+#endif
+                              )) {
       return false;
     }
 
@@ -3696,11 +3991,27 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
       if constexpr (Diagnostic) {
         const bool ok =
             active_diag_->totals.moe_bench
-                ? Moe<true>(l, s_.mixed, s_.block_out, rows, error_msg)
-                : Moe(l, s_.mixed, s_.block_out, rows, error_msg);
+                ? Moe<true>(l, s_.mixed, s_.block_out, rows, error_msg
+#ifdef GUFO_NPU
+                            ,
+                            false, prefill_phase && !speculative,
+                            static_cast<int>(il)
+#endif
+                                )
+                : Moe(l, s_.mixed, s_.block_out, rows, error_msg
+#ifdef GUFO_NPU
+                      ,
+                      false, prefill_phase && !speculative, static_cast<int>(il)
+#endif
+                  );
         if (!ok)
           return false;
-      } else if (!Moe(l, s_.mixed, s_.block_out, rows, error_msg)) {
+      } else if (!Moe(l, s_.mixed, s_.block_out, rows, error_msg
+#ifdef GUFO_NPU
+                      ,
+                      false, prefill_phase && !speculative, static_cast<int>(il)
+#endif
+                          )) {
         return false;
       }
       if constexpr (Diagnostic) {
@@ -4824,9 +5135,8 @@ bool Executor::MtpForward(Session& session,
                      n <= kVecBatch && pool <= graph_pool &&
                      pos + 1 >= session.VisionLayout().PrefixLength();
   const std::uint64_t key = MtpGraphKey(
-      n, hidden_row < 0, output.token != nullptr,
-      output.candidates != nullptr, sparse, output.kv_only,
-      session.draft_head_full_);
+      n, hidden_row < 0, output.token != nullptr, output.candidates != nullptr,
+      sparse, output.kv_only, session.draft_head_full_);
   const auto body = [&] {
     return MtpBody(session, n, pos, output.token != nullptr,
                    output.candidates != nullptr, error_msg,

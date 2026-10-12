@@ -13,6 +13,10 @@
 
 #include "src/cli/serve/logging.hpp"
 #include "src/core/gguf_reader.hpp"
+#include "src/npu/prefill_plan.hpp"
+#ifdef GUFO_NPU
+#include "src/npu/server_prefill.hpp"
+#endif
 #include "src/core/platform/tuning.hpp"
 #include "src/models/qwen38_flash_next/batch_twin_policy.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp"
@@ -37,13 +41,16 @@ constexpr std::uint32_t kPrefillTailTokens = 128;
 
 // GUFO_PREFILL_FORWARD_TOKENS is the single override of upstream's 4,096-token
 // forward size (including checkpoint capture and disk in-pass prefill).
-// Measured on gfx1151 at 28K-token cold prompts: 4,096 -> 0.88 ms/token, 2,048 -> 1.4-1.8, 8,192 -> 1.5. Scratch is sized from this value
-// (executor max_batch), so it is read once; unset or out of [64, 16384] keeps the default.
+// Measured on gfx1151 at 28K-token cold prompts: 4,096 -> 0.88 ms/token, 2,048
+// -> 1.4-1.8, 8,192 -> 1.5. Scratch is sized from this value (executor
+// max_batch), so it is read once; unset or out of [64, 16384] keeps the
+// default.
 std::uint32_t PrefillChunkTokens() {
   static const std::uint32_t chunk = [] {
     const char* e = std::getenv("GUFO_PREFILL_FORWARD_TOKENS");
     const long v = e != nullptr ? std::strtol(e, nullptr, 10) : 0;
-    return (v >= 64 && v <= 16384) ? static_cast<std::uint32_t>(v) : kPrefillChunkTokens;
+    return (v >= 64 && v <= 16384) ? static_cast<std::uint32_t>(v)
+                                   : kPrefillChunkTokens;
   }();
   return chunk;
 }
@@ -165,7 +172,8 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     const auto value = std::strtoul(cap, &end, 10);
     if (end == cap || *end != 0 || value == 0 ||
         value > std::numeric_limits<std::uint32_t>::max()) {
-      AssignError(error_msg, "GUFO_MAX_IMAGE_TOKENS must be a positive integer");
+      AssignError(error_msg,
+                  "GUFO_MAX_IMAGE_TOKENS must be a positive integer");
       return nullptr;
     }
     m->max_image_tokens_ = static_cast<std::uint32_t>(value);
@@ -223,7 +231,12 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
   }
   m->device_ = rocm::DeviceModel::Upload(*m->weights_, *m->reader_,
                                          m->mtp_weights_.get(),
-                                         m->mtp_reader_.get(), error_msg);
+                                         m->mtp_reader_.get(), error_msg
+#ifdef GUFO_NPU
+                                         ,
+                                         options.npu_prefill
+#endif
+  );
   if (!m->device_) {
     return nullptr;
   }
@@ -256,14 +269,18 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     if (!m->device_->UploadTwin(*twin, *twin_reader, error_msg)) {
       return nullptr;
     }
-    // DEBUG: GUFO_DENSE_TWIN_SHADOW = a fake-quant (Q8_0) twin of the same tensors; every 4-bit dense projection is recomputed through the Q8_0 path on the same activations and compared (needs GUFO_DENSE_TWIN_ALLOW_Q8=1).
-    if (const char* shadow_path = std::getenv("GUFO_DENSE_TWIN_SHADOW"); shadow_path != nullptr && shadow_path[0] != '\0') {
+    // DEBUG: GUFO_DENSE_TWIN_SHADOW = a fake-quant (Q8_0) twin of the same
+    // tensors; every 4-bit dense projection is recomputed through the Q8_0 path
+    // on the same activations and compared (needs GUFO_DENSE_TWIN_ALLOW_Q8=1).
+    if (const char* shadow_path = std::getenv("GUFO_DENSE_TWIN_SHADOW");
+        shadow_path != nullptr && shadow_path[0] != '\0') {
       auto shadow_reader = core::GgufReader::OpenFile(shadow_path, error_msg);
       if (!shadow_reader) {
         return nullptr;
       }
       auto shadow = TwinWeights::Bind(*shadow_reader, *m->weights_, error_msg);
-      if (!shadow || !m->device_->UploadShadow(*shadow, *shadow_reader, error_msg)) {
+      if (!shadow ||
+          !m->device_->UploadShadow(*shadow, *shadow_reader, error_msg)) {
         return nullptr;
       }
     }
@@ -274,7 +291,9 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
                               : std::getenv("GUFO_DRAFT_OUT_MODEL");
   if (head_path != nullptr && head_path[0] != '\0') {
     if (!m->mtp_weights_) {
-      AssignError(error_msg, "GUFO_DRAFT_OUT_MODEL needs the MTP draft head (--speculative mtp)");
+      AssignError(
+          error_msg,
+          "GUFO_DRAFT_OUT_MODEL needs the MTP draft head (--speculative mtp)");
       return nullptr;
     }
     auto head_reader = core::GgufReader::OpenFile(
@@ -304,8 +323,7 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
   }
   if (m->mtp_weights_ && options.draft_vocabulary == DraftVocabulary::kAuto) {
     const char* e = std::getenv("GUFO_DRAFT_VOCAB_AUTO");
-    if (!ParseDraftHeadSwitch(e != nullptr ? e : "",
-                              &m->head_switch_config_)) {
+    if (!ParseDraftHeadSwitch(e != nullptr ? e : "", &m->head_switch_config_)) {
       AssignError(error_msg,
                   "GUFO_DRAFT_VOCAB_AUTO must be enter,window,leave with "
                   "1 <= enter <= window <= 64 and leave >= 1");
@@ -373,13 +391,16 @@ bool Model::IsStopToken(std::int32_t token) const noexcept {
 
 std::vector<std::uint32_t> Model::SuppressedTokens() const {
   std::vector<std::uint32_t> result;
-  const auto* metadata=reader_->FindMetadata("tokenizer.ggml.suppress_tokens");
-  if (!metadata) return result;
-  const auto* ids=std::get_if<std::vector<std::int64_t>>(&metadata->value);
-  if (metadata->type!=core::GgufValueType::kArray || !ids)
-    throw std::invalid_argument("tokenizer.ggml.suppress_tokens must be an integer array");
+  const auto* metadata =
+      reader_->FindMetadata("tokenizer.ggml.suppress_tokens");
+  if (!metadata)
+    return result;
+  const auto* ids = std::get_if<std::vector<std::int64_t>>(&metadata->value);
+  if (metadata->type != core::GgufValueType::kArray || !ids)
+    throw std::invalid_argument(
+        "tokenizer.ggml.suppress_tokens must be an integer array");
   for (auto id : *ids)
-    if (id>=0 && static_cast<std::uint64_t>(id)<VocabSize())
+    if (id >= 0 && static_cast<std::uint64_t>(id) < VocabSize())
       result.push_back(static_cast<std::uint32_t>(id));
   return result;
 }
@@ -388,13 +409,29 @@ std::uint32_t Model::VocabSize() const noexcept {
   return weights_->config.vocab_size;
 }
 
-std::uint32_t Model::PrefillCapacity() const noexcept {
+std::uint32_t Model::PrefillLegacyCapacity() const noexcept {
   return std::min(PrefillChunkTokens(), options_.max_context);
+}
+std::uint32_t Model::PrefillLegacyThroughCapacity() const noexcept {
+  return std::min(PrefillChunkTokens() + kPrefillTailTokens,
+                  options_.max_context);
+}
+std::uint32_t Model::PrefillCapacity() const noexcept {
+#ifdef GUFO_NPU
+  if (options_.npu_prefill && options_.npu_prefill->ready())
+    return std::min(4096U, options_.max_context);
+#endif
+  return PrefillLegacyCapacity();
 }
 
 std::uint32_t Model::PrefillThroughCapacity() const noexcept {
-  return std::min(PrefillChunkTokens() + kPrefillTailTokens,
-                  options_.max_context);
+#ifdef GUFO_NPU
+  // Scratch remains large enough for GPU fallback after NPU is disabled.
+  if (options_.npu_prefill)
+    return std::min(std::max(4096U, PrefillChunkTokens() + kPrefillTailTokens),
+                    options_.max_context);
+#endif
+  return PrefillLegacyThroughCapacity();
 }
 
 bool Model::HasMtp() const noexcept {
@@ -422,7 +459,8 @@ std::vector<platform::LoadedFile> Model::LoadedFiles() const {
   std::vector<platform::LoadedFile> files;
   platform::AppendLoadedFiles(reader_->GetMappedRegions(), "target", &files);
   if (mtp_reader_)
-    platform::AppendLoadedFiles(mtp_reader_->GetMappedRegions(), "draft", &files);
+    platform::AppendLoadedFiles(mtp_reader_->GetMappedRegions(), "draft",
+                                &files);
   if (vision_) {
     const auto vision_files = vision_->LoadedFiles();
     files.insert(files.end(), vision_files.begin(), vision_files.end());
@@ -461,18 +499,17 @@ std::string Model::AccountingLine(core::SessionMode mode,
                                   std::uint32_t context) const {
   const auto mib = [](std::size_t b) { return b / (1024.0 * 1024.0); };
   char buf[320];
-  std::snprintf(buf, sizeof(buf),
-                "resident_mib=%.1f vision_resident_mib=%.1f vision_session_mib=%.1f "
-                "deferred_scratch_mib=%.1f ",
-                mib(ResidentBytes()), mib(vision_ ? vision_->ResidentBytes() : 0),
-                mib(VisionSessionBytes(context)),
-                mib(DeferredScratchBytes()));
-  return std::string(buf) +
-         executor_->SessionBytesBreakdown(
-             mode, context,
-             mode == core::SessionMode::kSpeculative
-                 ? executor_->max_speculative() - 1
-                 : 0);
+  std::snprintf(
+      buf, sizeof(buf),
+      "resident_mib=%.1f vision_resident_mib=%.1f vision_session_mib=%.1f "
+      "deferred_scratch_mib=%.1f ",
+      mib(ResidentBytes()), mib(vision_ ? vision_->ResidentBytes() : 0),
+      mib(VisionSessionBytes(context)), mib(DeferredScratchBytes()));
+  return std::string(buf) + executor_->SessionBytesBreakdown(
+                                mode, context,
+                                mode == core::SessionMode::kSpeculative
+                                    ? executor_->max_speculative() - 1
+                                    : 0);
 }
 
 std::size_t Model::DeferredScratchBytes() const {
@@ -542,10 +579,14 @@ std::uint32_t Session::ContextSize() const noexcept {
   return session_->max_context();
 }
 
-// GUFO_MTP_TRACE=1 (literal value only; default off = behaviour and output unchanged): one stderr line per decode cycle,
-// '[mtp-cycle] t_ms=<ms on the steady clock, at the end of the cycle> base=<context position> drafts=<MTP drafts proposed>
-// accepted=<MTP drafts accepted> lookup=<copied (n-gram) proposals> stop=<0|1>', and '[mtp-ar] t_ms= base=' per plain autoregressive token.
-// The gaps between successive t_ms values are the cycle times (wall, incl. catch-up of the previous chain); decode-thread lead-2 capture.
+// GUFO_MTP_TRACE=1 (literal value only; default off = behaviour and output
+// unchanged): one stderr line per decode cycle,
+// '[mtp-cycle] t_ms=<ms on the steady clock, at the end of the cycle>
+// base=<context position> drafts=<MTP drafts proposed> accepted=<MTP drafts
+// accepted> lookup=<copied (n-gram) proposals> stop=<0|1>', and '[mtp-ar] t_ms=
+// base=' per plain autoregressive token. The gaps between successive t_ms
+// values are the cycle times (wall, incl. catch-up of the previous chain);
+// decode-thread lead-2 capture.
 static bool MtpCycleTraceEnabled() {
   static const bool on = [] {
     const char* e = std::getenv("GUFO_MTP_TRACE");
@@ -553,9 +594,9 @@ static bool MtpCycleTraceEnabled() {
   }();
   return on;
 }
-// GUFO_SURVIVAL_FLOOR (default ON; only the literal '0' disables): survival-mode
-// decoding takes a plain step while the length controller's back-off is active
-// (see SurvivalDrafts in mtp_policy.hpp). Read once.
+// GUFO_SURVIVAL_FLOOR (default ON; only the literal '0' disables):
+// survival-mode decoding takes a plain step while the length controller's
+// back-off is active (see SurvivalDrafts in mtp_policy.hpp). Read once.
 static bool SurvivalFloorEnabled() {
   static const bool on = [] {
     const char* e = std::getenv("GUFO_SURVIVAL_FLOOR");
@@ -564,17 +605,25 @@ static bool SurvivalFloorEnabled() {
   return on;
 }
 static double MtpTraceNowMs() {
-  return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  return std::chrono::duration<double, std::milli>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
 }
 
-bool Session::ThinkingAfter(const std::vector<std::int32_t>& chain, std::size_t keep) const {
+bool Session::ThinkingAfter(const std::vector<std::int32_t>& chain,
+                            std::size_t keep) const {
   for (std::size_t i = std::min(keep, chain.size()); i > 0; --i) {
-    if (chain[i - 1] == kMtpThinkStartToken) return true;
-    if (chain[i - 1] == kMtpThinkEndToken || chain[i - 1] == kMtpToolCallToken) return false;
+    if (chain[i - 1] == kMtpThinkStartToken)
+      return true;
+    if (chain[i - 1] == kMtpThinkEndToken || chain[i - 1] == kMtpToolCallToken)
+      return false;
   }
   for (std::size_t i = tokens_.size(); i > 0; --i) {
-    if (tokens_[i - 1] == kMtpThinkStartToken) return true;
-    if (tokens_[i - 1] == kMtpThinkEndToken || tokens_[i - 1] == kMtpToolCallToken) return false;
+    if (tokens_[i - 1] == kMtpThinkStartToken)
+      return true;
+    if (tokens_[i - 1] == kMtpThinkEndToken ||
+        tokens_[i - 1] == kMtpToolCallToken)
+      return false;
   }
   return false;
 }
@@ -608,12 +657,14 @@ void Session::SetCancellationCheck(std::function<bool()> check) {
 void Session::ConfigureVision(
     std::shared_ptr<const qwen::vision::Prompt> prompt) {
   if (prompt) {
-    // The admission reservation assumes at most MaxImageTokens image tokens per request.
+    // The admission reservation assumes at most MaxImageTokens image tokens per
+    // request.
     std::uint64_t image_tokens = 0;
     for (const auto& image : prompt->rope.images)
       image_tokens += std::uint64_t{image.height} * image.width;
     if (image_tokens > model_->MaxImageTokens(session_->max_context()))
-      throw std::invalid_argument("image tokens exceed the per-request limit (GUFO_MAX_IMAGE_TOKENS)");
+      throw std::invalid_argument(
+          "image tokens exceed the per-request limit (GUFO_MAX_IMAGE_TOKENS)");
   }
   const auto identity = prompt ? prompt->IdentityForPrefix(tokens_.size())
                                : std::span<const std::uint8_t>{};
@@ -918,7 +969,7 @@ bool Session::DraftCatchUpBatch(std::span<const AdvanceRequest> requests,
   return items.empty() || exec.MtpForwardBatch(items, error_msg);
 }
 
-template <bool CaptureStarted>
+template<bool CaptureStarted>
 bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
                    bool prefill, std::uint32_t boundary,
                    std::unique_ptr<SessionSnapshot>* checkpoint,
@@ -934,7 +985,13 @@ bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
     const auto capacity = remaining <= exec.max_batch()
                               ? exec.max_batch()
                               : model_->PrefillCapacity();
-    const std::size_t n = std::min<std::size_t>(capacity, remaining);
+    bool npu_on = false;
+#ifdef GUFO_NPU
+    npu_on = prefill && model_->options_.npu_prefill &&
+             model_->options_.npu_prefill->ready();
+#endif
+    const std::size_t n = npu_on ? std::min<std::size_t>(4096, remaining)
+                                 : std::min<std::size_t>(capacity, remaining);
     const auto chunk = tokens.subspan(off, n);
     if (MtpEnabled() && !tokens_.empty() &&
         !DraftCatchUp(chunk[0], false, error_msg)) {
@@ -994,11 +1051,11 @@ bool Session::Sync(std::span<const std::int32_t> prompt, std::string* error_msg,
   return SyncImpl(prompt, error_msg, 0, nullptr, nullptr, nullptr, next);
 }
 
-bool Session::SyncThrough(std::span<const std::int32_t> prompt,
-                          std::uint32_t boundary,
-                          std::unique_ptr<SessionSnapshot>* checkpoint,
-                          std::string* error_msg, double* capture_ms,
-                          std::chrono::steady_clock::time_point* capture_started) {
+bool Session::SyncThrough(
+    std::span<const std::int32_t> prompt, std::uint32_t boundary,
+    std::unique_ptr<SessionSnapshot>* checkpoint, std::string* error_msg,
+    double* capture_ms,
+    std::chrono::steady_clock::time_point* capture_started) {
   if (!checkpoint || boundary == 0 || boundary > prompt.size() ||
       prompt.size() - boundary > 8 || boundary <= tokens_.size()) {
     AssignError(error_msg,
@@ -1043,12 +1100,12 @@ bool Session::SyncImpl(std::span<const std::int32_t> prompt,
     common = 0;
   }
   valid_ = false;
-  const bool ok = capture_started
-                      ? Feed<true>(prompt.subspan(common), error_msg, true,
-                                   boundary, checkpoint, capture_ms,
-                                   capture_started, next)
-                      : Feed<false>(prompt.subspan(common), error_msg, true,
-                                    boundary, checkpoint, capture_ms, nullptr, next);
+  const bool ok =
+      capture_started
+          ? Feed<true>(prompt.subspan(common), error_msg, true, boundary,
+                       checkpoint, capture_ms, capture_started, next)
+          : Feed<false>(prompt.subspan(common), error_msg, true, boundary,
+                        checkpoint, capture_ms, nullptr, next);
   valid_ = ok;
   return ok;
 }
@@ -1352,14 +1409,14 @@ bool Session::PrepareDecode(const DecodeRequest& request,
   const std::size_t width =
       MtpEnabled() && cap > 1
           ? 1 + (batch_drafts ? std::min<std::uint32_t>(*batch_drafts, cap - 1)
-                 : survival   ? SurvivalDrafts(
-                                    draft_length_,
-                                    static_cast<std::uint32_t>(cap - 1),
-                                    static_cast<std::uint32_t>(tokens_.size()),
-                                    SurvivalFloorEnabled())
-                              : draft_length_.Choose(
-                                    static_cast<std::uint32_t>(cap - 1),
-                                    static_cast<std::uint32_t>(tokens_.size())))
+                 : survival
+                     ? SurvivalDrafts(
+                           draft_length_, static_cast<std::uint32_t>(cap - 1),
+                           static_cast<std::uint32_t>(tokens_.size()),
+                           SurvivalFloorEnabled())
+                     : draft_length_.Choose(
+                           static_cast<std::uint32_t>(cap - 1),
+                           static_cast<std::uint32_t>(tokens_.size())))
           : cap;
   if (width == 0) {
     result->stop = true;
@@ -1394,7 +1451,8 @@ bool Session::PrepareDecode(const DecodeRequest& request,
     return true;
   }
   if (scoring_state) {
-    // Sampling can journal deferred behaviour; score the state before that draw.
+    // Sampling can journal deferred behaviour; score the state before that
+    // draw.
     pending->anchor_logprob = scoring_state->RawLogprobs(
         logits_, static_cast<sampling::TokenId>(anchor),
         static_cast<std::size_t>(sampler.config().logprobs));
@@ -1527,9 +1585,9 @@ bool Session::FinishDecode(const DecodeRequest& request,
   std::array<MtpCandidateLogits, kMaxMtpDraftTokens + 1> candidates{};
   std::string candidate_error;
   const bool have_candidates =
-      !collect_logprobs && sampled && platform::PlatformTuning().fast_sampling &&
-      k <= candidates.size() && sampler.config().top_k > 0 &&
-      !sampler.config().penalties_enabled() &&
+      !collect_logprobs && sampled &&
+      platform::PlatformTuning().fast_sampling && k <= candidates.size() &&
+      sampler.config().top_k > 0 && !sampler.config().penalties_enabled() &&
       exec.VerifyCandidates(std::span(candidates).first(k), &candidate_error);
   // Full rows kept on the GPU are fetched once, only when a row is needed.
   // Scoring downloads greedy rows too, while retaining the existing GPU winner.
@@ -1569,7 +1627,8 @@ bool Session::FinishDecode(const DecodeRequest& request,
         continue;
       }
       if (is_stop(prediction.index)) {
-        if(prediction.index==chain[keep]) sampler.RecordSpecEogStop(k-keep-1);
+        if (prediction.index == chain[keep])
+          sampler.RecordSpecEogStop(k - keep - 1);
         result->stop = true;
         break;
       }
@@ -1578,8 +1637,8 @@ bool Session::FinishDecode(const DecodeRequest& request,
       }
       if (collect_logprobs) {
         result->logprobs.push_back(sampler.RawLogprobs(
-            std::span<const float>(verify_logits_).subspan((keep - 1) * vocab,
-                                                         vocab),
+            std::span<const float>(verify_logits_)
+                .subspan((keep - 1) * vocab, vocab),
             prediction.index,
             static_cast<std::size_t>(sampler.config().logprobs)));
       }
@@ -1602,21 +1661,26 @@ bool Session::FinishDecode(const DecodeRequest& request,
       }
       double accept_scale = 1.0;
       if (MtpLenient().enabled) {
-        const auto draft_token = static_cast<std::int32_t>(proposals[keep - 1].token);
-        if (is_stop(draft_token) || draft_token == kMtpThinkEndToken || draft_token == kMtpToolCallToken) {
-          MtpLenientStats().skipped_special.fetch_add(1, std::memory_order_relaxed);
+        const auto draft_token =
+            static_cast<std::int32_t>(proposals[keep - 1].token);
+        if (is_stop(draft_token) || draft_token == kMtpThinkEndToken ||
+            draft_token == kMtpToolCallToken) {
+          MtpLenientStats().skipped_special.fetch_add(
+              1, std::memory_order_relaxed);
         } else {
           accept_scale = MtpLenientScale(ThinkingAfter(chain, keep));
         }
       }
       const auto verified =
-          target
-              ? VerifyMtpProposal(*target, vocab, proposals[keep - 1], sampler, accept_scale)
-              : VerifyMtpProposal(row, proposals[keep - 1], sampler, accept_scale);
+          target ? VerifyMtpProposal(*target, vocab, proposals[keep - 1],
+                                     sampler, accept_scale)
+                 : VerifyMtpProposal(row, proposals[keep - 1], sampler,
+                                     accept_scale);
       const auto token = static_cast<std::int32_t>(verified.token);
       const bool accepted = verified.accepted;
       if (is_stop(token)) {
-        if (accepted) sampler.RecordSpecEogStop(k-keep-1);
+        if (accepted)
+          sampler.RecordSpecEogStop(k - keep - 1);
         result->stop = true;
         break;
       }
@@ -1644,7 +1708,8 @@ bool Session::FinishDecode(const DecodeRequest& request,
     }
     if (scoring_state)
       result->logprobs.push_back(scoring_state->RawLogprobs(
-          std::span<const float>(verify_logits_).subspan((keep - 1) * vocab, vocab),
+          std::span<const float>(verify_logits_)
+              .subspan((keep - 1) * vocab, vocab),
           static_cast<sampling::TokenId>(chain[keep]),
           static_cast<std::size_t>(sampler.config().logprobs)));
     ++keep;
@@ -1741,8 +1806,7 @@ bool Session::DecodeStep(std::size_t max_tokens,
   pending.rows_on_device =
       pending.speculative && !pending.gpu_verification && pending.sampled &&
       !pending.collect_logprobs && platform::PlatformTuning().fast_sampling &&
-      sampler.config().top_k > 0 &&
-      !sampler.config().penalties_enabled();
+      sampler.config().top_k > 0 && !sampler.config().penalties_enabled();
   float* logits = !pending.speculative ? logits_.data()
                   : pending.gpu_verification || pending.rows_on_device
                       ? nullptr

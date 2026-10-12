@@ -17,7 +17,8 @@ PROFILES = '## Profiles\n\n| Profile | Effect |\n| --- | --- |\n| default | Use 
 
 def validate_value(row, value):
     name, rule = row['name'], row['value_rule']
-    enums = {'--speculative': {'mtp', 'off', 'dspark', 'dflash2'},
+    enums = {'--npu-prefill': {'off', 'on'},
+             '--speculative': {'mtp', 'off', 'dspark', 'dflash2'},
              '--mtp-policy': {'survival', 'length'},
              '--mtp-draft-vocab': {'auto', 'latin', 'full'},
              '--think': {'auto', 'on', 'off'},

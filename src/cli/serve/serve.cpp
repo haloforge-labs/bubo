@@ -31,12 +31,18 @@
 #include "src/cli/brand.hpp"
 #include "src/cli/sampling_options.hpp"
 #include "src/cli/serve/asr_service.hpp"
+#include "src/cli/serve/debug_request.hpp"
 #include "src/cli/serve/debug_settings.hpp"
 #include "src/cli/serve/http_server.hpp"
 #include "src/cli/serve/image_api.hpp"
 #include "src/cli/serve/inference_backend.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/release_profile.hpp"
+#ifdef GUFO_NPU
+#include "src/npu/fabric_peak.hpp"
+#include "src/npu/operator_control.hpp"
+#include "src/npu/server_prefill.hpp"
+#endif
 #include "src/cli/serve/sampling_request.hpp"
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/diagnostics/gpu_queues.h"
@@ -88,10 +94,15 @@ public:
         gufo::platform::DeviceMemoryInfo(&free, &total) == hipSuccess) {
       out << " gpu_device_used_mib=" << (total - free) / (1024 * 1024)
           << " gpu_device_total_mib=" << total / (1024 * 1024);
-    // DXGI split of the same numbers: LOCAL (the dedicated carve-out) vs NON_LOCAL (shared system memory); the combined figures above sum both.
-    if (const auto split = gufo::platform::QueryDeviceMemorySplit(); split.valid)
-      out << " gpu_local_used_mib=" << split.local_used / (1024 * 1024) << " gpu_local_budget_mib=" << split.local_budget / (1024 * 1024)
-          << " gpu_nonlocal_used_mib=" << split.nonlocal_used / (1024 * 1024) << " gpu_nonlocal_budget_mib=" << split.nonlocal_budget / (1024 * 1024);
+      // DXGI split of the same numbers: LOCAL (the dedicated carve-out) vs
+      // NON_LOCAL (shared system memory); the combined figures above sum both.
+      if (const auto split = gufo::platform::QueryDeviceMemorySplit();
+          split.valid)
+        out << " gpu_local_used_mib=" << split.local_used / (1024 * 1024)
+            << " gpu_local_budget_mib=" << split.local_budget / (1024 * 1024)
+            << " gpu_nonlocal_used_mib=" << split.nonlocal_used / (1024 * 1024)
+            << " gpu_nonlocal_budget_mib="
+            << split.nonlocal_budget / (1024 * 1024);
     }
 #else
     (void)gpu_loaded;
@@ -132,6 +143,8 @@ extern "C" void ReportFatalSignal(int number) {
   (void)::write(STDERR_FILENO, kPrefix, sizeof(kPrefix) - 1);
   (void)::write(STDERR_FILENO, digits, length);
   (void)::write(STDERR_FILENO, "\n", 1);
+#ifdef GUFO_NPU
+#endif
   // Restore the default action and re-raise, so the exit status and any core
   // dump still describe the original fault.
   struct sigaction restore{};
@@ -174,6 +187,8 @@ void ReportTerminationReason() {
     } catch (...) {
       // The handler must not throw on its way out.
     }
+#ifdef GUFO_NPU
+#endif
     if (previous != nullptr) {
       previous();
     }
@@ -189,6 +204,8 @@ constexpr int kDeviceLostExitStatus = 75;
 // shutdown path so a supervisor restarts the server, and bound that teardown:
 // joining requests or freeing device memory may block on the dead device.
 void ShutdownAfterDeviceLoss() {
+#ifdef GUFO_NPU
+#endif
   constexpr auto kShutdownTimeout = std::chrono::seconds(10);
   // Arm the watchdog before logging or shutdown: neither a blocked log sink
   // nor a dead-device join may prevent the forced exit.
@@ -286,8 +303,9 @@ void AddServerOptions(gufo::cli::ArgParser& parser, std::string* host,
         return true;
       });
   parser.AddFlag("-v", "--verbose", kVerboseHelp, "Logging", &log->verbose);
-  parser.AddFlag("", "--debug-hooks", "Enable loopback debug diagnostics (default: off)",
-                 "Debug", debug_hooks);
+  parser.AddFlag("", "--debug-hooks",
+                 "Enable loopback debug diagnostics (default: off)", "Debug",
+                 debug_hooks);
   parser.AddOption("", "--max-score-tokens", "N",
                    "Maximum teacher-forced prompt tokens (default: 8192)",
                    "Debug", max_score_tokens);
@@ -314,8 +332,8 @@ void AddServerOptionsForHelp(gufo::cli::ArgParser& parser,
   AddServerOptions(parser, &targets->host, &targets->port,
                    include_sessions ? &targets->session_count : nullptr,
                    &targets->max_connections, &targets->max_request_body_bytes,
-                   &targets->api_key, &targets->log,
-                   &targets->debug_hooks, &targets->max_score_tokens);
+                   &targets->api_key, &targets->log, &targets->debug_hooks,
+                   &targets->max_score_tokens);
 }
 
 // Split a `NAME=VALUE` CLI spec. Returns false when either side is empty.
@@ -837,12 +855,21 @@ int RunServe(std::span<const char* const> args) {
     std::cerr << "Error: " << release.error << '\n';
     return 2;
   }
+
   if (release.active) {
     for (const auto& line : release.resolved.logs) {
       server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << line << '\n';
     }
   }
+  std::string requested_prefill = "off";
+  bool requested_fabric_peak = false;
+#ifdef GUFO_NPU
+  std::unique_ptr<npu::ClockDriver> fabric_driver;
+  std::unique_ptr<npu::FabricPeak> fabric_peak;
+  std::shared_ptr<npu::ServerPrefill> persistent_prefill;
+  bool prefill_started = false;
+#endif
   std::string release_profile_name;
   bool release_exact = false, print_effective_settings = false;
   bool no_twin = false, no_draft_head = false, no_vision = false;
@@ -862,6 +889,13 @@ int RunServe(std::span<const char* const> args) {
         "", "--verify-model",
         "Hash eight manifest files plus distinct overrides (~2-4 min on SSD)",
         "Profiles", &verify_model);
+    parser.AddOption(
+        "", "--npu-prefill", "off|on",
+        "Experimental NPU prefill (default: off; explicit CLI only)",
+        "Profiles", &requested_prefill);
+    parser.AddFlag("", "--fabric-peak",
+                   "Experimental AMD fabric peak mode (default: off)",
+                   "Profiles", &requested_fabric_peak);
     parser.AddOption("", "--profile", "NAME",
                      "Release profile: default, subagents, exact, or stock",
                      "Profiles", &release_profile_name);
@@ -938,7 +972,8 @@ int RunServe(std::span<const char* const> args) {
   std::string api_key;
   ServerLogOptions log_options;
   const char* debug_environment = std::getenv("GUFO_DEBUG_HOOKS");
-  bool debug_hooks = debug_environment && std::string_view(debug_environment) == "1";
+  bool debug_hooks =
+      debug_environment && std::string_view(debug_environment) == "1";
   std::size_t max_score_tokens = 8192;
   std::shared_ptr<const json::Value> debug_settings;
 
@@ -948,10 +983,10 @@ int RunServe(std::span<const char* const> args) {
   ArgParser server_parser(gufo::cli::ProductCommand("serve"));
   const auto add_server_options = [&](ArgParser& parser,
                                       bool include_sessions = true) {
-    AddServerOptions(
-        parser, &host, &port, include_sessions ? &session_count : nullptr,
-        &max_connections, &max_request_body_bytes, &api_key, &log_options,
-        &debug_hooks, &max_score_tokens);
+    AddServerOptions(parser, &host, &port,
+                     include_sessions ? &session_count : nullptr,
+                     &max_connections, &max_request_body_bytes, &api_key,
+                     &log_options, &debug_hooks, &max_score_tokens);
   };
   add_server_options(server_parser);
   add_release_options(server_parser);
@@ -1622,6 +1657,59 @@ int RunServe(std::span<const char* const> args) {
     speculative_config.mtp_auto_draft_vocabulary = mtp_draft_vocab == "auto";
     speculative_config.prompt_lookup = prompt_lookup;
     std::string err;
+    if (release.resolved.fabric_authorization.Allows(
+            core::ExperimentalFeature::FabricPeak)) {
+#ifdef GUFO_NPU
+      try {
+        fabric_driver = npu::InstalledOpenClClockDriver(
+            release.resolved.fabric_authorization);
+        fabric_peak = std::make_unique<npu::FabricPeak>(
+            release.resolved.fabric_authorization, *fabric_driver);
+        fabric_peak->Start();
+      } catch (const std::exception& error) {
+        server::Logger::Error("npu", error.what());
+        (void)server::Logger::FlushSync();
+        return 2;
+      }
+#else
+      server::Logger::Error("npu",
+                            "--fabric-peak requires qualified clock query and "
+                            "recovery; no clock change performed");
+      (void)server::Logger::FlushSync();
+      return 2;
+#endif
+    }
+#ifdef GUFO_NPU
+    // Before GPU warm-up/upload. DIR is data consumed only after ON, never an
+    // enabler. The same boundary is exercised by the CPU counter factory.
+    try {
+      core::CreateAuthorizedPrefill(
+          release.resolved.prefill_authorization,
+          [&](const core::ExperimentalAuthorization& authorization) {
+            std::map<std::string, std::string> values;
+            for (const auto& setting : release.resolved.settings)
+              if (npu::IsKnob(setting.name) && setting.value)
+                values.emplace(setting.name, *setting.value);
+            auto knobs = npu::ParseKnobs(authorization, values);
+            persistent_prefill = std::make_shared<npu::ServerPrefill>(
+                authorization, std::move(knobs));
+            prefill_started = persistent_prefill->Start();
+          });
+    } catch (const std::exception& error) {
+      std::cerr << "NPU effective=off; disabled for process; " << error.what()
+                << '\n';
+      (void)server::Logger::FlushSync();
+      return 2;
+    }
+    if (release.resolved.prefill_authorization.Allows(
+            core::ExperimentalFeature::Prefill) &&
+        !prefill_started)
+      return 2;
+#endif
+#ifdef GUFO_NPU
+    if (prefill_started)
+      speculative_config.npu_prefill = persistent_prefill;
+#endif
     ModelLoadLog load_log("text", model);
     backend = std::make_shared<server::InferenceBackend>();
     if (!backend->load(
@@ -1706,6 +1794,18 @@ int RunServe(std::span<const char* const> args) {
         resolved["served_model_name"] = backend->model_id();
         resolved["origin"] = server::ReleaseOrigins(release.resolved);
         resolved["release_profile"] = release.resolved.profile;
+#ifdef GUFO_NPU
+        resolved["npu_startup_mode"] = prefill_started ? "on" : "off";
+        resolved["npu_startup_reason"] =
+            prefill_started ? "persistent session ready"
+            : persistent_prefill
+                ? "startup failed; disabled for process; no retry"
+                : release.resolved.prefill_authorization.reason();
+#else
+        resolved["npu_startup_mode"] = "off";
+        resolved["npu_startup_reason"] =
+            release.resolved.prefill_authorization.reason();
+#endif
         resolved["release_profile_settings"] =
             server::ReleaseSettingsJson(release.resolved);
         resolved["sessions"] = session_count;
@@ -1737,7 +1837,8 @@ int RunServe(std::span<const char* const> args) {
         sampling["repeat_last_n"] = effective_sampling.repeat_last_n;
         sampling["frequency_penalty"] = effective_sampling.frequency_penalty;
         sampling["presence_penalty"] = effective_sampling.presence_penalty;
-        sampling["preset"] = static_cast<int>(backend->sampling_defaults().model);
+        sampling["preset"] =
+            static_cast<int>(backend->sampling_defaults().model);
         resolved["sampling_defaults"] = std::move(sampling);
         auto reasoning = json::Value::object();
         reasoning["think"] = reasoning_mode;
@@ -1745,11 +1846,14 @@ int RunServe(std::span<const char* const> args) {
         reasoning["preserve_thinking"] = preserve_thinking;
         reasoning["initial_output"] = static_cast<int>(initial_output);
         reasoning["enabled"] = reasoning_defaults->enabled
-            ? json::Value(*reasoning_defaults->enabled) : json::Value();
+                                   ? json::Value(*reasoning_defaults->enabled)
+                                   : json::Value();
         resolved["reasoning_defaults"] = std::move(reasoning);
-        resolved["trace_path"] = trace_path.empty() ? json::Value() : json::Value(trace_path);
+        resolved["trace_path"] =
+            trace_path.empty() ? json::Value() : json::Value(trace_path);
         resolved["log_progress"] = log_progress;
-        resolved["log_level"] = std::string(server::LogLevelName(server::Logger::Level()));
+        resolved["log_level"] =
+            std::string(server::LogLevelName(server::Logger::Level()));
 #if defined(ENGINE_ENABLE_HIP)
         int device = 0;
         hipDeviceProp_t properties{};
@@ -1770,7 +1874,8 @@ int RunServe(std::span<const char* const> args) {
                 std::move(resolved), GUFO_RELEASE_VERSION, GUFO_REVISION,
                 crypto::Sha256FileHex(platform::LoadedExecutablePath()),
                 server::ReleaseOrigins(release.resolved)));
-        server::Logger::Diagnostic("settings", "settings " + debug_settings->dump());
+        server::Logger::Diagnostic("settings",
+                                   "settings " + debug_settings->dump());
       } catch (const std::exception& error) {
         server::Logger::FlushSync(std::chrono::seconds(2));
         std::cerr << "Error enabling debug hooks: " << error.what() << '\n';
@@ -1809,8 +1914,37 @@ int RunServe(std::span<const char* const> args) {
                 device_lost.store(true);
                 ShutdownAfterDeviceLoss();
               },
+#ifdef GUFO_NPU
+          .debug_npu_control =
+              [persistent_prefill](std::string_view action) {
+                if (persistent_prefill)
+                  return npu::OperatorControl(persistent_prefill->session(),
+                                              action);
+                auto value = json::Value::object();
+                value["healthy"] = false;
+                value["error"] = "NPU off";
+                return value;
+              },
+#endif
       },
       images);
+#ifdef GUFO_NPU
+  if (server::NpuOperatorListener(debug_hooks, host)) {
+    server.add(
+        "POST", "/debug/npu/stop",
+        [&](const server::HttpRequest&, server::TextGenerationBackend&) {
+          if (!persistent_prefill || !persistent_prefill->ready())
+            return server::HttpResponse{
+                .status = 409,
+                .reason = "Conflict",
+                .body =
+                    "{\"error\":\"NPU off/unhealthy; no unsafe shutdown\"}"};
+          server.request_stop();  // Teardown joins after this request has
+                                  // returned.
+          return server::HttpResponse{.body = "{\"status\":\"stopping\"}"};
+        });
+  }
+#endif
   std::string err;
   if (!server.start(&err)) {
     server::Logger::FlushSync(std::chrono::seconds(2));
@@ -1822,6 +1956,8 @@ int RunServe(std::span<const char* const> args) {
   // after the scheduler records the loss but before a request fires the hook.
   const auto exit_if_device_lost = [&device_lost, &backend] {
     if (device_lost.load() || (backend != nullptr && backend->device_lost())) {
+#ifdef GUFO_NPU
+#endif
       server::Logger::FlushSync(std::chrono::seconds(2));
       ::_exit(kDeviceLostExitStatus);
     }

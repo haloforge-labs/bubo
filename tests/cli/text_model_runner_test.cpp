@@ -1534,6 +1534,57 @@ void TestWarmChatCheckpointsStopAtTheStableBoundary() {
   dropped.Cancel();
 }
 
+void TestNpuPreferredChunkKeepsCheckpointGridAligned() {
+  // NPU prefill offloads only exact 4096-token chunks: the intermediate
+  // checkpoint grid must follow the preferred chunk, and stay 2048 when off.
+  class GridRunner final : public SnapshotRunner {
+  public:
+    GridRunner(std::shared_ptr<FakeStats> stats, std::size_t preferred)
+        : SnapshotRunner(std::move(stats), 64, 256, 4096),
+          preferred_(preferred) {}
+    TextRunnerDescriptor Descriptor() const override {
+      auto descriptor = SnapshotRunner::Descriptor();
+      descriptor.max_context = 32768;
+      return descriptor;
+    }
+    std::size_t PrefillPreferredChunk() const noexcept override {
+      return preferred_;
+    }
+    std::size_t PrefillBoundaryFallbackChunk() const noexcept override {
+      return 2048;
+    }
+
+  private:
+    std::size_t preferred_;
+  };
+  const auto spans = [](std::size_t preferred, std::size_t length) {
+    auto stats = std::make_shared<FakeStats>();
+    auto runner = std::make_shared<GridRunner>(stats, preferred);
+    TextRunnerPool pool(runner, 1);
+    std::vector<TextRunnerToken> prompt(length, 1);
+    auto request = pool.Acquire(prompt, {}, {}, {}, true, length - 100);
+    while (!request.prefill_complete())
+      (void)request.Prefill(32768);
+    request.Commit();
+    return stats->prefill_spans;
+  };
+  const auto on_7703 = spans(4096, 7703);
+  Expect(!on_7703.empty() && on_7703.front() == 4096,
+         "NPU on: a 7,703-token cold prompt starts with a 4096 chunk");
+  Expect(on_7703.size() >= 2 && on_7703[1] != 4096,
+         "NPU on: the remainder after the 4096 chunk stays on the GPU path");
+  const auto on_15384 = spans(4096, 15384);
+  Expect(on_15384.size() >= 3 && on_15384[0] == 4096 && on_15384[1] == 4096 &&
+             on_15384[2] == 4096,
+         "NPU on: a 15,384-token cold prompt gets three 4096 chunks first");
+  const auto off_7703 = spans(0, 7703);
+  std::size_t widest = 0;
+  for (const auto span : off_7703)
+    widest = std::max(widest, span);
+  Expect(widest <= 2048,
+         "NPU off: the original 2048 checkpoint grid is unchanged");
+}
+
 void TestHistoryEditsRestoreIntermediateCheckpoints() {
   class LongSnapshotRunner final : public SnapshotRunner {
   public:
@@ -2758,6 +2809,7 @@ int main(int argc, char** argv) {
   TestWarmChatCheckpointsStopAtTheStableBoundary();
   TestWarmHitAdvancesTheStableCheckpoint();
   TestHistoryEditsRestoreIntermediateCheckpoints();
+  TestNpuPreferredChunkKeepsCheckpointGridAligned();
   TestChatFallbackSurvivesSnapshotBudgetPressure();
   TestFullChatCheckpointRestoresWithoutSuffixPrefill();
   TestDiskOnlyCaptureReservesBudgetBeforeCommit();

@@ -16,6 +16,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 include(cmake/Version.cmake)
+include(cmake/Npu.cmake)
 set(BUILD_MANIFEST_MSVC_TOOLS_VERSION "$ENV{VCToolsVersion}" CACHE INTERNAL "Configured MSVC headers/libraries" FORCE)
 set(BUILD_MANIFEST_WINDOWS_SDK_VERSION "$ENV{WindowsSDKVersion}" CACHE INTERNAL "Configured Windows SDK" FORCE)
 set(GUFO_BRAND "bubo" CACHE STRING "Product brand: bubo or gufo")
@@ -111,13 +112,13 @@ if (ENGINE_ENABLE_HIP)
   add_subdirectory(src/models/deepseek_v4_flash)
 endif()
 
-# Qwen3.8-Flash-Next — model-private CPU reference plus ROCm runtime.
+# Qwen3.8-Flash-Next â€” model-private CPU reference plus ROCm runtime.
 add_subdirectory(src/models/qwen38_flash_next)
 
-# Qwen3-TTS — CPU reference + HIP kernels (CustomVoice 12Hz).
+# Qwen3-TTS â€” CPU reference + HIP kernels (CustomVoice 12Hz).
 add_subdirectory(src/models/qwen3_tts)
 
-# Qwen3-ASR — model-private 1.7B speech recognition runtime.
+# Qwen3-ASR â€” model-private 1.7B speech recognition runtime.
 add_subdirectory(src/models/qwen3_asr)
 
 # Compiler warnings and sanitizers
@@ -377,6 +378,12 @@ target_link_libraries(${bubo_inference_target} PRIVATE bubo_prepare)
 add_dependencies(gufo bubo_prepare_release_gate)
 target_link_libraries(${bubo_inference_target} PRIVATE gufo_diagnostics gufo_core gufo_llm_cli gufo_http CURL::libcurl)
 set_target_properties(gufo PROPERTIES OUTPUT_NAME "${GUFO_BRAND}")
+if(GUFO_ENABLE_NPU)
+  npu_attach_runtime(${bubo_inference_target})
+  if(ENGINE_ENABLE_HIP)
+    target_link_libraries(${bubo_inference_target} PRIVATE npu_bfp_hip)
+  endif()
+endif()
 if(GUFO_BRAND STREQUAL "bubo")
   add_custom_target(bubo DEPENDS gufo)
 endif()
@@ -477,6 +484,116 @@ if (BUILD_TESTING)
   add_compile_options(-UNDEBUG)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   add_subdirectory(tests/prepare)
+  if(GUFO_ENABLE_NPU)
+    add_executable(npu_prefill_plan_test tests/npu/prefill_plan_test.cpp)
+    target_include_directories(npu_prefill_plan_test PRIVATE "${CMAKE_SOURCE_DIR}")
+    add_test(NAME npu_prefill_plan_test COMMAND npu_prefill_plan_test)
+    set_tests_properties(npu_prefill_plan_test PROPERTIES LABELS "cpu;npu;fake")
+    add_executable(npu_xrt_runtime_test
+      tests/npu/xrt_runtime_test.cpp src/npu/xrt_runtime_policy.cpp)
+    add_test(NAME npu_xrt_runtime_test COMMAND npu_xrt_runtime_test)
+    set_tests_properties(npu_xrt_runtime_test PROPERTIES LABELS "cpu;npu;fake")
+    add_executable(npu_xrt_delay_guard_test tests/npu/xrt_delay_guard_test.cpp)
+    npu_attach_runtime(npu_xrt_delay_guard_test)
+    add_test(NAME npu_xrt_delay_guard_test COMMAND npu_xrt_delay_guard_test)
+    set_tests_properties(npu_xrt_delay_guard_test PROPERTIES LABELS "cpu;npu")
+    # Same adapter and pinned public XRT classes, with tooling-derived fake
+    # implementations. No import library/runtime loader is linked into this test.
+    add_executable(npu_private_bo_adapter_test
+      tests/npu/private_bo_adapter_test.cpp tests/npu/fake_xrt.cpp
+      src/npu/private_bo_adapter.cpp)
+    target_include_directories(npu_private_bo_adapter_test PRIVATE "${CMAKE_SOURCE_DIR}")
+    target_include_directories(npu_private_bo_adapter_test SYSTEM PRIVATE
+      "${GUFO_XRT_GENERATED_INCLUDE_DIR}" "${GUFO_XRT_INCLUDE_DIR}")
+    target_compile_definitions(npu_private_bo_adapter_test PRIVATE
+      XRT_STATIC_BUILD _ITERATOR_DEBUG_LEVEL=0 GUFO_NPU_TESTING)
+    target_link_libraries(npu_private_bo_adapter_test PRIVATE bcrypt)
+    set(GUFO_NPU_FAKE_CASES "${CMAKE_BINARY_DIR}/npu-fake-cases"
+      CACHE PATH "Prepared bad-artifact fixtures for CPU-only NPU tests")
+    add_test(NAME npu_private_bo_adapter_test COMMAND npu_private_bo_adapter_test
+      "${GUFO_XRT_TOOLING_ROOT}" "${GUFO_NPU_FAKE_CASES}")
+    set_tests_properties(npu_private_bo_adapter_test PROPERTIES LABELS "cpu;npu;fake")
+    add_executable(npu_fabric_peak_test tests/npu/fabric_peak_test.cpp
+      src/npu/fabric_peak.cpp)
+    target_include_directories(npu_fabric_peak_test PRIVATE "${CMAKE_SOURCE_DIR}")
+    target_compile_definitions(npu_fabric_peak_test PRIVATE GUFO_NPU_TESTING)
+    add_test(NAME npu_fabric_peak_test COMMAND npu_fabric_peak_test)
+    set_tests_properties(npu_fabric_peak_test PROPERTIES LABELS "cpu;npu;fake")
+    add_executable(npu_bfp_test tests/npu/bfp_test.cpp src/npu/bfp.cpp)
+    target_include_directories(npu_bfp_test PRIVATE "${CMAKE_SOURCE_DIR}")
+    add_test(NAME npu_bfp_test COMMAND npu_bfp_test)
+    set_tests_properties(npu_bfp_test PROPERTIES LABELS "cpu;npu" TIMEOUT 30)
+    add_executable(npu_staging_test tests/npu/staging_test.cpp src/npu/staging.cpp src/npu/bfp.cpp
+      src/cli/serve/release_profile.cpp
+      src/npu/session.cpp src/npu/private_bo_adapter.cpp
+      tests/npu/fake_xrt.cpp)
+    target_include_directories(npu_staging_test PRIVATE "${CMAKE_SOURCE_DIR}")
+    target_include_directories(npu_staging_test SYSTEM PRIVATE
+      "${GUFO_XRT_GENERATED_INCLUDE_DIR}" "${GUFO_XRT_INCLUDE_DIR}")
+    target_compile_definitions(npu_staging_test PRIVATE
+      XRT_STATIC_BUILD _ITERATOR_DEBUG_LEVEL=0 GUFO_NPU_TESTING GUFO_NPU=1)
+    target_link_libraries(npu_staging_test PRIVATE bcrypt gufo_logging gufo_core)
+    add_test(NAME npu_staging_test COMMAND npu_staging_test)
+    set_tests_properties(npu_staging_test PROPERTIES LABELS "cpu;npu;fake" TIMEOUT 30)
+    add_executable(npu_linear_z_test tests/npu/linear_z_test.cpp
+      src/npu/linear_z.cpp src/npu/staging.cpp src/npu/bfp.cpp
+      src/npu/session.cpp src/npu/private_bo_adapter.cpp
+      tests/npu/fake_xrt.cpp)
+    target_include_directories(npu_linear_z_test PRIVATE "${CMAKE_SOURCE_DIR}")
+    target_include_directories(npu_linear_z_test SYSTEM PRIVATE
+      "${GUFO_XRT_GENERATED_INCLUDE_DIR}" "${GUFO_XRT_INCLUDE_DIR}")
+    target_compile_definitions(npu_linear_z_test PRIVATE
+      XRT_STATIC_BUILD _ITERATOR_DEBUG_LEVEL=0 GUFO_NPU_TESTING)
+    target_link_libraries(npu_linear_z_test PRIVATE Threads::Threads bcrypt gufo_logging)
+    add_test(NAME npu_linear_z_test COMMAND npu_linear_z_test "${GUFO_XRT_TOOLING_ROOT}")
+    set_tests_properties(npu_linear_z_test PROPERTIES LABELS "cpu;npu;fake" TIMEOUT 30)
+    add_executable(npu_projection_test tests/npu/projection_test.cpp
+      src/npu/projection.cpp src/npu/staging.cpp src/npu/bfp.cpp
+      src/npu/session.cpp src/npu/private_bo_adapter.cpp
+      tests/npu/fake_xrt.cpp)
+    target_include_directories(npu_projection_test PRIVATE "${CMAKE_SOURCE_DIR}")
+    target_include_directories(npu_projection_test SYSTEM PRIVATE
+      "${GUFO_XRT_GENERATED_INCLUDE_DIR}" "${GUFO_XRT_INCLUDE_DIR}")
+    target_compile_definitions(npu_projection_test PRIVATE
+      XRT_STATIC_BUILD _ITERATOR_DEBUG_LEVEL=0 GUFO_NPU_TESTING)
+    target_link_libraries(npu_projection_test PRIVATE Threads::Threads bcrypt gufo_logging)
+    add_test(NAME npu_projection_test COMMAND npu_projection_test "${GUFO_XRT_TOOLING_ROOT}")
+    set_tests_properties(npu_projection_test PROPERTIES LABELS "cpu;npu;fake" TIMEOUT 30)
+    add_executable(npu_host_bench tests/npu/host_bench.cpp tests/npu/fake_xrt.cpp src/npu/private_bo_adapter.cpp src/npu/bfp.cpp)
+    target_include_directories(npu_host_bench PRIVATE "${CMAKE_SOURCE_DIR}" "${CMAKE_SOURCE_DIR}/tests/npu")
+    target_include_directories(npu_host_bench SYSTEM PRIVATE "${GUFO_XRT_GENERATED_INCLUDE_DIR}" "${GUFO_XRT_INCLUDE_DIR}")
+    target_compile_definitions(npu_host_bench PRIVATE XRT_STATIC_BUILD _ITERATOR_DEBUG_LEVEL=0 GUFO_NPU_TESTING)
+    target_link_libraries(npu_host_bench PRIVATE bcrypt)
+    add_executable(npu_session_test tests/npu/session_test.cpp tests/npu/fake_xrt.cpp
+      tests/npu/fake_hip.cpp src/npu/linear_z_hip.cpp src/npu/projection.cpp
+      src/npu/private_bo_adapter.cpp src/npu/session.cpp src/npu/server_prefill.cpp
+      src/npu/linear_z.cpp src/npu/staging.cpp src/npu/bfp.cpp)
+    target_include_directories(npu_session_test PRIVATE "${CMAKE_SOURCE_DIR}")
+    target_include_directories(npu_session_test SYSTEM PRIVATE "${GUFO_XRT_GENERATED_INCLUDE_DIR}" "${GUFO_XRT_INCLUDE_DIR}")
+    target_compile_definitions(npu_session_test PRIVATE XRT_STATIC_BUILD _ITERATOR_DEBUG_LEVEL=0 GUFO_NPU_TESTING)
+    target_link_libraries(npu_session_test PRIVATE bcrypt gufo_logging)
+    # SDK headers only: fake_hip.cpp supplies symbols; never link hip::host.
+    get_target_property(npu_hip_headers hip::amdhip64 INTERFACE_INCLUDE_DIRECTORIES)
+    target_include_directories(npu_session_test SYSTEM PRIVATE ${npu_hip_headers})
+    target_compile_definitions(npu_session_test PRIVATE __HIP_PLATFORM_AMD__=1)
+    foreach(npu_unit npu_linear_z_test npu_projection_test)
+      target_sources(${npu_unit} PRIVATE tests/npu/fake_hip.cpp
+        src/npu/linear_z_hip.cpp src/npu/server_prefill.cpp)
+      target_include_directories(${npu_unit} SYSTEM PRIVATE ${npu_hip_headers})
+      target_compile_definitions(${npu_unit} PRIVATE __HIP_PLATFORM_AMD__=1)
+    endforeach()
+    target_compile_options(npu_session_test PRIVATE -include "${CMAKE_SOURCE_DIR}/tests/npu/file_io_hook.hpp")
+    foreach(npu_case clean timeout error layer single stream_timeout invalid)
+      add_test(NAME npu_session_${npu_case}_test COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/npu/failure_log_test.py" "$<TARGET_FILE:npu_session_test>" "${npu_case}" "${GUFO_XRT_TOOLING_ROOT}")
+      set_tests_properties(npu_session_${npu_case}_test PROPERTIES LABELS "cpu;npu;fake" TIMEOUT 120)
+    endforeach()
+    add_custom_target(npu_cpu_checks DEPENDS npu_session_test npu_private_bo_adapter_test
+      npu_prefill_plan_test npu_staging_test npu_linear_z_test npu_projection_test
+      npu_bfp_test npu_fabric_peak_test npu_host_bench npu_runtime bubo-npu-watchdog)
+    if(TARGET npu_bfp_hip)
+      add_dependencies(npu_cpu_checks npu_bfp_hip)
+    endif()
+  endif()
 
   add_subdirectory(tests/cache)
 
@@ -552,6 +669,24 @@ if (BUILD_TESTING)
   target_link_libraries(log_async_test PRIVATE Threads::Threads)
   add_test(NAME log_async_test COMMAND log_async_test)
   set_tests_properties(log_async_test PROPERTIES LABELS "cpu;cli;release;check-pr" TIMEOUT 45)
+
+  if(WIN32)
+    # CPU-only CLI-to-creation counter: no NPU runtime, HIP or XRT dependency.
+    add_executable(experimental_policy_host tests/cli/experimental_policy_host.cpp
+      src/cli/serve/release_profile.cpp)
+    target_link_libraries(experimental_policy_host PRIVATE gufo_core gufo_logging)
+    if(GUFO_ENABLE_NPU)
+      target_compile_definitions(experimental_policy_host PRIVATE GUFO_NPU=1)
+      set(experimental_build_mode ON)
+    else()
+      set(experimental_build_mode OFF)
+    endif()
+    add_test(NAME experimental_policy_process_test COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_SOURCE_DIR}/tests/cli/experimental_policy_process_test.py"
+      "$<TARGET_FILE:experimental_policy_host>" "${experimental_build_mode}")
+    set_tests_properties(experimental_policy_process_test PROPERTIES LABELS "cpu;cli;fake" TIMEOUT 120)
+
+  endif()
 
   add_executable(release_profile_test
     tests/cli/release_profile_test.cpp
@@ -675,6 +810,8 @@ if (BUILD_TESTING)
   target_link_libraries(http_server_test PRIVATE gufo_http)
   add_test(NAME http_server_test COMMAND http_server_test)
   add_test(NAME debug_hooks_http_test COMMAND http_server_test --debug-hooks)
+  add_test(NAME npu_operator_http_test COMMAND http_server_test --npu-control)
+  set_tests_properties(npu_operator_http_test PROPERTIES LABELS "cpu;fake;operator" TIMEOUT 30)
   set_tests_properties(debug_hooks_http_test PROPERTIES LABELS "cpu;debug-hooks" TIMEOUT 30)
   set_tests_properties(http_server_test PROPERTIES LABELS "cpu;server;http" TIMEOUT 30)
   add_executable(audio_websocket_test tests/cli/audio_websocket_test.cpp)

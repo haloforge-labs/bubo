@@ -1,10 +1,10 @@
 #include "src/cli/serve/inference_backend.hpp"
 
-#include <atomic>
 #include <unistd.h>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -23,13 +23,19 @@
 #include <type_traits>
 #include <utility>
 
-#include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/behaviour_options.hpp"
+#include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/text_generation_scheduler.hpp"
 #include "src/cli/serve/text_model_runner.hpp"
 #include "src/core/gguf_identity.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/json.hpp"
+#include "src/npu/prefill_plan.hpp"
+#include "src/npu/request_stats.hpp"
+#ifdef GUFO_NPU
+#include "src/npu/request_policy.hpp"
+#include "src/npu/server_prefill.hpp"
+#endif
 #include "src/core/sampling.hpp"
 #include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen/control_tokens.hpp"
@@ -2431,7 +2437,17 @@ const QwenFlashNextTextRunnerState& RequireQwenFlashNextState(
 
 class QwenFlashNextTextRunner final : public HipTextModelRunner {
 public:
-  void OnRequestFinished() const override { model_->LogTwinCounters("request"); }
+  void OnRequestFinished() const override {
+    model_->LogTwinCounters("request");
+#ifdef GUFO_NPU
+    // One NPU prefill counter line per request (relaxed atomics, no I/O elsewhere).
+    if (model_->options().npu_prefill) {
+      const auto line = npu::TakeRequestLine();
+      if (!line.empty())
+        server::Logger::Info("npu", line);
+    }
+#endif
+  }
 
   [[nodiscard]] json::Value DebugSettings() const override {
     auto settings = json::Value::object();
@@ -2447,26 +2463,36 @@ public:
     settings["model_name"] = model_->ModelName();
     settings["model_context"] = static_cast<std::size_t>(model_->MaxContext());
     settings["context"] = static_cast<std::size_t>(max_context_);
-    settings["executor_max_batch"] = static_cast<std::size_t>(model_->ExecutorMaxBatch());
-    settings["prefill_capacity"] = static_cast<std::size_t>(model_->PrefillCapacity());
-    settings["prefill_through_capacity"] = static_cast<std::size_t>(model_->PrefillThroughCapacity());
-    settings["in_pass_checkpoint_slack"] = static_cast<std::size_t>(model_->PrefillCheckpointSlack());
-    settings["decode_concurrency"] = static_cast<std::size_t>(model_->DecodeConcurrency());
+    settings["executor_max_batch"] =
+        static_cast<std::size_t>(model_->ExecutorMaxBatch());
+    settings["prefill_capacity"] =
+        static_cast<std::size_t>(model_->PrefillCapacity());
+    settings["prefill_through_capacity"] =
+        static_cast<std::size_t>(model_->PrefillThroughCapacity());
+    settings["in_pass_checkpoint_slack"] =
+        static_cast<std::size_t>(model_->PrefillCheckpointSlack());
+    settings["decode_concurrency"] =
+        static_cast<std::size_t>(model_->DecodeConcurrency());
     settings["speculative_mode"] = use_mtp_ ? "mtp" : "off";
     settings["vision_enabled"] = model_->VisionEncoder() != nullptr;
     const auto& options = model_->options();
     auto mtp = json::Value::object();
     mtp["model_has_mtp"] = model_->HasMtp();
     mtp["enabled"] = use_mtp_;
-    mtp["runner_max_draft_tokens"] = static_cast<std::size_t>(max_draft_tokens_);
-    mtp["model_max_draft_tokens"] = static_cast<std::size_t>(options.max_draft_tokens);
+    mtp["runner_max_draft_tokens"] =
+        static_cast<std::size_t>(max_draft_tokens_);
+    mtp["model_max_draft_tokens"] =
+        static_cast<std::size_t>(options.max_draft_tokens);
     mtp["survival"] = options.mtp_survival;
     mtp["prompt_lookup"] = options.prompt_lookup;
     mtp["draft_vocabulary"] =
-        options.draft_vocabulary == models::qwen38_flash_next::DraftVocabulary::kLatinText
+        options.draft_vocabulary ==
+                models::qwen38_flash_next::DraftVocabulary::kLatinText
             ? "latin_text"
-        : options.draft_vocabulary == models::qwen38_flash_next::DraftVocabulary::kAuto
-            ? "auto" : "full";
+        : options.draft_vocabulary ==
+                models::qwen38_flash_next::DraftVocabulary::kAuto
+            ? "auto"
+            : "full";
     settings["mtp_policy"] = std::move(mtp);
     auto suppressed = json::Value::array();
     for (const auto token : suppress_tokens_)
@@ -2494,7 +2520,8 @@ public:
       behaviour["marker_bias_unspecified_effort"] = policy.marker_bias;
       behaviour["initial_thinking_raw_completion"] = policy.initial_thinking;
       behaviour["suppressed_token_ids"] = tokens(policy.suppress_ids);
-      behaviour["reasoning_budget"] = static_cast<long long>(policy.reasoning_budget);
+      behaviour["reasoning_budget"] =
+          static_cast<long long>(policy.reasoning_budget);
       behaviour["reasoning_start_tag"] = policy.reasoning_start_tag;
       auto tags = json::Value::array();
       for (const auto& tag : policy.reasoning_end_tags)
@@ -2556,10 +2583,11 @@ public:
     for (std::size_t p = 1; p < prompt.size();) {
       if (cancelled && cancelled())
         throw std::runtime_error("generation cancelled");
-      const auto width = std::min<std::size_t>(session->MaxVerifyWidth(),
-                                               prompt.size() - p);
-      scores[p] = sampler.RawLogprobs(session->Logits(), prompt[p],
-                                      static_cast<std::size_t>(config.logprobs));
+      const auto width =
+          std::min<std::size_t>(session->MaxVerifyWidth(), prompt.size() - p);
+      scores[p] =
+          sampler.RawLogprobs(session->Logits(), prompt[p],
+                              static_cast<std::size_t>(config.logprobs));
       sampler.Accept(prompt[p]);
       if (!session->TeacherForce(std::span(tokens).subspan(p, width), &rows,
                                  &error))
@@ -2598,13 +2626,27 @@ public:
           .payload_version =
               models::qwen38_flash_next::Session::kSnapshotPayloadVersion,
       };
+#ifdef GUFO_NPU
+      if (const auto& prefill = model_->options().npu_prefill) {
+        const auto suffix = npu::CacheSuffix(prefill->knobs());
+        auto& id = persistence_->compatibility_identity;
+        id.insert(id.end(), suffix.begin(), suffix.end());
+      }
+#endif
     }
   }
 
   [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
     return {
         .model_id = model_->ModelName(),
-        .state_abi = std::string(kQwenFlashNextStateAbi),
+        .state_abi =
+            std::string(kQwenFlashNextStateAbi)
+#ifdef GUFO_NPU
+            + (model_->options().npu_prefill
+                   ? npu::CacheSuffix(model_->options().npu_prefill->knobs())
+                   : "")
+#endif
+            ,
         .max_context = max_context_,
         .capabilities =
             TextRunnerCapabilities{
@@ -2640,13 +2682,15 @@ public:
         const auto per_request = model_->SessionBytes(mode, max_context_);
         Logger::Info(
             "loader",
-            "event=mem_accounting " + model_->AccountingLine(mode, max_context_) +
+            "event=mem_accounting " +
+                model_->AccountingLine(mode, max_context_) +
                 " admission_free_mib=" + std::to_string(free_bytes >> 20) +
                 " admission_capacity_mib=" +
                 std::to_string(capacity.value_or(0) >> 20) +
                 " per_request_mib=" + std::to_string(per_request >> 20) +
                 " capacity_div_per_request=" +
-                std::to_string(per_request ? capacity.value_or(0) / per_request : 0) +
+                std::to_string(per_request ? capacity.value_or(0) / per_request
+                                           : 0) +
                 " " + Logger::MemoryStatus());
       }
     }
@@ -2758,10 +2802,9 @@ public:
     }
     const std::size_t remaining = prompt.size() - offset;
     const std::size_t consumed =
-        std::min<std::size_t>({max_input_tokens, remaining,
-                               remaining <= model_->PrefillThroughCapacity()
-                                   ? model_->PrefillThroughCapacity()
-                                   : model_->PrefillCapacity()});
+        npu::PrefillChunk(PrefillPreferredChunk() != 0, max_input_tokens,
+                          remaining, model_->PrefillLegacyCapacity(),
+                          model_->PrefillLegacyThroughCapacity());
     const std::size_t next_position = offset + consumed;
     const auto prefix = QwenFlashNextEngineTokens(prompt.first(next_position));
     // The next step most likely takes the same budget; its n-gram rows are
@@ -2769,10 +2812,9 @@ public:
     const std::size_t after = prompt.size() - next_position;
     const auto next = QwenFlashNextEngineTokens(prompt.subspan(
         next_position,
-        std::min<std::size_t>({max_input_tokens, after,
-                               after <= model_->PrefillThroughCapacity()
-                                   ? model_->PrefillThroughCapacity()
-                                   : model_->PrefillCapacity()})));
+        npu::PrefillChunk(PrefillPreferredChunk() != 0, max_input_tokens, after,
+                          model_->PrefillLegacyCapacity(),
+                          model_->PrefillLegacyThroughCapacity())));
     std::string error;
     if (!qfn.session().Sync(prefix, &error, next)) {
       qfn.set_position(0);
@@ -2786,13 +2828,27 @@ public:
     };
   }
 
+  [[nodiscard]] std::size_t PrefillBoundaryFallbackChunk()
+      const noexcept override {
+    return model_->PrefillLegacyCapacity();
+  }
+  [[nodiscard]] std::size_t PrefillPreferredChunk() const noexcept override {
+#ifdef GUFO_NPU
+    const auto& service = model_->options().npu_prefill;
+    if (service && service->ready() && model_->options().max_context >= 4096)
+      return 4096;
+#endif
+    return 0;
+  }
   [[nodiscard]] std::optional<std::size_t> PrefillCheckpointBytes(
       const TextRunnerState& state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t budget,
       std::size_t boundary) const override {
     const auto& qfn = RequireQwenFlashNextState(state);
-    const auto consumed = std::min<std::size_t>(
-        {budget, prompt.size() - offset, model_->PrefillThroughCapacity()});
+    const auto consumed = npu::PrefillChunk(
+        PrefillPreferredChunk() != 0, budget, prompt.size() - offset,
+        model_->PrefillLegacyThroughCapacity(),
+        model_->PrefillLegacyThroughCapacity());
     if (boundary <= offset + 1 || boundary >= offset + consumed ||
         offset + consumed - boundary > 8)
       return std::nullopt;
@@ -2808,18 +2864,19 @@ public:
     auto& qfn = RequireQwenFlashNextState(state);
     if (offset != qfn.position())
       throw std::logic_error("in-pass checkpoint offset does not match state");
-    const auto consumed = std::min<std::size_t>(
-        {budget, prompt.size() - offset, model_->PrefillThroughCapacity()});
+    const auto consumed = npu::PrefillChunk(
+        PrefillPreferredChunk() != 0, budget, prompt.size() - offset,
+        model_->PrefillLegacyThroughCapacity(),
+        model_->PrefillLegacyThroughCapacity());
     const auto next_position = offset + consumed;
     const auto prefix = QwenFlashNextEngineTokens(prompt.first(next_position));
     std::unique_ptr<models::qwen38_flash_next::SessionSnapshot> captured;
     std::string error;
     double capture_ms = 0;
     std::chrono::steady_clock::time_point capture_started;
-    if (!qfn.session().SyncThrough(prefix, static_cast<std::uint32_t>(boundary),
-                                   &captured, &error, &capture_ms,
-                                   qfn.debug_timeline() ? &capture_started
-                                                        : nullptr)) {
+    if (!qfn.session().SyncThrough(
+            prefix, static_cast<std::uint32_t>(boundary), &captured, &error,
+            &capture_ms, qfn.debug_timeline() ? &capture_started : nullptr)) {
       qfn.set_position(0);
       throw std::runtime_error("in-pass checkpoint failed: " + error);
     }
@@ -2871,9 +2928,10 @@ public:
     }
     std::shared_ptr<const sampling::TokenLogprob> logprob;
     if (scoring_state)
-      logprob = std::make_shared<const sampling::TokenLogprob>(scoring_state->RawLogprobs(
-          logits, static_cast<sampling::TokenId>(token),
-          static_cast<std::size_t>(sampler.config().logprobs)));
+      logprob = std::make_shared<const sampling::TokenLogprob>(
+          scoring_state->RawLogprobs(
+              logits, static_cast<sampling::TokenId>(token),
+              static_cast<std::size_t>(sampler.config().logprobs)));
     return {
         .stop = false,
         .token = static_cast<TextRunnerToken>(token),
@@ -2943,11 +3001,14 @@ public:
     step.draft_tokens = stats_after.drafted - stats_before.drafted;
     step.draft_accepted_tokens = stats_after.accepted - stats_before.accepted;
     // One serial engine call prepares/finishes at most one speculative cycle.
-    // Other runners may aggregate cycles; TextDecodeStep uses sum/any semantics.
-    step.policy_chosen_length_sum = stats_after.policy_width - stats_before.policy_width;
+    // Other runners may aggregate cycles; TextDecodeStep uses sum/any
+    // semantics.
+    step.policy_chosen_length_sum =
+        stats_after.policy_width - stats_before.policy_width;
     step.mtp_offered = stats_after.mtp_offered - stats_before.mtp_offered;
     step.cut = stats_after.survival_cut - stats_before.survival_cut;
-    step.survival_any = stats_after.survival_cycles != stats_before.survival_cycles;
+    step.survival_any =
+        stats_after.survival_cycles != stats_before.survival_cycles;
     step.lookup_tokens = stats_after.lookup - stats_before.lookup;
     step.lookup_accepted_tokens =
         stats_after.lookup_accepted - stats_before.lookup_accepted;
@@ -3163,9 +3224,11 @@ public:
   [[nodiscard]] sampling::SamplingConfig ConfigureSampling(
       const sampling::SamplingConfig& config, const ChatRequest* request,
       std::span<const TextRunnerToken> prompt) const override {
-    if (!config.behaviour) return config;
+    if (!config.behaviour)
+      return config;
     auto result = config;
-    auto policy = std::make_shared<sampling::BehaviourConfig>(*config.behaviour);
+    auto policy =
+        std::make_shared<sampling::BehaviourConfig>(*config.behaviour);
     policy->suppress_ids = suppress_tokens_;
     const auto& tokenizer = model_->tokenizer();
     {
@@ -3173,9 +3236,10 @@ public:
       if (!behaviour_pieces_) {
         auto pieces = std::make_shared<std::vector<std::string>>();
         pieces->reserve(tokenizer.GetVocabSize());
-        for (std::uint32_t id=0; id<tokenizer.GetVocabSize(); ++id) {
+        for (std::uint32_t id = 0; id < tokenizer.GetVocabSize(); ++id) {
           pieces->push_back(tokenizer.DecodeTokenCopy(id));
-          if (tokenizer.IsStopToken(id)) behaviour_eog_.push_back(id);
+          if (tokenizer.IsStopToken(id))
+            behaviour_eog_.push_back(id);
         }
         behaviour_pieces_ = std::move(pieces);
       }
@@ -3189,93 +3253,124 @@ public:
     policy->think_end = policy->think_ends.front();
     policy->budget_forced = tokenizer.Encode(policy->reasoning_budget_message);
     policy->budget_forced.insert(policy->budget_forced.end(),
-                                 policy->think_end.begin(),policy->think_end.end());
-    const char* transition_text=std::getenv("GUFO_LOOP_BREAKER_TRANSITION_TEXT");
-    policy->loop_prefix = tokenizer.Encode(transition_text ? transition_text : policy->loop_transition==2 ?
-        "I'm going in circles. Let me" :
-        "\nI've been repeating myself; I'll answer now.\n",
-        {.parse_special_tokens=false});
-    if (policy->eog_ids.empty() || policy->think_start.empty() || policy->think_end.empty())
-      throw std::invalid_argument("behaviour policy needs model stop and thinking tokens");
+                                 policy->think_end.begin(),
+                                 policy->think_end.end());
+    const char* transition_text =
+        std::getenv("GUFO_LOOP_BREAKER_TRANSITION_TEXT");
+    policy->loop_prefix = tokenizer.Encode(
+        transition_text ? transition_text
+        : policy->loop_transition == 2
+            ? "I'm going in circles. Let me"
+            : "\nI've been repeating myself; I'll answer now.\n",
+        {.parse_special_tokens = false});
+    if (policy->eog_ids.empty() || policy->think_start.empty() ||
+        policy->think_end.empty())
+      throw std::invalid_argument(
+          "behaviour policy needs model stop and thinking tokens");
     // Chat templates pre-open the current assistant reasoning segment. Raw
     // completion continuations use the final matched start/end in the prompt.
     if (request) {
       policy->loop_exempt = !request->tools.empty();
-      const bool thinking_on=QwenChatOptions(*request,max_context_).enable_thinking;
-      auto tracker=*policy;
-      tracker.initial_thinking=false;
-      tracker.reasoning_budget_enabled=false;
-      tracker.loop_breaker=false;
+      const bool thinking_on =
+          QwenChatOptions(*request, max_context_).enable_thinking;
+      auto tracker = *policy;
+      tracker.initial_thinking = false;
+      tracker.reasoning_budget_enabled = false;
+      tracker.loop_breaker = false;
       sampling::BehaviourState phase;
       phase.Reset(tracker);
-      for (auto id : tokenizer.Encode(tokenization::GenerationPrompt(thinking_on)))
-        phase.Accept(tracker,id,false);
-      policy->initial_thinking=phase.thinking;
-      policy->marker_bias = ResolveMarkerBias(*policy,BehaviourEffortName(request->reasoning.effort));
+      for (auto id :
+           tokenizer.Encode(tokenization::GenerationPrompt(thinking_on)))
+        phase.Accept(tracker, id, false);
+      policy->initial_thinking = phase.thinking;
+      policy->marker_bias = ResolveMarkerBias(
+          *policy, BehaviourEffortName(request->reasoning.effort));
       if (!thinking_on) {
-        policy->think_eog_guard=false;
-        policy->marker_bias=0;
+        policy->think_eog_guard = false;
+        policy->marker_bias = 0;
       }
     } else {
       policy->initial_thinking = false;
-      for (std::size_t end=0; end<prompt.size(); ++end) {
+      for (std::size_t end = 0; end < prompt.size(); ++end) {
         const auto ends = [&](const auto& seq) {
-          return end+1>=seq.size() && std::equal(seq.rbegin(),seq.rend(),
-              std::make_reverse_iterator(prompt.begin()+end+1));
+          return end + 1 >= seq.size() &&
+                 std::equal(
+                     seq.rbegin(), seq.rend(),
+                     std::make_reverse_iterator(prompt.begin() + end + 1));
         };
-        if (ends(policy->think_start)) policy->initial_thinking=true;
+        if (ends(policy->think_start))
+          policy->initial_thinking = true;
         for (const auto& end_tag : policy->think_ends)
-          if (ends(end_tag)) policy->initial_thinking=false;
+          if (ends(end_tag))
+            policy->initial_thinking = false;
       }
-      policy->marker_bias = ResolveMarkerBias(*policy,"");
+      policy->marker_bias = ResolveMarkerBias(*policy, "");
     }
     static constexpr std::string_view markers =
-        "perhaps maybe wait Wait actually hold Hmm hmm Alternatively alternatively However however "
-        "instead Instead But but though although yet rather unless otherwise nonetheless nevertheless "
-        "regardless still anyway Or or either whether uncertain unsure possibly might could another "
-        "different reconsider rethink backtrack retry recheck revisit doubt confused wrong mistake error incorrect";
+        "perhaps maybe wait Wait actually hold Hmm hmm Alternatively "
+        "alternatively However however "
+        "instead Instead But but though although yet rather unless otherwise "
+        "nonetheless nevertheless "
+        "regardless still anyway Or or either whether uncertain unsure "
+        "possibly might could another "
+        "different reconsider rethink backtrack retry recheck revisit doubt "
+        "confused wrong mistake error incorrect";
     std::set<std::uint32_t> ids;
     if (policy->marker_bias != 0) {
       std::vector<std::string> marker_words;
-      if (const char* list=std::getenv("GUFO_THINK_MARKER_LIST"); list && *list) {
+      if (const char* list = std::getenv("GUFO_THINK_MARKER_LIST");
+          list && *list) {
         std::ifstream input(list);
-        if (!input) throw std::invalid_argument("cannot read GUFO_THINK_MARKER_LIST");
+        if (!input)
+          throw std::invalid_argument("cannot read GUFO_THINK_MARKER_LIST");
         std::string line;
-        while (std::getline(input,line)) {
-          if (!line.empty() && line.back()=='\r') line.pop_back();
-          if (!line.empty()) marker_words.push_back(line);
+        while (std::getline(input, line)) {
+          if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+          if (!line.empty())
+            marker_words.push_back(line);
         }
-        if (input.bad()) throw std::invalid_argument("cannot finish GUFO_THINK_MARKER_LIST");
+        if (input.bad())
+          throw std::invalid_argument("cannot finish GUFO_THINK_MARKER_LIST");
       } else {
         std::istringstream words{std::string(markers)};
         std::string word;
-        while (words >> word) marker_words.push_back(word);
+        while (words >> word)
+          marker_words.push_back(word);
       }
       for (auto word : marker_words) {
-        if (!word.empty() && word.front()==' ') word.erase(0,1);
-        if (word.empty()) continue;
-        std::string lower=word;
-        std::transform(lower.begin(),lower.end(),lower.begin(),
-            [](unsigned char c){return static_cast<char>(std::tolower(c));});
-        std::string capital=lower;
-        capital[0]=static_cast<char>(std::toupper(static_cast<unsigned char>(capital[0])));
-        for (const auto& variant : {word,lower,capital}) {
-          for (const auto& text : {variant," "+variant}) {
-            const auto tokens=tokenizer.Encode(text,{.parse_special_tokens=false});
-            if (tokens.size()==1 && tokenizer.DecodeTokenCopy(tokens.front())==text)
+        if (!word.empty() && word.front() == ' ')
+          word.erase(0, 1);
+        if (word.empty())
+          continue;
+        std::string lower = word;
+        std::transform(
+            lower.begin(), lower.end(), lower.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        std::string capital = lower;
+        capital[0] = static_cast<char>(
+            std::toupper(static_cast<unsigned char>(capital[0])));
+        for (const auto& variant : {word, lower, capital}) {
+          for (const auto& text : {variant, " " + variant}) {
+            const auto tokens =
+                tokenizer.Encode(text, {.parse_special_tokens = false});
+            if (tokens.size() == 1 &&
+                tokenizer.DecodeTokenCopy(tokens.front()) == text)
               ids.insert(tokens.front());
           }
         }
       }
     }
-    policy->marker_ids.assign(ids.begin(),ids.end());
-    for (const auto& [text,bias] : policy->text_logit_bias)
-      for (auto id : tokenizer.Encode(text)) policy->logit_bias.emplace_back(id,bias);
+    policy->marker_ids.assign(ids.begin(), ids.end());
+    for (const auto& [text, bias] : policy->text_logit_bias)
+      for (auto id : tokenizer.Encode(text))
+        policy->logit_bias.emplace_back(id, bias);
     policy->text_logit_bias.clear();
-    for (const auto& [id,bias] : policy->logit_bias) {
+    for (const auto& [id, bias] : policy->logit_bias) {
       (void)bias;
-      if (id>=tokenizer.GetVocabSize())
-        throw std::invalid_argument("logit_bias token id is outside the model vocabulary");
+      if (id >= tokenizer.GetVocabSize())
+        throw std::invalid_argument(
+            "logit_bias token id is outside the model vocabulary");
     }
     result.behaviour = std::move(policy);
     return result;
@@ -3448,28 +3543,32 @@ std::string InferenceBackend::token_piece(sampling::TokenId token) const {
   if (state)
     return state->scheduler->runner().Decode(std::span(&token, 1));
 #endif
-  throw std::invalid_argument("token logprobs are not supported for this model");
+  throw std::invalid_argument(
+      "token logprobs are not supported for this model");
 }
 
-std::shared_ptr<InferenceBackend::GenerationRequest> InferenceBackend::start_score(
-    std::string_view prompt, const sampling::SamplingConfig& sampling,
-    std::size_t max_score_tokens, const CancellationCheck& is_cancelled) {
+std::shared_ptr<InferenceBackend::GenerationRequest>
+InferenceBackend::start_score(std::string_view prompt,
+                              const sampling::SamplingConfig& sampling,
+                              std::size_t max_score_tokens,
+                              const CancellationCheck& is_cancelled) {
 #if defined(ENGINE_ENABLE_HIP)
   const auto request_start = Clock::now();
   const auto state = impl_->Snapshot();
   if (!state || !state->scheduler->runner().SupportsLogprobs())
-    throw std::invalid_argument("prompt logprobs are not supported for this model");
+    throw std::invalid_argument(
+        "prompt logprobs are not supported for this model");
   auto tokens = state->scheduler->runner().Tokenize(prompt);
   if (tokens.size() > max_score_tokens)
     throw std::invalid_argument("prompt exceeds --max-score-tokens");
-  auto configured = state->scheduler->runner().ConfigureSampling(
-      sampling, nullptr, {});
+  auto configured =
+      state->scheduler->runner().ConfigureSampling(sampling, nullptr, {});
   TextRequestMetadata metadata;
   metadata.request_start = request_start;
   auto request = state->scheduler->ScorePrompt(
       std::move(tokens), configured, is_cancelled, std::move(metadata));
   return std::make_shared<Impl::ScheduledGenerationRequest>(state,
-                                                           std::move(request));
+                                                            std::move(request));
 #else
   return TextGenerationBackend::start_score(prompt, sampling, max_score_tokens,
                                             is_cancelled);
@@ -3628,6 +3727,9 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
             .twin_model_path = speculative_config.twin_model_path,
             .draft_head_model_path = speculative_config.draft_head_model_path,
             .vision_disabled = speculative_config.vision_disabled,
+#ifdef GUFO_NPU
+            .npu_prefill = speculative_config.npu_prefill,
+#endif
         },
         &load_error);
     if (model == nullptr) {
@@ -4054,7 +4156,7 @@ bool InferenceBackend::load(
     new_state->supports_images = model->VisionEncoder() != nullptr;
     std::vector<std::uint32_t> suppress_tokens;
     if (BehaviourSwitch("GUFO_MODEL_SUPPRESS_TOKENS"))
-      suppress_tokens=model->SuppressedTokens();
+      suppress_tokens = model->SuppressedTokens();
     auto runner = std::make_shared<QwenFlashNextTextRunner>(
         std::move(model), max_context,
         speculative_config.backend == TextSpeculativeBackend::kMtp,
@@ -4242,11 +4344,11 @@ InferenceBackend::Result InferenceBackend::complete(
   }
   auto prompt_tokens = state->scheduler->runner().Tokenize(prompt);
   const auto effective_sampling = state->scheduler->runner().ConfigureSampling(
-      sampling_config,nullptr,prompt_tokens);
+      sampling_config, nullptr, prompt_tokens);
   return impl_->GenerateScheduled(
       state, std::move(prompt_tokens), request_start, max_tokens,
-      effective_sampling, is_cancelled, on_token, std::string(client_id), {}, true,
-      0, stop_sequences);
+      effective_sampling, is_cancelled, on_token, std::string(client_id), {},
+      true, 0, stop_sequences);
 #else
   (void)client_id;
   (void)stop_sequences;
@@ -4278,7 +4380,7 @@ InferenceBackend::Result InferenceBackend::chat(
     return {};
   }
   effective_sampling = state->scheduler->runner().ConfigureSampling(
-      effective_sampling,&effective_request,prompt->tokens);
+      effective_sampling, &effective_request, prompt->tokens);
   return impl_->GenerateScheduled(
       state, std::move(prompt->tokens), request_start, max_tokens,
       effective_sampling, is_cancelled, on_token, request.client_id,
@@ -4320,13 +4422,14 @@ InferenceBackend::start_complete(
   auto prompt_tokens = state->scheduler->runner().Tokenize(prompt);
   if (timeline) {
     auto event = json::Value::object();
-    event["template_ms"] = std::chrono::duration<double, std::milli>(
-                               Clock::now() - render_start).count();
+    event["template_ms"] =
+        std::chrono::duration<double, std::milli>(Clock::now() - render_start)
+            .count();
     event["token_count"] = prompt_tokens.size();
     timeline->Add("render", render_start, std::move(event));
   }
   const auto effective_sampling = state->scheduler->runner().ConfigureSampling(
-      sampling_config,nullptr,prompt_tokens);
+      sampling_config, nullptr, prompt_tokens);
   auto scheduled_request = state->scheduler->Submit(
       std::move(prompt_tokens), max_tokens, effective_sampling, is_cancelled,
       stream_output,
@@ -4371,7 +4474,8 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
                                           &effective_sampling, &tool_format);
   const auto& effective_request = constrained ? *constrained : request;
   std::shared_ptr<DebugTimeline> timeline;
-  const auto render_start = request.debug_timeline ? Clock::now() : request_start;
+  const auto render_start =
+      request.debug_timeline ? Clock::now() : request_start;
   if (request.debug_timeline) {
     timeline = std::make_shared<DebugTimeline>(request_start);
     timeline->Add("admission", request_start);
@@ -4384,8 +4488,9 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
 
   if (timeline) {
     auto event = json::Value::object();
-    event["template_ms"] = std::chrono::duration<double, std::milli>(
-                               Clock::now() - render_start).count();
+    event["template_ms"] =
+        std::chrono::duration<double, std::milli>(Clock::now() - render_start)
+            .count();
     event["token_count"] = prompt->tokens.size();
     timeline->Add("render", render_start, std::move(event));
   }
@@ -4393,7 +4498,7 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
   const std::string client_id =
       request.client_id.empty() ? "anonymous" : request.client_id;
   effective_sampling = state->scheduler->runner().ConfigureSampling(
-      effective_sampling,&effective_request,prompt->tokens);
+      effective_sampling, &effective_request, prompt->tokens);
   auto scheduled_request = state->scheduler->Submit(
       std::move(prompt->tokens), max_tokens, effective_sampling, is_cancelled,
       stream_output,

@@ -48,6 +48,8 @@ void ValidateValue(const json::Value& row, const std::string& value) {
   };
   const auto name = row.member_str("name");
   if (row.member_str("kind") == "flag") {
+    if (name == "--npu-prefill" && !Has(value, {"off", "on"}))
+      fail();
     if (name == "--speculative" &&
         !Has(value, {"mtp", "off", "dspark", "dflash2"}))
       fail();
@@ -312,6 +314,38 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
   result.profile = inputs.profile;
   result.architecture = inputs.architecture;
   result.native_context = inputs.native_context;
+  // Resolve opt-ins before model metadata, manifest defaults or env injection.
+  const auto authorize = [&](const std::string& flag,
+                             core::ExperimentalFeature feature) {
+    const auto found = inputs.explicit_flags.find(flag);
+    const bool present = found != inputs.explicit_flags.end();
+    const std::string value = present                   ? found->second
+                              : flag == "--fabric-peak" ? "0"
+                                                        : "off";
+    const bool requested =
+        flag == "--fabric-peak" ? value == "1" : value == "on";
+    if ((flag == "--npu-prefill" && value != "off" && value != "on") ||
+        (flag == "--fabric-peak" && value != "0" && value != "1"))
+      throw std::invalid_argument(flag + ": invalid value '" + value + "'");
+    std::string reason =
+        present ? "explicit CLI OFF" : "no explicit CLI authorization";
+    if (inputs.profile == "exact" || inputs.profile == "stock")
+      reason = "profile=" + inputs.profile + " forces OFF";
+#ifndef GUFO_NPU
+    else if (feature == core::ExperimentalFeature::Prefill)
+      reason = "GUFO_ENABLE_NPU=OFF";
+#endif
+    else if (requested)
+      reason = "explicit CLI ON";
+    const bool allowed = requested && reason == "explicit CLI ON";
+    if (requested && !allowed)
+      throw std::invalid_argument(flag + " effective=off: " + reason);
+    return core::ExperimentalAuthorization(feature, allowed, std::move(reason));
+  };
+  result.prefill_authorization =
+      authorize("--npu-prefill", core::ExperimentalFeature::Prefill);
+  result.fabric_authorization =
+      authorize("--fabric-peak", core::ExperimentalFeature::FabricPeak);
   const bool exact_controls =
       inputs.profile == "exact" && inputs.model_family == "qwen3.8-flash-next";
   std::map<std::string, ReleaseSetting> settings;
@@ -344,6 +378,22 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
     const auto name = row.member_str("name");
     ReleaseSetting setting{
         name, Text(row, "built_in"), "built-in", row.member_str("class"), {}};
+    // These options are CLI-only for every model family. A manifest or
+    // environment entry named like a flag can never become an authorization.
+    if (name == "--npu-prefill" || name == "--fabric-peak") {
+      const auto& authorization = name == "--npu-prefill"
+                                      ? result.prefill_authorization
+                                      : result.fabric_authorization;
+      const bool on = authorization.Allows(
+          name == "--npu-prefill" ? core::ExperimentalFeature::Prefill
+                                  : core::ExperimentalFeature::FabricPeak);
+      setting.value =
+          name == "--npu-prefill" ? (on ? "on" : "off") : (on ? "1" : "0");
+      setting.origin =
+          inputs.explicit_flags.contains(name) ? "flag" : "built-in";
+      settings.emplace(name, std::move(setting));
+      continue;
+    }
     const bool is_env = row.member_str("kind") == "env";
     std::optional<std::string> real;
     const std::string environment_name = name == "--mtp-model"
@@ -721,6 +771,12 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
             ", sessions=1, cache=off";
     result.logs.push_back(line);
   }
+  result.logs.push_back(
+      "npu-prefill=" + result.effective_flags.at("--npu-prefill") +
+      "; reason=" + result.prefill_authorization.reason());
+  result.logs.push_back(
+      "fabric-peak=" + result.effective_flags.at("--fabric-peak") +
+      "; reason=" + result.fabric_authorization.reason());
   return result;
 }
 void ApplyInjections(const ReleaseResolution& resolved) {
@@ -767,10 +823,13 @@ void ApplyInjections(const ReleaseResolution& resolved) {
   }
 }
 
-ReleaseStartup PrepareReleaseSettings(std::span<const char* const> args) {
+ReleaseStartup PrepareReleaseSettings(
+    std::span<const char* const> args,
+    const std::map<std::string, std::string>& manifest_defaults) {
   ReleaseStartup startup;
   try {
     ReleaseInputs inputs;
+    inputs.manifest_defaults = manifest_defaults;
     std::string modality = "llm";
     bool help = false;
     const std::set<std::string> server_options = {"--host",
@@ -798,7 +857,8 @@ ReleaseStartup PrepareReleaseSettings(std::span<const char* const> args) {
              row.member_str("name").starts_with("--no-") ||
              Has(row.member_str("name"),
                  {"--exact", "--print-effective-settings",
-                  "--allow-unmeasured-memory"}))) {
+                  "--allow-unmeasured-memory", "--npu-prefill",
+                  "--fabric-peak"}))) {
           option = &row;
           break;
         }
@@ -814,7 +874,7 @@ ReleaseStartup PrepareReleaseSettings(std::span<const char* const> args) {
       help = Has(arg, {"help", "--help", "-h"});
       break;
     }
-    if (help || modality != "llm")
+    if (help)
       return startup;
     for (std::size_t i = 0; i < args.size(); ++i) {
       std::string arg(args[i]);
@@ -866,8 +926,16 @@ ReleaseStartup PrepareReleaseSettings(std::span<const char* const> args) {
         throw std::invalid_argument(name + " does not take a value");
       inputs.explicit_flags[option->member_str("name")] = value;
     }
-    if (help || modality != "llm")
+    if (help)
       return startup;
+    if (modality != "llm") {
+      if ((inputs.explicit_flags.contains("--npu-prefill") &&
+           inputs.explicit_flags.at("--npu-prefill") != "off") ||
+          inputs.explicit_flags.contains("--fabric-peak"))
+        throw std::invalid_argument(
+            "experimental ON requires serve llm; effective=off");
+      return startup;
+    }
     startup.active = true;
     if (auto found = inputs.explicit_flags.find("--profile");
         found != inputs.explicit_flags.end())
@@ -883,6 +951,8 @@ ReleaseStartup PrepareReleaseSettings(std::span<const char* const> args) {
     if (auto found = inputs.explicit_flags.find("--model");
         found != inputs.explicit_flags.end())
       inputs.model_path = std::filesystem::u8path(found->second);
+    // Deny experimental ON before even opening the model header.
+    (void)ResolveReleaseSettings(inputs);
     inputs.environment = SnapshotReleaseEnvironment();
     const auto selector = [&](const std::string& env) -> std::string {
       if (auto found = inputs.environment.find(env);
@@ -1010,6 +1080,17 @@ json::Value ReleaseOrigins(const ReleaseResolution& resolved) {
 json::Value ReleaseSettingsJson(const ReleaseResolution& resolved) {
   auto output = json::Value::object();
   output["profile"] = resolved.profile;
+  auto experimental = json::Value::object();
+  experimental["npu_prefill"] = resolved.effective_flags.at("--npu-prefill");
+  experimental["npu_reason"] = resolved.prefill_authorization.reason();
+  experimental["npu_deny_reason"] =
+      resolved.prefill_authorization.Allows(core::ExperimentalFeature::Prefill)
+          ? json::Value()
+          : json::Value(resolved.prefill_authorization.reason());
+  experimental["fabric_peak"] =
+      resolved.effective_flags.at("--fabric-peak") == "1";
+  experimental["fabric_deny_reason"] = resolved.fabric_authorization.reason();
+  output["experimental"] = std::move(experimental);
   output["architecture"] = resolved.architecture.empty()
                                ? json::Value()
                                : json::Value(resolved.architecture);

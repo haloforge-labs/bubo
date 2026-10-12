@@ -542,8 +542,12 @@ private:
                        const float* x, float* out, std::uint32_t n_tokens,
                        bool speculative, std::string* error_msg,
                        bool projections_ready = false,
-                       bool project_output = true,
-                       GdnCheckpoint checkpoint = {}) const;
+                       bool project_output = true, GdnCheckpoint checkpoint = {}
+#ifdef GUFO_NPU
+                       ,
+                       bool npu_prefill = false, int layer = -1
+#endif
+  ) const;
   /// `pos`/`first_block` are device values; `start_pos` and `pool_grid`
   /// are their host-side counterparts for the eager-only decisions.
   bool Attention(const DeviceLayer& l, Session::AttentionState& s,
@@ -552,16 +556,30 @@ private:
                  std::uint32_t start_pos, std::uint32_t pool_grid,
                  std::uint32_t max_context, bool sparse, std::string* error_msg,
                  bool last_only = false, bool projections_ready = false,
-                 bool project_output = true,
-                 std::uint32_t checkpoint_tokens = 0) const;
+                 bool project_output = true, std::uint32_t checkpoint_tokens = 0
+#ifdef GUFO_NPU
+                 ,
+                 bool npu_prefill = false, int layer = -1
+#endif
+  ) const;
   template<bool Benchmark = false>
   bool Moe(const DeviceLayer& l, const float* x, float* out,
            std::uint32_t n_tokens, std::string* error_msg,
-           bool last_only = false) const;
+           bool last_only = false
+#ifdef GUFO_NPU
+           ,
+           bool npu_prefill = false, int layer = -1
+#endif
+  ) const;
   /// Runs routed experts after the router and shared expert are ready.
   template<bool Benchmark = false>
   bool MoeExperts(const DeviceLayer& l, const float* x, float* out,
-                  std::uint32_t n_tokens, std::string* error_msg) const;
+                  std::uint32_t n_tokens, std::string* error_msg
+#ifdef GUFO_NPU
+                  ,
+                  const std::function<bool()>& finish_shared = {}
+#endif
+  ) const;
   bool MoeBatch(const DeviceLayer& l, const float* x, float* out,
                 std::uint32_t rows, std::string* error,
                 bool multi_session = false) const;

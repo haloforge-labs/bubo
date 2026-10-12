@@ -204,6 +204,10 @@ bool AttentionF16Gemm(const void* weights, const __half* input,
 /// Exact Q8_0 HC up projection and F16-input mixer for the Flash Next
 /// 2560-hidden, rank-320 geometry. Returns false below 96 tokens or for other
 /// shapes. low_rank must not overlap mixed_half; side outputs are optional.
+#ifdef GUFO_NPU
+bool QueryGateGpuGemm(const void* w, const __half* x, float* out,
+                      unsigned tokens, unsigned first, hipStream_t stream);
+#endif
 bool HcMixF16Gemm(const void* up, const __half* low_rank, const __half* xn,
                   const float* inject_w, float* mixed, __half* mixed_half,
                   void* mixed_q8, float* inject, std::uint32_t n_tokens,
@@ -233,11 +237,19 @@ bool DenseBf16Gemm(const void* w, const void* x, float* out, std::size_t batch,
 /// history is read only; pass convolved=true to GatedDeltaNet to consume
 /// this result and update history. Speculative snapshots need all raw QKV
 /// rows and must use DenseF16Gemm instead. Unsupported shapes launch nothing.
+/// With an NPU GPU-prefix limit below channels, writes raw prefix rows only;
+/// the caller must fence the NPU tail and pass convolved=false to
+/// GatedDeltaNet.
 bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
                      const float* history, float* qkvz, float* convolved,
                      std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
                      std::uint32_t channels, std::uint32_t kernel,
-                     hipStream_t stream, std::uint32_t checkpoint_tokens = 0);
+                     hipStream_t stream, std::uint32_t checkpoint_tokens = 0
+#ifdef GUFO_NPU
+                     ,
+                     std::uint32_t gpu_rows = 0
+#endif
+);
 
 /// Routed expert GEMMs. RoutedCompact sorts the (token, slot) assignments
 /// by expert into `rows_token`/`rows_slot` (RoutedCompactRows(slots,
@@ -388,7 +400,7 @@ struct GdnBatchItem {
   std::uint32_t n_tokens;
 };
 
-/// Runs the decode arithmetic for 1–8 independent requests of 1–8 rows,
+/// Runs the decode arithmetic for 1â€“8 independent requests of 1â€“8 rows,
 /// 128-wide heads and four convolution taps. `items` is device-accessible;
 /// inactive requests are untouched. The caller zeros their output rows.
 bool GatedDeltaNetBatch(const GdnBatchItem* items, std::uint32_t count,

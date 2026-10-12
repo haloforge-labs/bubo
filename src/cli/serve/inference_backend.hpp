@@ -30,6 +30,12 @@ namespace gufo::tokenization {
 class QwenTokenizer;
 }
 
+#ifdef GUFO_NPU
+namespace gufo::npu {
+class ServerPrefill;
+}
+#endif
+
 namespace gufo::server {
 
 enum class TextSpeculativeBackend : std::uint8_t {
@@ -57,6 +63,9 @@ struct TextSpeculativeConfig {
   std::string twin_model_path;
   std::string draft_head_model_path;
   bool vision_disabled{false};
+#ifdef GUFO_NPU
+  std::shared_ptr<npu::ServerPrefill> npu_prefill;
+#endif
 };
 
 struct TextDiskCacheConfig {

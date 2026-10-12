@@ -16,6 +16,7 @@
 #include "src/cli/serve/continuation_disk_store.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/core/json.hpp"
+#include "src/npu/prefill_plan.hpp"
 
 namespace gufo::server {
 
@@ -342,21 +343,29 @@ std::string_view SnapshotEventReasonName(SnapshotEventReason reason) noexcept {
   return "unknown";
 }
 
-// GUFO_CACHE_HOST_FLOOR_MB=N (default 0 = off): refuse a new snapshot (event=snapshot action=skipped reason=host_memory_floor) when host MemAvailable minus the
-// snapshot would fall under N MiB. 10-09 L4 arm A: the cache kept admitting 4.75 GB snapshots until 0.96 GB was left and the request then died with HTTP 500.
+// GUFO_CACHE_HOST_FLOOR_MB=N (default 0 = off): refuse a new snapshot
+// (event=snapshot action=skipped reason=host_memory_floor) when host
+// MemAvailable minus the snapshot would fall under N MiB. 10-09 L4 arm A: the
+// cache kept admitting 4.75 GB snapshots until 0.96 GB was left and the request
+// then died with HTTP 500.
 std::uint64_t HostFloorBytes() {
   static const std::uint64_t floor_bytes = [] {
     const char* v = std::getenv("GUFO_CACHE_HOST_FLOOR_MB");
-    if (v == nullptr || *v == '\0' || *v == '-') return std::uint64_t{0};
+    if (v == nullptr || *v == '\0' || *v == '-')
+      return std::uint64_t{0};
     char* end = nullptr;
     const auto mb = std::strtoull(v, &end, 10);
-    return end != v && *end == '\0' ? static_cast<std::uint64_t>(mb) * 1024ull * 1024ull : std::uint64_t{0};
+    return end != v && *end == '\0'
+               ? static_cast<std::uint64_t>(mb) * 1024ull * 1024ull
+               : std::uint64_t{0};
   }();
   return floor_bytes;
 }
 
-// GUFO_CACHE_REMOVAL_LOG=1 (diagnostic, default off): log EVERY snapshot removal (byte capacity and exact replacement too) with what was removed
-// (purpose, rank, stable boundary, family hash, last-use tick, source flag) and what asked for room, to find out why a stable-prefix record vanished.
+// GUFO_CACHE_REMOVAL_LOG=1 (diagnostic, default off): log EVERY snapshot
+// removal (byte capacity and exact replacement too) with what was removed
+// (purpose, rank, stable boundary, family hash, last-use tick, source flag) and
+// what asked for room, to find out why a stable-prefix record vanished.
 bool CacheRemovalLogEnabled() {
   static const bool enabled = [] {
     const char* v = std::getenv("GUFO_CACHE_REMOVAL_LOG");
@@ -392,9 +401,12 @@ void EmitSnapshotEvent(const SnapshotEvent& event) noexcept {
            << " incoming_purpose=" << event.incoming_purpose
            << " incoming_family=" << event.incoming_family
            << " preserve_source=" << (event.preserve_source ? 1 : 0);
-    if (removal_log && event.action == SnapshotEventAction::kSkipped && event.incoming_purpose >= 0)
-      line << " incoming_purpose=" << event.incoming_purpose << " max_priority=" << event.rank
-           << " evictable=" << event.stable_prefix_tokens << " incoming_family=" << event.incoming_family
+    if (removal_log && event.action == SnapshotEventAction::kSkipped &&
+        event.incoming_purpose >= 0)
+      line << " incoming_purpose=" << event.incoming_purpose
+           << " max_priority=" << event.rank
+           << " evictable=" << event.stable_prefix_tokens
+           << " incoming_family=" << event.incoming_family
            << " preserve_source=" << (event.preserve_source ? 1 : 0);
     Logger::Warn("cache", line.str());
   } catch (...) {
@@ -504,12 +516,16 @@ void EmitDiskEvent(const ContinuationDiskEvent& event) noexcept {
          << " staging_capacity_bytes=" << event.staging_capacity_bytes
          << " staging_used_bytes=" << event.staging_used_bytes;
     if (event.reason == ContinuationDiskEventReason::kPrefixPersisted)
-      line << " covering_tokens=" << event.covering_tokens << " gap_tokens=" << event.gap_tokens;
+      line << " covering_tokens=" << event.covering_tokens
+           << " gap_tokens=" << event.gap_tokens;
     if (event.reason == ContinuationDiskEventReason::kSaved) {
       line << " trigger=" << event.trigger << " write_ms=" << event.elapsed_ms;
       line << " slice_yields=" << event.slice_yields
            << " slice_wait_ms=" << event.slice_wait_ms;
-      line << " gather_ms=" << event.phase_gather_ms << " file_write_ms=" << event.phase_write_ms << " hash_ms=" << event.phase_hash_ms << " fsync_ms=" << event.phase_fsync_ms;
+      line << " gather_ms=" << event.phase_gather_ms
+           << " file_write_ms=" << event.phase_write_ms
+           << " hash_ms=" << event.phase_hash_ms
+           << " fsync_ms=" << event.phase_fsync_ms;
       Logger::Info("cache", line.str());
     } else if (event.reason == ContinuationDiskEventReason::kLru ||
                event.reason == ContinuationDiskEventReason::kMinStep) {
@@ -841,7 +857,10 @@ struct TextRunnerPool::Request::Impl {
       // Cold long prompts still retain the last grid point for late edits.
       // A grid point just before the prompt end saves little on an edit but
       // would split the final prefill pass and store another snapshot.
-      constexpr std::size_t interval = 2048;
+      // With the NPU prefill on the grid is the NPU chunk size, so a checkpoint
+      // never splits a 4096-token chunk (the NPU offloads only exact 4096 chunks).
+      const std::size_t npu_chunk = runner->PrefillPreferredChunk();
+      const std::size_t interval = npu_chunk ? npu_chunk : 2048;
       constexpr std::size_t tail = 128;
       const auto grid_points = (prompt.size() - 1) / interval;
       const auto count =
@@ -1041,13 +1060,16 @@ struct TextRunnerPool::Request::Impl {
     }
     const auto snapshot_finished = std::chrono::steady_clock::now();
     const auto snapshot_ms = std::chrono::duration<double, std::milli>(
-                                 snapshot_finished - snapshot_start).count();
+                                 snapshot_finished - snapshot_start)
+                                 .count();
     snapshot_metrics.snapshot_ms += snapshot_ms;
     if (timeline) {
       try {
         auto fields = json::Value::object();
-        fields["kind"] = snapshot_tokens.size() == prompt.size() ? "continuation"
-            : fallback_position == 0 ? "branch_point" : "stable_boundary";
+        fields["kind"] = snapshot_tokens.size() == prompt.size()
+                             ? "continuation"
+                         : fallback_position == 0 ? "branch_point"
+                                                  : "stable_boundary";
         fields["tokens"] = snapshot_tokens.size();
         fields["bytes"] = prompt_snapshot ? prompt_snapshot->PayloadBytes() : 0;
         fields["ms"] = snapshot_ms;
@@ -1260,8 +1282,9 @@ struct TextRunnerPool::Request::Impl {
     if (timeline) {
       try {
         auto fields = json::Value::object();
-        fields["kind"] = purpose == SnapshotPurpose::kBranchPoint ? "branch_point"
-                                                                 : "history";
+        fields["kind"] = purpose == SnapshotPurpose::kBranchPoint
+                             ? "branch_point"
+                             : "history";
         fields["tokens"] = position;
         fields["bytes"] = bytes;
         fields["ms"] = elapsed;
@@ -1499,6 +1522,12 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
         "text runner prefill budget must be at least one token");
   }
 
+  const auto preferred = impl_->runner->PrefillPreferredChunk();
+  if (preferred)
+    max_input_tokens = std::max(
+        max_input_tokens,
+        std::min(preferred, impl_->prompt.size() - impl_->prefill_offset));
+
   // Stop exactly on the next shared-prefix boundary so it can be persisted.
   // Direct callers join any capture before mutating its borrowed state.
   impl_->CapturePromptSnapshot();
@@ -1550,6 +1579,10 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
         std::min(max_input_tokens, snapshot_position - impl_->prefill_offset);
 
   const std::size_t remaining = impl_->prompt.size() - impl_->prefill_offset;
+  max_input_tokens = npu::PrefillBoundaryBudget(
+      preferred, impl_->runner->PrefillBoundaryFallbackChunk(), remaining,
+      max_input_tokens);
+
   impl_->state_reusable = false;
   // Complete the model frontier at the cache boundary, including logits and
   // draft catch-up. Its snapshot can then be restored independently.
@@ -1603,11 +1636,13 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
     }
     if (impl_->timeline) {
       if (!step.capture_started)
-        throw std::logic_error("runner did not report its in-pass capture timestamp");
+        throw std::logic_error(
+            "runner did not report its in-pass capture timestamp");
       auto fields = json::Value::object();
       fields["kind"] = "stable_boundary";
       fields["tokens"] = snapshot_position;
-      fields["bytes"] = impl_->prompt_snapshot ? impl_->prompt_snapshot->PayloadBytes() : 0;
+      fields["bytes"] =
+          impl_->prompt_snapshot ? impl_->prompt_snapshot->PayloadBytes() : 0;
       fields["ms"] = step.checkpoint_ms;
       fields["in_pass"] = true;
       fields["success"] = bool(impl_->prompt_snapshot);
@@ -1629,8 +1664,10 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
   if (impl_->timeline) {
     impl_->debug_prefill_in_pass = in_pass;
     impl_->debug_prefill_boundary = reached_frontier ? "prompt_end"
-        : impl_->prefill_offset == snapshot_position ? "stable_boundary"
-        : history || shared ? "checkpoint" : "cap";
+                                    : impl_->prefill_offset == snapshot_position
+                                        ? "stable_boundary"
+                                    : history || shared ? "checkpoint"
+                                                        : "cap";
   }
   if (history)
     impl_->checkpoints.erase(impl_->checkpoints.begin());
@@ -1927,7 +1964,8 @@ json::Value TextRunnerPool::DebugSettings() const {
     const auto& options = impl_->disk_store->options();
     disk["directory"] = std::filesystem::absolute(options.directory).string();
     disk["capacity_bytes"] = impl_->disk_store->capacity_bytes();
-    disk["staging_capacity_bytes"] = impl_->disk_store->staging_capacity_bytes();
+    disk["staging_capacity_bytes"] =
+        impl_->disk_store->staging_capacity_bytes();
     disk["min_checkpoint_step_tokens"] = options.min_checkpoint_step_tokens;
     disk["shared_prefix_min_tokens"] = impl_->shared_prefix_min_tokens;
     disk["shared_prefix_max_boundaries"] = impl_->shared_prefix_max_boundaries;
@@ -1936,7 +1974,8 @@ json::Value TextRunnerPool::DebugSettings() const {
   auto plans = json::Value::array();
   for (const auto& plan : impl_->validated.plans) {
     auto entry = json::Value::object();
-    entry["kind"] = plan.kind == TextExecutionPlanKind::kBatched ? "batched" : "serial";
+    entry["kind"] =
+        plan.kind == TextExecutionPlanKind::kBatched ? "batched" : "serial";
     entry["physical_width"] = plan.physical_width;
     plans.push_back(std::move(entry));
   }
@@ -2211,7 +2250,8 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
           fields["tokens"] = prefix.size();
           fields["bytes"] = bytes;
           fields["ms"] = std::chrono::duration<double, std::milli>(
-              std::chrono::steady_clock::now() - started).count();
+                             std::chrono::steady_clock::now() - started)
+                             .count();
           fields["in_pass"] = false;
           fields["success"] = true;
           timeline->Add("snapshot", started, std::move(fields));

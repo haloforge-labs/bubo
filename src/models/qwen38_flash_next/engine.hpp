@@ -27,6 +27,12 @@ namespace gufo::core {
 class GgufReader;
 }
 
+#ifdef GUFO_NPU
+namespace gufo::npu {
+class ServerPrefill;
+}
+#endif
+
 namespace gufo::models::qwen38_flash_next {
 
 struct ModelWeights;
@@ -81,6 +87,9 @@ struct ModelOptions {
   std::string twin_model_path;
   std::string draft_head_model_path;
   bool vision_disabled = false;
+#ifdef GUFO_NPU
+  std::shared_ptr<npu::ServerPrefill> npu_prefill;
+#endif
 };
 
 class Session;
@@ -109,13 +118,17 @@ public:
   [[nodiscard]] bool IsStopToken(std::int32_t token) const noexcept;
   [[nodiscard]] std::uint32_t VocabSize() const noexcept;
   [[nodiscard]] std::uint32_t PrefillCapacity() const noexcept;
+  [[nodiscard]] std::uint32_t PrefillLegacyCapacity() const noexcept;
+  [[nodiscard]] std::uint32_t PrefillLegacyThroughCapacity() const noexcept;
   [[nodiscard]] std::uint32_t PrefillThroughCapacity() const noexcept;
   [[nodiscard]] std::uint32_t ExecutorMaxBatch() const noexcept;
   /// Prints the decode-twin counters under `tag`; no-op without a twin.
   void LogTwinCounters(const char* tag) const;
   [[nodiscard]] std::uint32_t PrefillCheckpointSlack() const noexcept;
   [[nodiscard]] std::vector<platform::LoadedFile> LoadedFiles() const;
-  [[nodiscard]] const ModelOptions& options() const noexcept { return options_; }
+  [[nodiscard]] const ModelOptions& options() const noexcept {
+    return options_;
+  }
   [[nodiscard]] std::uint32_t MaxContext() const noexcept {
     return options_.max_context;
   }
@@ -166,7 +179,8 @@ private:
   std::unique_ptr<rocm::DeviceModel> device_;
   std::unique_ptr<rocm::Executor> executor_;
   std::shared_ptr<qwen::vision::Encoder> vision_;
-  std::uint32_t max_image_tokens_{0};  ///< GUFO_MAX_IMAGE_TOKENS; 0 = no cap beyond the context
+  std::uint32_t max_image_tokens_{
+      0};  ///< GUFO_MAX_IMAGE_TOKENS; 0 = no cap beyond the context
   MtpBatchController batch_policy_;
   /// DraftVocabulary::kAuto: 1 for each token id in the latin draft set (the
   /// same list the executor's subset head is gathered from).
@@ -195,13 +209,11 @@ public:
                           std::span<const std::int32_t> next = {});
   /// Prefills through a stable text boundary in the same forward, returning
   /// a checkpoint of that boundary while the live session reaches prompt.
-  [[nodiscard]] bool SyncThrough(std::span<const std::int32_t> prompt,
-                                 std::uint32_t boundary,
-                                 std::unique_ptr<SessionSnapshot>* checkpoint,
-                                 std::string* error_msg = nullptr,
-                                 double* capture_ms = nullptr,
-                                 std::chrono::steady_clock::time_point*
-                                     capture_started = nullptr);
+  [[nodiscard]] bool SyncThrough(
+      std::span<const std::int32_t> prompt, std::uint32_t boundary,
+      std::unique_ptr<SessionSnapshot>* checkpoint,
+      std::string* error_msg = nullptr, double* capture_ms = nullptr,
+      std::chrono::steady_clock::time_point* capture_started = nullptr);
   [[nodiscard]] bool Evaluate(std::int32_t token,
                               std::string* error_msg = nullptr);
   /// Appends `tokens` through the decode arithmetic: one token as a decode
@@ -341,19 +353,19 @@ private:
   friend class Model;
   Session(std::shared_ptr<Model> model, std::unique_ptr<rocm::Session> session);
 
-  template <bool CaptureStarted = false>
+  template<bool CaptureStarted = false>
   bool Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
             bool prefill = false, std::uint32_t boundary = 0,
             std::unique_ptr<SessionSnapshot>* checkpoint = nullptr,
             double* capture_ms = nullptr,
             std::chrono::steady_clock::time_point* capture_started = nullptr,
             std::span<const std::int32_t> after = {});
-  bool SyncImpl(std::span<const std::int32_t> prompt, std::string* error_msg,
-                std::uint32_t boundary,
-                std::unique_ptr<SessionSnapshot>* checkpoint,
-                double* capture_ms = nullptr,
-                std::chrono::steady_clock::time_point* capture_started = nullptr,
-                std::span<const std::int32_t> next = {});
+  bool SyncImpl(
+      std::span<const std::int32_t> prompt, std::string* error_msg,
+      std::uint32_t boundary, std::unique_ptr<SessionSnapshot>* checkpoint,
+      double* capture_ms = nullptr,
+      std::chrono::steady_clock::time_point* capture_started = nullptr,
+      std::span<const std::int32_t> next = {});
   std::unique_ptr<SessionSnapshot> SaveSnapshotImpl(
       const rocm::Session& state, std::span<const std::int32_t> tokens,
       std::span<const float> logits, std::uint32_t hidden_rows,
@@ -390,9 +402,12 @@ private:
   std::shared_ptr<Model> model_;
   std::unique_ptr<rocm::Session> session_;
   std::vector<std::int32_t> tokens_;
-  /// True when, after the committed context plus chain[0, keep), the most recent of <think> / </think> / <tool_call> is <think> (lenient acceptance gate;
-  /// a backward scan, so it is restore- and rollback-safe by construction).
-  bool ThinkingAfter(const std::vector<std::int32_t>& chain, std::size_t keep) const;
+  /// True when, after the committed context plus chain[0, keep), the most
+  /// recent of <think> / </think> / <tool_call> is <think> (lenient acceptance
+  /// gate; a backward scan, so it is restore- and rollback-safe by
+  /// construction).
+  bool ThinkingAfter(const std::vector<std::int32_t>& chain,
+                     std::size_t keep) const;
   mutable std::vector<float> logits_;
   /// A sampled cycle's rollback left the frontier row in flight (see
   /// FinishDecode): logits_ is stale until EnsureFrontier fetches it.

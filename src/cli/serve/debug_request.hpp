@@ -12,6 +12,8 @@
 
 namespace gufo::server {
 
+inline bool NpuOperatorListener(bool hooks, std::string_view host);
+
 inline bool DebugLoopbackListener(std::string_view host) {
   if (host == "localhost" || host == "::1")
     return true;
@@ -29,6 +31,10 @@ inline bool DebugLoopbackListener(std::string_view host) {
       host.remove_prefix(end + 1);
   }
   return octets[0] == 127;
+}
+
+inline bool NpuOperatorListener(bool hooks, std::string_view host) {
+  return hooks && host != "localhost" && DebugLoopbackListener(host);
 }
 
 // Parse alongside the existing body, so an ordinary request needs no second
@@ -65,7 +71,7 @@ inline std::optional<std::string> ParseDebugRequest(const json::Value& body,
 }
 
 inline std::optional<std::string> ParseChatLogprobs(const json::Value& body,
-                                                   std::int32_t* top) {
+                                                    std::int32_t* top) {
   bool enabled = false;
   if (const auto* value = body.find("logprobs"); value && !value->is_null()) {
     if (!value->is_bool())
@@ -73,9 +79,10 @@ inline std::optional<std::string> ParseChatLogprobs(const json::Value& body,
     enabled = value->as_bool();
   }
   std::int32_t count = 0;
-  if (const auto* value = body.find("top_logprobs"); value && !value->is_null()) {
-    if (!value->is_number() || !std::isfinite(value->as_double()) || value->as_double() < 0 ||
-        value->as_double() > 20 ||
+  if (const auto* value = body.find("top_logprobs");
+      value && !value->is_null()) {
+    if (!value->is_number() || !std::isfinite(value->as_double()) ||
+        value->as_double() < 0 || value->as_double() > 20 ||
         value->as_double() != static_cast<int>(value->as_double()))
       return "'top_logprobs' must be an integer in [0,20]";
     count = static_cast<std::int32_t>(value->as_double());

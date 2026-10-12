@@ -1,4 +1,8 @@
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
+#ifdef GUFO_NPU
+#include "src/npu/linear_z_geometry.hpp"
+#include "src/npu/projection_geometry.hpp"
+#endif
 
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_fp16.h>
@@ -5167,7 +5171,12 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     const __half* xn = nullptr, __half* mixed_half = nullptr,
     void* mixed_q8 = nullptr, const float* conv_w = nullptr,
     float* conv_out = nullptr, AttentionProjectionOutput attention = {},
-    std::uint32_t checkpoint_tokens = 0, std::size_t input_stride = 0) {
+    std::uint32_t checkpoint_tokens = 0, std::size_t input_stride = 0
+#ifdef GUFO_NPU
+    ,
+    unsigned first_row = 0
+#endif
+) {
   static_assert(WM * WN == 8, "256 threads is 8 waves");
   static_assert(BM % (16 * WM) == 0 && BN % (16 * WN) == 0);
   static_assert(!(kBf16 && kHalfWeights));
@@ -5213,7 +5222,11 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
   // count is divisible by kRowGroup; every dot product keeps its K order.
   const unsigned row_group = blockIdx.y / kRowGroup;
   const unsigned within = (blockIdx.y % kRowGroup) * gridDim.x + blockIdx.x;
-  const int r_block = (row_group * kRowGroup + within % kRowGroup) * BM;
+  const int r_block = (row_group * kRowGroup + within % kRowGroup) * BM
+#ifdef GUFO_NPU
+                      + first_row
+#endif
+      ;
   const int t_block = (within / kRowGroup) * BN;
   // BF16 replaces a library GEMM whose 32-token tile g starts its K loop
   // (g % 4) * 4 blocks in and wraps. A block takes the four tiles of one
@@ -5771,6 +5784,21 @@ bool AttentionF16Gemm(const void* weights, const __half* input,
   return true;
 }
 
+#ifdef GUFO_NPU
+bool QueryGateGpuGemm(const void* w, const __half* x, float* out,
+                      unsigned tokens, unsigned first, hipStream_t stream) {
+  const auto rows = npu::QueryGpuRows(first);
+  if (!w || !x || !out || rows == 0 || tokens < 4096 || tokens > 16384 ||
+      tokens % 4096 != 0)
+    return false;
+  hipLaunchKernelGGL((DenseF16GEMMKernel<256, 128, 1, 4, 2>),
+                     dim3(tokens / 128, rows / 256), dim3(kThreads), 0, stream,
+                     w, x, out, tokens, 13312, 2560, nullptr, nullptr, nullptr,
+                     nullptr, nullptr, AttentionProjectionOutput{}, 0, 0,
+                     first);
+  return true;
+}
+#endif
 bool HcMixF16Gemm(const void* up, const __half* low_rank, const __half* xn,
                   const float* inject_w, float* mixed, __half* mixed_half,
                   void* mixed_q8, float* inject, std::uint32_t n_tokens,
@@ -5893,17 +5921,41 @@ bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
                      const float* history, float* qkvz, float* convolved,
                      std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
                      std::uint32_t channels, std::uint32_t kernel,
-                     hipStream_t stream, std::uint32_t checkpoint_tokens) {
+                     hipStream_t stream, std::uint32_t checkpoint_tokens
+#ifdef GUFO_NPU
+                     ,
+                     std::uint32_t gpu_rows
+#endif
+) {
   if (n_tokens < 1024 || m != 16384 || k != 2560 || channels != 10240 ||
       kernel != kSsmConvTaps) {
     return false;
   }
+#ifdef GUFO_NPU
+  const auto launch_rows = npu::LinearZLaunchRows(gpu_rows, m, channels);
+  if (launch_rows == 0)
+    return false;
+  if (launch_rows < channels) {
+    // SLICES 7..12 includes QKV. Write all GPU prefix rows in the original
+    // pitch; defer convolution/boundary reads until the NPU tail is fenced.
+    hipLaunchKernelGGL((DenseF16GEMMKernel<256, 128, 2, 8, 1, 2>),
+                       dim3((n_tokens + 127) / 128, launch_rows / 256),
+                       dim3(kThreads), 0, stream, w, x, qkvz, n_tokens, m, k);
+    return true;
+  }
+#endif
   // Row-tile pairs per token tile in launch order (-0.9 %).
   hipLaunchKernelGGL((DenseF16GEMMKernel<256, 128, 2, 8, 1, 2, false, true>),
-                     dim3((n_tokens + 127) / 128, m / 256), dim3(kThreads), 0,
-                     stream, w, x, qkvz, n_tokens, m, k, nullptr, nullptr,
-                     nullptr, conv_w, convolved, AttentionProjectionOutput{},
-                     checkpoint_tokens);
+                     dim3((n_tokens + 127) / 128,
+#ifdef GUFO_NPU
+                          launch_rows / 256
+#else
+                          m / 256
+#endif
+                          ),
+                     dim3(kThreads), 0, stream, w, x, qkvz, n_tokens, m, k,
+                     nullptr, nullptr, nullptr, conv_w, convolved,
+                     AttentionProjectionOutput{}, checkpoint_tokens);
   hipLaunchKernelGGL(
       SsmConvBoundaryKernel,
       dim3(Blocks(channels),
