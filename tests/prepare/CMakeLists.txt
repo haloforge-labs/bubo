@@ -1,5 +1,5 @@
 foreach(name prepare_args_test prepare_catalogue_test prepare_gate_test
-             prepare_fingerprint_test prepare_dependencies_test)
+             prepare_fingerprint_test prepare_dependencies_test prepare_zip_test)
   add_executable(${name} ${name}.cpp)
   target_link_libraries(${name} PRIVATE bubo_prepare)
   set_target_properties(${name} PROPERTIES
