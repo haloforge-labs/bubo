@@ -37,8 +37,9 @@ int main(int argc, char* argv[]) {
   for (std::size_t repo = 0; repo < evidence.size(); ++repo) {
     auto missing = evidence;
     missing.erase(missing.begin() + repo);
-    assert(ValidateReleaseEvidence(fixture::kCatalogue, missing).find(
-               "missing evidence for source repository") != std::string::npos);
+    assert(ValidateReleaseEvidence(fixture::kCatalogue, missing)
+               .find("missing evidence for source repository") !=
+           std::string::npos);
   }
   for (std::size_t row = 0; row < fixture::kCatalogue.size(); ++row) {
     auto empty = fixture::kCatalogue;
