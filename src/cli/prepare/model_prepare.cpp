@@ -517,7 +517,8 @@ int CopySupplied(const fs::path& source, const fs::path& partial,
   return 0;
 }
 int RunImpl(const Options& options, const Environment& env, std::istream& input,
-            std::ostream& out, std::ostream& err) {
+            std::ostream& out, std::ostream& err, PreparationPlan* preview,
+            bool approved) {
   try {
     // Production approval/text slots are intentionally OPEN. Do not invent
     // licence texts or fetch mutable legal text to get past the release gate.
@@ -550,19 +551,31 @@ int RunImpl(const Options& options, const Environment& env, std::istream& input,
     Plan initial;
     if (const auto code = MakePlan(options, env, root, initial, out, err))
       return code;
+    if (preview) {
+      preview->ready = initial.ready;
+      preview->volumes = initial.volumes;
+      preview->text = initial.ready
+                          ? std::string{}
+                          : ModelConsent(env.entries, root, initial.status,
+                                         initial.remaining, initial.volumes,
+                                         options.step != Step::Runtime);
+      return 0;
+    }
     // mutation-anchor: initial-readonly-check
     if (initial.ready) {
       out << "prepare: already prepared; nothing to do\n";
       return 0;
     }
-    out << ModelConsent(env.entries, root, initial.status, initial.remaining,
-                        initial.volumes, options.step != Step::Runtime);
-    if (options.yes)
-      out << "approval: --yes (displayed plan accepted)\n";
-    else {
-      std::string answer;
-      if (!std::getline(input, answer) || (answer != "y" && answer != "Y"))
-        return Error(err, 3, "plan declined");
+    if (!approved) {
+      out << ModelConsent(env.entries, root, initial.status, initial.remaining,
+                          initial.volumes, options.step != Step::Runtime);
+      if (options.yes)
+        out << "approval: --yes (displayed plan accepted)\n";
+      else {
+        std::string answer;
+        if (!std::getline(input, answer) || (answer != "y" && answer != "Y"))
+          return Error(err, 3, "plan declined");
+      }
     }
     if (env.cancelled && env.cancelled())
       return Error(err, 3, "cancelled");
@@ -739,7 +752,8 @@ std::string ModelConsent(std::span<const Entry> entries, const fs::path& root,
   return text.str();
 }
 int RunModel(const Options& options, std::ostream& out, std::ostream& err,
-             const std::function<bool()>& cancelled) {
+             const std::function<bool()>& cancelled, PreparationPlan* preview,
+             bool approved) {
   CurlTransport transport;
   Environment env;
   env.entries = ModelCatalogue();
@@ -749,12 +763,13 @@ int RunModel(const Options& options, std::ostream& out, std::ostream& err,
     const auto table = ProductionFingerprintTable(entry);
     return table ? CheckGgufFingerprint(path, entry, table.table) : table.error;
   };
-  return RunImpl(options, env, std::cin, out, err);
+  return RunImpl(options, env, std::cin, out, err, preview, approved);
 }
 #ifdef BUBO_PREPARE_TESTING
 int RunModelForTesting(const Options& options, const ModelTestEnvironment& test,
                        std::istream& input, std::ostream& out,
-                       std::ostream& err) {
+                       std::ostream& err, PreparationPlan* preview,
+                       bool approved) {
   Environment env;
   env.entries = test.entries;
   for (const auto& notice : test.notices)
@@ -766,7 +781,7 @@ int RunModelForTesting(const Options& options, const ModelTestEnvironment& test,
   env.fingerprint = test.fingerprint;
   env.cancelled = test.cancelled;
   env.before_manifest = test.before_manifest;
-  return RunImpl(options, env, input, out, err);
+  return RunImpl(options, env, input, out, err, preview, approved);
 }
 #endif
 }  // namespace bubo::prepare

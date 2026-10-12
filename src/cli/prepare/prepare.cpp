@@ -1,8 +1,12 @@
 #include "src/cli/prepare/prepare.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <csignal>
 #include <filesystem>
+#include <iostream>
+#include <limits>
+#include <map>
 #include <ostream>
 
 #ifdef _WIN32
@@ -188,17 +192,96 @@ int Run(std::span<const char* const> args, std::string_view local_app_data,
     PrintHelp(out);
     return 0;
   }
-  if (parsed.options.step == Step::All) {
-    err << "prepare: E4 the combined all-step plan is unavailable while model "
-           "source pins and notices are OPEN; use bubo prepare runtime\n";
-    return 4;
-  }
   CancellationScope cancellation;
+  if (parsed.options.step == Step::All) {
+    const auto cancelled = [] {
+      return gCancelled.load(std::memory_order_relaxed);
+    };
+    const PreparePhase model = [&](const Options& options, std::istream&,
+                                   std::ostream& output, std::ostream& errors,
+                                   PreparationPlan* preview, bool approved) {
+      return RunModel(options, output, errors, cancelled, preview, approved);
+    };
+    const PreparePhase runtime = [&](const Options& options, std::istream&,
+                                     std::ostream& output, std::ostream& errors,
+                                     PreparationPlan* preview, bool approved) {
+      return RunRuntime(options, output, errors, cancelled, preview, approved);
+    };
+    return RunAll(parsed.options, model, runtime, std::cin, out, err,
+                  cancelled);
+  }
   if (parsed.options.step == Step::Runtime)
     return RunRuntime(parsed.options, out, err, [] {
       return gCancelled.load(std::memory_order_relaxed);
     });
   return RunModel(parsed.options, out, err,
                   [] { return gCancelled.load(std::memory_order_relaxed); });
+}
+
+int RunAll(const Options& options, const PreparePhase& model,
+           const PreparePhase& runtime, std::istream& input, std::ostream& out,
+           std::ostream& err, const std::function<bool()>& cancelled) {
+  PreparationPlan model_plan, runtime_plan;
+  // Gate the model's immutable source/legal inputs before even inspecting the
+  // runtime. An OPEN model gate must never partially install the runtime.
+  if (const auto code = model(options, input, out, err, &model_plan, false))
+    return code;
+  if (const auto code = runtime(options, input, out, err, &runtime_plan, false))
+    return code;
+  if (model_plan.ready && runtime_plan.ready) {
+    out << "prepare: already prepared; nothing to do\n";
+    return 0;
+  }
+  std::map<std::string, ConsentVolume> volumes;
+  constexpr std::uint64_t margin = 2ULL * 1024 * 1024 * 1024;
+  for (const auto* plan : {&model_plan, &runtime_plan}) {
+    for (const auto& volume : plan->volumes) {
+      auto [row, inserted] = volumes.try_emplace(volume.name, volume);
+      if (!inserted) {
+        row->second.free_bytes =
+            std::min(row->second.free_bytes, volume.free_bytes);
+        const auto extra =
+            volume.required_bytes - std::min(margin, volume.required_bytes);
+        if (extra > std::numeric_limits<std::uint64_t>::max() -
+                        row->second.required_bytes) {
+          err << "prepare: E7 combined space calculation overflow\n";
+          return 7;
+        }
+        row->second.required_bytes += extra;
+      }
+    }
+  }
+  for (const auto& [name, volume] : volumes) {
+    out << "Combined volume " << name << ": free " << volume.free_bytes
+        << " bytes; required " << volume.required_bytes << " bytes\n";
+    if (volume.free_bytes < volume.required_bytes) {
+      err << "prepare: E7 insufficient combined free space on " << name << '\n';
+      return 7;
+    }
+  }
+  out << "Combined preparation plan. One approval covers both disclosures "
+         "below.\n"
+      << runtime_plan.text << model_plan.text
+      << "Approve the complete runtime and model plan? [y/N]\n";
+  if (options.yes)
+    out << "approval: --yes (displayed plan accepted)\n";
+  else {
+    std::string answer;
+    if (!std::getline(input, answer) || (answer != "y" && answer != "Y")) {
+      err << "prepare: E3 plan declined\n";
+      return 3;
+    }
+  }
+  if (cancelled && cancelled()) {
+    err << "prepare: E3 cancelled\n";
+    return 3;
+  }
+  if (!runtime_plan.ready) {
+    if (const auto code = runtime(options, input, out, err, nullptr, true))
+      return code;
+  }
+  if (!model_plan.ready)
+    return model(options, input, out, err, nullptr, true);
+  return 0;
 }
 }  // namespace bubo::prepare

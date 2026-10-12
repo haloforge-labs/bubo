@@ -25,6 +25,11 @@
 
 namespace bubo::prepare {
 namespace {
+std::string RuntimeDisclosure(std::span<const WheelPin> wheels,
+                              const std::filesystem::path& runtime,
+                              const std::filesystem::path& licenses);
+}
+namespace {
 namespace fs = std::filesystem;
 fs::path Path(std::string_view text) {
   auto path = fs::path(std::u8string(
@@ -302,7 +307,8 @@ void Holders(const Environment& e) {
   }
 }
 int RunImpl(const Options& options, Environment e, std::istream& input,
-            std::ostream& out, std::ostream& err) {
+            std::ostream& out, std::ostream& err, PreparationPlan* preview,
+            bool approved) {
   try {
     if (e.members.empty() || e.notices.empty())
       throw Failure(4, "runtime member/notice pins are OPEN");
@@ -332,6 +338,10 @@ int RunImpl(const Options& options, Environment e, std::istream& input,
     // A previous accepted transaction authorizes its recovery. Restore the
     // previous installation even if its wheel cache is now missing/offline.
     if (fs::exists(root / Path(".bubo/runtime/journal.json"))) {
+      if (preview)
+        throw Failure(7,
+                      "unfinished runtime transaction; run bubo prepare "
+                      "runtime to recover before all");
       Holders(e);
       PrepareLock recovery_lock;
       std::string error;
@@ -343,6 +353,10 @@ int RunImpl(const Options& options, Environment e, std::istream& input,
     }
     if (!fs::exists(root / Path(".bubo/runtime/journal.json")) &&
         CheckInstalled(root, e)) {
+      if (preview) {
+        preview->ready = true;
+        return 0;
+      }
       out << "prepare runtime: already prepared; nothing to do\n";
       return 0;
     }
@@ -399,23 +413,34 @@ int RunImpl(const Options& options, Environment e, std::istream& input,
         budget(cache, w.size - RetainedPrefix(entries[i], partial));
       }
     }
+    std::ostringstream disclosure;
     for (const auto& [volume, b] : budgets) {
       const auto required = b.second + 2ULL * 1024 * 1024 * 1024;
-      out << "Runtime volume " << volume << ": free " << b.first
-          << " bytes; required " << required << " bytes\n";
+      disclosure << "Runtime volume " << volume << ": free " << b.first
+                 << " bytes; required " << required << " bytes\n";
       if (b.first < required)
         throw Failure(7, "insufficient runtime/cache free space");
+      if (preview)
+        preview->volumes.push_back({volume, b.first, required});
     }
     // Exact notice texts are available before the affirmative prompt.
     for (const auto& n : e.notices)
-      out << "Licence/notice: " << n.path << '\n' << n.text << '\n';
-    out << RuntimeConsent(root, root / "licenses");
-    if (options.yes)
-      out << "approval: --yes (displayed plan accepted)\n";
-    else {
-      std::string answer;
-      if (!std::getline(input, answer) || (answer != "y" && answer != "Y"))
-        throw Failure(3, "plan declined");
+      disclosure << "Licence/notice: " << n.path << '\n' << n.text << '\n';
+    disclosure << RuntimeDisclosure(e.wheels, root, root / "licenses");
+    if (preview) {
+      preview->ready = false;
+      preview->text = disclosure.str();
+      return 0;
+    }
+    if (!approved) {
+      out << disclosure.str();
+      if (options.yes)
+        out << "approval: --yes (displayed plan accepted)\n";
+      else {
+        std::string answer;
+        if (!std::getline(input, answer) || (answer != "y" && answer != "Y"))
+          throw Failure(3, "plan declined");
+      }
     }
     if (e.cancelled && e.cancelled())
       throw Failure(3, "cancelled");
@@ -590,13 +615,16 @@ int RunImpl(const Options& options, Environment e, std::istream& input,
   }
 }
 }  // namespace
-std::string RuntimeConsent(const fs::path& runtime, const fs::path& licenses) {
+namespace {
+std::string RuntimeDisclosure(std::span<const WheelPin> wheels,
+                              const fs::path& runtime,
+                              const fs::path& licenses) {
   std::ostringstream text;
   text << "Bubo needs the AMD ROCm runtime. Bubo does not include AMD files.\n"
           "Bubo downloads three packages directly from AMD (ROCm 10.0.0 for "
           "gfx1151):\n\n";
   std::uint64_t total = 0;
-  for (const auto& w : RuntimeWheels()) {
+  for (const auto& w : wheels) {
     auto sha = std::string(w.sha256);
     std::transform(sha.begin(), sha.end(), sha.begin(), [](unsigned char c) {
       return static_cast<char>(std::toupper(c));
@@ -626,6 +654,10 @@ std::string RuntimeConsent(const fs::path& runtime, const fs::path& licenses) {
          "files.\n\n"
          "Continue? [y/N]\n";
   return text.str();
+}
+}  // namespace
+std::string RuntimeConsent(const fs::path& runtime, const fs::path& licenses) {
+  return RuntimeDisclosure(RuntimeWheels(), runtime, licenses);
 }
 std::vector<std::string> RuntimeHolders(
     const fs::path& root, const std::vector<RuntimeMember>& members) {
@@ -683,11 +715,14 @@ std::vector<std::string> RuntimeHolders(
   return result;
 }
 int RunRuntime(const Options& options, std::ostream& out, std::ostream& err,
-               const std::function<bool()>& cancelled) {
+               const std::function<bool()>& cancelled, PreparationPlan* preview,
+               bool approved) {
 #ifndef _WIN32
   (void)options;
   (void)out;
   (void)cancelled;
+  (void)preview;
+  (void)approved;
   err << "prepare: E2 AMD Windows runtime preparation requires Windows\n";
   return 2;
 #else
@@ -722,7 +757,8 @@ int RunRuntime(const Options& options, std::ostream& out, std::ostream& err,
     e.transport = &transport;
     e.download.policy = policy;
     e.cancelled = cancelled;
-    return RunImpl(options, std::move(e), std::cin, out, err);
+    return RunImpl(options, std::move(e), std::cin, out, err, preview,
+                   approved);
   } catch (const Failure& error) {
     err << "prepare: E" << error.code << ' ' << error.what() << '\n';
     return error.code;
@@ -735,7 +771,8 @@ int RunRuntime(const Options& options, std::ostream& out, std::ostream& err,
 #ifdef BUBO_PREPARE_TESTING
 int RunRuntimeForTesting(const Options& options,
                          const RuntimeTestEnvironment& t, std::istream& input,
-                         std::ostream& out, std::ostream& err) {
+                         std::ostream& out, std::ostream& err,
+                         PreparationPlan* preview, bool approved) {
   Environment e;
   e.wheels = t.wheels;
   e.members = t.members;
@@ -748,7 +785,7 @@ int RunRuntimeForTesting(const Options& options,
   e.cancelled = t.cancelled;
   if (t.volume)
     e.volume = t.volume;
-  return RunImpl(options, std::move(e), input, out, err);
+  return RunImpl(options, std::move(e), input, out, err, preview, approved);
 }
 #endif
 }  // namespace bubo::prepare

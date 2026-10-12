@@ -15,10 +15,6 @@
 #endif
 
 namespace bubo::prepare {
-struct ConsentVolume {
-  std::string name;
-  std::uint64_t free_bytes = 0, required_bytes = 0;
-};
 std::string ModelConsent(std::span<const Entry> entries,
                          const std::filesystem::path& model_root,
                          std::span<const std::string> status,
@@ -26,7 +22,8 @@ std::string ModelConsent(std::span<const Entry> entries,
                          std::span<const ConsentVolume> volumes,
                          bool model_selected = true);
 int RunModel(const Options&, std::ostream& out, std::ostream& err,
-             const std::function<bool()>& cancelled = {});
+             const std::function<bool()>& cancelled = {},
+             PreparationPlan* preview = nullptr, bool approved = false);
 #ifdef BUBO_PREPARE_TESTING
 struct TestNotice {
   std::string name, text, sha256;
@@ -47,6 +44,7 @@ struct ModelTestEnvironment {
 };
 int RunModelForTesting(const Options&, const ModelTestEnvironment&,
                        std::istream& input, std::ostream& out,
-                       std::ostream& err);
+                       std::ostream& err, PreparationPlan* preview = nullptr,
+                       bool approved = false);
 #endif
 }  // namespace bubo::prepare

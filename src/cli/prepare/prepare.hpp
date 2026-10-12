@@ -1,9 +1,12 @@
 #pragma once
 
+#include <cstdint>
+#include <functional>
 #include <iosfwd>
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace bubo::prepare {
 enum class Step { All, Runtime, Model };
@@ -37,6 +40,23 @@ struct ParseResult {
   std::string error;
   explicit operator bool() const { return error.empty(); }
 };
+struct ConsentVolume {
+  std::string name;
+  std::uint64_t free_bytes = 0, required_bytes = 0;
+};
+// Read-only preflight output. Internal orchestration displays both steps before
+// one approval; this does not provide a CLI or catalogue override.
+struct PreparationPlan {
+  bool ready = false;
+  std::string text;
+  std::vector<ConsentVolume> volumes;
+};
+using PreparePhase =
+    std::function<int(const Options&, std::istream&, std::ostream&,
+                      std::ostream&, PreparationPlan*, bool)>;
+int RunAll(const Options&, const PreparePhase& model,
+           const PreparePhase& runtime, std::istream&, std::ostream&,
+           std::ostream&, const std::function<bool()>& cancelled = {});
 ParseResult Parse(std::span<const char* const> args,
                   std::string_view local_app_data);
 std::string ModelRoot(const Options& options);

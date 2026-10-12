@@ -16,7 +16,8 @@ std::vector<std::string> RuntimeHolders(
     const std::filesystem::path& root,
     const std::vector<RuntimeMember>& members);
 int RunRuntime(const Options&, std::ostream&, std::ostream&,
-               const std::function<bool()>& cancelled = {});
+               const std::function<bool()>& cancelled = {},
+               PreparationPlan* preview = nullptr, bool approved = false);
 #ifdef BUBO_PREPARE_TESTING
 struct RuntimeTestEnvironment {
   std::array<WheelPin, 3> wheels;
@@ -32,6 +33,8 @@ struct RuntimeTestEnvironment {
   std::function<bool()> cancelled;
 };
 int RunRuntimeForTesting(const Options&, const RuntimeTestEnvironment&,
-                         std::istream&, std::ostream&, std::ostream&);
+                         std::istream&, std::ostream&, std::ostream&,
+                         PreparationPlan* preview = nullptr,
+                         bool approved = false);
 #endif
 }  // namespace bubo::prepare
