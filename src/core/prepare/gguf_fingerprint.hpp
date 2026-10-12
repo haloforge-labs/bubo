@@ -19,4 +19,8 @@ std::string CheckGgufFingerprint(const std::filesystem::path& path,
                                  const Entry& shard,
                                  const FingerprintTable& pin,
                                  bool full_verify = false);
+// Server startup: validate the pinned header and tensor descriptors only.
+// Never seeks to or hashes a tensor payload, including on the first start.
+std::string CheckGgufHeader(const std::filesystem::path& path,
+                            const Entry& shard, const FingerprintTable& pin);
 }  // namespace bubo::prepare

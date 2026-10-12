@@ -240,4 +240,34 @@ std::string CheckGgufFingerprint(const std::filesystem::path& path,
     return error.what();
   }
 }
+std::string CheckGgufHeader(const std::filesystem::path& path,
+                            const Entry& shard, const FingerprintTable& pin) {
+  try {
+    if (std::filesystem::file_size(path) != shard.size)
+      return "GGUF shard size mismatch";
+    if (pin.schema_version != 2 ||
+        pin.generator_version != kFingerprintGeneratorVersion ||
+        pin.logical_name != shard.logical_name ||
+        pin.file_sha256 != shard.sha256)
+      return "missing complete GGUF header pin";
+    Reader reader(path);
+    const auto actual = ReadTable(reader, shard);
+    if (actual.header_bytes != pin.header_bytes ||
+        actual.header_sha256 != pin.header_sha256 ||
+        actual.tensors.size() != pin.tensors.size())
+      return "GGUF header/tensor table mismatch";
+    for (std::size_t i = 0; i < actual.tensors.size(); ++i) {
+      const auto& a = actual.tensors[i];
+      const auto& p = pin.tensors[i];
+      if (a.tensor_name != p.tensor_name || a.type != p.type ||
+          a.dimensions != p.dimensions || a.offset != p.offset ||
+          a.relative_offset != p.relative_offset ||
+          a.tensor_bytes != p.tensor_bytes || a.checked_length != p.checked_length)
+        return "GGUF tensor table mismatch: " + a.tensor_name;
+    }
+    return {};
+  } catch (const std::exception& error) {
+    return error.what();
+  }
+}
 }  // namespace bubo::prepare
