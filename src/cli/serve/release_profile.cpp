@@ -524,7 +524,7 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
     }
     if ((name == "--cache-disk" &&
          (enabled("--no-cache-disk") || enabled("--no-cache") ||
-          exact_controls)) ||
+          (exact_controls && setting.value))) ||
         (name == "--mmproj" && enabled("--no-vision")) ||
         (name == "--mtp-model" && enabled("--no-mtp"))) {
       setting.value.reset();

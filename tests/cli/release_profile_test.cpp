@@ -379,6 +379,8 @@ void ReviewRegression(int finding) {
     }
     Expect(Find(exact, "--no-cache").value == std::optional<std::string>("1"),
            "exact injects no-cache");
+    Expect(Find(exact, "--cache-disk").origin == "built-in",
+           "an absent disk cache option retains its original origin");
     auto ignored_disk = Inputs("exact");
     ignored_disk.explicit_flags["--cache-disk"] = "cache";
     Expect(!ResolveReleaseSettings(ignored_disk)
