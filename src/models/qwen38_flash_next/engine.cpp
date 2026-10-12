@@ -585,8 +585,7 @@ std::uint32_t Session::ContextSize() const noexcept {
 // base=<context position> drafts=<MTP drafts proposed> accepted=<MTP drafts
 // accepted> lookup=<copied (n-gram) proposals> stop=<0|1>', and '[mtp-ar] t_ms=
 // base=' per plain autoregressive token. The gaps between successive t_ms
-// values are the cycle times (wall, incl. catch-up of the previous chain);
-// decode-thread lead-2 capture.
+// values are the cycle times (wall, incl. catch-up of the previous chain).
 static bool MtpCycleTraceEnabled() {
   static const bool on = [] {
     const char* e = std::getenv("GUFO_MTP_TRACE");
