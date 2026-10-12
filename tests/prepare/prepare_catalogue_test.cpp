@@ -8,7 +8,7 @@ int main() {
   using namespace bubo::prepare;
   const auto& catalogue = ModelCatalogue();
   assert(ValidateFields(catalogue, false).empty());
-  assert(!ValidateFields(catalogue, true).empty());
+  assert(ValidateFields(catalogue, true).empty());  // all production pins are filled (10-12)
   // Independent contract values: addendum section 8 / recipe sections 1-3.
   std::uint64_t shards = 0, all = 0;
   std::size_t shard_count = 0;
@@ -26,8 +26,8 @@ int main() {
   assert(shards == 111334655392ULL);
   assert(all == 116617136608ULL);
   assert(PIN_SLOT_UNSLOTH_COMMIT == "766911a6b7369840a91dbcd95f9f997acaab6cd6" &&
-         PIN_SLOT_BUBO_COMMIT.empty());
-  assert(BUBO_HF_REPO_ID == "PIN_SLOT_BUBO_REPO_ID");
+         PIN_SLOT_BUBO_COMMIT == "bb72204d4f9bdd1568c225cce3bf878673009780");
+  assert(BUBO_HF_REPO_ID == "HaloForgeLabs/bubo-qwen3.8-flash-next");
   assert(catalogue[5].file_name == "mmproj-BF16.gguf");
   assert(catalogue[5].destination ==
          "mmproj/mmproj-Qwen3.8-Flash-Next-BF16.gguf");

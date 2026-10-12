@@ -1,0 +1,992 @@
+{
+ "schema_version": 1,
+ "repository": "huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF",
+ "commit": "73e9eb7c69fdbf667def63e233e70845e7d5ac0b",
+ "tree": [
+  {
+   "type": "directory",
+   "oid": "cfa90ddfd3702c897f47e5a14d985e2cc020dc27",
+   "size": 0,
+   "path": "BF16",
+   "lastCommit": {
+    "id": "73e9eb7c69fdbf667def63e233e70845e7d5ac0b",
+    "title": "Upload folder using huggingface_hub",
+    "date": "2026-09-29T22:26:16.000Z"
+   }
+  },
+  {
+   "type": "directory",
+   "oid": "7e932c05f3e8fb03eaa9d1b3057fdb66ec2ec0fe",
+   "size": 0,
+   "path": "Q8_0",
+   "lastCommit": {
+    "id": "99a1bd5be0119784089c7c3132bd936207b2c8e2",
+    "title": "Upload folder using huggingface_hub",
+    "date": "2026-09-29T18:35:46.000Z"
+   }
+  },
+  {
+   "type": "directory",
+   "oid": "7fdfd21ed7dd31f8385a61fed4091f18ab4b01b2",
+   "size": 0,
+   "path": "UD-Q4_K_XL",
+   "lastCommit": {
+    "id": "7e3bfc316b880fefeb049596f11c49d6a18e05fb",
+    "title": "Upload folder using huggingface_hub",
+    "date": "2026-09-06T09:25:03.000Z"
+   }
+  },
+  {
+   "type": "file",
+   "oid": "f0365df176e869a88ca19316d3ed4b87179b9631",
+   "size": 3156,
+   "path": ".gitattributes",
+   "lastCommit": {
+    "id": "73e9eb7c69fdbf667def63e233e70845e7d5ac0b",
+    "title": "Upload folder using huggingface_hub",
+    "date": "2026-09-29T22:26:16.000Z"
+   },
+   "securityFileStatus": {
+    "status": "safe",
+    "protectAiScan": {
+     "status": "unscanned",
+     "reportLink": "https://insights-db.paloaltonetworks.com/models/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/73e9eb7c69fdbf667def63e233e70845e7d5ac0b/files?blob-id=f0365df176e869a88ca19316d3ed4b87179b9631&utm_source=huggingface"
+    },
+    "avScan": {
+     "status": "safe",
+     "message": "No security issues detected",
+     "reportLink": "https://fdtn.ai/ai-supply-chain/hugging-face?utm_source=huggingface"
+    },
+    "pickleImportScan": {
+     "status": "unscanned",
+     "pickleImports": [],
+     "version": "0.0.0"
+    },
+    "virusTotalScan": {
+     "status": "unscanned"
+    },
+    "jFrogScan": {
+     "status": "unscanned",
+     "message": "Not a machine-learning model"
+    }
+   }
+  },
+  {
+   "type": "file",
+   "oid": "345da2356735ee83db97f5b63897b34c54033c8e",
+   "size": 10946368,
+   "lfs": {
+    "oid": "348986b2568af284eb16a0be0ccd17aa4cf0bc823de4a1c9da8e5a24365e3fd9",
+    "size": 10946368,
+    "pointerSize": 133
+   },
+   "xetHash": "6dcdd6acd538ccb311382353018d3a60ec76944a6311efa171183743c5bd970a",
+   "path": "BF16/Qwen3.8-Flash-Next-BF16-00001-of-00008.gguf",
+   "lastCommit": {
+    "id": "73e9eb7c69fdbf667def63e233e70845e7d5ac0b",
+    "title": "Upload folder using huggingface_hub",
+    "date": "2026-09-29T22:26:16.000Z"
+   },
+   "securityFileStatus": {
+    "status": "safe",
+    "protectAiScan": {
+     "status": "safe",
+     "message": "This file has no security findings.",
+     "reportLink": "https://insights-db.paloaltonetworks.com/models/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/73e9eb7c69fdbf667def63e233e70845e7d5ac0b/files?blob-id=345da2356735ee83db97f5b63897b34c54033c8e&utm_source=huggingface"
+    },
+    "avScan": {
+     "status": "safe",
+     "message": "No security issues detected",
+     "reportLink": "https://fdtn.ai/ai-supply-chain/hugging-face?utm_source=huggingface"
+    },
+    "pickleImportScan": {
+     "status": "unscanned",
+     "pickleImports": [],
+     "version": "0.0.0"
+    },
+    "virusTotalScan": {
+     "status": "safe",
+     "message": "0/76 engines detect it as malicious.",
+     "reportLink": "https://www.virustotal.com/gui/file/348986b2568af284eb16a0be0ccd17aa4cf0bc823de4a1c9da8e5a24365e3fd9?utm_source=huggingface"
+    },
+    "jFrogScan": {
+     "status": "safe",
+     "message": "Safe GGUF model",
+     "reportLink": "https://research.jfrog.com/model-threats/gguf-ssti?utm_source=huggingface"
+    }
+   }
+  },
+  {
+   "type": "file",
+   "oid": "f8f9aa0a6e2b796addca365a0e642f9a436a052e",
+   "size": 10447201728,
+   "lfs": {
+    "oid": "89beb18bde61fbc2fd9fde7e5a4f3d33f9edba9de471b21284f39f43bc96b3fd",
+    "size": 10447201728,
+    "pointerSize": 136
+   },
+   "xetHash": "9ee0e8a91836677eb9b7fc6a326a36f72c6c0ee64943dbacc80b509ff5854ae4",
+   "path": "BF16/Qwen3.8-Flash-Next-BF16-00002-of-00008.gguf",
+   "lastCommit": {
+    "id": "73e9eb7c69fdbf667def63e233e70845e7d5ac0b",
+    "title": "Upload folder using huggingface_hub",
+    "date": "2026-09-29T22:26:16.000Z"
+   },
+   "securityFileStatus": {
+    "status": "safe",
+    "protectAiScan": {
+     "status": "safe",
+     "message": "This file has no security findings.",
+     "reportLink": "https://insights-db.paloaltonetworks.com/models/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/73e9eb7c69fdbf667def63e233e70845e7d5ac0b/files?blob-id=f8f9aa0a6e2b796addca365a0e642f9a436a052e&utm_source=huggingface"
+    },
+    "avScan": {
+     "status": "unscanned",
+     "message": "",
+     "version": "1.5.4/28138"
+    },
+    "pickleImportScan": {
+     "status": "unscanned",
+     "pickleImports": [],
+     "version": "0.0.0"
+    },
+    "virusTotalScan": {
+     "status": "safe",
+     "message": "0/74 engines detect it as malicious.",
+     "reportLink": "https://www.virustotal.com/gui/file/89beb18bde61fbc2fd9fde7e5a4f3d33f9edba9de471b21284f39f43bc96b3fd?utm_source=huggingface"
+    },
+    "jFrogScan": {
+     "status": "safe",
+     "message": "Safe GGUF model",
+     "reportLink": "https://research.jfrog.com/model-threats/gguf-ssti?utm_source=huggingface"
+    }
+   }
+  },
+  {
+   "type": "file",
+   "oid": "5e5b182b41f3fd3ca1bcbd78104b8f82f2642dc7",
+   "size": 102400491744,
+   "lfs": {
+    "oid": "3379902dd2c81acddb91a30871d8630eea6da3638870374446d73eb67dd1a0fb",
+    "size": 102400491744,
+    "pointerSize": 137
+   },
+   "xetHash": "a0d517eb745b8b3b3537df308f90f3f8915860e92006595e274267d8ed174524",
+   "path": "BF16/Qwen3.8-Flash-Next-BF16-00003-of-00008.gguf",
+   "lastCommit": {
+    "id": "73e9eb7c69fdbf667def63e233e70845e7d5ac0b",
+    "title": "Upload folder using huggingface_hub",
+    "date": "2026-09-29T22:26:16.000Z"
+   },
+   "securityFileStatus": {
+    "status": "safe",
+    "protectAiScan": {
+     "status": "safe",
+     "message": "This file has no security findings.",
+     "reportLink": "https://insights-db.paloaltonetworks.com/models/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/73e9eb7c69fdbf667def63e233e70845e7d5ac0b/files?blob-id=5e5b182b41f3fd3ca1bcbd78104b8f82f2642dc7&utm_source=huggingface"
+    },
+    "avScan": {
+     "status": "unscanned",
+     "message": "",
+     "version": "1.5.4/28138"
+    },
+    "pickleImportScan": {
+     "status": "unscanned",
+     "pickleImports": [],
+     "version": "0.0.0"
+    },
+    "virusTotalScan": {
+     "status": "unscanned",
+     "message": "File not scanned in VirusTotal",
+     "reportLink": "https://www.virustotal.com/gui/file/3379902dd2c81acddb91a30871d8630eea6da3638870374446d73eb67dd1a0fb?utm_source=huggingface"
+    },
+    "jFrogScan": {
+     "status": "safe",
+     "message": "Safe GGUF model",
+     "reportLink": "https://research.jfrog.com/model-threats/gguf-ssti?utm_source=huggingface"
+    }
+   }
+  },
+  {
+   "type": "file",
+   "oid": "29c2f39c7797bd43dc9a4bea887441e5677c5922",
+   "size": 48394236704,
+   "lfs": {
+    "oid": "5566c91734d78925c7a5a474882e6bc7fb3ae5aa445baaf3afc752a66001c7f1",
+    "size": 48394236704,
+    "pointerSize": 136
+   },
+   "xetHash": "f68a398425fe802f70ca39633e8e56c01db6bb97d82d759377352aa0756d4954",
+   "path": "BF16/Qwen3.8-Flash-Next-BF16-00004-of-00008.gguf",
+   "lastCommit": {
+    "id": "73e9eb7c69fdbf667def63e233e70845e7d5ac0b",
+    "title": "Upload folder using huggingface_hub",
+    "date": "2026-09-29T22:26:16.000Z"
+   },
+   "securityFileStatus": {
+    "status": "safe",
+    "protectAiScan": {
+     "status": "safe",
+     "message": "This file has no security findings.",
+     "reportLink": "https://insights-db.paloaltonetworks.com/models/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/73e9eb7c69fdbf667def63e233e70845e7d5ac0b/files?blob-id=29c2f39c7797bd43dc9a4bea887441e5677c5922&utm_source=huggingface"
+    },
+    "avScan": {
+     "status": "unscanned",
+     "message": "",
+     "version": "1.5.4/28138"
+    },
+    "pickleImportScan": {
+     "status": "unscanned",
+     "pickleImports": [],
+     "version": "0.0.0"
+    },
+    "virusTotalScan": {
+     "status": "safe",
+     "message": "0/0 engines detect it as malicious.",
+     "reportLink": "https://www.virustotal.com/gui/file/5566c91734d78925c7a5a474882e6bc7fb3ae5aa445baaf3afc752a66001c7f1?utm_source=huggingface"
+    },
+    "jFrogScan": {
+     "status": "safe",
+     "message": "Safe GGUF model",
+     "reportLink": "https://research.jfrog.com/model-threats/gguf-ssti?utm_source=huggingface"
+    }
+   }
+  },
+  {
+   "type": "file",
+   "oid": "8e894f80340984b4e86d8469d4efbbcee3aa77b8",
+   "size": 48367899104,
+   "lfs": {
+    "oid": "49213e4a1b3d944c61abf34622fbec1c405297798cac846b1c8137876665c0a5",
+    "size": 48367899104,
+    "pointerSize": 136
+   },
+   "xetHash": "30528e9e898181388b0f418a965ac4890a873a96bf583ed96e5b6b2e2a2ffe9b",
+   "path": "BF16/Qwen3.8-Flash-Next-BF16-00005-of-00008.gguf",
+   "lastCommit": {
+    "id": "73e9eb7c69fdbf667def63e233e70845e7d5ac0b",
+    "title": "Upload folder using huggingface_hub",
+    "date": "2026-09-29T22:26:16.000Z"
+   },
+   "securityFileStatus": {
+    "status": "safe",
+    "protectAiScan": {
+     "status": "safe",
+     "message": "This file has no security findings.",
+     "reportLink": "https://insights-db.paloaltonetworks.com/models/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/73e9eb7c69fdbf667def63e233e70845e7d5ac0b/files?blob-id=8e894f80340984b4e86d8469d4efbbcee3aa77b8&utm_source=huggingface"
+    },
+    "avScan": {
+     "status": "unscanned",
+     "message": "",
+     "version": "1.5.4/28138"
+    },
+    "pickleImportScan": {
+     "status": "unscanned",
+     "pickleImports": [],
+     "version": "0.0.0"
+    },
+    "virusTotalScan": {
+     "status": "safe",
+     "message": "0/74 engines detect it as malicious.",
+     "reportLink": "https://www.virustotal.com/gui/file/49213e4a1b3d944c61abf34622fbec1c405297798cac846b1c8137876665c0a5?utm_source=huggingface"
+    },
+    "jFrogScan": {
+     "status": "safe",
+     "message": "Safe GGUF model",
+     "reportLink": "https://research.jfrog.com/model-threats/gguf-ssti?utm_source=huggingface"
+    }
+   }
+  },
+  {
+   "type": "file",
+   "oid": "69ca3f149d49c8b508bc4d03d2cc0dcaf3643a72",
+   "size": 48615234016,
+   "lfs": {
+    "oid": "659146215cebb639c925b28c8113c2e0322f52c080086f83b0a67e1803d8fd28",
+    "size": 48615234016,
+    "pointerSize": 136
+   },
+   "xetHash": "7a22375abca8e28c1c893c2ef45d43a32350e6e96bc1c9ae0a5f700746ac2018",
+   "path": "BF16/Qwen3.8-Flash-Next-BF16-00006-of-00008.gguf",
+   "lastCommit": {
+    "id": "73e9eb7c69fdbf667def63e233e70845e7d5ac0b",
+    "title": "Upload folder using huggingface_hub",
+    "date": "2026-09-29T22:26:16.000Z"
+   },
+   "securityFileStatus": {
+    "status": "safe",
+    "protectAiScan": {
+     "status": "safe",
+     "message": "This file has no security findings.",
+     "reportLink": "https://insights-db.paloaltonetworks.com/models/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/73e9eb7c69fdbf667def63e233e70845e7d5ac0b/files?blob-id=69ca3f149d49c8b508bc4d03d2cc0dcaf3643a72&utm_source=huggingface"
+    },
+    "avScan": {
+     "status": "unscanned",
+     "message": "",
+     "version": "1.5.4/28138"
+    },
+    "pickleImportScan": {
+     "status": "unscanned",
+     "pickleImports": [],
+     "version": "0.0.0"
+    },
+    "virusTotalScan": {
+     "status": "safe",
+     "message": "0/74 engines detect it as malicious.",
+     "reportLink": "https://www.virustotal.com/gui/file/659146215cebb639c925b28c8113c2e0322f52c080086f83b0a67e1803d8fd28?utm_source=huggingface"
+    },
+    "jFrogScan": {
+     "status": "safe",
+     "message": "Safe GGUF model",
+     "reportLink": "https://research.jfrog.com/model-threats/gguf-ssti?utm_source=huggingface"
+    }
+   }
+  },
+  {
+   "type": "file",
+   "oid": "0f1fdc3ccc847e43398ee0c40db673a83fcd2537",
+   "size": 48367899104,
+   "lfs": {
+    "oid": "5b1f37058d979b302f0554d5b2aafdcfae0d3f5d7beef2c3d5214fbd8ef32f26",
+    "size": 48367899104,
+    "pointerSize": 136
+   },
+   "xetHash": "55a7285ff3f9537efe183a6f798cd596742caead590e033561509506575f03f2",
+   "path": "BF16/Qwen3.8-Flash-Next-BF16-00007-of-00008.gguf",
+   "lastCommit": {
+    "id": "73e9eb7c69fdbf667def63e233e70845e7d5ac0b",
+    "title": "Upload folder using huggingface_hub",
+    "date": "2026-09-29T22:26:16.000Z"
+   },
+   "securityFileStatus": {
+    "status": "safe",
+    "protectAiScan": {
+     "status": "safe",
+     "message": "This file has no security findings.",
+     "reportLink": "https://insights-db.paloaltonetworks.com/models/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/73e9eb7c69fdbf667def63e233e70845e7d5ac0b/files?blob-id=0f1fdc3ccc847e43398ee0c40db673a83fcd2537&utm_source=huggingface"
+    },
+    "avScan": {
+     "status": "unscanned",
+     "message": "",
+     "version": "1.5.4/28138"
+    },
+    "pickleImportScan": {
+     "status": "unscanned",
+     "pickleImports": [],
+     "version": "0.0.0"
+    },
+    "virusTotalScan": {
+     "status": "safe",
+     "message": "0/74 engines detect it as malicious.",
+     "reportLink": "https://www.virustotal.com/gui/file/5b1f37058d979b302f0554d5b2aafdcfae0d3f5d7beef2c3d5214fbd8ef32f26?utm_source=huggingface"
+    },
+    "jFrogScan": {
+     "status": "safe",
+     "message": "Safe GGUF model",
+     "reportLink": "https://research.jfrog.com/model-threats/gguf-ssti?utm_source=huggingface"
+    }
+   }
+  },
+  {
+   "type": "file",
+   "oid": "fe9aae217aabf7bddfc749fb95e1b6f9418b3bf7",
+   "size": 47426022080,
+   "lfs": {
+    "oid": "99f71ccd504fb8b704c2e70ff2c39829ca0171bd0368a2047f62b5b547cc8830",
+    "size": 47426022080,
+    "pointerSize": 136
+   },
+   "xetHash": "aa96a99a658c54511df7a584ab96e28605bb0e708f7fbd9d0462d9e5cd3d4170",
+   "path": "BF16/Qwen3.8-Flash-Next-BF16-00008-of-00008.gguf",
+   "lastCommit": {
+    "id": "73e9eb7c69fdbf667def63e233e70845e7d5ac0b",
+    "title": "Upload folder using huggingface_hub",
+    "date": "2026-09-29T22:26:16.000Z"
+   },
+   "securityFileStatus": {
+    "status": "safe",
+    "protectAiScan": {
+     "status": "safe",
+     "message": "This file has no security findings.",
+     "reportLink": "https://insights-db.paloaltonetworks.com/models/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/73e9eb7c69fdbf667def63e233e70845e7d5ac0b/files?blob-id=fe9aae217aabf7bddfc749fb95e1b6f9418b3bf7&utm_source=huggingface"
+    },
+    "avScan": {
+     "status": "unscanned",
+     "message": "",
+     "version": "1.5.4/28138"
+    },
+    "pickleImportScan": {
+     "status": "unscanned",
+     "pickleImports": [],
+     "version": "0.0.0"
+    },
+    "virusTotalScan": {
+     "status": "safe",
+     "message": "0/74 engines detect it as malicious.",
+     "reportLink": "https://www.virustotal.com/gui/file/99f71ccd504fb8b704c2e70ff2c39829ca0171bd0368a2047f62b5b547cc8830?utm_source=huggingface"
+    },
+    "jFrogScan": {
+     "status": "safe",
+     "message": "Safe GGUF model",
+     "reportLink": "https://research.jfrog.com/model-threats/gguf-ssti?utm_source=huggingface"
+    }
+   }
+  },
+  {
+   "type": "file",
+   "oid": "9557a8961782792814714b7488346732c043793d",
+   "size": 3235,
+   "path": "LICENSE",
+   "lastCommit": {
+    "id": "7e3bfc316b880fefeb049596f11c49d6a18e05fb",
+    "title": "Upload folder using huggingface_hub",
+    "date": "2026-09-06T09:25:03.000Z"
+   },
+   "securityFileStatus": {
+    "status": "safe",
+    "protectAiScan": {
+     "status": "unscanned",
+     "reportLink": "https://insights-db.paloaltonetworks.com/models/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/73e9eb7c69fdbf667def63e233e70845e7d5ac0b/files?blob-id=9557a8961782792814714b7488346732c043793d&utm_source=huggingface"
+    },
+    "avScan": {
+     "status": "safe",
+     "message": "No security issues detected",
+     "reportLink": "https://fdtn.ai/ai-supply-chain/hugging-face?utm_source=huggingface"
+    },
+    "pickleImportScan": {
+     "status": "unscanned",
+     "pickleImports": [],
+     "version": "0.0.0"
+    },
+    "virusTotalScan": {
+     "status": "unscanned"
+    },
+    "jFrogScan": {
+     "status": "unscanned",
+     "message": "Not a machine-learning model"
+    }
+   }
+  },
+  {
+   "type": "file",
+   "oid": "d8329531db51307f4c6ffa02fbd70388d058143b",
+   "size": 10946624,
+   "lfs": {
+    "oid": "2dabcbb53ca537a7947bc7d20414fd464eeaf4d66d43021b5b2556cc87544ad2",
+    "size": 10946624,
+    "pointerSize": 133
+   },
+   "xetHash": "2f72013b794ce16614d00aeee45547e782bdc48bd38dac94142ac7b661ad69fa",
+   "path": "Q8_0/Qwen3.8-Flash-Next-Q8_0-00001-of-00006.gguf",
+   "lastCommit": {
+    "id": "99a1bd5be0119784089c7c3132bd936207b2c8e2",
+    "title": "Upload folder using huggingface_hub",
+    "date": "2026-09-29T18:35:46.000Z"
+   },
+   "securityFileStatus": {
+    "status": "safe",
+    "protectAiScan": {
+     "status": "safe",
+     "message": "This file has no security findings.",
+     "reportLink": "https://insights-db.paloaltonetworks.com/models/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/73e9eb7c69fdbf667def63e233e70845e7d5ac0b/files?blob-id=d8329531db51307f4c6ffa02fbd70388d058143b&utm_source=huggingface"
+    },
+    "avScan": {
+     "status": "safe",
+     "message": "No security issues detected",
+     "reportLink": "https://fdtn.ai/ai-supply-chain/hugging-face?utm_source=huggingface"
+    },
+    "pickleImportScan": {
+     "status": "unscanned",
+     "pickleImports": [],
+     "version": "0.0.0"
+    },
+    "virusTotalScan": {
+     "status": "safe",
+     "message": "0/76 engines detect it as malicious.",
+     "reportLink": "https://www.virustotal.com/gui/file/2dabcbb53ca537a7947bc7d20414fd464eeaf4d66d43021b5b2556cc87544ad2?utm_source=huggingface"
+    },
+    "jFrogScan": {
+     "status": "safe",
+     "message": "Safe GGUF model",
+     "reportLink": "https://research.jfrog.com/model-threats/gguf-ssti?utm_source=huggingface"
+    }
+   }
+  },
+  {
+   "type": "file",
+   "oid": "a3ccf0099c02512368a776bbdfc4d0382e879827",
+   "size": 682434944,
+   "lfs": {
+    "oid": "df11d036f89c9f04865b8f1785db1a705ad401088517a6000d24483b7799626f",
+    "size": 682434944,
+    "pointerSize": 134
+   },
+   "xetHash": "0ceb6d1311208a6b4b23994e7ad920e931901621700aa8a197b5cc8fa909d359",
+   "path": "Q8_0/Qwen3.8-Flash-Next-Q8_0-00002-of-00006.gguf",
+   "lastCommit": {
+    "id": "99a1bd5be0119784089c7c3132bd936207b2c8e2",
+    "title": "Upload folder using huggingface_hub",
+    "date": "2026-09-29T18:35:46.000Z"
+   },
+   "securityFileStatus": {
+    "status": "queued",
+    "protectAiScan": {
+     "status": "safe",
+     "message": "This file has no security findings.",
+     "reportLink": "https://insights-db.paloaltonetworks.com/models/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/73e9eb7c69fdbf667def63e233e70845e7d5ac0b/files?blob-id=a3ccf0099c02512368a776bbdfc4d0382e879827&utm_source=huggingface"
+    },
+    "avScan": {
+     "status": "safe",
+     "message": "No security issues detected",
+     "reportLink": "https://fdtn.ai/ai-supply-chain/hugging-face?utm_source=huggingface"
+    },
+    "pickleImportScan": {
+     "status": "unscanned",
+     "pickleImports": [],
+     "version": "0.0.0"
+    },
+    "virusTotalScan": {
+     "status": "safe",
+     "message": "0/74 engines detect it as malicious.",
+     "reportLink": "https://www.virustotal.com/gui/file/df11d036f89c9f04865b8f1785db1a705ad401088517a6000d24483b7799626f?utm_source=huggingface"
+    },
+    "jFrogScan": {
+     "status": "queued",
+     "message": ""
+    }
+   }
+  },
+  {
+   "type": "file",
+   "oid": "66f8ebcb089328242e10bd6f50144d2231fa926b",
+   "size": 54400261344,
+   "lfs": {
+    "oid": "2af1a1f000ab162ea77795348a3df054404915815a19ab04eba51cfe2d79c439",
+    "size": 54400261344,
+    "pointerSize": 136
+   },
+   "xetHash": "3181268bbe6cdbf3c4f06a7068e326bcb2b464023630830b137a4cfa184efa1b",
+   "path": "Q8_0/Qwen3.8-Flash-Next-Q8_0-00003-of-00006.gguf",
+   "lastCommit": {
+    "id": "99a1bd5be0119784089c7c3132bd936207b2c8e2",
+    "title": "Upload folder using huggingface_hub",
+    "date": "2026-09-29T18:35:46.000Z"
+   },
+   "securityFileStatus": {
+    "status": "queued",
+    "protectAiScan": {
+     "status": "safe",
+     "message": "This file has no security findings.",
+     "reportLink": "https://insights-db.paloaltonetworks.com/models/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/73e9eb7c69fdbf667def63e233e70845e7d5ac0b/files?blob-id=66f8ebcb089328242e10bd6f50144d2231fa926b&utm_source=huggingface"
+    },
+    "avScan": {
+     "status": "unscanned",
+     "message": "",
+     "version": "1.5.4/28137"
+    },
+    "pickleImportScan": {
+     "status": "unscanned",
+     "pickleImports": [],
+     "version": "0.0.0"
+    },
+    "virusTotalScan": {
+     "status": "unscanned",
+     "message": "File not scanned in VirusTotal",
+     "reportLink": "https://www.virustotal.com/gui/file/2af1a1f000ab162ea77795348a3df054404915815a19ab04eba51cfe2d79c439?utm_source=huggingface"
+    },
+    "jFrogScan": {
+     "status": "queued",
+     "message": ""
+    }
+   }
+  },
+  {
+   "type": "file",
+   "oid": "5df21d5af430e37550dcd9d7c5f447a249a5d73d",
+   "size": 49446841248,
+   "lfs": {
+    "oid": "680cfda198b36a61801fd0a38895690aa6af9346d36b32c0eed3f0b096ae8f7c",
+    "size": 49446841248,
+    "pointerSize": 136
+   },
+   "xetHash": "c777f2504a055fcf080413f9b82ddc523e57d29e1a83d35e85390458527b7177",
+   "path": "Q8_0/Qwen3.8-Flash-Next-Q8_0-00004-of-00006.gguf",
+   "lastCommit": {
+    "id": "99a1bd5be0119784089c7c3132bd936207b2c8e2",
+    "title": "Upload folder using huggingface_hub",
+    "date": "2026-09-29T18:35:46.000Z"
+   },
+   "securityFileStatus": {
+    "status": "queued",
+    "protectAiScan": {
+     "status": "safe",
+     "message": "This file has no security findings.",
+     "reportLink": "https://insights-db.paloaltonetworks.com/models/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/73e9eb7c69fdbf667def63e233e70845e7d5ac0b/files?blob-id=5df21d5af430e37550dcd9d7c5f447a249a5d73d&utm_source=huggingface"
+    },
+    "avScan": {
+     "status": "unscanned",
+     "message": "",
+     "version": "1.5.4/28137"
+    },
+    "pickleImportScan": {
+     "status": "unscanned",
+     "pickleImports": [],
+     "version": "0.0.0"
+    },
+    "virusTotalScan": {
+     "status": "safe",
+     "message": "0/74 engines detect it as malicious.",
+     "reportLink": "https://www.virustotal.com/gui/file/680cfda198b36a61801fd0a38895690aa6af9346d36b32c0eed3f0b096ae8f7c?utm_source=huggingface"
+    },
+    "jFrogScan": {
+     "status": "queued",
+     "message": ""
+    }
+   }
+  },
+  {
+   "type": "file",
+   "oid": "d21f1fe7936f7d02442867015b13b7d9caf20a21",
+   "size": 49668930432,
+   "lfs": {
+    "oid": "d16e9b874de3aa2dd4a879a749747a1642c046313875ec2cbfff22a801a839aa",
+    "size": 49668930432,
+    "pointerSize": 136
+   },
+   "xetHash": "d636668553693f48dc96093f331695232a228477042cc3012d0c574966cfa79f",
+   "path": "Q8_0/Qwen3.8-Flash-Next-Q8_0-00005-of-00006.gguf",
+   "lastCommit": {
+    "id": "99a1bd5be0119784089c7c3132bd936207b2c8e2",
+    "title": "Upload folder using huggingface_hub",
+    "date": "2026-09-29T18:35:46.000Z"
+   },
+   "securityFileStatus": {
+    "status": "queued",
+    "protectAiScan": {
+     "status": "safe",
+     "message": "This file has no security findings.",
+     "reportLink": "https://insights-db.paloaltonetworks.com/models/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/73e9eb7c69fdbf667def63e233e70845e7d5ac0b/files?blob-id=d21f1fe7936f7d02442867015b13b7d9caf20a21&utm_source=huggingface"
+    },
+    "avScan": {
+     "status": "unscanned",
+     "message": "",
+     "version": "1.5.4/28138"
+    },
+    "pickleImportScan": {
+     "status": "unscanned",
+     "pickleImports": [],
+     "version": "0.0.0"
+    },
+    "virusTotalScan": {
+     "status": "safe",
+     "message": "0/74 engines detect it as malicious.",
+     "reportLink": "https://www.virustotal.com/gui/file/d16e9b874de3aa2dd4a879a749747a1642c046313875ec2cbfff22a801a839aa?utm_source=huggingface"
+    },
+    "jFrogScan": {
+     "status": "queued",
+     "message": ""
+    }
+   }
+  },
+  {
+   "type": "file",
+   "oid": "00976d4f0661331374e113642ea78bd97c2d2599",
+   "size": 34015618848,
+   "lfs": {
+    "oid": "2581ef059bc50ed4653b81223bae778202e62421854a9db3661382de763497e6",
+    "size": 34015618848,
+    "pointerSize": 136
+   },
+   "xetHash": "c510ea300321f1d92598bd3dd0f96fc73e79fc36eacf4693913d30d325c86bb9",
+   "path": "Q8_0/Qwen3.8-Flash-Next-Q8_0-00006-of-00006.gguf",
+   "lastCommit": {
+    "id": "99a1bd5be0119784089c7c3132bd936207b2c8e2",
+    "title": "Upload folder using huggingface_hub",
+    "date": "2026-09-29T18:35:46.000Z"
+   },
+   "securityFileStatus": {
+    "status": "queued",
+    "protectAiScan": {
+     "status": "safe",
+     "message": "This file has no security findings.",
+     "reportLink": "https://insights-db.paloaltonetworks.com/models/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/73e9eb7c69fdbf667def63e233e70845e7d5ac0b/files?blob-id=00976d4f0661331374e113642ea78bd97c2d2599&utm_source=huggingface"
+    },
+    "avScan": {
+     "status": "unscanned",
+     "message": "",
+     "version": "1.5.4/28137"
+    },
+    "pickleImportScan": {
+     "status": "unscanned",
+     "pickleImports": [],
+     "version": "0.0.0"
+    },
+    "virusTotalScan": {
+     "status": "safe",
+     "message": "0/74 engines detect it as malicious.",
+     "reportLink": "https://www.virustotal.com/gui/file/2581ef059bc50ed4653b81223bae778202e62421854a9db3661382de763497e6?utm_source=huggingface"
+    },
+    "jFrogScan": {
+     "status": "queued",
+     "message": ""
+    }
+   }
+  },
+  {
+   "type": "file",
+   "oid": "abc1504ca2b25c45fcd2dfea969f8f6afb62c7dc",
+   "size": 2568,
+   "path": "README.md",
+   "lastCommit": {
+    "id": "1a1ca29d9f89f2ffe4a855cd69fc7f1c6e9b645f",
+    "title": "Update README.md",
+    "date": "2026-09-06T05:50:09.000Z"
+   },
+   "securityFileStatus": {
+    "status": "safe",
+    "protectAiScan": {
+     "status": "safe",
+     "message": "This file has no security findings.",
+     "reportLink": "https://insights-db.paloaltonetworks.com/models/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/73e9eb7c69fdbf667def63e233e70845e7d5ac0b/files?blob-id=abc1504ca2b25c45fcd2dfea969f8f6afb62c7dc&utm_source=huggingface"
+    },
+    "avScan": {
+     "status": "safe",
+     "message": "No security issues detected",
+     "reportLink": "https://fdtn.ai/ai-supply-chain/hugging-face?utm_source=huggingface"
+    },
+    "pickleImportScan": {
+     "status": "unscanned",
+     "pickleImports": [],
+     "version": "0.0.0"
+    },
+    "virusTotalScan": {
+     "status": "unscanned"
+    },
+    "jFrogScan": {
+     "status": "unscanned",
+     "message": "Not a machine-learning model"
+    }
+   }
+  },
+  {
+   "type": "file",
+   "oid": "b8f00583fbcb854f2fbe88139f7c64c15fa51d43",
+   "size": 10946752,
+   "lfs": {
+    "oid": "290a31ca20b74ed2c21b257d378a5678d821ad9fdd8feb1fc52c719761668903",
+    "size": 10946752,
+    "pointerSize": 133
+   },
+   "xetHash": "6de793ca4c51e99cea9f0661308fb2f1e4c6556fc916ea767dbbdc10885bf62d",
+   "path": "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+   "lastCommit": {
+    "id": "7e3bfc316b880fefeb049596f11c49d6a18e05fb",
+    "title": "Upload folder using huggingface_hub",
+    "date": "2026-09-06T09:25:03.000Z"
+   },
+   "securityFileStatus": {
+    "status": "safe",
+    "protectAiScan": {
+     "status": "safe",
+     "message": "This file has no security findings.",
+     "reportLink": "https://insights-db.paloaltonetworks.com/models/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/73e9eb7c69fdbf667def63e233e70845e7d5ac0b/files?blob-id=b8f00583fbcb854f2fbe88139f7c64c15fa51d43&utm_source=huggingface"
+    },
+    "avScan": {
+     "status": "safe",
+     "message": "No security issues detected",
+     "reportLink": "https://fdtn.ai/ai-supply-chain/hugging-face?utm_source=huggingface"
+    },
+    "pickleImportScan": {
+     "status": "unscanned",
+     "pickleImports": [],
+     "version": "0.0.0"
+    },
+    "virusTotalScan": {
+     "status": "safe",
+     "message": "0/76 engines detect it as malicious.",
+     "reportLink": "https://www.virustotal.com/gui/file/290a31ca20b74ed2c21b257d378a5678d821ad9fdd8feb1fc52c719761668903?utm_source=huggingface"
+    },
+    "jFrogScan": {
+     "status": "safe",
+     "message": "Safe GGUF model",
+     "reportLink": "https://research.jfrog.com/model-threats/gguf-ssti?utm_source=huggingface"
+    }
+   }
+  },
+  {
+   "type": "file",
+   "oid": "7e5a119cb1cd5faf33002def5c67915641a63242",
+   "size": 49859583296,
+   "lfs": {
+    "oid": "0ebf70d076e0e98f74dc414a90b92c67d7267876ae524bc7799cf463e27b754b",
+    "size": 49859583296,
+    "pointerSize": 136
+   },
+   "xetHash": "02ebee35f3f5befbd3db2d6e55e8ed8e98240d6899c2a76e529b996df7d838b3",
+   "path": "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf",
+   "lastCommit": {
+    "id": "7e3bfc316b880fefeb049596f11c49d6a18e05fb",
+    "title": "Upload folder using huggingface_hub",
+    "date": "2026-09-06T09:25:03.000Z"
+   },
+   "securityFileStatus": {
+    "status": "queued",
+    "protectAiScan": {
+     "status": "safe",
+     "message": "This file has no security findings.",
+     "reportLink": "https://insights-db.paloaltonetworks.com/models/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/73e9eb7c69fdbf667def63e233e70845e7d5ac0b/files?blob-id=7e5a119cb1cd5faf33002def5c67915641a63242&utm_source=huggingface"
+    },
+    "avScan": {
+     "status": "unscanned",
+     "message": "",
+     "version": "1.5.4/28115"
+    },
+    "pickleImportScan": {
+     "status": "unscanned",
+     "pickleImports": [],
+     "version": "0.0.0"
+    },
+    "virusTotalScan": {
+     "status": "safe",
+     "message": "0/74 engines detect it as malicious.",
+     "reportLink": "https://www.virustotal.com/gui/file/0ebf70d076e0e98f74dc414a90b92c67d7267876ae524bc7799cf463e27b754b?utm_source=huggingface"
+    },
+    "jFrogScan": {
+     "status": "queued",
+     "message": ""
+    }
+   }
+  },
+  {
+   "type": "file",
+   "oid": "a901ed05ea7593aef10f041d6473efd99b9a9bc5",
+   "size": 49376141664,
+   "lfs": {
+    "oid": "e9b12f44e13e60d6ef9396449f7b4356b2e2911222b8183a596830c2418db19a",
+    "size": 49376141664,
+    "pointerSize": 136
+   },
+   "xetHash": "f1850a0929a8c796bcee829ccac312a6d678110445224dc4cb2e0648bec846b5",
+   "path": "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf",
+   "lastCommit": {
+    "id": "7e3bfc316b880fefeb049596f11c49d6a18e05fb",
+    "title": "Upload folder using huggingface_hub",
+    "date": "2026-09-06T09:25:03.000Z"
+   },
+   "securityFileStatus": {
+    "status": "queued",
+    "protectAiScan": {
+     "status": "safe",
+     "message": "This file has no security findings.",
+     "reportLink": "https://insights-db.paloaltonetworks.com/models/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/73e9eb7c69fdbf667def63e233e70845e7d5ac0b/files?blob-id=a901ed05ea7593aef10f041d6473efd99b9a9bc5&utm_source=huggingface"
+    },
+    "avScan": {
+     "status": "unscanned",
+     "message": "",
+     "version": "1.5.4/28115"
+    },
+    "pickleImportScan": {
+     "status": "unscanned",
+     "pickleImports": [],
+     "version": "0.0.0"
+    },
+    "virusTotalScan": {
+     "status": "safe",
+     "message": "0/74 engines detect it as malicious.",
+     "reportLink": "https://www.virustotal.com/gui/file/e9b12f44e13e60d6ef9396449f7b4356b2e2911222b8183a596830c2418db19a?utm_source=huggingface"
+    },
+    "jFrogScan": {
+     "status": "queued",
+     "message": ""
+    }
+   }
+  },
+  {
+   "type": "file",
+   "oid": "ce68c3c838571f24a4daa92dbcd7d602fe76c8bf",
+   "size": 12087983680,
+   "lfs": {
+    "oid": "983901b3e47686f56f5fcec87ba8c51e7e2c6996277dd77bc3fc804a1d563da3",
+    "size": 12087983680,
+    "pointerSize": 136
+   },
+   "xetHash": "4057c94962b18a33d537b49ef55b4b03a598e732bb4c011759e2a1f8c111ecb1",
+   "path": "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf",
+   "lastCommit": {
+    "id": "7e3bfc316b880fefeb049596f11c49d6a18e05fb",
+    "title": "Upload folder using huggingface_hub",
+    "date": "2026-09-06T09:25:03.000Z"
+   },
+   "securityFileStatus": {
+    "status": "queued",
+    "protectAiScan": {
+     "status": "safe",
+     "message": "This file has no security findings.",
+     "reportLink": "https://insights-db.paloaltonetworks.com/models/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/73e9eb7c69fdbf667def63e233e70845e7d5ac0b/files?blob-id=ce68c3c838571f24a4daa92dbcd7d602fe76c8bf&utm_source=huggingface"
+    },
+    "avScan": {
+     "status": "unscanned",
+     "message": "",
+     "version": "1.5.4/28115"
+    },
+    "pickleImportScan": {
+     "status": "unscanned",
+     "pickleImports": [],
+     "version": "0.0.0"
+    },
+    "virusTotalScan": {
+     "status": "safe",
+     "message": "0/74 engines detect it as malicious.",
+     "reportLink": "https://www.virustotal.com/gui/file/983901b3e47686f56f5fcec87ba8c51e7e2c6996277dd77bc3fc804a1d563da3?utm_source=huggingface"
+    },
+    "jFrogScan": {
+     "status": "queued",
+     "message": ""
+    }
+   }
+  },
+  {
+   "type": "file",
+   "oid": "98b6119985eab3a4d96753e8b98e90298b260fa6",
+   "size": 907542592,
+   "lfs": {
+    "oid": "dbac7334a8a433abd6cd1d1db82398ba123faa2f328696da20848e605e645ca1",
+    "size": 907542592,
+    "pointerSize": 134
+   },
+   "xetHash": "079db89b70db5ebf6f12cd5456a9cb59ec5e0dca341c6cabeacb9588f6872932",
+   "path": "mmproj-model-bf16.gguf",
+   "lastCommit": {
+    "id": "7e3bfc316b880fefeb049596f11c49d6a18e05fb",
+    "title": "Upload folder using huggingface_hub",
+    "date": "2026-09-06T09:25:03.000Z"
+   },
+   "securityFileStatus": {
+    "status": "queued",
+    "protectAiScan": {
+     "status": "safe",
+     "message": "This file has no security findings.",
+     "reportLink": "https://insights-db.paloaltonetworks.com/models/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/73e9eb7c69fdbf667def63e233e70845e7d5ac0b/files?blob-id=98b6119985eab3a4d96753e8b98e90298b260fa6&utm_source=huggingface"
+    },
+    "avScan": {
+     "status": "safe",
+     "message": "No security issues detected",
+     "reportLink": "https://fdtn.ai/ai-supply-chain/hugging-face?utm_source=huggingface"
+    },
+    "pickleImportScan": {
+     "status": "unscanned",
+     "pickleImports": [],
+     "version": "0.0.0"
+    },
+    "virusTotalScan": {
+     "status": "safe",
+     "message": "0/74 engines detect it as malicious.",
+     "reportLink": "https://www.virustotal.com/gui/file/dbac7334a8a433abd6cd1d1db82398ba123faa2f328696da20848e605e645ca1?utm_source=huggingface"
+    },
+    "jFrogScan": {
+     "status": "queued",
+     "message": ""
+    }
+   }
+  }
+ ]
+}

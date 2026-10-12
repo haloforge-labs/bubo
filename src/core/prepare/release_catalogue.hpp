@@ -11,8 +11,10 @@ namespace bubo::prepare {
 // slots.
 inline constexpr std::string_view PIN_SLOT_UNSLOTH_COMMIT =
     "766911a6b7369840a91dbcd95f9f997acaab6cd6";
-inline constexpr std::string_view PIN_SLOT_BUBO_COMMIT = "";
-inline constexpr std::string_view BUBO_HF_REPO_ID = "PIN_SLOT_BUBO_REPO_ID";
+inline constexpr std::string_view PIN_SLOT_BUBO_COMMIT =
+    "bb72204d4f9bdd1568c225cce3bf878673009780";
+inline constexpr std::string_view BUBO_HF_REPO_ID =
+    "HaloForgeLabs/bubo-qwen3.8-flash-next";
 inline constexpr std::string_view kHuihuiCommit =
     "73e9eb7c69fdbf667def63e233e70845e7d5ac0b";
 inline constexpr std::string_view kPackageId =
