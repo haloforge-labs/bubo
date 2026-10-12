@@ -107,7 +107,11 @@ int main() {
           destination.c_str(), "--output",  destination.c_str()};
       expected_code = 2;
       assert(Run(runtime_probe, test.local, out, err) == expected_code);
+#ifdef _WIN32
       assert(err.str().find("identical bubo.exe") != std::string::npos);
+#else
+      assert(err.str().find("requires Windows") != std::string::npos);
+#endif
       assert(!std::filesystem::exists(destination));
     } else
       assert(Run(test.args, test.local, out, err) == expected_code);

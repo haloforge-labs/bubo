@@ -688,6 +688,13 @@ std::vector<std::string> RuntimeHolders(
 }
 int RunRuntime(const Options& options, std::ostream& out, std::ostream& err,
                const std::function<bool()>& cancelled) {
+#ifndef _WIN32
+  (void)options;
+  (void)out;
+  (void)cancelled;
+  err << "prepare: E2 AMD Windows runtime preparation requires Windows\n";
+  return 2;
+#else
   try {
     if (!options.runtime_dir.empty()) {
       const auto target = NativePath(Path(options.runtime_dir));
@@ -727,6 +734,7 @@ int RunRuntime(const Options& options, std::ostream& out, std::ostream& err,
     err << "prepare: E4 " << error.what() << "; no downloads started\n";
     return 4;
   }
+#endif
 }
 #ifdef BUBO_PREPARE_TESTING
 int RunRuntimeForTesting(const Options& options,
