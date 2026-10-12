@@ -3,6 +3,7 @@
 #include <string>
 
 #include "src/core/prepare/release_catalogue.hpp"
+#include "src/core/prepare/model_notices.hpp"
 
 int main() {
   using namespace bubo::prepare;
@@ -28,6 +29,12 @@ int main() {
   assert(PIN_SLOT_UNSLOTH_COMMIT == "766911a6b7369840a91dbcd95f9f997acaab6cd6" &&
          PIN_SLOT_BUBO_COMMIT == "bb72204d4f9bdd1568c225cce3bf878673009780");
   assert(BUBO_HF_REPO_ID == "HaloForgeLabs/bubo-qwen3.8-flash-next");
+  // E4: the approved legal bundle is embedded (LICENSE, NOTICE, PROVENANCE.md).
+  const auto& notices = ModelNotices();
+  assert(notices.size() == 3 && notices[0].name == "LICENSE" &&
+         notices[1].name == "NOTICE" && notices[2].name == "PROVENANCE.md");
+  for (const auto& notice : notices)
+    assert(!notice.text.empty() && notice.sha256.size() == 64);
   assert(catalogue[5].file_name == "mmproj-BF16.gguf");
   assert(catalogue[5].destination ==
          "mmproj/mmproj-Qwen3.8-Flash-Next-BF16.gguf");

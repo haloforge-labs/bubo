@@ -16,6 +16,7 @@
 #include "src/core/prepare/gguf_fingerprint.hpp"
 #include "src/core/prepare/hash_file.hpp"
 #include "src/core/prepare/metadata_json.hpp"
+#include "src/core/prepare/model_notices.hpp"
 #include "src/core/prepare/transport.hpp"
 
 #ifdef _WIN32
@@ -756,6 +757,9 @@ int RunModel(const Options& options, std::ostream& out, std::ostream& err,
   CurlTransport transport;
   Environment env;
   env.entries = ModelCatalogue();
+  for (const auto& notice : ModelNotices())
+    env.notices.push_back({std::string(notice.name), std::string(notice.text),
+                           std::string(notice.sha256)});
   env.transport = &transport;
   env.cancelled = cancelled;
   env.fingerprint = [](const Entry& entry, const fs::path& path) {

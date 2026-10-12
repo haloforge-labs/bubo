@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "src/core/prepare/metadata_json.hpp"
+#include "src/core/prepare/model_notices.hpp"
 #include "src/core/prepare/release_evidence.hpp"
 
 int main(int argc, char* argv[]) {
@@ -24,6 +25,15 @@ int main(int argc, char* argv[]) {
     const auto fields = ValidateFields(ModelCatalogue(), true);
     if (!fields.empty())
       throw std::invalid_argument(fields);
+    // E4: the approved LICENSE, NOTICE and PROVENANCE.md bundle must be embedded.
+    const auto& notices = ModelNotices();
+    constexpr std::string_view names[] = {"LICENSE", "NOTICE", "PROVENANCE.md"};
+    if (notices.size() != 3)
+      throw std::invalid_argument("E4 model notice bundle is OPEN");
+    for (std::size_t i = 0; i < 3; ++i)
+      if (notices[i].name != names[i] || notices[i].text.empty() ||
+          notices[i].sha256.size() != 64)
+        throw std::invalid_argument("E4 model notice bundle is malformed");
     std::vector<SourceEvidence> evidence;
     for (auto name : {"huihui.json", "unsloth.json", "bubo.json"}) {
       const auto path = std::filesystem::u8path(argv[2]) / name;
