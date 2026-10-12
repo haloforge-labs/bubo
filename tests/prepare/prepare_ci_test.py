@@ -25,6 +25,7 @@ def main():
                           'SHA256_Transform()', 'int inflate(int x) { return x; }'):
             assert check(forbidden), forbidden
         for hook in ('RunModelForTesting()', 'RunRuntimeForTesting()',
+                     'RuntimeReadyErrorForTesting()', 'LoadModelPackageForTesting()',
                      'test_loopback = true;', 'origin_override = "http://local";'):
             assert check(hook), hook
             assert not check('#ifdef BUBO_PREPARE_TESTING\n' + hook + '\n#endif\n')

@@ -28,6 +28,7 @@ FIXTURE_OVERRIDE = re.compile(
     r'PIN_OVERRIDE|CATALOGUE_OVERRIDE|BUBO_FIXTURE\w*)\b')
 BINARY_HOOKS = (b'RunModelForTesting', b'RunRuntimeForTesting',
                 b'RunAllForTesting', b'origin_override', b'test_loopback',
+                b'RuntimeReadyErrorForTesting', b'LoadModelPackageForTesting',
                 b'http,https')
 
 
@@ -67,7 +68,9 @@ def prepare_security(root, prepare_library=None):
             if re.search(r'\b(?:inflate|inflateInit2_?|inflateEnd)\s*\([^;]*\)\s*\{', line):
                 errors.append(f'{relative}:{number}: own inflater implementation')
         for number, line in production_lines(text):
-            if FIXTURE_OVERRIDE.search(line):
+            package_source = '/prepare/' in relative or path.name.startswith('model_manifest.')
+            package_hook = package_source and re.search(r'\b\w*ForTesting\b', line)
+            if FIXTURE_OVERRIDE.search(line) or package_hook:
                 errors.append(f'{relative}:{number}: fixture override in production code: {line.strip()}')
     if prepare_library:
         data = prepare_library.read_bytes()
