@@ -86,8 +86,9 @@ foreach ($entry in @($brand.exe, 'bubo-engine.dll')) {
     Select-Object -Skip 1 | ForEach-Object { ($_ -split "`t")[2] } |
     Where-Object { $_ -notmatch '/' -and $_ -like '*.dll' })
   $missing = @($closure.Edges | Where-Object {
-    $_.Resolution -eq 'missing' -and -not $_.From.StartsWith("$env:SystemRoot\", [StringComparison]::OrdinalIgnoreCase)
-    -and -not ($entry -eq 'bubo-engine.dll' -and $_.Name -in $amdRuntimeDlls)
+    $_.Resolution -eq 'missing' -and
+    -not $_.From.StartsWith("$env:SystemRoot\", [StringComparison]::OrdinalIgnoreCase) -and
+    -not ($entry -eq 'bubo-engine.dll' -and $_.Name -in $amdRuntimeDlls)
   })
   if ($missing.Count) { throw "Package import closure is incomplete: $($missing.Name -join ', ')" }
 }
