@@ -89,8 +89,9 @@ Value PinnedFile(const Entry& entry) {
   result["file"] = std::string(entry.destination);
   result["size"] = static_cast<unsigned long long>(entry.size);
   result["sha256"] = std::string(entry.sha256);
-  if (entry.kind == Kind::Twin || entry.kind == Kind::DraftHead) {
+  if (entry.kind != Kind::MainShard)
     result["recipe_id"] = "huihui-ud-q4-k-xl-iq4xs-nofullattn-nohc-q4k-v1";
+  if (entry.kind == Kind::Twin || entry.kind == Kind::DraftHead) {
     result["generator_version"] = "1.0.0";
   }
   return result;
