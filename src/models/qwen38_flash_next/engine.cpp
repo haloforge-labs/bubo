@@ -170,7 +170,8 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     }
     m->max_image_tokens_ = static_cast<std::uint32_t>(value);
   }
-  m->reader_ = core::GgufReader::OpenFile(std::filesystem::u8path(model_path), error_msg);
+  m->reader_ = core::GgufReader::OpenFile(std::filesystem::u8path(model_path),
+                                          error_msg);
   if (!m->reader_) {
     return nullptr;
   }
@@ -188,7 +189,8 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
   try {
     if (!options.vision_disabled)
       m->vision_ = qwen::vision::Encoder::Open(
-          std::filesystem::u8path(model_path), std::filesystem::u8path(options.vision_model_path), c.hidden_size);
+          std::filesystem::u8path(model_path),
+          std::filesystem::u8path(options.vision_model_path), c.hidden_size);
   } catch (const std::exception& e) {
     AssignError(error_msg, e.what());
     return nullptr;
@@ -208,8 +210,8 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     }
   }
   if (!options.mtp_model_path.empty()) {
-    m->mtp_reader_ =
-        core::GgufReader::OpenFile(std::filesystem::u8path(options.mtp_model_path), error_msg);
+    m->mtp_reader_ = core::GgufReader::OpenFile(
+        std::filesystem::u8path(options.mtp_model_path), error_msg);
     if (!m->mtp_reader_) {
       return nullptr;
     }
@@ -227,7 +229,8 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
   }
   // Decode twin (default OFF): GUFO_DENSE_TWIN_MODEL = path of the 4-bit dense twin GGUF (see TwinWeights). Every failure is fatal (no fallback to the 8-bit copy).
   const char* twin_path = options.resolved_artefacts
-      ? options.twin_model_path.c_str() : std::getenv("GUFO_DENSE_TWIN_MODEL");
+                              ? options.twin_model_path.c_str()
+                              : std::getenv("GUFO_DENSE_TWIN_MODEL");
   if (twin_path != nullptr && twin_path[0] != '\0') {
     static_assert(kMaxMtpDraftTokens + 1 == kBatchMaxChain);
     const auto chain =
@@ -241,7 +244,8 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
       AssignError(error_msg, failure);
       return nullptr;
     }
-    auto twin_reader = core::GgufReader::OpenFile(std::filesystem::u8path(twin_path), error_msg);
+    auto twin_reader = core::GgufReader::OpenFile(
+        std::filesystem::u8path(twin_path), error_msg);
     if (!twin_reader) {
       return nullptr;
     }
@@ -266,13 +270,15 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
   }
   // DRAFT OUTPUT HEAD (default OFF): GUFO_DRAFT_OUT_MODEL = GGUF with only output.weight at Q4_K / Q5_K, read by the MTP draft steps only (see BindDraftOutput). Fatal on any problem.
   const char* head_path = options.resolved_artefacts
-      ? options.draft_head_model_path.c_str() : std::getenv("GUFO_DRAFT_OUT_MODEL");
+                              ? options.draft_head_model_path.c_str()
+                              : std::getenv("GUFO_DRAFT_OUT_MODEL");
   if (head_path != nullptr && head_path[0] != '\0') {
     if (!m->mtp_weights_) {
       AssignError(error_msg, "GUFO_DRAFT_OUT_MODEL needs the MTP draft head (--speculative mtp)");
       return nullptr;
     }
-    auto head_reader = core::GgufReader::OpenFile(std::filesystem::u8path(head_path), error_msg);
+    auto head_reader = core::GgufReader::OpenFile(
+        std::filesystem::u8path(head_path), error_msg);
     if (!head_reader) {
       return nullptr;
     }

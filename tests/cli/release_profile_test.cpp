@@ -324,8 +324,11 @@ void ReviewRegression(int finding) {
         inputs.environment[name] = on;
       if (name == "GUFO_DENSE_TWIN_MODEL" || name == "GUFO_DRAFT_OUT_MODEL") {
         Expect(!Find(ResolveReleaseSettings(inputs), name).value,
-               "exact suppresses inherited artefact env before path checks: " + name);
-        inputs.explicit_flags[name == "GUFO_DENSE_TWIN_MODEL" ? "--twin-model" : "--draft-head-model"] = on;
+               "exact suppresses inherited artefact env before path checks: " +
+                   name);
+        inputs.explicit_flags[name == "GUFO_DENSE_TWIN_MODEL"
+                                  ? "--twin-model"
+                                  : "--draft-head-model"] = on;
       }
       Reject([&] { (void)ResolveReleaseSettings(inputs); },
              "exact rejects positive re-enabling: " + name);

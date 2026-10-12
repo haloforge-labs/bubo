@@ -3497,7 +3497,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
 #if defined(ENGINE_ENABLE_HIP)
   TextDiskCacheConfig resolved_disk_cache_config = disk_cache_config;
   std::string load_error;
-  auto reader_owner = core::GgufReader::OpenFile(std::filesystem::u8path(model_path), &load_error);
+  auto reader_owner = core::GgufReader::OpenFile(
+      std::filesystem::u8path(model_path), &load_error);
   if (reader_owner == nullptr) {
     SetError(error, "Failed to open GGUF: " + load_error);
     return false;

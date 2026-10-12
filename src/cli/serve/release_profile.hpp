@@ -11,8 +11,8 @@
 
 #include "src/cli/arg_parser.hpp"
 #include "src/cli/brand.hpp"
-#include "src/core/json.hpp"
 #include "src/cli/serve/model_manifest.hpp"
+#include "src/core/json.hpp"
 
 namespace gufo::server {
 

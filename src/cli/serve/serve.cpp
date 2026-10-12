@@ -779,7 +779,8 @@ void PrintServeHelp(std::string_view program_name,
            "  --print-effective-settings  Print JSON and exit\n"
            "  --manifest PATH           Select bubo-package.json\n"
            "  --twin-model PATH --draft-head-model PATH\n"
-           "  --verify-model            Hash eight manifest files plus distinct overrides\n"
+           "  --verify-model            Hash eight manifest files plus "
+           "distinct overrides\n"
            "                            (~2-4 minutes on SSD; before loading)\n"
            "  --no-behaviour --no-twin --no-draft-head --no-vision --no-mtp\n"
            "  --no-prompt-lookup --no-cache --no-cache-disk "
@@ -854,11 +855,13 @@ int RunServe(std::span<const char* const> args) {
                      "Profiles", &package_manifest);
     parser.AddOption("", "--twin-model", "PATH", "Select the dense twin",
                      "Profiles", &twin_model_path);
-    parser.AddOption("", "--draft-head-model", "PATH", "Select the MTP draft head",
-                     "Profiles", &draft_head_model_path);
-    parser.AddFlag("", "--verify-model",
-                   "Hash eight manifest files plus distinct overrides (~2-4 min on SSD)",
-                   "Profiles", &verify_model);
+    parser.AddOption("", "--draft-head-model", "PATH",
+                     "Select the MTP draft head", "Profiles",
+                     &draft_head_model_path);
+    parser.AddFlag(
+        "", "--verify-model",
+        "Hash eight manifest files plus distinct overrides (~2-4 min on SSD)",
+        "Profiles", &verify_model);
     parser.AddOption("", "--profile", "NAME",
                      "Release profile: default, subagents, exact, or stock",
                      "Profiles", &release_profile_name);
@@ -1473,7 +1476,8 @@ int RunServe(std::span<const char* const> args) {
       return 0;
     }
     if (!release.package.files.empty() &&
-        (model.empty() || std::filesystem::is_directory(std::filesystem::u8path(model)))) {
+        (model.empty() ||
+         std::filesystem::is_directory(std::filesystem::u8path(model)))) {
       const auto path = release.package.files.front().path.u8string();
       model.assign(path.begin(), path.end());
     }
@@ -1551,8 +1555,10 @@ int RunServe(std::span<const char* const> args) {
     server::TextSpeculativeConfig speculative_config;
     speculative_config.resolved_artefacts = release.resolved.artefacts.present;
     speculative_config.twin_model_path = release.resolved.artefacts.twin;
-    speculative_config.draft_head_model_path = release.resolved.artefacts.draft_head;
-    speculative_config.vision_disabled = release.resolved.artefacts.vision_disabled;
+    speculative_config.draft_head_model_path =
+        release.resolved.artefacts.draft_head;
+    speculative_config.vision_disabled =
+        release.resolved.artefacts.vision_disabled;
     if (speculative_backend.empty() && !dspark_model_path.empty()) {
       speculative_backend = "dspark";
     }
@@ -1645,8 +1651,10 @@ int RunServe(std::span<const char* const> args) {
                 .staging_capacity_bytes = cache_disk_staging_bytes,
                 .model_artifact_fingerprint = release.package.MainIdentity(),
                 .draft_model_artifact_fingerprint =
-                    speculative_config.draft_model_path.empty() ? std::string{} :
-                    release.package.IdentityFor(std::filesystem::u8path(speculative_config.draft_model_path)),
+                    speculative_config.draft_model_path.empty()
+                        ? std::string{}
+                        : release.package.IdentityFor(std::filesystem::u8path(
+                              speculative_config.draft_model_path)),
             },
             vision_model_path,
             server::TextRunnerRamCacheOptions{.capacity_bytes = cache_ram_bytes,

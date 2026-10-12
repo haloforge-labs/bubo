@@ -10,8 +10,8 @@
 #include <sstream>
 #include <stdexcept>
 
-#include "src/cli/serve/behaviour_options.hpp"
 #include "src/cli/serve/artefact_binding_cases.hpp"
+#include "src/cli/serve/behaviour_options.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/platform/tuning.hpp"
 #include "src/models/qwen38_flash_next/batch_twin_policy.hpp"
@@ -319,17 +319,21 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
     auto it = inputs.explicit_flags.find(name);
     return it != inputs.explicit_flags.end() && it->second != "0";
   };
-  const std::map<std::string, std::pair<std::string, std::string>> path_controls = {
-      {"GUFO_DENSE_TWIN_MODEL", {"--twin-model", "--no-twin"}},
-      {"GUFO_DRAFT_OUT_MODEL", {"--draft-head-model", "--no-draft-head"}},
-      {"--mtp-model", {"--mtp-model", "--no-mtp"}},
-      {"--mmproj", {"--mmproj", "--no-vision"}}};
+  const std::map<std::string, std::pair<std::string, std::string>>
+      path_controls = {
+          {"GUFO_DENSE_TWIN_MODEL", {"--twin-model", "--no-twin"}},
+          {"GUFO_DRAFT_OUT_MODEL", {"--draft-head-model", "--no-draft-head"}},
+          {"--mtp-model", {"--mtp-model", "--no-mtp"}},
+          {"--mmproj", {"--mmproj", "--no-vision"}}};
   for (const auto& [key, control] : path_controls) {
-    if (inputs.explicit_flags.contains(control.first) && enabled(control.second))
-      throw std::invalid_argument(control.first + " conflicts with " + control.second);
+    if (inputs.explicit_flags.contains(control.first) &&
+        enabled(control.second))
+      throw std::invalid_argument(control.first + " conflicts with " +
+                                  control.second);
     if (exact_controls && key != "--mmproj" &&
         inputs.explicit_flags.contains(control.first))
-      throw std::invalid_argument("profile=exact: explicit value re-enables " + control.first);
+      throw std::invalid_argument("profile=exact: explicit value re-enables " +
+                                  control.first);
   }
   if (enabled("--no-mtp") && inputs.explicit_flags.contains("--speculative") &&
       inputs.explicit_flags.at("--speculative") == "mtp")
@@ -342,13 +346,16 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
         name, Text(row, "built_in"), "built-in", row.member_str("class"), {}};
     const bool is_env = row.member_str("kind") == "env";
     std::optional<std::string> real;
-    const std::string environment_name = name == "--mtp-model" ? "BUBO_MTP_MODEL"
-                                        : name == "--mmproj" ? "BUBO_MMPROJ" : name;
+    const std::string environment_name = name == "--mtp-model"
+                                             ? "BUBO_MTP_MODEL"
+                                         : name == "--mmproj" ? "BUBO_MMPROJ"
+                                                              : name;
     if ((is_env || inputs.environment.contains(name) ||
          inputs.environment.contains(environment_name)) &&
         setting.release_class != "REMOVED") {
       if (inputs.real_environment)
-        real = CopyEnvironmentValue(inputs.real_environment(environment_name.c_str()));
+        real = CopyEnvironmentValue(
+            inputs.real_environment(environment_name.c_str()));
       else if (auto found = inputs.environment.find(name);
                found != inputs.environment.end())
         real = found->second;
@@ -367,7 +374,8 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
                                  name != "--mmproj" &&
                                  (inputs.profile == "stock" || exact_controls);
     if (restricted_path && real) {
-      result.logs.push_back(name + ": inherited env suppressed by profile=" + inputs.profile);
+      result.logs.push_back(
+          name + ": inherited env suppressed by profile=" + inputs.profile);
       real.reset();
     }
     const bool exact_off = exact_controls && row.find("exact_off")->as_bool();
@@ -423,8 +431,9 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
       setting.origin = suppressed ? "flag" : "profile:" + inputs.profile;
     }
     auto manifest = inputs.manifest_defaults.find(name);
-    if ((inputs.profile != "stock" || name == "--mmproj") && match && !suppressed &&
-        manifest != inputs.manifest_defaults.end() && !exact_off) {
+    if ((inputs.profile != "stock" || name == "--mmproj") && match &&
+        !suppressed && manifest != inputs.manifest_defaults.end() &&
+        !exact_off) {
       setting.value = manifest->second;
       setting.origin = "manifest";
     }
@@ -448,7 +457,8 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
         setting.value.reset();
         setting.origin = "profile:" + inputs.profile;
       }
-      if (auto selected = inputs.explicit_flags.find(path_control->second.first);
+      if (auto selected =
+              inputs.explicit_flags.find(path_control->second.first);
           selected != inputs.explicit_flags.end()) {
         setting.value = selected->second;
         setting.origin = "flag";
@@ -534,14 +544,18 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
   }
   if ((inputs.profile == "stock" || exact_controls) &&
       inputs.model_family == "qwen3.8-flash-next" &&
-      !(inputs.profile == "stock" && inputs.explicit_flags.contains("--mtp-model") &&
+      !(inputs.profile == "stock" &&
+        inputs.explicit_flags.contains("--mtp-model") &&
         inputs.explicit_flags.contains("--speculative") &&
         inputs.explicit_flags.at("--speculative") == "mtp")) {
     if (inputs.explicit_flags.contains("--mtp-model"))
-      throw std::invalid_argument("profile=stock: --mtp-model requires explicit --speculative mtp");
-    if (inputs.profile == "stock" && inputs.explicit_flags.contains("--speculative") &&
+      throw std::invalid_argument(
+          "profile=stock: --mtp-model requires explicit --speculative mtp");
+    if (inputs.profile == "stock" &&
+        inputs.explicit_flags.contains("--speculative") &&
         inputs.explicit_flags.at("--speculative") == "mtp")
-      throw std::invalid_argument("profile=stock: --speculative mtp requires explicit --mtp-model");
+      throw std::invalid_argument(
+          "profile=stock: --speculative mtp requires explicit --mtp-model");
     settings.at("--mtp-model").value.reset();
     if (!inputs.explicit_flags.contains("--speculative") || exact_controls) {
       settings.at("--speculative").value = "off";
@@ -599,11 +613,13 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
         if (met)
           continue;
         const auto path = path_controls.find(setting.name);
-        const bool positive_path = path != path_controls.end() &&
+        const bool positive_path =
+            path != path_controls.end() &&
             inputs.explicit_flags.contains(path->second.first);
         if (positive_path && Matches(row, inputs) &&
             inputs.model_family == "qwen3.8-flash-next")
-          throw std::invalid_argument(path->second.first + ": needs " + req.str());
+          throw std::invalid_argument(path->second.first + ": needs " +
+                                      req.str());
         if (!Matches(row, inputs) || inputs.profile == "stock" ||
             inputs.model_family != "qwen3.8-flash-next") {
           if (candidate)
@@ -637,7 +653,8 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
           "GUFO_DENSE_TWIN_MAX_N must be at least 8 for batched twin");
     if (row.member_str("kind") == "flag" && setting.value)
       result.effective_flags[setting.name] = *setting.value;
-    if (row.member_str("kind") == "env" && !path_controls.contains(setting.name) && setting.value &&
+    if (row.member_str("kind") == "env" &&
+        !path_controls.contains(setting.name) && setting.value &&
         (setting.origin == "manifest" ||
          setting.origin.starts_with("profile:") || setting.origin == "flag") &&
         inputs.profile != "stock")
@@ -868,19 +885,23 @@ ReleaseStartup PrepareReleaseSettings(std::span<const char* const> args) {
       inputs.model_path = std::filesystem::u8path(found->second);
     inputs.environment = SnapshotReleaseEnvironment();
     const auto selector = [&](const std::string& env) -> std::string {
-      if (auto found = inputs.environment.find(env); found != inputs.environment.end() &&
-          found->second && !found->second->empty())
+      if (auto found = inputs.environment.find(env);
+          found != inputs.environment.end() && found->second &&
+          !found->second->empty())
         return *found->second;
       return {};
     };
     const auto selected_manifest = inputs.explicit_flags.contains("--manifest")
-        ? inputs.explicit_flags.at("--manifest") : selector("BUBO_MANIFEST");
+                                       ? inputs.explicit_flags.at("--manifest")
+                                       : selector("BUBO_MANIFEST");
     const bool verify = inputs.explicit_flags.contains("--verify-model");
-    startup.package = LoadModelPackage(inputs.model_path, inputs.profile, verify,
-                                      &std::cerr, std::filesystem::u8path(selected_manifest));
+    startup.package =
+        LoadModelPackage(inputs.model_path, inputs.profile, verify, &std::cerr,
+                         std::filesystem::u8path(selected_manifest));
     inputs.manifest_present = !startup.package.manifest_path.empty();
     if (!startup.package.files.empty() &&
-        (inputs.model_path.empty() || std::filesystem::is_directory(inputs.model_path)))
+        (inputs.model_path.empty() ||
+         std::filesystem::is_directory(inputs.model_path)))
       inputs.model_path = startup.package.files.front().path;
     inputs.manifest_defaults = startup.package.defaults;
     for (const auto& [env, key] : std::map<std::string, std::string>{
@@ -914,34 +935,52 @@ ReleaseStartup PrepareReleaseSettings(std::span<const char* const> args) {
     startup.resolved = ResolveReleaseSettings(inputs);
     std::map<std::string, std::string> selected;
     for (const auto& setting : startup.resolved.settings)
-      if (setting.value && (setting.origin == "flag" || setting.origin == "env"))
+      if (setting.value &&
+          (setting.origin == "flag" || setting.origin == "env"))
         selected[setting.name] = *setting.value;
     CheckPackageOverrides(startup.package, selected, verify, &std::cerr);
     if (verify)
-      startup.resolved.logs.push_back("verify-model: checked " +
+      startup.resolved.logs.push_back(
+          "verify-model: checked " +
           std::to_string(startup.package.hashed_files) + " files, " +
-          std::to_string(startup.package.hashed_bytes) + " bytes (including distinct overrides)");
+          std::to_string(startup.package.hashed_bytes) +
+          " bytes (including distinct overrides)");
     if (!startup.package.manifest_path.empty()) {
       const auto manifest_path = startup.package.manifest_path.u8string();
-      startup.resolved.logs.push_back("manifest: " + std::string(manifest_path.begin(), manifest_path.end()) +
-          "; size + pinned header/tensor table checked; payload hashes are opt-in");
+      startup.resolved.logs.push_back(
+          "manifest: " +
+          std::string(manifest_path.begin(), manifest_path.end()) +
+          "; size + pinned header/tensor table checked; payload hashes are "
+          "opt-in");
       const auto cache = startup.resolved.effective_flags.find("--cache-disk");
-      if (cache != startup.resolved.effective_flags.end() && !cache->second.empty()) {
+      if (cache != startup.resolved.effective_flags.end() &&
+          !cache->second.empty()) {
         if (startup.package.MainIdentity().empty())
-          throw std::invalid_argument("bubo-package.json: --cache-disk requires observed whole-file digests; run serve --verify-model");
+          throw std::invalid_argument(
+              "bubo-package.json: --cache-disk requires observed whole-file "
+              "digests; run serve --verify-model");
         if (!startup.resolved.artefacts.mtp.empty() &&
-            startup.package.IdentityFor(std::filesystem::u8path(startup.resolved.artefacts.mtp)).empty())
-          throw std::invalid_argument(startup.resolved.artefacts.mtp + ": --cache-disk requires --verify-model for the selected override");
+            startup.package
+                .IdentityFor(
+                    std::filesystem::u8path(startup.resolved.artefacts.mtp))
+                .empty())
+          throw std::invalid_argument(startup.resolved.artefacts.mtp +
+                                      ": --cache-disk requires --verify-model "
+                                      "for the selected override");
       }
-    }
-    else if (const auto cache = startup.resolved.effective_flags.find("--cache-disk");
-             cache != startup.resolved.effective_flags.end() && !cache->second.empty())
-      throw std::invalid_argument("bubo-package.json: --cache-disk requires a prepared manifest and --verify-model; no implicit startup payload hashing");
+    } else if (const auto cache =
+                   startup.resolved.effective_flags.find("--cache-disk");
+               cache != startup.resolved.effective_flags.end() &&
+               !cache->second.empty())
+      throw std::invalid_argument(
+          "bubo-package.json: --cache-disk requires a prepared manifest and "
+          "--verify-model; no implicit startup payload hashing");
     ApplyInjections(startup.resolved);
   } catch (const std::exception& error) {
     startup.error = error.what();
-    std::replace_if(startup.error.begin(), startup.error.end(),
-                    [](unsigned char c) { return c < 32 || c == 127; }, ' ');
+    std::replace_if(
+        startup.error.begin(), startup.error.end(),
+        [](unsigned char c) { return c < 32 || c == 127; }, ' ');
   }
   return startup;
 }
@@ -1061,13 +1100,15 @@ std::string RenderReleaseInclude(std::span<const json::Value> rows) {
   return out + "#endif\n";
 }
 std::string RenderArtefactBindingTable() {
-  std::string out = "| Profile | Artefact | Source | Binding |\n| --- | --- | --- | --- |\n";
+  std::string out =
+      "| Profile | Artefact | Source | Binding |\n| --- | --- | --- | --- |\n";
   for (const auto& row : kArtefactBindingCases) {
-    const std::string result = row.expected == BindingExpectation::bound ? "Bound"
-                              : row.expected == BindingExpectation::disabled ? "Disabled"
-                              : "Rejected (exit 2)";
-    out += "| " + std::string(row.profile) + " | " + std::string(row.artefact) + " | " +
-           std::string(row.source) + " | " + result + " |\n";
+    const std::string result =
+        row.expected == BindingExpectation::bound      ? "Bound"
+        : row.expected == BindingExpectation::disabled ? "Disabled"
+                                                       : "Rejected (exit 2)";
+    out += "| " + std::string(row.profile) + " | " + std::string(row.artefact) +
+           " | " + std::string(row.source) + " | " + result + " |\n";
   }
   return out;
 }

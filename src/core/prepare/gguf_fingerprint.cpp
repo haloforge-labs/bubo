@@ -262,7 +262,8 @@ std::string CheckGgufHeader(const std::filesystem::path& path,
       if (a.tensor_name != p.tensor_name || a.type != p.type ||
           a.dimensions != p.dimensions || a.offset != p.offset ||
           a.relative_offset != p.relative_offset ||
-          a.tensor_bytes != p.tensor_bytes || a.checked_length != p.checked_length)
+          a.tensor_bytes != p.tensor_bytes ||
+          a.checked_length != p.checked_length)
         return "GGUF tensor table mismatch: " + a.tensor_name;
     }
     return {};

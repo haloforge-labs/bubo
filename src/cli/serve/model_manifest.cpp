@@ -24,9 +24,9 @@ constexpr std::string_view kRecipe =
 std::string Display(const fs::path& path) {
   const auto value = path.u8string();
   std::string result(value.begin(), value.end());
-  std::replace_if(result.begin(), result.end(), [](unsigned char c) {
-    return c < 32 || c == 127;
-  }, '?');
+  std::replace_if(
+      result.begin(), result.end(),
+      [](unsigned char c) { return c < 32 || c == 127; }, '?');
   return result;
 }
 [[noreturn]] void Fail(const fs::path& path, std::string why) {
@@ -40,7 +40,8 @@ fs::path Absolute(const fs::path& path) {
 bool SafeRelative(std::string_view value) {
   if (value.empty() || value.front() == '/' || value.front() == '\\' ||
       value.find(':') != value.npos ||
-      std::ranges::any_of(value, [](unsigned char c) { return c < 32 || c == 127; }))
+      std::ranges::any_of(value,
+                          [](unsigned char c) { return c < 32 || c == 127; }))
     return false;
   std::string text(value);
   std::replace(text.begin(), text.end(), '\\', '/');
@@ -65,7 +66,8 @@ void Verify(PackageFile& file, ModelPackage& package, std::ostream* output) {
     *output << "verify-model: " << Display(file.path) << " (" << file.size
             << " bytes)\n";
   std::uint64_t printed = 0;
-  const auto digest = prep::HashFile(prep::NativePath(file.path),
+  const auto digest = prep::HashFile(
+      prep::NativePath(file.path),
       [&](std::uint64_t done, std::uint64_t total) {
         if (output && (done == total || done - printed >= 64 * 1024 * 1024)) {
           *output << "verify-model: " << Display(file.path) << ' ' << done
@@ -82,7 +84,8 @@ void Verify(PackageFile& file, ModelPackage& package, std::ostream* output) {
 std::map<std::string, prep::FileStamp> Stamps(const fs::path& root) {
   std::map<std::string, prep::FileStamp> result;
   try {
-    const auto state = meta::Parse(meta::Read(root / ".bubo" / "prepare-state.json"));
+    const auto state =
+        meta::Parse(meta::Read(root / ".bubo" / "prepare-state.json"));
     meta::Keys(state, {"schema_version", "package_id", "files"});
     if (meta::Integer(meta::Required(state, "schema_version")) != 1 ||
         meta::String(meta::Required(state, "package_id")) != prep::kPackageId)
@@ -95,8 +98,8 @@ std::map<std::string, prep::FileStamp> Stamps(const fs::path& root) {
       const auto key = meta::String(meta::Required(row, "file")) + ":" +
                        meta::String(meta::Required(row, "sha256"));
       prep::FileStamp stamp{meta::Integer(meta::Required(row, "size")),
-                           meta::String(meta::Required(row, "modified")),
-                           meta::String(meta::Required(row, "identity"))};
+                            meta::String(meta::Required(row, "modified")),
+                            meta::String(meta::Required(row, "identity"))};
       if (stamp.modified.empty() || stamp.identity.empty() ||
           !result.emplace(key, std::move(stamp)).second)
         return {};
@@ -111,7 +114,8 @@ std::array<unsigned, 3> Version(std::string_view value) {
   for (std::size_t i = 0; i < 3; ++i) {
     const auto dot = value.find('.');
     const auto part = value.substr(0, dot);
-    const auto [end, ec] = std::from_chars(part.data(), part.data() + part.size(), result[i]);
+    const auto [end, ec] =
+        std::from_chars(part.data(), part.data() + part.size(), result[i]);
     if (part.empty() || ec != std::errc{} || end != part.data() + part.size() ||
         (i < 2 && dot == value.npos) || (i == 2 && dot != value.npos))
       throw std::invalid_argument("invalid engine_min version");
@@ -119,21 +123,25 @@ std::array<unsigned, 3> Version(std::string_view value) {
   }
   return result;
 }
-ModelPackage Load(const fs::path& model, const std::string& profile,
-                  std::span<const prep::Entry> entries, bool verify,
-                  std::ostream* output,
-                  const std::function<prep::FingerprintResult(const prep::Entry&)>& fingerprints,
-                  const fs::path& selected) {
+ModelPackage Load(
+    const fs::path& model, const std::string& profile,
+    std::span<const prep::Entry> entries, bool verify, std::ostream* output,
+    const std::function<prep::FingerprintResult(const prep::Entry&)>&
+        fingerprints,
+    const fs::path& selected) {
   ModelPackage result;
   if (model.empty() && selected.empty()) {
     if (verify)
-      Fail("bubo-package.json", "--verify-model requires --manifest or a discovered bubo-package.json");
+      Fail("bubo-package.json",
+           "--verify-model requires --manifest or a discovered "
+           "bubo-package.json");
     return result;
   }
   const bool model_directory = !model.empty() && fs::is_directory(model);
   fs::path manifest;
   if (!selected.empty())
-    manifest = fs::is_directory(selected) ? selected / "bubo-package.json" : selected;
+    manifest =
+        fs::is_directory(selected) ? selected / "bubo-package.json" : selected;
   else if (model_directory) {
     manifest = model / "bubo-package.json";
     if (!fs::exists(manifest))
@@ -144,7 +152,9 @@ ModelPackage Load(const fs::path& model, const std::string& profile,
     Fail(manifest, "manifest filename must be bubo-package.json");
   if (!fs::exists(manifest)) {
     if (!selected.empty() || verify)
-      Fail(manifest, "--verify-model requires --manifest or a discovered bubo-package.json; file is missing");
+      Fail(manifest,
+           "--verify-model requires --manifest or a discovered "
+           "bubo-package.json; file is missing");
     return result;
   }
   result.manifest_path = Absolute(manifest);
@@ -153,12 +163,14 @@ ModelPackage Load(const fs::path& model, const std::string& profile,
     prep::ReadLease manifest_lease(prep::NativePath(result.manifest_path));
     const auto document = meta::Parse(meta::Read(result.manifest_path));
     meta::Keys(document, {"schema_version", "package_id", "engine_min", "model",
-                         "artefacts", "profiles_supported", "recipe_inputs"});
+                          "artefacts", "profiles_supported", "recipe_inputs"});
     if (meta::Integer(meta::Required(document, "schema_version")) != 1)
       Fail(manifest, "unsupported schema_version");
-    if (meta::String(meta::Required(document, "package_id")) != prep::kPackageId)
+    if (meta::String(meta::Required(document, "package_id")) !=
+        prep::kPackageId)
       Fail(manifest, "package_id entry mismatch");
-    if (Version(meta::String(meta::Required(document, "engine_min"))) > Version("0.1.0"))
+    if (Version(meta::String(meta::Required(document, "engine_min"))) >
+        Version("0.1.0"))
       Fail(manifest, "engine_min requires a newer Bubo engine");
     const auto& profiles = meta::Required(document, "profiles_supported");
     if (!profiles.is_array())
@@ -166,7 +178,8 @@ ModelPackage Load(const fs::path& model, const std::string& profile,
     std::set<std::string> supported;
     for (const auto& item : profiles.items()) {
       const auto name = meta::String(item);
-      if ((name != "default" && name != "stock" && name != "exact" && name != "subagents") ||
+      if ((name != "default" && name != "stock" && name != "exact" &&
+           name != "subagents") ||
           !supported.insert(name).second)
         Fail(manifest, "invalid profiles_supported");
     }
@@ -179,8 +192,10 @@ ModelPackage Load(const fs::path& model, const std::string& profile,
     const auto& source = meta::Required(main, "source");
     meta::Keys(source, {"repository", "revision"});
     if (entries.size() != 8 ||
-        meta::String(meta::Required(source, "repository")) != entries.front().source_repo ||
-        meta::String(meta::Required(source, "revision")) != entries.front().commit)
+        meta::String(meta::Required(source, "repository")) !=
+            entries.front().source_repo ||
+        meta::String(meta::Required(source, "revision")) !=
+            entries.front().commit)
       Fail(manifest, "model source entry mismatch");
     const auto& shards = meta::Required(main, "files");
     const auto& artefacts = meta::Required(document, "artefacts");
@@ -193,24 +208,29 @@ ModelPackage Load(const fs::path& model, const std::string& profile,
     bool model_named = model.empty() || model_directory;
     std::uint64_t shard_tensors = 0;
     for (const auto& entry : entries) {
-      const auto& row = entry.kind == prep::Kind::MainShard
-                            ? shards.items().at(shard_index)
-                            : meta::Required(artefacts, std::string(entry.logical_name));
+      const auto& row =
+          entry.kind == prep::Kind::MainShard
+              ? shards.items().at(shard_index)
+              : meta::Required(artefacts, std::string(entry.logical_name));
       std::string name;
       try {
-        meta::Keys(row, {"file", "size", "sha256", "recipe_id", "generator_version"});
+        meta::Keys(
+            row, {"file", "size", "sha256", "recipe_id", "generator_version"});
         name = meta::String(meta::Required(row, "file"));
         if (!SafeRelative(name))
           Fail(fs::u8path(name), "unsafe manifest relative path");
-        if (name != entry.destination || meta::Integer(meta::Required(row, "size")) != entry.size ||
+        if (name != entry.destination ||
+            meta::Integer(meta::Required(row, "size")) != entry.size ||
             meta::String(meta::Required(row, "sha256")) != entry.sha256)
           Fail(root / fs::u8path(name), "manifest entry mismatch");
-        const bool derived = entry.kind == prep::Kind::Twin || entry.kind == prep::Kind::DraftHead;
+        const bool derived = entry.kind == prep::Kind::Twin ||
+                             entry.kind == prep::Kind::DraftHead;
         if (entry.kind != prep::Kind::MainShard &&
             meta::String(meta::Required(row, "recipe_id")) != kRecipe)
           Fail(root / fs::u8path(name), "recipe entry mismatch");
-        if (derived && (meta::String(meta::Required(row, "recipe_id")) != kRecipe ||
-                        meta::String(meta::Required(row, "generator_version")) != "1.0.0"))
+        if (derived &&
+            (meta::String(meta::Required(row, "recipe_id")) != kRecipe ||
+             meta::String(meta::Required(row, "generator_version")) != "1.0.0"))
           Fail(root / fs::u8path(name), "recipe entry mismatch");
         if ((!derived && row.contains("generator_version")) ||
             (entry.kind == prep::Kind::MainShard && row.contains("recipe_id")))
@@ -218,10 +238,12 @@ ModelPackage Load(const fs::path& model, const std::string& profile,
       } catch (const std::exception& error) {
         Fail(name.empty() ? manifest : root / fs::u8path(name), error.what());
       }
-      PackageFile file{std::string(entry.logical_name), std::string(entry.sha256),
+      PackageFile file{std::string(entry.logical_name),
+                       std::string(entry.sha256),
                        Absolute(root / fs::u8path(name)), entry.size};
       try {
-        file.lease = std::make_shared<prep::ReadLease>(prep::NativePath(file.path));
+        file.lease =
+            std::make_shared<prep::ReadLease>(prep::NativePath(file.path));
         const auto stamp = file.lease->Snapshot();
         if (stamp.size != entry.size)
           Fail(file.path, "size mismatch");
@@ -230,10 +252,15 @@ ModelPackage Load(const fs::path& model, const std::string& profile,
           if (!model.empty() && Absolute(model) == file.path)
             model_named = true;
           std::string error;
-          const auto reader = core::GgufReader::OpenHeaderFile(prep::NativePath(file.path), &error);
-          if (reader->GetMetadataString("general.architecture") != std::optional<std::string_view>("qwen4exp") ||
-              reader->GetMetadataUint32("split.count") != std::optional<std::uint32_t>(4) ||
-              reader->GetMetadataUint32("split.no") != std::optional<std::uint32_t>(static_cast<std::uint32_t>(shard_index)))
+          const auto reader = core::GgufReader::OpenHeaderFile(
+              prep::NativePath(file.path), &error);
+          if (reader->GetMetadataString("general.architecture") !=
+                  std::optional<std::string_view>("qwen4exp") ||
+              reader->GetMetadataUint32("split.count") !=
+                  std::optional<std::uint32_t>(4) ||
+              reader->GetMetadataUint32("split.no") !=
+                  std::optional<std::uint32_t>(
+                      static_cast<std::uint32_t>(shard_index)))
             Fail(file.path, "model family/split header mismatch");
           const auto count = reader->GetMetadataUint64("split.tensors.count");
           if (!count || (total_tensors && count != total_tensors))
@@ -244,7 +271,9 @@ ModelPackage Load(const fs::path& model, const std::string& profile,
             const auto pin = fingerprints(entry);
             if (!pin)
               Fail(file.path, pin.error);
-            if (const auto error = prep::CheckGgufHeader(prep::NativePath(file.path), entry, pin.table); !error.empty())
+            if (const auto error = prep::CheckGgufHeader(
+                    prep::NativePath(file.path), entry, pin.table);
+                !error.empty())
               Fail(file.path, error);
           }
           ++shard_index;
@@ -262,8 +291,10 @@ ModelPackage Load(const fs::path& model, const std::string& profile,
         Fail(file.path, error.what());
       }
       const std::map<prep::Kind, std::string> keys = {
-          {prep::Kind::Mtp, "--mtp-model"}, {prep::Kind::Mmproj, "--mmproj"},
-          {prep::Kind::Twin, "GUFO_DENSE_TWIN_MODEL"}, {prep::Kind::DraftHead, "GUFO_DRAFT_OUT_MODEL"}};
+          {prep::Kind::Mtp, "--mtp-model"},
+          {prep::Kind::Mmproj, "--mmproj"},
+          {prep::Kind::Twin, "GUFO_DENSE_TWIN_MODEL"},
+          {prep::Kind::DraftHead, "GUFO_DRAFT_OUT_MODEL"}};
       if (entry.kind != prep::Kind::MainShard)
         result.defaults[keys.at(entry.kind)] = Display(file.path);
       result.files.push_back(std::move(file));
@@ -271,7 +302,8 @@ ModelPackage Load(const fs::path& model, const std::string& profile,
     if (!model_named)
       Fail(model, "main model is not named by the selected manifest");
     if (!total_tensors || shard_tensors != *total_tensors)
-      Fail(manifest, "split.tensors.count differs from the combined tensor table");
+      Fail(manifest,
+           "split.tensors.count differs from the combined tensor table");
     if (output && verify)
       *output << "verify-model: checked " << result.hashed_files << " files, "
               << result.hashed_bytes << " bytes\n";
@@ -287,19 +319,22 @@ std::string Aggregate(std::span<const PackageFile* const> files) {
       return {};
     value += ":" + std::to_string(file->size) + ":" + file->sha256;
   }
-  return crypto::Sha256Hex({reinterpret_cast<const std::uint8_t*>(value.data()), value.size()});
+  return crypto::Sha256Hex(
+      {reinterpret_cast<const std::uint8_t*>(value.data()), value.size()});
 }
 }  // namespace
 ModelPackage LoadModelPackage(const fs::path& model, const std::string& profile,
-                              bool verify, std::ostream* output, const fs::path& selected) {
+                              bool verify, std::ostream* output,
+                              const fs::path& selected) {
   return Load(model, profile, prep::ModelCatalogue(), verify, output,
               prep::ProductionFingerprintTable, selected);
 }
 #ifdef BUBO_PREPARE_TESTING
 ModelPackage LoadModelPackageForTesting(
-    const fs::path& model, const std::string& profile, std::span<const prep::Entry> entries,
-    bool verify, std::ostream* output,
-    const std::function<prep::FingerprintResult(const prep::Entry&)>& fingerprints,
+    const fs::path& model, const std::string& profile,
+    std::span<const prep::Entry> entries, bool verify, std::ostream* output,
+    const std::function<prep::FingerprintResult(const prep::Entry&)>&
+        fingerprints,
     const fs::path& selected) {
   return Load(model, profile, entries, verify, output, fingerprints, selected);
 }
@@ -308,27 +343,34 @@ void CheckPackageOverrides(ModelPackage& package,
                            const std::map<std::string, std::string>& paths,
                            bool verify, std::ostream* output) {
   const std::map<std::string, std::string> names = {
-      {"--mtp-model", "mtp"}, {"--mmproj", "mmproj"},
-      {"GUFO_DENSE_TWIN_MODEL", "twin"}, {"GUFO_DRAFT_OUT_MODEL", "draft_head"}};
+      {"--mtp-model", "mtp"},
+      {"--mmproj", "mmproj"},
+      {"GUFO_DENSE_TWIN_MODEL", "twin"},
+      {"GUFO_DRAFT_OUT_MODEL", "draft_head"}};
   for (const auto& [key, path] : paths) {
     if (!names.contains(key) || path.empty())
       continue;
-    const auto original = std::find_if(package.files.begin(), package.files.end(),
+    const auto original = std::find_if(
+        package.files.begin(), package.files.end(),
         [&](const auto& file) { return file.logical_name == names.at(key); });
     if (original == package.files.end())
       continue;  // Manifest absent preserves upstream unpinned path semantics.
     const auto absolute = Absolute(fs::u8path(path));
-    const auto already_named = std::find_if(package.files.begin(), package.files.end(),
-        [&](const auto& file) { return file.path == absolute; });
+    const auto already_named =
+        std::find_if(package.files.begin(), package.files.end(),
+                     [&](const auto& file) { return file.path == absolute; });
     if (already_named != package.files.end()) {
       if (already_named->logical_name != original->logical_name ||
-          already_named->size != original->size || already_named->sha256 != original->sha256)
+          already_named->size != original->size ||
+          already_named->sha256 != original->sha256)
         Fail(absolute, "override manifest entry mismatch");
       continue;
     }
-    PackageFile file{original->logical_name, original->sha256, absolute, original->size};
+    PackageFile file{original->logical_name, original->sha256, absolute,
+                     original->size};
     try {
-      file.lease = std::make_shared<prep::ReadLease>(prep::NativePath(file.path));
+      file.lease =
+          std::make_shared<prep::ReadLease>(prep::NativePath(file.path));
       if (file.lease->Snapshot().size != file.size)
         Fail(file.path, "override size mismatch");
       CheckHeader(file.path);

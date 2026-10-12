@@ -131,241 +131,241 @@
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: \" << release.error << '\\n';",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "832"
+      "line": "837"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << line << '\\n';",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "838"
+      "line": "843"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: \" << error.what() << '\\n';",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "945"
+      "line": "963"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: unknown serve command '\" << topic << \"'\\n\";",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "970"
+      "line": "988"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: --host must be an IPv4 address\\n\";",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "989"
+      "line": "1007"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: --port must be between 0 and 65535\\n\";",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "994"
+      "line": "1012"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: --max-score-tokens must be positive\\n\";",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "999"
+      "line": "1017"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr\n          << \"GUFO_DEBUG_HOOKS/--debug-hooks ignored for non-text server\\n\";",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1004"
+      "line": "1022"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: server limits must be positive\\n\";",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1011"
+      "line": "1029"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: --verbose is shorthand for --log-level=debug, so \"\n                   \"it cannot combine with --log-level\\n\";",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1021"
+      "line": "1039"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: \" << parse_err << '\\n';",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1082"
+      "line": "1100"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: --model <DIR> is required for image server\\n\";",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1093"
+      "line": "1111"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error loading Qwen-Image-2.1: \" << error.what() << '\\n';",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1101"
+      "line": "1119"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: \" << parse_err << \"\\n\";",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1130"
+      "line": "1148"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: --ttl must be a positive duration\\n\";",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1146"
+      "line": "1164"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: --model <DIR> is required for video server\\n\";",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1152"
+      "line": "1170"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error enabling MiniMax H3 video service: \"\n                << video_jobs->initialization_error() << '\\n';",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1173"
+      "line": "1191"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: \" << parse_err << '\\n';",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1189"
+      "line": "1207"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: --model <DIR> is required for \" << subcommand\n                << \" server\\n\";",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1200"
+      "line": "1218"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: --context must be at least \" << (is_tts ? 1 : 32)\n                << '\\n';",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1206"
+      "line": "1224"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: \" << parse_err << '\\n';",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1217"
+      "line": "1235"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error loading Qwen3-TTS: \" << error.what() << '\\n';",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1232"
+      "line": "1250"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error enabling Qwen3-TTS service: \"\n                  << tts->initialization_error() << '\\n';",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1237"
+      "line": "1255"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error loading Qwen3-ASR: \" << error.what() << '\\n';",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1255"
+      "line": "1273"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error enabling Qwen3-ASR service: \"\n                  << asr->initialization_error() << '\\n';",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1260"
+      "line": "1278"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: \" << error.what() << '\\n';",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1443"
+      "line": "1461"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: \" << parse_err << \"\\n\";",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1448"
+      "line": "1466"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: --log-progress needs --log-level=info or \"\n                   \"--log-level=debug\\n\";",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1481"
+      "line": "1505"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: cannot open --trace file '\" << trace_path\n                  << \"': \" << *error << \"\\n\";",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1490"
+      "line": "1514"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: sampling and scheduling limits are invalid\\n\";",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1513"
+      "line": "1537"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: speculative draft limits are invalid\\n\";",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1520"
+      "line": "1544"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: \" << parse_err << \"\\n\";",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1527"
+      "line": "1551"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: speculative backend '\" << speculative_backend\n                << \"' is not supported by the HTTP server\\n\";",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1545"
+      "line": "1575"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: \" << exception.what() << '\\n';",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1557"
+      "line": "1587"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: DFlash2 requires --dflash-model and \"\n                   \"--min-draft-tokens 1;",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1563"
+      "line": "1593"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: --model <PATH> is required\\n\";",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1579"
+      "line": "1609"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error: --mtp-policy is length or survival, \"\n                   \"--mtp-draft-vocab is full, latin or auto\\n\";",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1586"
+      "line": "1616"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error loading model '\" << model << \"': \" << err << \"\\n\";",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1628"
+      "line": "1663"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error enabling debug hooks: \" << error.what() << '\\n';",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1740"
+      "line": "1776"
     },
     {
       "file": "src/cli/serve/serve.cpp",
       "call": "std::cerr << \"Error starting HTTP server: \" << err << \"\\n\";",
       "reason": "Cold startup error/profile stream output with an existing bounded prefix drain.",
-      "line": "1781"
+      "line": "1817"
     },
     {
       "file": "src/cli/serve/logging.cpp",
