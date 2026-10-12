@@ -81,3 +81,25 @@ if(WIN32 AND GUFO_BRAND STREQUAL "bubo")
     OUTPUT_NAME "bubo-engine"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/prepare-fixture-engine")
 endif()
+
+add_executable(model_manifest_test
+  ../serve/model_manifest_test.cpp
+  ../../src/cli/serve/model_manifest.cpp
+  ../../src/cli/serve/release_profile.cpp)
+target_link_libraries(model_manifest_test PRIVATE bubo_prepare_test gufo_core gufo_logging)
+set_target_properties(model_manifest_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME model_manifest_test COMMAND model_manifest_test)
+set_tests_properties(model_manifest_test PROPERTIES LABELS "cpu;prepare;release;resolver")
+
+add_executable(prepare_integration_test prepare_integration_test.cpp
+  ../../src/cli/serve/model_manifest.cpp ../../src/cli/serve/release_profile.cpp)
+target_link_libraries(prepare_integration_test PRIVATE bubo_prepare_test gufo_core gufo_logging)
+set_target_properties(prepare_integration_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+add_test(NAME prepare_integration_test COMMAND prepare_integration_test)
+set_tests_properties(prepare_integration_test PROPERTIES LABELS "cpu;prepare;release;integration")
+add_custom_target(prepare_ci_test
+  COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/prepare_ci_test.py"
+  WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" VERBATIM)
+add_test(NAME prepare_ci_test
+  COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/prepare_ci_test.py")
+set_tests_properties(prepare_ci_test PROPERTIES WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" LABELS "cpu;prepare;release;ci")

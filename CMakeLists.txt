@@ -304,6 +304,7 @@ set(bubo_command_sources
   src/cli/transcribe/transcribe.cpp
   src/cli/video/video.cpp
   src/cli/serve/serve.cpp
+  src/cli/serve/model_manifest.cpp
   src/cli/serve/release_profile.cpp
   src/cli/serve/continuation_cache.cpp
   src/cli/serve/continuation_disk_store.cpp
@@ -350,13 +351,14 @@ target_link_libraries(prepare_gate PRIVATE bubo_prepare)
 add_custom_target(bubo_prepare_release_gate ALL
   COMMAND ${CMAKE_COMMAND}
     "-DCONFIG=$<CONFIG>" "-DGATE=$<TARGET_FILE:prepare_gate>"
+    "-DROOT=${CMAKE_SOURCE_DIR}" "-DLIBRARY=$<TARGET_FILE:bubo_prepare>"
     "-DEVIDENCE=${CMAKE_SOURCE_DIR}/tools/release/prepare-evidence"
     -P "${CMAKE_SOURCE_DIR}/tools/release/prepare-gate.cmake"
-  DEPENDS prepare_gate VERBATIM)
+  DEPENDS prepare_gate bubo_prepare VERBATIM)
 add_custom_target(prepare_release_check
   COMMAND $<TARGET_FILE:prepare_gate> --release
     "${CMAKE_SOURCE_DIR}/tools/release/prepare-evidence"
-  DEPENDS prepare_gate VERBATIM)
+  DEPENDS prepare_gate bubo_prepare VERBATIM)
 set(bubo_inference_target gufo)
 if(WIN32 AND GUFO_BRAND STREQUAL "bubo")
   add_library(bubo_engine SHARED ${bubo_command_sources})
@@ -551,8 +553,9 @@ if (BUILD_TESTING)
 
   add_executable(release_profile_test
     tests/cli/release_profile_test.cpp
+    src/cli/serve/model_manifest.cpp
     src/cli/serve/release_profile.cpp)
-  target_link_libraries(release_profile_test PRIVATE gufo_core gufo_logging)
+  target_link_libraries(release_profile_test PRIVATE gufo_core gufo_logging bubo_prepare)
   target_compile_definitions(release_profile_test PRIVATE
     GUFO_BRAND_SCAN_PYTHON="${Python3_EXECUTABLE}"
     GUFO_PRODUCTION_ENV_SPEC="${GUFO_PRODUCTION_ENV_SPEC_PATH}"
@@ -643,12 +646,13 @@ if (BUILD_TESTING)
 
   add_executable(openai_chat_test
     tests/cli/openai_chat_test.cpp
+    src/cli/serve/model_manifest.cpp
     src/cli/serve/release_profile.cpp
     src/cli/serve/logging.cpp
     src/cli/serve/openai_chat.cpp
     src/models/deepseek_v4_flash/chat_template.cpp
   )
-  target_link_libraries(openai_chat_test PRIVATE gufo_core)
+  target_link_libraries(openai_chat_test PRIVATE gufo_core bubo_prepare)
   add_test(NAME openai_chat_test COMMAND openai_chat_test)
   add_test(NAME debug_hooks_settings_test COMMAND openai_chat_test --debug-hooks)
   set_tests_properties(debug_hooks_settings_test PROPERTIES LABELS "cpu;debug-hooks" TIMEOUT 30)
