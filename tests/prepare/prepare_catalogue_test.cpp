@@ -25,7 +25,8 @@ int main() {
   assert(shard_count == 4 && catalogue.size() == 8);
   assert(shards == 111334655392ULL);
   assert(all == 116617136608ULL);
-  assert(PIN_SLOT_UNSLOTH_COMMIT.empty() && PIN_SLOT_BUBO_COMMIT.empty());
+  assert(PIN_SLOT_UNSLOTH_COMMIT == "766911a6b7369840a91dbcd95f9f997acaab6cd6" &&
+         PIN_SLOT_BUBO_COMMIT.empty());
   assert(BUBO_HF_REPO_ID == "PIN_SLOT_BUBO_REPO_ID");
   assert(catalogue[5].file_name == "mmproj-BF16.gguf");
   assert(catalogue[5].destination ==

@@ -9,7 +9,8 @@
 namespace bubo::prepare {
 // Source: ADDENDUM-20261011-1750.md section 2; owner evidence closes these
 // slots.
-inline constexpr std::string_view PIN_SLOT_UNSLOTH_COMMIT = "";
+inline constexpr std::string_view PIN_SLOT_UNSLOTH_COMMIT =
+    "766911a6b7369840a91dbcd95f9f997acaab6cd6";
 inline constexpr std::string_view PIN_SLOT_BUBO_COMMIT = "";
 inline constexpr std::string_view BUBO_HF_REPO_ID = "PIN_SLOT_BUBO_REPO_ID";
 inline constexpr std::string_view kHuihuiCommit =
