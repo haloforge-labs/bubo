@@ -88,7 +88,7 @@ Empty environment values count as unset and produce a warning.
 | `GUFO_EOG_DEFER_P` | Set the deferred stop probability. | 0.9 | Keep the default unless early end token deferral tests require a different probability. | any; strix-halo-tuned; qwen3.8-flash-next |
 | `GUFO_EOG_MIN_PROB` | Set the minimum EOG probability required to stop. | 0.2 | Keep the default unless end token probability tests require another minimum. | any; strix-halo-tuned; qwen3.8-flash-next |
 | `GUFO_EOG_MIN_PROB_EXACT` | Compute EOG probability over the full vocabulary. | Off | Keep it off unless end token decisions require full vocabulary probabilities. | any; generic; qwen3.8-flash-next |
-| `GUFO_EXPERT_V2K` | Run decode experts in the grouped expert kernel. | 1 (0 with profile exact or stock) | Keep it on unless a test requires the per-slot expert kernels. | any; strix-halo-tuned; qwen3.8-flash-next |
+| `GUFO_EXPERT_V2K` | Run decode experts in the grouped expert kernel. | 0 | Keep it off unless grouped expert kernel tests require it; profile exact rejects 1. | any; strix-halo-tuned; qwen3.8-flash-next |
 | `GUFO_HOST` | Set the server address through the environment. | Unset | Leave it unset unless the server address must come from this environment variable. | any; generic; any |
 | `GUFO_LENIENT` | Accept near miss MTP drafts inside thinking spans. | bounded with MTP; otherwise off | Keep bounded outside exact unless strict speculative acceptance is required. | any; strix-halo-tuned; qwen3.8-flash-next |
 | `GUFO_LENIENT_LAMBDA` | Set the lenient speculative acceptance bound. | 0.5 | Keep the default unless lenient acceptance tests require a different bound. | any; generic; qwen3.8-flash-next |
