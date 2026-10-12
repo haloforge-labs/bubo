@@ -4,3 +4,5 @@ src/models/deepseek_v4_flash/reference/artifact_chat_template.jinja text eol=lf
 src/models/qwen/reference/chat_template.jinja text eol=lf
 # Frozen a40d37f oracle: preserve Git blob bytes on Windows checkouts.
 tests/fixtures/behaviour_fast_baseline/** -text
+# Release notices are pinned as exact bytes, including original line endings.
+tools/release/runtime-notices/** -text
