@@ -7,5 +7,5 @@ tests/fixtures/behaviour_fast_baseline/** -text
 # Release notices are pinned as exact bytes, including original line endings.
 tools/release/runtime-notices/** -text
 src/core/prepare/runtime_members.inc text eol=lf
-src/cli/prepare/runtime_notices.inc text eol=lf
+src/core/prepare/runtime_notices.inc text eol=lf
 tools/release/runtime-members.tsv text eol=lf

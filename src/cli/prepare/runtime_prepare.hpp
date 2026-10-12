@@ -5,14 +5,11 @@
 #include <vector>
 
 #include "src/cli/prepare/prepare.hpp"
+#include "src/core/prepare/runtime_notices.hpp"
 #include "src/core/prepare/runtime_table.hpp"
 #include "src/core/prepare/transport.hpp"
 
 namespace bubo::prepare {
-struct RuntimeNotice {
-  std::string_view path, sha256, text;
-};
-const std::vector<RuntimeNotice>& RuntimeNotices();
 std::string RuntimeConsent(const std::filesystem::path& runtime,
                            const std::filesystem::path& licenses);
 std::vector<std::string> RuntimeHolders(

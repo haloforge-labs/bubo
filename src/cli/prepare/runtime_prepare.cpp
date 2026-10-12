@@ -32,7 +32,6 @@ fs::path Path(std::string_view text) {
   return path.make_preferred();
 }
 using metadata::Value;
-#include "src/cli/prepare/runtime_notices.inc"
 struct Failure : std::runtime_error {
   int code;
   Failure(int c, std::string text)
@@ -591,9 +590,6 @@ int RunImpl(const Options& options, Environment e, std::istream& input,
   }
 }
 }  // namespace
-const std::vector<RuntimeNotice>& RuntimeNotices() {
-  return kRuntimeNotices;
-}
 std::string RuntimeConsent(const fs::path& runtime, const fs::path& licenses) {
   std::ostringstream text;
   text << "Bubo needs the AMD ROCm runtime. Bubo does not include AMD files.\n"

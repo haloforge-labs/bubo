@@ -313,6 +313,7 @@ set(bubo_command_sources
   src/eval/http_client.cpp
 )
 set(bubo_prepare_sources
+  src/core/prepare/runtime_notices.cpp
   src/cli/prepare/runtime_prepare.cpp
   src/core/prepare/zip_reader.cpp
   src/core/prepare/runtime_table.cpp
