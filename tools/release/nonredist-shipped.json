@@ -1,4 +1,4 @@
 [
-  "msvcp140*", "vcruntime140*", "concrt*", "vccorlib*", "vcomp*",
-  "Microsoft.VC143.CRT*"
+  "msvcp140*", "vcruntime140*", "concrt*.dll", "vccorlib*", "vcomp*.dll",
+  "Microsoft.VC143.CRT*", "ucrtbase.dll", "api-ms-win-crt-*.dll"
 ]

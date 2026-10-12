@@ -1,8 +1,67 @@
 param([string]$Runtime = "$PSScriptRoot\..\..\tools\windows\vc-runtime.ps1",
-      [string]$Root = "$PSScriptRoot\..\..", [string]$Case = 'all')
+      [string]$Root = "$PSScriptRoot\..\..", [string]$Case = 'all',
+      [string]$NativeSource = "$PSScriptRoot\..\..\src\cli\prepare\vc_runtime.cpp")
 $ErrorActionPreference = 'Stop'
 [Diagnostics.Process]::GetCurrentProcess().PriorityClass = 'BelowNormal'
 . $Runtime
+if ($Case -in @('all', 'native', 'registry-view')) {
+  $parameters = (Get-Command Test-BuboVcRuntime).ScriptBlock.Ast.Body.ParamBlock.Parameters
+  $registryDefault = $parameters[0].DefaultValue.ScriptBlock.GetScriptBlock()
+  $fileDefault = $parameters[1].DefaultValue.ScriptBlock.GetScriptBlock()
+  if ($Case -in @('all', 'native')) {
+    # Invoke each actual default independently, even if registry short-circuits.
+    $result = & $registryDefault
+    if ($result -isnot [bool]) { throw 'native registry probe did not return bool' }
+    Write-Output "native PowerShell registry64 probe bool=$result"
+    foreach ($name in @('vcruntime140.dll', 'msvcp140.dll')) {
+      $result = & $fileDefault $name
+      if ($result -isnot [bool]) { throw 'native System32 probe did not return bool' }
+      Write-Output "native PowerShell System32 $name probe bool=$result"
+    }
+  }
+  $source = [IO.File]::ReadAllText($NativeSource)
+  if (!$source.Contains('RRF_RT_REG_DWORD | RRF_SUBKEY_WOW6464KEY')) { throw 'C++ explicit registry64 view missing' }
+  # Run the actual default registry script against an in-memory registry API.
+  # This observes view, hive, path, default value and disposal without writes.
+  function Open-FakeBase($Hive, $View) {
+    if ($Hive -ne [Microsoft.Win32.RegistryHive]::LocalMachine -or
+        $View -ne [Microsoft.Win32.RegistryView]::Registry64) { throw 'wrong registry view/hive' }
+    $script:viewObserved = $true
+    $base = [pscustomobject]@{}
+    $base | Add-Member ScriptMethod OpenSubKey {
+      param($Path, $Writable)
+      if ($Path -ne 'SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64' -or $Writable) { throw 'wrong key/access' }
+      if ($script:registryState -eq 'absent') { return $null }
+      $key = [pscustomobject]@{}
+      $key | Add-Member ScriptMethod GetValue {
+        param($Name, $Default)
+        if ($Name -ne 'Installed' -or $Default -ne 0) { throw 'wrong value/default' }
+        if ($script:registryState -eq 'missing-value') { return $Default }
+        if ($script:registryState -eq 'installed') { return 1 }
+        return 0
+      }
+      $key | Add-Member ScriptMethod Dispose { $script:keyDisposed = $true }
+      return $key
+    }
+    $base | Add-Member ScriptMethod Dispose { $script:baseDisposed = $true }
+    return $base
+  }
+  class BuboFakeRegistry {
+    static [object] OpenBaseKey([Microsoft.Win32.RegistryHive]$Hive, [Microsoft.Win32.RegistryView]$View) {
+      return (Open-FakeBase $Hive $View)
+    }
+  }
+  $fake = [scriptblock]::Create($registryDefault.ToString().Replace('[Microsoft.Win32.RegistryKey]::OpenBaseKey', '[BuboFakeRegistry]::OpenBaseKey'))
+  foreach ($state in @('installed', 'zero', 'absent', 'missing-value')) {
+    $script:registryState = $state
+    $script:viewObserved = $false; $script:baseDisposed = $false; $script:keyDisposed = $false
+    $result = & $fake
+    Write-Output "fake registry64 $state bool=$result"
+    if (!$script:viewObserved -or !$script:baseDisposed -or
+        ($state -ne 'absent' -and !$script:keyDisposed) -or
+        $result -isnot [bool] -or $result -ne ($state -eq 'installed')) { throw "registry64/default/disposal regression: $state" }
+  }
+}
 foreach ($kind in @('registry', 'missing', 'files', 'partial')) {
   if ($Case -ne 'all' -and $Case -ne $kind) { continue }
   $registry = { $kind -eq 'registry' }

@@ -15,6 +15,24 @@ int main(int argc, char** argv) {
     return condition;
   };
   bool ok = true;
+  if (selected == "all" || selected == "native") {
+    try {
+      const auto native = NativeVcRuntimeProbe();
+      const bool registered = native.installed();
+      std::cout << "native registry64 probe bool=" << registered << '\n';
+#ifdef _WIN32
+      for (const auto name : {"vcruntime140.dll", "msvcp140.dll"}) {
+        const bool exists = native.system_file(name);
+        std::cout << "native System32 " << name << " probe bool=" << exists
+                  << '\n';
+      }
+#endif
+      // Installation state is machine-dependent; only require callable probes.
+    } catch (const std::exception& error) {
+      std::cerr << "native probe exception: " << error.what() << '\n';
+      ok &= check(false, "real read-only probes return bool without exception");
+    }
+  }
   for (const std::string kind : {"registry", "missing", "files", "partial"}) {
     if (selected != "all" && selected != kind)
       continue;

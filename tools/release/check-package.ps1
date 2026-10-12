@@ -36,11 +36,12 @@ if ($PackageZip) {
   } finally { $archive.Dispose() }
   exit 0
 }
-$files = @(Get-ChildItem -LiteralPath $PackageFolder -Recurse -File |
+$packageRoot = (Resolve-Path -LiteralPath $PackageFolder).Path
+$files = @(Get-ChildItem -LiteralPath $packageRoot -Recurse -File |
   Where-Object { $_.Extension -in @('.exe', '.dll') })
 if (-not $files.Count) { throw "No release binaries in $PackageFolder" }
 foreach ($file in Get-ChildItem -LiteralPath $PackageFolder -Recurse -File) {
-  Test-ShippedPath $file.FullName
+  Test-ShippedPath ([IO.Path]::GetRelativePath($packageRoot, $file.FullName))
 }
 foreach ($file in $files) {
   if ($file.Name -in @('bubo.exe', 'bubo-engine.dll')) {
