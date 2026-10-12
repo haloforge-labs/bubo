@@ -546,7 +546,7 @@ void Review2Regression(int finding) {
         "other-family exact accepts its ordinary session and cache options");
     Expect(RenderReleaseDocs(ReleaseSwitchTable())
                    .find("Other model families keep their existing defaults "
-                         "except for the exact seed.") != std::string::npos,
+                         "except for the exact seed and NPU profile policy.") != std::string::npos,
            "docs state the other-family seed exception");
   } else if (finding == 8) {
     inputs = Inputs("default");

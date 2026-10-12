@@ -385,7 +385,7 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
       settings.emplace(name, std::move(setting));
       continue;
     }
-    if (name.starts_with("GUFO_NPU_") &&
+    if (name.find("_NPU_") == 4 &&
         !result.prefill_authorization.Allows(core::ExperimentalFeature::Prefill)) {
       settings.emplace(name, std::move(setting));
       continue;

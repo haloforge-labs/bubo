@@ -13,7 +13,7 @@ Empty environment values count as unset and produce a warning.
 | --- | --- | --- | --- | --- |
 | `--allow-unmeasured-memory` | Allow subagent context above the measured token limit. | Unset | Keep it off unless the required context exceeds the measured memory limit. | any; generic; any |
 | `--api-key` | Require an API key from clients. | Unset | Set a key when clients must authenticate to the server. | any; generic; any |
-| `--cache-disk` | Set the disk prompt cache directory. | Off | Opt in for fast restarts. Prepared model bytes are verified once; matching verification stamps skip later hashes. | any; generic; any |
+| `--cache-disk` | Set the disk prompt cache directory. | Off | Opt in for fast restarts; model bytes are verified once, then a stamp skips later hashes. | any; generic; any |
 | `--cache-disk-bytes` | Limit disk prompt cache storage. | 8,589,934,592 | Keep 8 GiB unless the disk cache must retain more prompt snapshots. | any; generic; any |
 | `--cache-disk-staging-bytes` | Limit RAM used to stage disk prompt snapshots. | 0 = auto (<= disk budget, <= 1/8 available RAM) | Keep automatic sizing unless disk persistence needs a different RAM limit. | any; generic; any |
 | `--cache-ram-bytes` | Set the RAM snapshot cache budget. | 6442450944 | Keep the profile limit unless available host RAM requires a smaller cache. | any; strix-halo-tuned; qwen3.8-flash-next |
@@ -48,7 +48,7 @@ Empty environment values count as unset and produce a warning.
 | `--no-prompt-lookup` | Disable prompt lookup proposals. | Unset | Keep prompt lookup enabled with MTP unless lookup comparisons require it off. | any; generic; any |
 | `--no-twin` | Suppress the manifest dense twin. | Unset | Enable it when decoding must run without the supplied dense twin. | any; generic; any |
 | `--no-vision` | Suppress the manifest vision sidecar. | Unset | Enable it when the server must omit the vision sidecar. | any; generic; any |
-| `--npu-prefill` | Use NPU prefill when available. | on when usable | Default and subagents request ON; exact and stock force OFF. Startup failures retain the GPU path. | any; generic; any |
+| `--npu-prefill` | Use NPU prefill when available. | on when usable | Default and subagents request ON; exact and stock force OFF; startup failures keep the GPU path. | any; generic; any |
 | `--port` | Set the server listen port. | 8080 | Keep 8080 unless another service uses that port or clients require a different port. | any; generic; any |
 | `--prefill-chunk` | Limit prompt tokens between active decode rounds. | 512 | Keep 512 unless active sessions need shorter pauses during another request prefill. | any; strix-halo-tuned; qwen3.8-flash-next |
 | `--presence-penalty` | Penalize tokens already generated in the response. | Qwen3.8: 0.0 thinking; 1.5 non-thinking unless GUFO_PRODUCTION_SAMPLING=1 | Keep the model preset unless the task needs a different penalty for previously generated tokens. | any; generic; any |

@@ -56,6 +56,7 @@ target_include_directories(npu_runtime PRIVATE "${CMAKE_SOURCE_DIR}")
 target_include_directories(npu_runtime SYSTEM PRIVATE
   "${GUFO_XRT_GENERATED_INCLUDE_DIR}" "${GUFO_XRT_INCLUDE_DIR}")
 target_compile_definitions(npu_runtime PRIVATE _ITERATOR_DEBUG_LEVEL=0)
+target_link_libraries(npu_runtime PRIVATE OpenSSL::Crypto)
 # Use the same XRT class declarations throughout the runtime.
 add_library(npu_xrt INTERFACE)
 target_include_directories(npu_xrt SYSTEM INTERFACE

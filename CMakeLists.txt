@@ -507,7 +507,7 @@ if (BUILD_TESTING)
       "${GUFO_XRT_GENERATED_INCLUDE_DIR}" "${GUFO_XRT_INCLUDE_DIR}")
     target_compile_definitions(npu_private_bo_adapter_test PRIVATE
       XRT_STATIC_BUILD _ITERATOR_DEBUG_LEVEL=0 GUFO_NPU_TESTING)
-    target_link_libraries(npu_private_bo_adapter_test PRIVATE bcrypt)
+    target_link_libraries(npu_private_bo_adapter_test PRIVATE gufo_core)
     set(GUFO_NPU_FAKE_CASES "${CMAKE_BINARY_DIR}/npu-fake-cases"
       CACHE PATH "Prepared bad-artifact fixtures for CPU-only NPU tests")
     add_test(NAME npu_private_bo_adapter_test COMMAND npu_private_bo_adapter_test
@@ -518,7 +518,7 @@ if (BUILD_TESTING)
     add_test(NAME npu_bfp_test COMMAND npu_bfp_test)
     set_tests_properties(npu_bfp_test PROPERTIES LABELS "cpu;npu" TIMEOUT 30)
     add_executable(npu_staging_test tests/npu/staging_test.cpp src/npu/staging.cpp src/npu/bfp.cpp
-      src/cli/serve/release_profile.cpp
+      src/cli/serve/model_manifest.cpp src/cli/serve/release_profile.cpp
       src/npu/session.cpp src/npu/private_bo_adapter.cpp
       tests/npu/fake_xrt.cpp)
     target_include_directories(npu_staging_test PRIVATE "${CMAKE_SOURCE_DIR}")
@@ -526,7 +526,7 @@ if (BUILD_TESTING)
       "${GUFO_XRT_GENERATED_INCLUDE_DIR}" "${GUFO_XRT_INCLUDE_DIR}")
     target_compile_definitions(npu_staging_test PRIVATE
       XRT_STATIC_BUILD _ITERATOR_DEBUG_LEVEL=0 GUFO_NPU_TESTING GUFO_NPU=1)
-    target_link_libraries(npu_staging_test PRIVATE bcrypt gufo_logging gufo_core)
+    target_link_libraries(npu_staging_test PRIVATE gufo_logging gufo_core bubo_prepare)
     add_test(NAME npu_staging_test COMMAND npu_staging_test)
     set_tests_properties(npu_staging_test PROPERTIES LABELS "cpu;npu;fake" TIMEOUT 30)
     add_executable(npu_linear_z_test tests/npu/linear_z_test.cpp
@@ -538,7 +538,7 @@ if (BUILD_TESTING)
       "${GUFO_XRT_GENERATED_INCLUDE_DIR}" "${GUFO_XRT_INCLUDE_DIR}")
     target_compile_definitions(npu_linear_z_test PRIVATE
       XRT_STATIC_BUILD _ITERATOR_DEBUG_LEVEL=0 GUFO_NPU_TESTING)
-    target_link_libraries(npu_linear_z_test PRIVATE Threads::Threads bcrypt gufo_logging)
+    target_link_libraries(npu_linear_z_test PRIVATE Threads::Threads gufo_core gufo_logging)
     add_test(NAME npu_linear_z_test COMMAND npu_linear_z_test "${GUFO_XRT_TOOLING_ROOT}")
     set_tests_properties(npu_linear_z_test PROPERTIES LABELS "cpu;npu;fake" TIMEOUT 30)
     add_executable(npu_projection_test tests/npu/projection_test.cpp
@@ -550,14 +550,14 @@ if (BUILD_TESTING)
       "${GUFO_XRT_GENERATED_INCLUDE_DIR}" "${GUFO_XRT_INCLUDE_DIR}")
     target_compile_definitions(npu_projection_test PRIVATE
       XRT_STATIC_BUILD _ITERATOR_DEBUG_LEVEL=0 GUFO_NPU_TESTING)
-    target_link_libraries(npu_projection_test PRIVATE Threads::Threads bcrypt gufo_logging)
+    target_link_libraries(npu_projection_test PRIVATE Threads::Threads gufo_core gufo_logging)
     add_test(NAME npu_projection_test COMMAND npu_projection_test "${GUFO_XRT_TOOLING_ROOT}")
     set_tests_properties(npu_projection_test PROPERTIES LABELS "cpu;npu;fake" TIMEOUT 30)
     add_executable(npu_host_bench tests/npu/host_bench.cpp tests/npu/fake_xrt.cpp src/npu/private_bo_adapter.cpp src/npu/bfp.cpp)
     target_include_directories(npu_host_bench PRIVATE "${CMAKE_SOURCE_DIR}" "${CMAKE_SOURCE_DIR}/tests/npu")
     target_include_directories(npu_host_bench SYSTEM PRIVATE "${GUFO_XRT_GENERATED_INCLUDE_DIR}" "${GUFO_XRT_INCLUDE_DIR}")
     target_compile_definitions(npu_host_bench PRIVATE XRT_STATIC_BUILD _ITERATOR_DEBUG_LEVEL=0 GUFO_NPU_TESTING)
-    target_link_libraries(npu_host_bench PRIVATE bcrypt)
+    target_link_libraries(npu_host_bench PRIVATE gufo_core)
     add_executable(npu_session_test tests/npu/session_test.cpp tests/npu/fake_xrt.cpp
       tests/npu/fake_hip.cpp src/npu/linear_z_hip.cpp src/npu/projection.cpp
       src/npu/private_bo_adapter.cpp src/npu/session.cpp src/npu/server_prefill.cpp
@@ -565,7 +565,7 @@ if (BUILD_TESTING)
     target_include_directories(npu_session_test PRIVATE "${CMAKE_SOURCE_DIR}")
     target_include_directories(npu_session_test SYSTEM PRIVATE "${GUFO_XRT_GENERATED_INCLUDE_DIR}" "${GUFO_XRT_INCLUDE_DIR}")
     target_compile_definitions(npu_session_test PRIVATE XRT_STATIC_BUILD _ITERATOR_DEBUG_LEVEL=0 GUFO_NPU_TESTING)
-    target_link_libraries(npu_session_test PRIVATE bcrypt gufo_logging)
+    target_link_libraries(npu_session_test PRIVATE gufo_core gufo_logging)
     # SDK headers only: fake_hip.cpp supplies symbols; never link hip::host.
     get_target_property(npu_hip_headers hip::amdhip64 INTERFACE_INCLUDE_DIRECTORIES)
     target_include_directories(npu_session_test SYSTEM PRIVATE ${npu_hip_headers})
@@ -670,8 +670,8 @@ if (BUILD_TESTING)
   if(WIN32)
     # CPU-only CLI-to-creation counter: no NPU runtime, HIP or XRT dependency.
     add_executable(experimental_policy_host tests/cli/experimental_policy_host.cpp
-      src/cli/serve/release_profile.cpp)
-    target_link_libraries(experimental_policy_host PRIVATE gufo_core gufo_logging)
+      src/cli/serve/model_manifest.cpp src/cli/serve/release_profile.cpp)
+    target_link_libraries(experimental_policy_host PRIVATE gufo_core gufo_logging bubo_prepare)
     if(GUFO_ENABLE_NPU)
       target_compile_definitions(experimental_policy_host PRIVATE GUFO_NPU=1)
       set(experimental_build_mode ON)

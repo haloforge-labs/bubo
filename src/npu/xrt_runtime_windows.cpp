@@ -1,8 +1,7 @@
-// Windows types must precede bcrypt/delayimp; retain this SDK include order.
+// Windows types must precede delayimp; retain this SDK include order.
 // clang-format off
 #include <windows.h>
 // clang-format on
-#include <bcrypt.h>
 #include <delayimp.h>
 #include <xrt/experimental/xrt_version.h>
 
@@ -10,10 +9,12 @@
 #include <cstring>
 #include <iomanip>
 #include <mutex>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
 
+#include "src/core/crypto/sha256.hpp"
 #include "src/npu/xrt_runtime.hpp"
 
 namespace gufo::npu {
@@ -58,21 +59,8 @@ public:
                      &count, nullptr) &&
                 count == bytes.size(),
             "NPU XRT DLL read failed");
-    // Tooling uses BCrypt SHA256; retain that single-layer implementation.
-    BCRYPT_ALG_HANDLE algorithm = nullptr;
-    Require(BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM,
-                                        nullptr, 0) == 0,
-            "NPU XRT SHA256 provider failed");
-    std::array<unsigned char, 32> digest{};
-    const auto status = BCryptHash(algorithm, nullptr, 0, bytes.data(),
-                                   static_cast<ULONG>(bytes.size()),
-                                   digest.data(), digest.size());
-    BCryptCloseAlgorithmProvider(algorithm, 0);
-    Require(status == 0, "NPU XRT SHA256 failed");
-    std::ostringstream hash;
-    for (const auto byte : digest) {
-      hash << std::hex << std::setw(2) << std::setfill('0') << unsigned(byte);
-    }
+    const std::string digest = crypto::Sha256Hex(
+        std::span<const std::uint8_t>(bytes.data(), bytes.size()));
     DWORD ignored = 0;
     const auto version_size = GetFileVersionInfoSizeW(path.c_str(), &ignored);
     std::vector<unsigned char> version(version_size);
@@ -86,7 +74,7 @@ public:
                 info_size >= sizeof(*info) && info->dwSignature == 0xfeef04bd,
             "NPU XRT DLL file version unavailable");
     return {path,
-            hash.str(),
+            digest,
             {HIWORD(info->dwFileVersionMS), LOWORD(info->dwFileVersionMS),
              HIWORD(info->dwFileVersionLS), LOWORD(info->dwFileVersionLS)}};
   }

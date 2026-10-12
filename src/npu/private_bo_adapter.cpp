@@ -4,23 +4,21 @@
 // NOTICES.md.
 #include "private_bo_adapter.hpp"
 
-// Windows types must precede bcrypt; preserve the SDK prerequisite order.
-// clang-format off
 #include <windows.h>
-#include <bcrypt.h>
-// clang-format on
 
 #include <array>
 #include <bit>
 #include <cstring>
 #include <limits>
 #include <map>
+#include <span>
 #include <string_view>
 #include <system_error>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
+#include "src/core/crypto/sha256.hpp"
 #include "xrt/xrt_bo.h"
 #include "xrt/xrt_device.h"
 #include "xrt/xrt_hw_context.h"
@@ -44,40 +42,8 @@ void Require(bool valid, const char* message,
 }
 
 std::string Hash(const Bytes& bytes) {
-  struct Sha {
-    BCRYPT_ALG_HANDLE alg = nullptr;
-    BCRYPT_HASH_HANDLE hash = nullptr;
-    ~Sha() {
-      if (hash)
-        BCryptDestroyHash(hash);
-      if (alg)
-        BCryptCloseAlgorithmProvider(alg, 0);
-    }
-  } sha;
-  Require(BCryptOpenAlgorithmProvider(&sha.alg, BCRYPT_SHA256_ALGORITHM,
-                                      nullptr, 0) == 0,
-          "SHA256 provider failed");
-  DWORD size = 0, written = 0;
-  Require(BCryptGetProperty(sha.alg, BCRYPT_OBJECT_LENGTH,
-                            reinterpret_cast<PUCHAR>(&size), sizeof(size),
-                            &written, 0) == 0,
-          "SHA256 object size failed");
-  std::vector<unsigned char> object(size);
-  std::array<unsigned char, 32> result{};
-  Require(BCryptCreateHash(sha.alg, &sha.hash, object.data(), size, nullptr, 0,
-                           0) == 0 &&
-              BCryptHashData(sha.hash,
-                             reinterpret_cast<PUCHAR>(
-                                 const_cast<std::byte*>(bytes.data())),
-                             static_cast<ULONG>(bytes.size()), 0) == 0 &&
-              BCryptFinishHash(sha.hash, result.data(), result.size(), 0) == 0,
-          "SHA256 calculation failed");
-  std::string text;
-  for (auto byte : result) {
-    text += "0123456789abcdef"[byte >> 4];
-    text += "0123456789abcdef"[byte & 15];
-  }
-  return text;
+  return crypto::Sha256Hex(std::span<const std::uint8_t>(
+      reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()));
 }
 
 // Keep both handles open through parse/register: no path replacement or write
