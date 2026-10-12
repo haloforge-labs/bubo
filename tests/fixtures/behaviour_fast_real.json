@@ -1,6 +1,6 @@
 [
   {
-    "source": "<local path>",
+    "source": "logit-off-code-s0.bin",
     "sha256": "2a6bc727c5f2793f1b0976409be0c5b43631b7dd89c8ec84720cad637f69cc56",
     "record": 0,
     "position": 1,
@@ -12,7 +12,7 @@
     "tail": "fixed SplitMix-derived F32, below last retained logit by 2..10"
   },
   {
-    "source": "<local path>",
+    "source": "logit-off-code-s0.bin",
     "sha256": "2a6bc727c5f2793f1b0976409be0c5b43631b7dd89c8ec84720cad637f69cc56",
     "record": 127,
     "position": 128,
@@ -24,7 +24,7 @@
     "tail": "fixed SplitMix-derived F32, below last retained logit by 2..10"
   },
   {
-    "source": "<local path>",
+    "source": "logit-off-wiki-s0.bin",
     "sha256": "3704551e7828b8ea10c303ffe4dd4b3d62089d38f34f49577291d1c0a892cc97",
     "record": 0,
     "position": 1,
@@ -36,7 +36,7 @@
     "tail": "fixed SplitMix-derived F32, below last retained logit by 2..10"
   },
   {
-    "source": "<local path>",
+    "source": "logit-off-wiki-s0.bin",
     "sha256": "3704551e7828b8ea10c303ffe4dd4b3d62089d38f34f49577291d1c0a892cc97",
     "record": 127,
     "position": 128,

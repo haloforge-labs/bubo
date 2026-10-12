@@ -16,8 +16,8 @@ import struct
 import subprocess
 import sys
 
-PUBLIC = Path(r"<local path>")
-JOB = Path(r"<local path>")
+PUBLIC = Path(os.environ.get("BUBO_BATCH_QUALITY_SESSIONS", "sessions"))
+JOB = Path(os.environ.get("BUBO_BATCH_QUALITY_JOB", "job"))
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "tools"))
 from gufo.control_tokens import kImStart as IM_START, kImEnd as IM_END

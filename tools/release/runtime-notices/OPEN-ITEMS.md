@@ -37,4 +37,4 @@ Source: [Visual Studio 2026 REDIST policy](https://learn.microsoft.com/en-us/vis
 
 ## Scoped vcpkg search
 
-`where.exe vcpkg` found no executable; no VCPKG environment entries were present. The read-only search, including hidden and ignored files, stayed within `<local path>` and found no vcpkg copyright/port manifest/status files. No other disk tree was scanned for vcpkg. Upstream texts were used for the pinned versions supplied in the inventory; unpinned Windows components are explicitly provisional above.
+`where.exe vcpkg` found no executable; no VCPKG environment entries were present. The read-only search, including hidden and ignored files, stayed within the local strixllama checkout and found no vcpkg copyright/port manifest/status files. No other disk tree was scanned for vcpkg. Upstream texts were used for the pinned versions supplied in the inventory; unpinned Windows components are explicitly provisional above.

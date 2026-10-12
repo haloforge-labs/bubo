@@ -10,7 +10,7 @@ constexpr std::string_view kHuihui =
 constexpr std::string_view kUnsloth = "unsloth/Qwen3.8-Flash-Next-GGUF";
 constexpr std::string_view kLicence = "qwen-community-1.0";
 // All eight rows copied from ADDENDUM-20261011-1750.md section 2.
-// Bytes/hashes: <local path>
+// Bytes/hashes: tools/release/prepare-evidence (HF API listings at the pinned revisions)
 // section 1 (main_1..4, twin), section 2 (draft_head), section 3 (mtp, mmproj).
 // Repos/commits/paths/destinations: addendum section 2; package ID: section 3.
 constexpr std::array<Entry, 8> kModels = {

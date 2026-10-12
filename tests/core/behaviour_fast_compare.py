@@ -6,7 +6,7 @@ import sys
 
 old, new, out = sys.argv[1:]
 frozen = Path(__file__).resolve().parents[1] / 'fixtures/behaviour_fast_baseline/src/core'
-# Frozen at c847e6df (B6.2) on 2026-10-11; previously a40d37f. Provenance: tests/fixtures/behaviour_fast_baseline/README.md.
+# Frozen at c847e6df on 2026-10-11; previously a40d37f. Provenance: tests/fixtures/behaviour_fast_baseline/README.md.
 expected = {
     'sampling.cpp': '232ac3b2a47ff48d7ea2ebaee3b1b478b5b6d84ee70f75f61cc632e471395816',
     'sampling.hpp': '00ebc5cd7559fd95529c84af164f07f8b869666a3e975d06e3440028c51b0e64',

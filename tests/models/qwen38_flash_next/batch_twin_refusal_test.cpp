@@ -29,7 +29,7 @@ int main() {
   const char* previous = std::getenv("GUFO_DENSE_TWIN_BATCH");
   const bool had_previous = previous != nullptr;
   const std::string saved = had_previous ? previous : "";
-  // Independent golden copied from B5c Model::Load, including punctuation.
+  // Independent golden copied from the earlier Model::Load, including punctuation.
   constexpr std::string_view refusal =
       "GUFO_DENSE_TWIN_MODEL supports one decode session (the batched "
       "decode loop is not twinned)";
@@ -63,7 +63,7 @@ int main() {
   Require(q::TwinBatchLoadError(true, true, 2, std::uint64_t{1} << 32, 8) !=
           nullptr);
   SetBatchSwitch(had_previous ? saved.c_str() : nullptr);
-  std::cout << "PASS real Load predicate: exact B5c refusal unset/0/true/01; "
+  std::cout << "PASS real Load predicate: exact earlier refusal unset/0/true/01; "
                "c1 cutoff accepted with every switch; literal 1 only; shared "
                "cutoff parser; "
                "armed Q8 logits rows 9..64; chain bounds\n";

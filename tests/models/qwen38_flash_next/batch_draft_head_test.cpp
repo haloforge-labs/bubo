@@ -43,7 +43,7 @@ int main() {
           }
           ++combinations;
         }
-  // Cohort heads (B5cand3): a singleton picks what Executor::MtpHead picks
+  // Cohort heads (earlier candidate build): a singleton picks what Executor::MtpHead picks
   // (subset = has_subset && !full; else draft_out if loaded, else output),
   // with or without the batch switch; a cohort with any full-mode session
   // never uses the subset; a plain cohort of two or more keeps kPlain.

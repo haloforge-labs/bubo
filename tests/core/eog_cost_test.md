@@ -1,7 +1,7 @@
 # EOG CPU replay and differential check
 
 `eog_cost_test` links the production `gufo_core` sampler and the existing frozen
-B6.2 sampler fixture in one executable. The fixture is compiled in a separate
+release sampler fixture in one executable. The fixture is compiled in a separate
 namespace; its source is not copied or modified. Both adapters use the server's
 `ParseBehaviourOptions` parser. All input logits and token pieces are synthetic.
 

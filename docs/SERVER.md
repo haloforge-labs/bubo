@@ -1617,7 +1617,7 @@ worker-time sum from a wall span. Cached gathers can correctly have no reads.
 Expert diversity reuses the existing device `ExpertCounts` result downloaded
 and synchronized for prefill dispatch. No new kernel, copy, or synchronization
 is needed. `layers` tuples are `layer:routed_tokens:distinct:bytes_per_expert`.
-B4b skips unused final-layer FFN rows: the final layer's routed-token count can
+The final-layer FFN skip skips unused final-layer FFN rows: the final layer's routed-token count can
 be smaller than the pass token count. The diagnostic counts actual selections
 and actual touched matrices; it does not compute hypothetical routes for
 skipped rows. The min/mean/max include all executed trunk MoE layers, exclude

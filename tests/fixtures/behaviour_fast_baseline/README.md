@@ -10,18 +10,18 @@ the baseline executable prints its configured source fingerprint.
 | Frozen at | Date | Reason |
 |---|---|---|
 | a40d37f | 2026-10-09 | First frozen sampler for the behaviour fast path. |
-| c847e6df | 2026-10-11 | Release build B6.2: loop breaker periods (think 128, answer 16), final second detection, think EOG guard escalation (43bcbcf3), and the exact max-logit bound for EOG threshold tests (c847e6df). |
+| c847e6df | 2026-10-11 | Release build: loop breaker periods (think 128, answer 16), final second detection, think EOG guard escalation (43bcbcf3), and the exact max-logit bound for EOG threshold tests (c847e6df). |
 
 The c847e6df freeze followed three checks:
 
 1. c847e6df and 43bcbcf3 give byte-identical transcripts on all 200 cases. The bound
    changes no decision.
-2. Against the previous oracle (B6.1 = a40d37f behaviour), the decision-level
+2. Against the previous oracle (the previous release build = a40d37f behaviour), the decision-level
    differences are the think EOG guard escalation only. The guard escalates after
    16 blocked end-of-thinking attempts. With escalation disabled, 43bcbcf3 equals
-   B6.1 on all 200 cases. The other byte differences are by design: the loop
+   the previous release build on all 200 cases. The other byte differences are by design: the loop
    ring size, the loop thresholds and the new `guard_escalation` summary line.
-3. The B6.2 GPU check passed (probe identity, think-off speed, live loop break,
+3. The the release build GPU check passed (probe identity, think-off speed, live loop break,
    two sessions, agent replay identity).
 
 The fixture sets `budget_forced = think_end`. This is the production shape: the

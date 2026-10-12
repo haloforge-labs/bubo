@@ -1,4 +1,4 @@
-// Compiled twice, once with sampling=sampling_eog_old and the pinned B6.2
+// Compiled twice, once with sampling=sampling_eog_old and the pinned release
 // headers. Both implementations link the actual sampler sources.
 #include <bit>
 #include <cstring>

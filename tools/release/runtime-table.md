@@ -2,9 +2,8 @@
 
 `runtime-members.tsv` and `src/core/prepare/runtime_members.inc` are generated
 from the three official AMD wheels. Archive sizes and SHA-256 values are from
-`<local path>`,
-Appendix B. The 13 DLL hashes are checked against Appendix A and
-`<local path>`.
+the AMD runtime path report of 2026-10-10 (Appendix B). The 13 DLL hashes are checked against Appendix A and
+the Windows runtime inventory of 2026-10-10.
 URLs follow the binding `PREPARE-CONSENT-TEXT-20261011.md` (including the
 `/rocm/core/whl-next/` segment), superseding the older design URLs.
 
