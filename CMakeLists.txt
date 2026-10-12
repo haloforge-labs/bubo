@@ -579,7 +579,8 @@ if (BUILD_TESTING)
     target_compile_options(npu_session_test PRIVATE -include "${CMAKE_SOURCE_DIR}/tests/npu/file_io_hook.hpp")
     foreach(npu_case clean timeout error layer single stream_timeout invalid
         startup_missing_dir startup_missing_insts startup_missing_xclbin startup_hash
-        startup_version startup_runtime_missing startup_device denied power_unavailable)
+        startup_version startup_runtime_missing startup_device startup_pre_failed denied
+        power_unavailable power_turbo)
       add_test(NAME npu_session_${npu_case}_test COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/npu/failure_log_test.py" "$<TARGET_FILE:npu_session_test>" "${npu_case}" "${GUFO_XRT_TOOLING_ROOT}")
       set_tests_properties(npu_session_${npu_case}_test PROPERTIES LABELS "cpu;npu;fake" TIMEOUT 120)
     endforeach()

@@ -74,6 +74,8 @@ int main(int argc, char** argv) {
                              ? "insts_4096x2560x1024_128x64x128.txt"
                              : "final_4096x2560x1024_128x64x128.xclbin"));
       }
+    } else if (mode == "startup_pre_failed") {
+      FailProcess("invalid NPU startup configuration");
     } else if (mode == "startup_version") {
       fake::control.runtime_mismatch = true;
     } else if (mode == "startup_runtime_missing") {
@@ -99,11 +101,15 @@ int main(int argc, char** argv) {
   }
   if (mode == "power_unavailable")
     fake::control.fail_call = "device.get_info.platform";
+  if (mode == "power_turbo")
+    fake::control.power_mode = "Turbo";
   auto service = std::make_shared<ServerPrefill>(o);
   auto& session = service->session();
   assert(service->Start());
-  if (mode == "power_unavailable") {
+  if (mode == "power_unavailable" || mode == "power_turbo") {
     assert(service->ready() && !ProcessFailed());
+    assert(std::count(fake::control.calls.begin(), fake::control.calls.end(),
+                      "device.get_info.platform") == 1);
     gufo::server::Logger::FlushSync();
     return 0;
   }

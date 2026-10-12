@@ -13,3 +13,5 @@ if mode.startswith("startup_"):
     assert len(lines) == 1 and "NPU disabled for process; GPU path" in lines[0], lines
 if mode in ("denied", "power_unavailable"):
     assert "[npu]" not in result.stderr, result.stderr
+if mode == "power_turbo":
+    assert result.stderr.count("[INFO] [npu]") == 1 and "Turbo" in result.stderr, result.stderr

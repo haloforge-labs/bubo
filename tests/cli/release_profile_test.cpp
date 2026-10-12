@@ -926,12 +926,20 @@ void TestResolver() {
         const bool exact = std::string_view(profile) == "exact";
         if (exact)
           flags["--seed"] = "1";
+#ifdef GUFO_NPU
+        const bool npu_default = std::string_view(profile) == "default" ||
+                                 std::string_view(profile) == "subagents";
+        flags["--npu-prefill"] = npu_default ? "on" : "off";
+#endif
         Expect(candidate.effective_flags == flags,
                "upstream flag diff: " + std::string(family) + "/" + profile);
         Expect(candidate.injections.empty(), "upstream env injections empty");
         for (const auto& setting : candidate.settings) {
           const auto& stock = Find(upstream, setting.name);
-          Expect(setting.value == (exact && setting.name == "--seed"
+          Expect(setting.value == (setting.name == "--npu-prefill"
+                                       ? std::optional<std::string>(
+                                             flags.at(setting.name))
+                                   : exact && setting.name == "--seed"
                                        ? std::optional<std::string>("1")
                                        : stock.value),
                  "effective env/flag diff: " + std::string(family) + "/" +
@@ -962,7 +970,7 @@ void TestResolver() {
                         ? " tuned defaults retained"
                     : std::string_view(profile) == "exact"
                         ? " diff=seed:1 only; message checked"
-                        : " diff=EMPTY")
+                        : " model defaults unchanged; NPU policy checked")
                 << " (with/without --no-behaviour)\n";
     }
   }

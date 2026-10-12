@@ -1182,7 +1182,8 @@ std::string RenderReleaseDocs(std::span<const json::Value> rows) {
       "# Release switches\n\nGenerated from "
       "`src/cli/serve/release_switches.json`.\n\nProfile defaults apply to "
       "Qwen3.8 Flash Next.\nOther model families keep their existing "
-      "defaults except for the exact seed.\nExplicit flags and real "
+      "defaults except for the exact seed and NPU profile policy.\nExplicit flags "
+      "and real "
       "environment values take "
       "precedence.\nEmpty environment values count as unset and produce a "
       "warning.\n\n";

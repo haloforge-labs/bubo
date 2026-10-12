@@ -3,7 +3,7 @@
 Generated from `src/cli/serve/release_switches.json`.
 
 Profile defaults apply to Qwen3.8 Flash Next.
-Other model families keep their existing defaults except for the exact seed.
+Other model families keep their existing defaults except for the exact seed and NPU profile policy.
 Explicit flags and real environment values take precedence.
 Empty environment values count as unset and produce a warning.
 
