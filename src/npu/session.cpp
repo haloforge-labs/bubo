@@ -61,7 +61,7 @@ struct NpuSession::State {
   std::condition_variable wake;
   std::thread keepalive;
   std::unique_ptr<PrivateBoAdapter> adapter;
-  std::atomic<bool> healthy{false}, stop{false}, paused{false};
+  std::atomic<bool> healthy{false}, stop{false};
   bool attempted = false;
   std::uint64_t beats = 0, dispatches = 0;
   std::chrono::steady_clock::time_point last_dispatch;
@@ -108,9 +108,6 @@ NpuSession::~NpuSession() {
 bool NpuSession::Healthy() const noexcept {
   return state_->healthy && !process_failed;
 }
-bool NpuSession::Paused() const noexcept {
-  return state_->paused;
-}
 std::chrono::milliseconds NpuSession::Timeout() const noexcept {
   return state_->options.timing.timeout;
 }
@@ -145,7 +142,7 @@ NpuResult NpuSession::Start() {
           lock.unlock();
           {
             std::lock_guard serial(state->mutex);
-            if (state->healthy && !process_failed && !state->paused &&
+            if (state->healthy && !process_failed &&
                 std::chrono::steady_clock::now() - state->last_dispatch >=
                     std::chrono::milliseconds(2000)) {
               DispatchInfo beat;
@@ -178,7 +175,7 @@ bool NpuSession::DispatchBatch(
     const std::function<void(std::size_t, std::span<const std::byte>)>&
         consume) {
   std::lock_guard lock(state_->mutex);
-  if (!Healthy() || state_->paused)
+  if (!Healthy())
     return false;
   try {
     state_->adapter->ExecuteBatch(a, weights, consume);
@@ -196,21 +193,11 @@ NpuResult NpuSession::Dispatch(std::span<const std::byte> a,
   if (a.size() != kABytes || b.size() != kBBytes)
     return {false, false, false, false, false, "NPU input size rejected", {}};
   std::lock_guard lock(state_->mutex);
-  if (!Healthy() || state_->paused)
+  if (!Healthy())
     return {};
   return state_->Run(a, b, info);
 }
-NpuResult NpuSession::YieldKeepalive(bool pause) {
-  std::lock_guard lock(state_->mutex);
-  state_->paused = pause;
-  return {false, false, Healthy(), false, false, {}, {}};
-}
-KeepaliveStatus NpuSession::Status() const noexcept {
-  std::lock_guard lock(state_->mutex);
-  return {Healthy(),          state_->paused,     state_->beats, state_->beats,
-          state_->dispatches, state_->dispatches, false};
-}
-NpuResult NpuSession::RejectResult(std::string error, bool) {
+NpuResult NpuSession::RejectResult(std::string error) {
   // May be called by a bounded stream wait while XRT owns the session mutex.
   return state_->Fail(std::move(error));
 }

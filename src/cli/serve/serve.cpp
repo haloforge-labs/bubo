@@ -39,8 +39,6 @@
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/release_profile.hpp"
 #ifdef GUFO_NPU
-#include "src/npu/fabric_peak.hpp"
-#include "src/npu/operator_control.hpp"
 #include "src/npu/server_prefill.hpp"
 #endif
 #include "src/cli/serve/sampling_request.hpp"
@@ -143,8 +141,6 @@ extern "C" void ReportFatalSignal(int number) {
   (void)::write(STDERR_FILENO, kPrefix, sizeof(kPrefix) - 1);
   (void)::write(STDERR_FILENO, digits, length);
   (void)::write(STDERR_FILENO, "\n", 1);
-#ifdef GUFO_NPU
-#endif
   // Restore the default action and re-raise, so the exit status and any core
   // dump still describe the original fault.
   struct sigaction restore{};
@@ -187,8 +183,6 @@ void ReportTerminationReason() {
     } catch (...) {
       // The handler must not throw on its way out.
     }
-#ifdef GUFO_NPU
-#endif
     if (previous != nullptr) {
       previous();
     }
@@ -204,8 +198,6 @@ constexpr int kDeviceLostExitStatus = 75;
 // shutdown path so a supervisor restarts the server, and bound that teardown:
 // joining requests or freeing device memory may block on the dead device.
 void ShutdownAfterDeviceLoss() {
-#ifdef GUFO_NPU
-#endif
   constexpr auto kShutdownTimeout = std::chrono::seconds(10);
   // Arm the watchdog before logging or shutdown: neither a blocked log sink
   // nor a dead-device join may prevent the forced exit.
@@ -863,10 +855,7 @@ int RunServe(std::span<const char* const> args) {
     }
   }
   std::string requested_prefill = "off";
-  bool requested_fabric_peak = false;
 #ifdef GUFO_NPU
-  std::unique_ptr<npu::ClockDriver> fabric_driver;
-  std::unique_ptr<npu::FabricPeak> fabric_peak;
   std::shared_ptr<npu::ServerPrefill> persistent_prefill;
   bool prefill_started = false;
 #endif
@@ -893,9 +882,6 @@ int RunServe(std::span<const char* const> args) {
         "", "--npu-prefill", "off|on",
         "Experimental NPU prefill (default: off; explicit CLI only)",
         "Profiles", &requested_prefill);
-    parser.AddFlag("", "--fabric-peak",
-                   "Experimental AMD fabric peak mode (default: off)",
-                   "Profiles", &requested_fabric_peak);
     parser.AddOption("", "--profile", "NAME",
                      "Release profile: default, subagents, exact, or stock",
                      "Profiles", &release_profile_name);
@@ -1657,28 +1643,6 @@ int RunServe(std::span<const char* const> args) {
     speculative_config.mtp_auto_draft_vocabulary = mtp_draft_vocab == "auto";
     speculative_config.prompt_lookup = prompt_lookup;
     std::string err;
-    if (release.resolved.fabric_authorization.Allows(
-            core::ExperimentalFeature::FabricPeak)) {
-#ifdef GUFO_NPU
-      try {
-        fabric_driver = npu::InstalledOpenClClockDriver(
-            release.resolved.fabric_authorization);
-        fabric_peak = std::make_unique<npu::FabricPeak>(
-            release.resolved.fabric_authorization, *fabric_driver);
-        fabric_peak->Start();
-      } catch (const std::exception& error) {
-        server::Logger::Error("npu", error.what());
-        (void)server::Logger::FlushSync();
-        return 2;
-      }
-#else
-      server::Logger::Error("npu",
-                            "--fabric-peak requires qualified clock query and "
-                            "recovery; no clock change performed");
-      (void)server::Logger::FlushSync();
-      return 2;
-#endif
-    }
 #ifdef GUFO_NPU
     // Before GPU warm-up/upload. DIR is data consumed only after ON, never an
     // enabler. The same boundary is exercised by the CPU counter factory.
@@ -1914,37 +1878,8 @@ int RunServe(std::span<const char* const> args) {
                 device_lost.store(true);
                 ShutdownAfterDeviceLoss();
               },
-#ifdef GUFO_NPU
-          .debug_npu_control =
-              [persistent_prefill](std::string_view action) {
-                if (persistent_prefill)
-                  return npu::OperatorControl(persistent_prefill->session(),
-                                              action);
-                auto value = json::Value::object();
-                value["healthy"] = false;
-                value["error"] = "NPU off";
-                return value;
-              },
-#endif
       },
       images);
-#ifdef GUFO_NPU
-  if (server::NpuOperatorListener(debug_hooks, host)) {
-    server.add(
-        "POST", "/debug/npu/stop",
-        [&](const server::HttpRequest&, server::TextGenerationBackend&) {
-          if (!persistent_prefill || !persistent_prefill->ready())
-            return server::HttpResponse{
-                .status = 409,
-                .reason = "Conflict",
-                .body =
-                    "{\"error\":\"NPU off/unhealthy; no unsafe shutdown\"}"};
-          server.request_stop();  // Teardown joins after this request has
-                                  // returned.
-          return server::HttpResponse{.body = "{\"status\":\"stopping\"}"};
-        });
-  }
-#endif
   std::string err;
   if (!server.start(&err)) {
     server::Logger::FlushSync(std::chrono::seconds(2));
@@ -1956,8 +1891,6 @@ int RunServe(std::span<const char* const> args) {
   // after the scheduler records the loss but before a request fires the hook.
   const auto exit_if_device_lost = [&device_lost, &backend] {
     if (device_lost.load() || (backend != nullptr && backend->device_lost())) {
-#ifdef GUFO_NPU
-#endif
       server::Logger::FlushSync(std::chrono::seconds(2));
       ::_exit(kDeviceLostExitStatus);
     }

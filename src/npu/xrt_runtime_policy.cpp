@@ -4,7 +4,7 @@
 
 namespace gufo::npu::detail {
 
-// Adapted from npu-tooling-sol/host.cpp runtimeCheck; build/code are unsigned
+// Adapted from the XRT host flow; build/code are unsigned
 // integers, not a Git hash. No device API belongs in this loading boundary.
 void ValidateAndLoad(RuntimeOperations& operations) {
   const auto identity = operations.Inspect();

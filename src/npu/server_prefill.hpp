@@ -26,7 +26,7 @@ public:
   bool Start();
   NpuSession& session() noexcept { return session_; }
   bool ready() const noexcept {
-    return ready_.load() && session_.Healthy() && !session_.Paused();
+    return ready_.load() && session_.Healthy();
   }
   void Reject(std::string error);
   void Hold(std::string error) noexcept;

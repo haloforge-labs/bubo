@@ -8,7 +8,7 @@ namespace {
 class FakeRuntime final : public gufo::npu::detail::RuntimeOperations {
 public:
   gufo::npu::RuntimeIdentity identity{
-      "C:/Windows/System32/xrt_coreutil.dll",
+      std::filesystem::current_path() / "xrt_coreutil.dll",
       "04a26d37c6e0c713491ad0bfae74ce74ea94c74136d2aa056333616dac6c3a44",
       {32, 0, 20102, 3931}};
   std::array<unsigned, 5> versions{2, 21, 0, 8679, 131093};
@@ -71,7 +71,7 @@ int main() {
     relative.identity.path = "xrt_coreutil.dll";
     Denied(relative, "relative path", 0);
     FakeRuntime name;
-    name.identity.path = "C:/Windows/System32/other.dll";
+    name.identity.path = std::filesystem::current_path() / "other.dll";
     Denied(name, "wrong filename", 0);
     FakeRuntime hash;
     hash.identity.sha256[0] = 'f';

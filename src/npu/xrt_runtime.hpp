@@ -30,7 +30,7 @@ public:
 void ValidateAndLoad(RuntimeOperations& operations);
 }  // namespace detail
 
-// Call only after immutable effective mode authorizes NPU prefill (P4).
+// Call only after immutable effective mode authorizes NPU prefill.
 // No static initializer, environment lookup or implicit device creation.
 void EnsureXrtRuntime();
 

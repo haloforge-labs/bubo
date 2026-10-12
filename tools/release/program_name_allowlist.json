@@ -3096,12 +3096,5 @@
     "count": 1,
     "category": "build-target",
     "reason": "Retained CMake target identity; production Bubo builds require the prepare pin/evidence gate."
-  },
-  {
-    "file": "CMakeLists.txt",
-    "line": "      \"${CMAKE_SOURCE_DIR}/tests/npu/real_engine_barrier_test.py\" \"$<TARGET_FILE:gufo>\")",
-    "count": 1,
-    "category": "build-target",
-    "reason": "Internal executable CMake target for CPU-only real ON barrier refusal; output remains bubo.exe."
   }
 ]

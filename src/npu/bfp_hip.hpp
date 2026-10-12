@@ -6,7 +6,7 @@
 #include "bfp.hpp"
 
 namespace gufo::npu::bfp {
-// Source-compiled only in P6. All spans are DEVICE storage, kept alive until
+// HIP encoding support. All spans are DEVICE storage, kept alive until
 // the stream completes. Caller zeros invalid once per chunk and refuses the
 // chunk after its existing completion wait if any encoder/decoder set it.
 // Stream success alone does not establish finite/valid results.

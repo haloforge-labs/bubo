@@ -4,8 +4,11 @@ import argparse
 import json
 import math
 import re
-from check_brand import check as check_brand
 from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from check_brand import check as check_brand
 
 CLASSES = {'DEFAULT', 'OPTION', 'DEBUG', 'INTERNAL', 'REMOVED', 'OTHER_MODEL'}
 FAMILIES = {'any', 'qwen3.8-flash-next', 'qwen3.8-27b', 'qwen3.6-a3b', 'deepseek-v4-flash', 'minimax-h3', 'qwen-image-2.1', 'qwen3-tts', 'qwen3-asr'}

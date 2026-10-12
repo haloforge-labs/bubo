@@ -19,8 +19,6 @@ using namespace std::chrono_literals;
 int main(int argc, char** argv) {
   assert(argc == 3);
   SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
-  SetEnvironmentVariableA("GUFO_NPU_RUN_DIR", nullptr);
-  SetEnvironmentVariableA("GUFO_NPU_WATCHER_HEARTBEAT", nullptr);
   fake::Reset();
   fake::control.expected_a = 0;
   const std::string mode = argv[1];

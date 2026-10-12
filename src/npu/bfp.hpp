@@ -19,7 +19,7 @@ float Half(std::uint16_t bits);
 // Checked storage bounds, shared by CPU and HIP launch boundaries.
 std::size_t MatrixExtent(std::size_t rows, std::size_t pitch,
                          std::size_t offset, std::size_t columns);
-// Fixed qualified geometry only. CPU FP16 activations; owned P5 Q8_0
+// Fixed qualified geometry only. CPU FP16 activations; owned Q8_0
 // staging, already padded to N rows. Results own their bytes.
 std::vector<std::uint8_t> EncodeA(std::span<const std::uint16_t> input,
                                   std::size_t pitch = K);

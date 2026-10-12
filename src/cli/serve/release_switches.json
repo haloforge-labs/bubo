@@ -358,31 +358,6 @@
       "echo": false
     },
     {
-      "name": "--fabric-peak",
-      "kind": "flag",
-      "class": "OPTION",
-      "model_family": "any",
-      "platform": "any",
-      "requires": [],
-      "values": {
-        "default": null,
-        "subagents": null,
-        "exact": null
-      },
-      "exact_off": false,
-      "inject_with": null,
-      "suppressed_by": [],
-      "purpose": "Opt in to experimental AMD fabric peak mode.",
-      "default_text": "0",
-      "hardware_scope": "generic",
-      "note": "Explicit CLI only; exact and stock reject ON; driver lifecycle remains pending P5.",
-      "built_in": "0",
-      "value_rule": "bool",
-      "aliases": [],
-      "takes_value": false,
-      "echo": false
-    },
-    {
       "name": "--frequency-penalty",
       "kind": "flag",
       "class": "OPTION",
@@ -4167,31 +4142,6 @@
       "suppressed_by": [],
       "purpose": "Select zero through twelve paired query and gate slices.",
       "default_text": "8 within ON",
-      "hardware_scope": "generic",
-      "note": "Only consumed after CLI authorization; partial controls cannot exclude NPU exposure.",
-      "built_in": null,
-      "value_rule": "text",
-      "aliases": [],
-      "takes_value": true,
-      "echo": false
-    },
-    {
-      "name": "GUFO_NPU_ISOLATE",
-      "kind": "env",
-      "class": "OPTION",
-      "model_family": "any",
-      "platform": "any",
-      "requires": [],
-      "values": {
-        "default": null,
-        "subagents": null,
-        "exact": null
-      },
-      "exact_off": false,
-      "inject_with": null,
-      "suppressed_by": [],
-      "purpose": "Parse isolation strictly while retaining private BO copies.",
-      "default_text": "0 within ON",
       "hardware_scope": "generic",
       "note": "Only consumed after CLI authorization; partial controls cannot exclude NPU exposure.",
       "built_in": null,

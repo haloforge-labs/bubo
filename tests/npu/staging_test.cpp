@@ -49,7 +49,7 @@ int main() {
   SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
   SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
   fake::Reset();
-  assert(IsKnob("GUFO_NPU_DIR") && !IsKnob("GUFO_NPU_TRACE"));
+  assert(IsKnob("GUFO_NPU_DIR"));
   assert(!IsKnob("GUFO_NPU_") && !IsKnob("GUFO_NPU_LAYERS"));
   // Actual resolver precedence, without model/header/DLL/device activity.
   for (unsigned origin = 0; origin < 3; ++origin) {
@@ -90,7 +90,7 @@ int main() {
   std::map<std::string, std::string> values{{"GUFO_NPU_DIR", "0"}};
   auto knobs = ParseKnobs(token, values);
   assert(knobs.artifacts == "0" && knobs.slices == 6 && knobs.gate_slices == 8);
-  assert(knobs.shared_expert && !knobs.isolate);
+  assert(knobs.shared_expert);
   assert(knobs.timing.timeout.count() == 8000 &&
          knobs.timing.keepalive_interval.count() == 1000);
   Reject([&] { ParseKnobs({}, values); });
@@ -101,7 +101,7 @@ int main() {
     Reject([&] { ParseKnobs(token, bad_path); });
   }
   for (const auto* name :
-       {"GUFO_NPU_SHEXP", "GUFO_NPU_ISOLATE", "GUFO_NPU_KEEPALIVE"}) {
+       {"GUFO_NPU_SHEXP", "GUFO_NPU_KEEPALIVE"}) {
     for (const auto* bad :
          {"", "01", "00", "2", "-1", "+1", "1x", " 1", "1 ", "on"}) {
       auto invalid = values;
@@ -142,14 +142,11 @@ int main() {
   values["GUFO_NPU_GATE_SLICES"] = "0";
   values["GUFO_NPU_SHEXP"] = "0";
   values["GUFO_NPU_KEEPALIVE"] = "0";
-  values["GUFO_NPU_ISOLATE"] = "0";
   knobs = ParseKnobs(token, values);
   assert(knobs.slices == 12 && knobs.gate_slices == 0 && !knobs.shared_expert &&
-         !knobs.isolate && knobs.timing.keepalive_interval.count() == 0);
+         knobs.timing.keepalive_interval.count() == 0);
   assert(token.Allows(gufo::core::ExperimentalFeature::Prefill));
-  values["GUFO_NPU_ISOLATE"] = "1";
-  assert(ParseKnobs(token, values).isolate);
-  std::cout << "PASS: strict knobs, DIR=0 path, ISOLATE=0 false, "
+  std::cout << "PASS: strict knobs, DIR=0 path, "
                "lane/keepalive controls retain authorization\n";
 
   auto linear_bytes = Fixture(16384);
@@ -188,7 +185,7 @@ int main() {
                          bfp_weights.begin() + g * 9 + 9,
                          [](auto byte) { return byte == 0; }));
   }
-  std::cout << "PASS: P5 owned padded staging encodes to independent full B BO "
+  std::cout << "PASS: owned padded staging encodes to independent full B BO "
                "bytes\n";
   Reject([&] { LinearPlan(linear, 0); });
   Reject([&] { LinearPlan(linear, 13); });

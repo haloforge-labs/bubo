@@ -63,9 +63,6 @@ int main(int argc, char** argv) {
     inputs.environment = gufo::server::SnapshotReleaseEnvironment();
     startup.resolved = gufo::server::ResolveReleaseSettings(inputs);
   }
-  if (entry == "fabric-as-prefill")
-    startup.resolved.prefill_authorization =
-        startup.resolved.fabric_authorization;
   std::cout << "phase=model-create effective="
             << startup.resolved.effective_flags.at("--npu-prefill") << '\n'
             << std::flush;

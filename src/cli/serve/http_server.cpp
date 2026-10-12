@@ -1756,29 +1756,6 @@ void HttpServer::register_routes() {
   add_text("/v1/chat/completions", HandleOpenAiChat);
   add_text("/v1/responses", OpenAiResponses);
   if (options_.debug_hooks && DebugLoopbackListener(host_)) {
-    if (NpuOperatorListener(options_.debug_hooks, host_)) {
-      const auto control =
-          [callback = options_.debug_npu_control](std::string action) {
-            return [callback, action = std::move(action)](
-                       const HttpRequest&, TextGenerationBackend&) {
-              if (!callback)
-                return HttpResponse{
-                    .status = 409,
-                    .reason = "Conflict",
-                    .body = "{\"error\":\"NPU off or unavailable\"}"};
-              auto value = callback(action);
-              auto response = Ok(value);
-              if (!value.find("healthy")->as_bool(false)) {
-                response.status = 409;
-                response.reason = "Conflict";
-              }
-              return response;
-            };
-          };
-      add("GET", "/debug/npu/status", control("status"));
-      add("POST", "/debug/npu/yield", control("yield"));
-      add("POST", "/debug/npu/resume", control("resume"));
-    }
     add("POST", "/debug/prompt", InspectDebugPrompt);
     add("GET", "/debug/cache", [](const HttpRequest&, TextGenerationBackend&) {
       return InvalidCompatibilityRequest("cache inspection is not implemented");
@@ -2029,46 +2006,11 @@ void HttpServer::reap_workers() {
 }
 
 HttpResponse HttpServer::handle_request(const HttpRequest& req) {
-  if (req.path.starts_with("/debug/npu/") &&
-      NpuOperatorListener(options_.debug_hooks, host_)) {
-    unsigned hosts = 0, origins = 0, controls = 0;
-    for (const auto& [name, value] : req.headers) {
-      const auto lower = ToLower(name);
-      hosts += lower == "host";
-      origins += lower == "origin";
-      controls += lower == "x-npu-control";
-    }
-    const auto literal = host_ == "::1" ? "[::1]" : "127.0.0.1";
-    const auto host = req.header("host");
-    if (hosts != 1 || origins != 0 ||
-        (host != literal &&
-         host != literal + std::string(":") + std::to_string(port_)) ||
-        (req.method != "GET" && (req.method != "POST" || controls != 1 ||
-                                 req.header("x-npu-control") != "1")))
-      return Err(403, "Forbidden",
-                 "NPU control requires literal loopback Host, no Origin and "
-                 "X-NPU-Control: 1",
-                 "permission_error", "npu_control_forbidden");
-  }
   if (!IsAuthorized(req, api_key_hash_)) {
     auto response = Err(401, "Unauthorized", "missing or invalid API key",
                         "authentication_error", "invalid_api_key");
     response.headers.emplace_back("WWW-Authenticate", "Bearer");
     return response;
-  }
-  if (req.method == "POST" && options_.debug_npu_control &&
-      (req.path == "/v1/completions" || req.path == "/v1/chat/completions" ||
-       req.path == "/v1/responses")) {
-    const auto status = options_.debug_npu_control("status");
-    if (const auto* paused = status.find("paused");
-        paused && paused->as_bool()) {
-      Logger::Warn(
-          "npu",
-          "model request refused: NPU yielded; explicit resume required");
-      return Err(409, "Conflict",
-                 "NPU yielded; model request refused until explicit resume",
-                 "server_error", "npu_yielded");
-    }
   }
   // `/health` and `/ready` are the native spelling and match llama-server's
   // `/health`. `/healthz` and `/readyz` are aliases so Kubernetes-style probe
@@ -2368,7 +2310,7 @@ void HttpServer::handle_connection(int client_fd) {
     } else if (!ok) {
       resp = Err(400, "Bad Request", "malformed request",
                  "invalid_request_error", "bad_request");
-    } else if (req.method == "OPTIONS" && !req.path.starts_with("/debug/npu/")) {
+    } else if (req.method == "OPTIONS") {
       resp = {.status = 204, .reason = "No Content"};
     } else {
       // A client without the API key cannot write into the trace.
@@ -2380,8 +2322,6 @@ void HttpServer::handle_connection(int client_fd) {
       resp = handle_request(req);
     }
 
-    if (req.path.starts_with("/debug/npu/"))
-      resp.omit_cors = true;
     resp.headers.emplace_back("X-Request-ID", req.request_id);
     response_status = resp.status;
     bool connected = true;
@@ -2509,7 +2449,6 @@ void HttpServer::handle_connection(int client_fd) {
     }
     HttpResponse resp = Err(exception.http_status(), reason, exception.what(),
                             "server_error", exception.stable_code());
-    resp.omit_cors = req.path.starts_with("/debug/npu/");
     resp.headers.emplace_back("X-Request-ID", req.request_id);
     if (exception.retryable()) {
       resp.headers.emplace_back("Retry-After", "1");
@@ -2529,7 +2468,6 @@ void HttpServer::handle_connection(int client_fd) {
     HttpResponse resp = Err(500, "Internal Server Error",
                             *e.what() ? e.what() : "generation failed",
                             "internal_error", "server_exception");
-    resp.omit_cors = req.path.starts_with("/debug/npu/");
     resp.headers.emplace_back("X-Request-ID", req.request_id);
     // The exception text was not logged (10-09 L4 arm A: HTTP 500 at ~1 GB host memory left, cause invisible): add a control-free, 200-char copy.
     std::string error_text = e.what();
@@ -2551,7 +2489,6 @@ void HttpServer::handle_connection(int client_fd) {
     HttpResponse resp =
         Err(500, "Internal Server Error", "unknown server error",
             "internal_error", "server_exception");
-    resp.omit_cors = req.path.starts_with("/debug/npu/");
     resp.headers.emplace_back("X-Request-ID", req.request_id);
     Logger::LogRequest(req.request_id, req.method, req.path,
                        response_started ? response_status : resp.status,

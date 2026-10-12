@@ -17,7 +17,7 @@ namespace gufo::npu {
 struct Knobs {
   std::filesystem::path artifacts;
   unsigned slices = 6, gate_slices = 8;
-  bool shared_expert = true, isolate = false;
+  bool shared_expert = true;
   Timing timing;
 };
 bool IsKnob(std::string_view name) noexcept;
@@ -47,7 +47,7 @@ std::vector<WeightSlice> GatePlan(const Q8Matrix& weights, unsigned slices,
 std::vector<WeightSlice> SharedPlan(const Q8Matrix& gate, const Q8Matrix& up,
                                     bool enabled);
 // Packed Q8_0 rows, zero-padded to 1024 x 2560, NOT an encoded XRT B BO.
-// P6 encodes these bytes; P7/P8 register/consume them with session fences.
+// BFP encoding and session fences protect the staged bytes.
 std::vector<std::byte> StageQ8(const Q8Matrix& weights,
                                const WeightSlice& slice);
 bool QualifiedPrefill(std::uint64_t tokens,

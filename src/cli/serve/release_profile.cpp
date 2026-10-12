@@ -319,13 +319,9 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
                              core::ExperimentalFeature feature) {
     const auto found = inputs.explicit_flags.find(flag);
     const bool present = found != inputs.explicit_flags.end();
-    const std::string value = present                   ? found->second
-                              : flag == "--fabric-peak" ? "0"
-                                                        : "off";
-    const bool requested =
-        flag == "--fabric-peak" ? value == "1" : value == "on";
-    if ((flag == "--npu-prefill" && value != "off" && value != "on") ||
-        (flag == "--fabric-peak" && value != "0" && value != "1"))
+    const std::string value = present ? found->second : "off";
+    const bool requested = value == "on";
+    if (value != "off" && value != "on")
       throw std::invalid_argument(flag + ": invalid value '" + value + "'");
     std::string reason =
         present ? "explicit CLI OFF" : "no explicit CLI authorization";
@@ -344,8 +340,6 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
   };
   result.prefill_authorization =
       authorize("--npu-prefill", core::ExperimentalFeature::Prefill);
-  result.fabric_authorization =
-      authorize("--fabric-peak", core::ExperimentalFeature::FabricPeak);
   const bool exact_controls =
       inputs.profile == "exact" && inputs.model_family == "qwen3.8-flash-next";
   std::map<std::string, ReleaseSetting> settings;
@@ -380,15 +374,10 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
         name, Text(row, "built_in"), "built-in", row.member_str("class"), {}};
     // These options are CLI-only for every model family. A manifest or
     // environment entry named like a flag can never become an authorization.
-    if (name == "--npu-prefill" || name == "--fabric-peak") {
-      const auto& authorization = name == "--npu-prefill"
-                                      ? result.prefill_authorization
-                                      : result.fabric_authorization;
-      const bool on = authorization.Allows(
-          name == "--npu-prefill" ? core::ExperimentalFeature::Prefill
-                                  : core::ExperimentalFeature::FabricPeak);
-      setting.value =
-          name == "--npu-prefill" ? (on ? "on" : "off") : (on ? "1" : "0");
+    if (name == "--npu-prefill") {
+      const auto& authorization = result.prefill_authorization;
+      const bool on = authorization.Allows(core::ExperimentalFeature::Prefill);
+      setting.value = on ? "on" : "off";
       setting.origin =
           inputs.explicit_flags.contains(name) ? "flag" : "built-in";
       settings.emplace(name, std::move(setting));
@@ -774,9 +763,6 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
   result.logs.push_back(
       "npu-prefill=" + result.effective_flags.at("--npu-prefill") +
       "; reason=" + result.prefill_authorization.reason());
-  result.logs.push_back(
-      "fabric-peak=" + result.effective_flags.at("--fabric-peak") +
-      "; reason=" + result.fabric_authorization.reason());
   return result;
 }
 void ApplyInjections(const ReleaseResolution& resolved) {
@@ -857,8 +843,7 @@ ReleaseStartup PrepareReleaseSettings(
              row.member_str("name").starts_with("--no-") ||
              Has(row.member_str("name"),
                  {"--exact", "--print-effective-settings",
-                  "--allow-unmeasured-memory", "--npu-prefill",
-                  "--fabric-peak"}))) {
+                  "--allow-unmeasured-memory", "--npu-prefill"}))) {
           option = &row;
           break;
         }
@@ -930,8 +915,7 @@ ReleaseStartup PrepareReleaseSettings(
       return startup;
     if (modality != "llm") {
       if ((inputs.explicit_flags.contains("--npu-prefill") &&
-           inputs.explicit_flags.at("--npu-prefill") != "off") ||
-          inputs.explicit_flags.contains("--fabric-peak"))
+           inputs.explicit_flags.at("--npu-prefill") != "off"))
         throw std::invalid_argument(
             "experimental ON requires serve llm; effective=off");
       return startup;
@@ -1087,9 +1071,6 @@ json::Value ReleaseSettingsJson(const ReleaseResolution& resolved) {
       resolved.prefill_authorization.Allows(core::ExperimentalFeature::Prefill)
           ? json::Value()
           : json::Value(resolved.prefill_authorization.reason());
-  experimental["fabric_peak"] =
-      resolved.effective_flags.at("--fabric-peak") == "1";
-  experimental["fabric_deny_reason"] = resolved.fabric_authorization.reason();
   output["experimental"] = std::move(experimental);
   output["architecture"] = resolved.architecture.empty()
                                ? json::Value()

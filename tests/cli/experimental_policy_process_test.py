@@ -9,7 +9,7 @@ import tempfile
 
 host, mode = sys.argv[1:3]
 flags = 0x08004000 if os.name == 'nt' else 0
-with tempfile.TemporaryDirectory(prefix='p4-policy-') as directory:
+with tempfile.TemporaryDirectory(prefix='prefill-policy-') as directory:
     root = Path(directory)
     header = root / 'metadata-only.gguf'
     def string(value):
@@ -25,7 +25,7 @@ with tempfile.TemporaryDirectory(prefix='p4-policy-') as directory:
         count += 1
         counter = root / f'counter-{count}.txt'
         manifest = root / f'manifest-{count}.json'
-        data = {'--npu-prefill': 'on', '--fabric-peak': '1'} if manifest_on else {}
+        data = {'--npu-prefill': 'on'} if manifest_on else {}
         if source in ('manifest', 'both'):
             data['GUFO_NPU_DIR'] = path
         manifest.write_text(json.dumps(data))
@@ -61,8 +61,6 @@ with tempfile.TemporaryDirectory(prefix='p4-policy-') as directory:
             case(profile, source, entry='noncli')
     if mode == 'ON':
         case('default', 'both', 'on', entry='noncli')
-    case('default', 'both', entry='fabric-as-prefill', extra=('--fabric-peak',))
-    print('PASS: fabric authorization cannot authorize a prefill factory')
     for value in ('', 'ON', '0', '1', 'onx', ' on', 'off '):
         # Malformed values must fail at the resolver, without a factory call.
         counter = root / 'malformed-counter.txt'
@@ -72,12 +70,6 @@ with tempfile.TemporaryDirectory(prefix='p4-policy-') as directory:
                            text=True, capture_output=True, timeout=15, creationflags=flags)
         assert r.returncode == 2 and 'invalid value' in r.stdout and not counter.exists(), r.stdout
     print('PASS: strict off|on parsing rejects seven malformed variants before Create')
-    for profile in ('exact', 'stock'):
-        counter = root / 'fabric-counter.txt'
-        r = subprocess.run([host, 'cli', str(counter), str(manifest), '--profile', profile, '--fabric-peak'],
-                           text=True, capture_output=True, timeout=15, creationflags=flags)
-        assert r.returncode == 2 and '--fabric-peak effective=off' in r.stdout and not counter.exists(), r.stdout
-    print('PASS: fabric-peak exact/stock rejection; manifest never enables it')
     for profile in ('exact', 'stock', 'default'):
         if profile == 'default' and mode == 'ON':
             continue
@@ -87,7 +79,7 @@ with tempfile.TemporaryDirectory(prefix='p4-policy-') as directory:
         assert r.returncode == 2 and 'effective=off' in r.stdout and 'model header' not in r.stdout, r.stdout
     print('PASS: forbidden ON is rejected before model-header inspection')
     for modality in ('video', 'image', 'tts', 'asr'):
-        for option in (['--npu-prefill','on'], ['--fabric-peak']):
+        for option in (['--npu-prefill','on'],):
             r = subprocess.run([host, 'cli', str(counter), str(manifest), modality,
                                 '--profile', 'exact', *option], text=True, capture_output=True,
                                timeout=15, creationflags=flags)

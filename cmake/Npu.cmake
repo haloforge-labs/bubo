@@ -7,9 +7,9 @@ if(NOT WIN32)
   message(FATAL_ERROR "GUFO_ENABLE_NPU currently requires Windows x64")
 endif()
 
-# Reuse the tooling job's one XRT layer. No downloads or SDK installation.
+# Supply the pinned XRT headers and generated import library.
 set(GUFO_XRT_TOOLING_ROOT
-  "<local path>"
+  ""
   CACHE PATH "Pinned CPU tooling output with XRT headers and import library")
 set(GUFO_XRT_INCLUDE_DIR
   "${GUFO_XRT_TOOLING_ROOT}/XRT/src/runtime_src/core/include"
@@ -35,8 +35,7 @@ if(NOT xrt_rc EQUAL 0 OR
   message(FATAL_ERROR "GUFO_ENABLE_NPU requires pinned XRT headers at 15e6319")
 endif()
 
-# Tooling may be refreshed by a later preparation job. Freeze its import
-# library for this configuration instead of linking a changing external file.
+# Snapshot the import library for this configuration.
 set(xrt_snapshot "${CMAKE_BINARY_DIR}/npu-xrt/xrt_coreutil.lib")
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/npu-xrt")
 file(COPY_FILE "${GUFO_XRT_IMPORT_LIBRARY}" "${xrt_snapshot}")
@@ -51,13 +50,13 @@ file(WRITE "${CMAKE_BINARY_DIR}/npu-xrt/import-library.sha256"
 add_library(npu_runtime OBJECT
   src/npu/xrt_runtime_windows.cpp src/npu/xrt_runtime_policy.cpp
   src/npu/private_bo_adapter.cpp src/npu/session.cpp
-  src/npu/server_prefill.cpp src/npu/staging.cpp src/npu/fabric_peak.cpp
+  src/npu/server_prefill.cpp src/npu/staging.cpp
   src/npu/bfp.cpp src/npu/linear_z.cpp src/npu/projection.cpp)
 target_include_directories(npu_runtime PRIVATE "${CMAKE_SOURCE_DIR}")
 target_include_directories(npu_runtime SYSTEM PRIVATE
   "${GUFO_XRT_GENERATED_INCLUDE_DIR}" "${GUFO_XRT_INCLUDE_DIR}")
 target_compile_definitions(npu_runtime PRIVATE _ITERATOR_DEBUG_LEVEL=0)
-# The real layer has no XRT C++ class replacements. P2 uses these same headers.
+# Use the same XRT class declarations throughout the runtime.
 add_library(npu_xrt INTERFACE)
 target_include_directories(npu_xrt SYSTEM INTERFACE
   "${GUFO_XRT_GENERATED_INCLUDE_DIR}" "${GUFO_XRT_INCLUDE_DIR}")
@@ -72,7 +71,7 @@ function(npu_attach_runtime target)
   target_link_libraries(${target} PRIVATE npu_xrt)
 endfunction()
 
-# P6: source compilation only; G4 first qualifies GPU numerical correctness.
+# HIP encoding and transfer support.
 if(ENGINE_ENABLE_HIP)
   add_library(npu_bfp_hip OBJECT src/npu/bfp.hip.cpp src/npu/linear_z_hip.cpp)
   set_source_files_properties(src/npu/bfp.hip.cpp PROPERTIES LANGUAGE HIP)
@@ -80,10 +79,3 @@ if(ENGINE_ENABLE_HIP)
   target_include_directories(npu_bfp_hip PRIVATE "${CMAKE_SOURCE_DIR}")
   target_link_libraries(npu_bfp_hip PRIVATE hip::host)
 endif()
-
-# Independent observer has no XRT header, import library, runtime loader or
-# GPU/model dependency. Install beside the host; CreateProcess uses that path.
-add_executable(bubo-npu-watchdog tools/npu/watchdog.cpp src/npu/trace_windows.cpp)
-target_include_directories(bubo-npu-watchdog PRIVATE "${CMAKE_SOURCE_DIR}")
-target_link_libraries(bubo-npu-watchdog PRIVATE gufo_logging)
-install(TARGETS bubo-npu-watchdog RUNTIME DESTINATION bin)

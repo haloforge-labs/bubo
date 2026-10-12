@@ -46,7 +46,6 @@ struct ReleaseSetting {
 };
 struct ReleaseResolution {
   core::ExperimentalAuthorization prefill_authorization;
-  core::ExperimentalAuthorization fabric_authorization;
   std::string profile;
   std::vector<ReleaseSetting> settings;
   std::vector<ReleaseSetting> injections;

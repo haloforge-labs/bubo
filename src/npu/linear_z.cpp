@@ -108,9 +108,9 @@ LinearZWork::LinearZWork(std::shared_ptr<const LinearZWeights> weights,
           info.group = static_cast<int>(g);
           auto r = dispatch(std::as_bytes(inputs[g]),
                             std::as_bytes(std::span(weights->b[s])), info);
-          result.owner_recovery = r.owner_recovery;
+          result.dma_uncertain = r.dma_uncertain;
           if (!r.submitted || !r.executed || !r.healthy || !r.result_valid ||
-              r.owner_recovery || r.output.size() != bfp::CBytes)
+              r.dma_uncertain || r.output.size() != bfp::CBytes)
             throw std::runtime_error("NPU linear result rejected: " + r.error);
           bfp::DecodeC({reinterpret_cast<const std::uint8_t*>(r.output.data()),
                         r.output.size()},

@@ -21,7 +21,6 @@ Empty environment values count as unset and produce a warning.
 | `--draft-head-model` | Select the prepared MTP draft head. | Unset | Select the prepared MTP draft head. | any; strix-halo-tuned; qwen3.8-flash-next |
 | `--draft-tokens` | Set the maximum speculative draft length. | 7 | Keep seven tokens unless speculative draft length tests require another value. | any; generic; qwen3.8-flash-next |
 | `--exact` | Select the exact profile. | Unset | Enable it when output must repeat with the same build, prompt, and seed. | any; generic; any |
-| `--fabric-peak` | Opt in to experimental AMD fabric peak mode. | 0 | Explicit CLI only; exact and stock reject ON; driver lifecycle remains pending P5. | any; generic; any |
 | `--frequency-penalty` | Penalize tokens by their generated occurrence count. | 0.0 (off) | Keep zero unless the task needs fewer frequently repeated tokens. | any; generic; any |
 | `--host` | Set the server listen address. | 127.0.0.1 | Keep the local address unless remote clients must connect to the server. | any; generic; any |
 | `--log-level` | Set the amount of server log detail. | info | Keep info unless diagnosis requires debug messages or normal operation needs fewer messages. | any; generic; any |
@@ -103,7 +102,6 @@ Empty environment values count as unset and produce a warning.
 | `GUFO_MODEL_SUPPRESS_TOKENS` | Enable model token suppression. | off | Keep it off unless model token suppression is required. | any; generic; qwen3.8-flash-next |
 | `GUFO_NPU_DIR` | Locate NPU artifacts after explicit CLI authorization. | Unset | A path only, including 0; cannot enable NPU mode. | any; generic; any |
 | `GUFO_NPU_GATE_SLICES` | Select zero through twelve paired query and gate slices. | 8 within ON | Only consumed after CLI authorization; partial controls cannot exclude NPU exposure. | any; generic; any |
-| `GUFO_NPU_ISOLATE` | Parse isolation strictly while retaining private BO copies. | 0 within ON | Only consumed after CLI authorization; partial controls cannot exclude NPU exposure. | any; generic; any |
 | `GUFO_NPU_KEEPALIVE` | Enable periodic heartbeat with literal zero or one. | 1 within ON | Only consumed after CLI authorization; partial controls cannot exclude NPU exposure. | any; generic; any |
 | `GUFO_NPU_KEEPALIVE_MS` | Set heartbeat interval to zero or one hundred through sixty thousand milliseconds. | 1000 within ON | Only consumed after CLI authorization; partial controls cannot exclude NPU exposure. | any; generic; any |
 | `GUFO_NPU_SHEXP` | Enable shared expert staging with literal zero or one. | 1 within ON | Only consumed after CLI authorization; partial controls cannot exclude NPU exposure. | any; generic; any |
@@ -191,10 +189,6 @@ Use `--print-effective-settings` to inspect settings without loading tensors or 
 | `GUFO_MEM_ACCOUNTING` | Control mem accounting. | off | Inventory classification. | any; generic; any |
 | `GUFO_MOE_BENCH` | Control moe bench. | off | Inventory classification. | any; generic; qwen3.8-flash-next |
 | `GUFO_MTP_TRACE` | Write one trace line for each decode cycle. | off | Trace output uses bounded asynchronous logging. Synchronous trace output can reduce decode speed. | any; generic; qwen3.8-flash-next |
-| `GUFO_NPU_RUN_DIR` | Pass the launcher evidence folder after explicit NPU authorization. | Unset | Existing C: folder and context.json required; does not enable NPU. | any; generic; any |
-| `GUFO_NPU_STAGE` | Label the explicitly authorized native NPU run. | Unset | Internal launcher stage label; cannot enable NPU or skip evidence. | any; generic; any |
-| `GUFO_NPU_TRACE` | Enable detailed NPU dispatch checksums with literal zero or one. | 0 within ON | Only consumed after CLI authorization; partial controls cannot exclude NPU exposure. | any; generic; any |
-| `GUFO_NPU_WATCHER_HEARTBEAT` | Pass the separate watcher heartbeat file after explicit NPU authorization. | Unset | Must be run-folder watcher.ready, live and younger than five seconds; cannot bypass the barrier. | any; generic; any |
 | `GUFO_PLATFORM_TUNING` | Control Windows timing and memory placement switches. | All switches on on Windows | GUFO_PLATFORM_TUNING=none is a diagnostic that slows Windows decode. | windows; generic; any |
 | `GUFO_PREFILL_DIAG` | Control prefill diag. | off | Inventory classification. | any; generic; qwen3.8-flash-next |
 | `GUFO_REQUIRE_GFX1151` | Control require hip. | off | Inventory classification. | any; generic; any |

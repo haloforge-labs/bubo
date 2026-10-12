@@ -35,16 +35,9 @@ struct DispatchInfo {
 };
 struct NpuResult {
   bool submitted = false, executed = false, healthy = false;
-  bool result_valid = false, owner_recovery = false;
+  bool result_valid = false, dma_uncertain = false;
   std::string error;
   std::vector<std::byte> output;
-};
-
-struct KeepaliveStatus {
-  bool healthy = false, paused = false;
-  std::uint64_t heartbeat_submitted = 0, heartbeat_completed = 0;
-  std::uint64_t prefill_submitted = 0, prefill_completed = 0;
-  bool yield_expired = false;
 };
 
 class NpuSession {
@@ -55,7 +48,6 @@ public:
   NpuSession& operator=(const NpuSession&) = delete;
   NpuResult Start();
   bool Healthy() const noexcept;
-  bool Paused() const noexcept;
   std::chrono::milliseconds Timeout() const noexcept;
   bool DispatchBatch(
       std::span<const std::byte> a,
@@ -65,9 +57,7 @@ public:
   void PrepareWeight(std::span<const std::byte> b);
   NpuResult Dispatch(std::span<const std::byte> a, std::span<const std::byte> b,
                      DispatchInfo info);
-  NpuResult YieldKeepalive(bool pause);
-  KeepaliveStatus Status() const noexcept;
-  NpuResult RejectResult(std::string error, bool owner_recovery = false);
+  NpuResult RejectResult(std::string error);
   NpuResult Shutdown();
 
 private:

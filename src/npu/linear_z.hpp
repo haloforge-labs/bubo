@@ -48,7 +48,7 @@ using PackedConsumer =
     std::function<void(std::size_t, std::size_t, std::span<const std::byte>)>;
 struct LinearZResult {
   bool valid = false;
-  bool owner_recovery = false;
+  bool dma_uncertain = false;
   std::string error;
   // [tokens][tail columns], z plus optional trailing QKV for slices 7..12.
   std::vector<float> tail;

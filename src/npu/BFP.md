@@ -1,37 +1,21 @@
-# P6 BFP contract
+# BFP encoding
 
-Selective source adaptation from `mikealanni/gufo` commit
-`8e0fb1dedbc06c2b9d2ed6cc429cc394b840dee7`, MIT, specifically
-`kernels.hip.cpp` BFP group math and A/B/C stream coordinates. No unrelated
-GPU optimization, executor, XRT wrapper, AIE source or binary was copied.
-Existing MIT and AIE Apache-2.0 WITH LLVM-exception notices remain intact.
+The group math and stream coordinates adapt kernels.hip.cpp from the MIT
+mikealanni/gufo fork. See NOTICES.md for MIT and external mlir-aie
+Apache-2.0 WITH LLVM-exception attribution.
 
-Only the artifact's full M=4096, K=2560, N=1024 geometry is supported.
-Each group contains a raw shared FP32 exponent and eight signed mantissas:
-`q * 2^(e-127) / 64`. Encoding uses nearest-even then clamps to [-128,127].
-The fork's exponent-below-7 flush is retained. NaN/Inf and groups which
-decode outside finite FP32 are refused, including exponent 254 / -128.
-Zero groups are nine zero bytes. This is approximate arithmetic.
+The fixed geometry is M=4096, K=2560, N=1024. Each group has a shared
+exponent and eight signed mantissas: q * 2^(e-127) / 64.
+Encoding rounds to nearest even, clamps to [-128,127] and retains the
+exponent-below-seven flush. Nonfinite inputs and decoded results are rejected.
+This arithmetic is approximate.
 
-CPU EncodeA reads FP16 rows with checked pitch. EncodeB reads exactly the
-owned, padded Q8_0 bytes returned by P5 StageQ8, producing an independent
-2,949,120-byte B stream. A is 11,796,480 bytes and C is 4,718,592 bytes.
-DecodeC validates all stream groups before writing a pitched FP32 output;
-valid_cols is 1..1024, with partial groups masked per element. Input/output
-storage must be disjoint. Accumulation retains the caller's FP32 addition;
-callers must check final finite results before using them.
+EncodeA accepts pitched FP16 rows; EncodeB accepts padded CPU Q8_0 rows.
+The A, B and C streams occupy 11,796,480, 2,949,120 and 4,718,592 bytes.
+DecodeC checks stream groups before writing pitched FP32 output.
+Input and output storage must be disjoint.
 
-HIP counterparts compile in ON + ENGINE_ENABLE_HIP only, with no fast-math
-addition. They are linked only into the inference engine, not CPU test hosts.
-No GPU correctness is established by compilation or CPU tests. First device
-validation is G4. Scalar loads/stores avoid inherited vector-alignment and
-tail assumptions; their performance is unmeasured.
-
-P7/P8 must keep input, output and the device invalid flag alive through stream
-completion and the first-consumer fence. Zero the invalid flag before launch,
-check the returned HIP status, then read/check the flag after completion. A
-nonzero flag invalidates the entire operation, including any partial output.
-HIP success alone is not a result-valid state. Check finite accumulated
-outputs as well. Registration, dispatch, fallback, consumer fences, trace
-checksums and lane integration belong to P7/P8, not this packet. Use the
-single existing private-BO adapter; no HIP/XRT userptr alias is authorized.
+HIP storage and the invalid flag remain alive through stream completion.
+The invalid flag is reset before launch and checked before results are consumed.
+CPU and fake-device tests cover layout and validation; they do not establish
+hardware numerical correctness or performance.

@@ -59,7 +59,7 @@ void SliceCount(unsigned slices, bool zero) {
 bool IsKnob(std::string_view name) noexcept {
   return name == "GUFO_NPU_DIR" || name == "GUFO_NPU_SLICES" ||
          name == "GUFO_NPU_GATE_SLICES" || name == "GUFO_NPU_SHEXP" ||
-         name == "GUFO_NPU_ISOLATE" || name == "GUFO_NPU_TIMEOUT_MS" ||
+         name == "GUFO_NPU_TIMEOUT_MS" ||
          name == "GUFO_NPU_KEEPALIVE" || name == "GUFO_NPU_KEEPALIVE_MS";
 }
 
@@ -78,9 +78,6 @@ Knobs ParseKnobs(const core::ExperimentalAuthorization& authorization,
   knobs.slices = Number(values, "GUFO_NPU_SLICES", 6, 1, 12);
   knobs.gate_slices = Number(values, "GUFO_NPU_GATE_SLICES", 8, 0, 12);
   knobs.shared_expert = Switch(values, "GUFO_NPU_SHEXP", true);
-  knobs.isolate = Switch(values, "GUFO_NPU_ISOLATE", false);
-  // Both isolation values use the qualified private-copy adapter. There is
-  // no userptr/shared HIP mapping in this Windows port.
   (void)Switch(values, "GUFO_NPU_KEEPALIVE", true);
   knobs.timing = ParseTiming(Value(values, "GUFO_NPU_TIMEOUT_MS"),
                              Value(values, "GUFO_NPU_KEEPALIVE"),

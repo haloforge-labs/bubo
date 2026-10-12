@@ -115,7 +115,7 @@ FARPROC WINAPI VerifiedDelayHook(unsigned notification, PDelayLoadInfo info) {
     return nullptr;
   }
   if (notification == dliNotePreLoadLibrary) {
-    // Never fall back to the delay helper's DLL search. P2 calls Ensure before
+    // Never fall back to the delay helper's DLL search. Call Ensure before
     // any XRT API, including construction. A forgotten guard fails closed.
     Require(runtime_module != nullptr,
             "NPU XRT API reached before verified runtime loading");

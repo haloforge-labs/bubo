@@ -226,7 +226,7 @@ int main(int argc, char** argv) {
           if (fault == 3)
             r.result_valid = false;
           if (fault == 4)
-            r.owner_recovery = true;
+            r.dma_uncertain = true;
           if (fault == 5)
             r.output.pop_back();
           if (fault == 6)
@@ -285,8 +285,6 @@ int main(int argc, char** argv) {
   {
     fake::Reset();
     fake::control.expected_a = 0;
-    SetEnvironmentVariableA("GUFO_NPU_RUN_DIR", nullptr);
-    SetEnvironmentVariableA("GUFO_NPU_WATCHER_HEARTBEAT", nullptr);
     SessionOptions options;
     options.authorization =
         gufo::core::ExperimentalAuthorization::FakePrefill();

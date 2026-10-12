@@ -13,7 +13,7 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs&);
 }  // namespace gufo::server
 
 namespace gufo::core {
-enum class ExperimentalFeature { Prefill, FabricPeak };
+enum class ExperimentalFeature { Prefill };
 
 // A value capability: only the validated release resolver can authorize it.
 // Default construction is denied, including all non-CLI model-create callers.
@@ -31,9 +31,6 @@ public:
   }
 #ifdef GUFO_NPU_TESTING
   // Fake-XRT targets only. Never compiled into the product/counter host.
-  static ExperimentalAuthorization FakeFabric() {
-    return {ExperimentalFeature::FabricPeak, true, "fake clock test"};
-  }
   static ExperimentalAuthorization FakePrefill() {
     return {ExperimentalFeature::Prefill, true, "fake-XRT test"};
   }

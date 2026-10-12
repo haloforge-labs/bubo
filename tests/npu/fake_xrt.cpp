@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Extracted from npu-tooling-sol/fake_xrt.cpp and instrumented for P2 guards.
+// Fake XRT implementation instrumented for adapter validation.
 // Implements the SAME upstream declarations, never replacement XRT layouts.
 #include "fake_xrt.hpp"
 

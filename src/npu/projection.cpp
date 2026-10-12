@@ -132,9 +132,9 @@ ProjectionWork::ProjectionWork(std::shared_ptr<const ProjectionWeights> w,
                           : (s == 0 ? "shared-gate" : "shared-up");
           auto r = dispatch(std::as_bytes(inputs[g]),
                             std::as_bytes(std::span(w->b[s])), info);
-          result.owner_recovery = r.owner_recovery;
+          result.dma_uncertain = r.dma_uncertain;
           if (!r.submitted || !r.executed || !r.healthy || !r.result_valid ||
-              r.owner_recovery || r.output.size() != bfp::CBytes)
+              r.dma_uncertain || r.output.size() != bfp::CBytes)
             throw std::runtime_error("NPU projection result rejected: " +
                                      r.error);
           const unsigned valid = w->lane == Lane::QueryGate ? kN : w->rows;

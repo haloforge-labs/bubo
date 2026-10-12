@@ -7,7 +7,7 @@
 #include "server_prefill.hpp"
 
 namespace gufo::npu {
-// Source-compiled bridge only. Device numerical/coherency validation is G4.
+// Stream-ordered activation and result transfer bridge.
 // Mapped pages live with the service; the stream orders producer, worker wait,
 // decode and consumers. The host checks completion once per chunk.
 class HipLinearZTransfer final : public LinearZTransfer {

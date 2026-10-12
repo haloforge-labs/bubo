@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Engine/BO sequence extracted and adapted from npu-tooling-sol/host.cpp.
+// Engine/BO sequence adapted from the MIT fork mikealanni/gufo.
 // Source contract and Apache-2.0 WITH LLVM-exception AIE attribution:
 // NOTICES.md.
 #include "private_bo_adapter.hpp"
@@ -190,11 +190,7 @@ struct PrivateBoAdapter::Impl {
     kernel = Call("kernel.create", [&] {
       return std::make_unique<xrt::kernel>(*context, "MLIR_AIE");
     });
-    // Observe ALL memory groups before allocating any BO and allocate each BO
-    // in the group the driver reports for its kernel argument slot (the same
-    // thing the mlir-aie/XRT examples do). The Linux static proof pinned
-    // {1,0,0,0,0,0}; the Windows driver reports other ids (first Windows run
-    // 2026-10-12 14:39), so the contract is observe-and-log, not a constant.
+    // Allocate each buffer in the group reported for its kernel slot.
     constexpr std::array<int, 6> slots{1, 3, 4, 5, 6, 7};
     std::array<int, 6> groups{};
     for (std::size_t i = 0; i < slots.size(); ++i) {

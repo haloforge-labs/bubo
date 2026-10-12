@@ -12,8 +12,6 @@
 
 namespace gufo::server {
 
-inline bool NpuOperatorListener(bool hooks, std::string_view host);
-
 inline bool DebugLoopbackListener(std::string_view host) {
   if (host == "localhost" || host == "::1")
     return true;
@@ -31,10 +29,6 @@ inline bool DebugLoopbackListener(std::string_view host) {
       host.remove_prefix(end + 1);
   }
   return octets[0] == 127;
-}
-
-inline bool NpuOperatorListener(bool hooks, std::string_view host) {
-  return hooks && host != "localhost" && DebugLoopbackListener(host);
 }
 
 // Parse alongside the existing body, so an ordinary request needs no second

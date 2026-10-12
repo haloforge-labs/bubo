@@ -251,7 +251,7 @@ int main(int argc, char** argv) {
           if (field == 3)
             r.result_valid = false;
           if (field == 4)
-            r.owner_recovery = true;
+            r.dma_uncertain = true;
           if (field == 5)
             r.output.clear();
           if (field == 6)
@@ -264,7 +264,7 @@ int main(int argc, char** argv) {
     auto r = FinishProjection(*work, t, 18);
     assert(!r.valid && r.tail.empty() && !t.uploads &&
            (calls == 1 || (field == 6 && calls == 2)) && rejected == 1);
-    assert(r.owner_recovery == (field == 4));
+    assert(r.dma_uncertain == (field == 4));
   }
   Transfer invalid;
   invalid.invalid = true;
@@ -344,8 +344,6 @@ int main(int argc, char** argv) {
   {
     fake::Reset();
     fake::control.expected_a = 0;
-    SetEnvironmentVariableA("GUFO_NPU_RUN_DIR", nullptr);
-    SetEnvironmentVariableA("GUFO_NPU_WATCHER_HEARTBEAT", nullptr);
     SessionOptions options;
     options.authorization =
         gufo::core::ExperimentalAuthorization::FakePrefill();

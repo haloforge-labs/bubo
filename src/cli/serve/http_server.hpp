@@ -104,8 +104,6 @@ struct HttpServerOptions {
   /// a lost device. Health, readiness and generation answer 503 `device_lost`
   /// from then on; the hook decides how the process exits.
   std::function<void()> on_device_lost{};
-  // Invoked only by debug routes on a numeric loopback listener.
-  std::function<json::Value(std::string_view)> debug_npu_control{};
 };
 
 /// Minimal bounded HTTP/1.1 server for trusted-LAN model serving.
