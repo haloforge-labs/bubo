@@ -9,12 +9,21 @@ Bubo does not include AMD files or model weights.
 NEEDS
   - Microsoft VC++ v14 x64 Redistributable installed separately:
     https://aka.ms/vs/17/release/vc_redist.x64.exe
-    Bubo checks for it and never downloads or installs it.
+    Install the VC++ v14 x64 Redistributable before the PREPARE steps.
+    start.cmd and tools\windows\start.ps1 check before invoking bubo.exe;
+    they print the link above when the prerequisite is missing.
+    Bubo never downloads or installs the redistributable.
   - Windows 11 and an AMD Strix Halo gfx1151 GPU for inference.
   - A current AMD Software: Adrenalin Edition driver installed separately.
   - Local disk space for the prepared runtime and eight-file model package.
 
 PREPARE
+  Install the VC++ v14 x64 Redistributable first:
+    https://aka.ms/vs/17/release/vc_redist.x64.exe
+  There is no checking script entry point for prepare. bubo.exe links the CRT
+  dynamically: a direct bubo.exe prepare with the CRT missing shows a Windows
+  loader error before main(), so prepare cannot print the installation link.
+  Its in-process check is a second line of defence for partially missing CRT.
   Extract the archive to a per-user folder. Open a terminal in bin\ and run:
     .\bubo.exe prepare runtime
     .\bubo.exe prepare model --output "D:\BuboData"

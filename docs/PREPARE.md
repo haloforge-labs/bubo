@@ -1,5 +1,14 @@
 # Prepare runtime and model files on Windows
 
+Install the VC++ v14 x64 Redistributable
+(https://aka.ms/vs/17/release/vc_redist.x64.exe) before these PREPARE steps.
+It is a prerequisite and is never shipped or downloaded by Bubo. There is no
+checking script entry point for prepare: `bubo.exe` links the CRT dynamically,
+so direct `bubo.exe prepare` with the CRT missing shows a Windows loader error
+before `main()`. The in-process check only adds protection when some CRT parts
+are missing. `start.cmd` and `tools\windows\start.ps1` check before launching
+the executable and can print the installation link.
+
 `bubo prepare runtime` downloads the three pinned AMD ROCm 10.0.0 wheels for
 gfx1151, verifies their SHA-256 values, and installs exactly 13 DLLs plus the
 150 rocBLAS and 100 hipBLASLt data files beside `bubo.exe`. The data retain their
