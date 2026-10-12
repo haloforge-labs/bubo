@@ -32,6 +32,20 @@ int main(int argc, char* argv[]) {
     return baseline.empty() ? 0 : 1;
   }
   assert(argc == 1 && baseline.empty());
+  // Each of the three independent source repositories must have evidence;
+  // no other repository's valid metadata can stand in for the missing one.
+  for (std::size_t repo = 0; repo < evidence.size(); ++repo) {
+    auto missing = evidence;
+    missing.erase(missing.begin() + repo);
+    assert(ValidateReleaseEvidence(fixture::kCatalogue, missing).find(
+               "missing evidence for source repository") != std::string::npos);
+  }
+  for (std::size_t row = 0; row < fixture::kCatalogue.size(); ++row) {
+    auto empty = fixture::kCatalogue;
+    empty[row].commit = "";
+    assert(ValidateReleaseEvidence(empty, evidence).find("empty PIN SLOT") !=
+           std::string::npos);
+  }
   for (int mutation = 0; mutation < 11; ++mutation) {
     auto entries = fixture::kCatalogue;
     auto broken = evidence;

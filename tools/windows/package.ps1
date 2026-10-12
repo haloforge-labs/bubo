@@ -1,8 +1,8 @@
 # Packs the release build into a prebuilt zip for people who do not build:
-#   bubo-<product-version>-windows-x64\
+#   bubo-v<product-version>-windows-x64-gfx1151\
 #     start.cmd                    the launcher (number keys)
-#     bin\bubo.exe + DLLs          ROCm runtime (gfx1151 kernels), vcpkg libraries,
-#                                  and the Visual C++ runtimes (app-local)
+#     bin\bubo.exe + DLLs          lazy engine, vcpkg libraries and app-local VC runtime
+#                                  AMD files are acquired by bubo prepare runtime
 #     tools\windows\launcher.ps1, inventory.ps1
 #     README.txt, LICENSE, THIRD-PARTY.txt
 #
@@ -29,7 +29,7 @@ if (-not $Out) { $Out = Join-Path $root "dist" }
 $Out = [IO.Path]::GetFullPath($Out)
 if (-not (Test-Path (Join-Path $build $brand.exe))) { throw "build first: tools\windows\build.ps1" }
 
-$name = "$($brand.product)-$Version-windows-x64"
+$name = "$($brand.product)-v$Version-windows-x64-gfx1151"
 $stage = Join-Path $Out $name
 if ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($stage)) -ne $Out) { throw 'Package stage escapes output directory' }
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
@@ -40,20 +40,21 @@ Copy-Item (Join-Path $build $brand.exe) $bin
 if (-not (Test-Path -LiteralPath (Join-Path $build 'bubo-engine.dll'))) {
   throw 'Bubo package requires the matching lazy inference DLL; rebuild bubo'
 }
-# bubo-engine.dll and the vcpkg z.dll are included by the DLL glob below.
+# bubo-engine.dll and the vcpkg z.dll are included by this closed allow-list.
 # zlib1.dll is not the runtime name in this vcpkg triplet.
 # Audited against normal/delay import closure and source/port dynamic loads.
-# Keep AMD runtime files: prepare supplies them; this filter removes only the
-# unused vcpkg extras. Recheck the closure before dropping any other library.
-$unused = @('libssl-3-x64.dll','legacy.dll','icuio*.dll','icutu*.dll',
-  'turbojpeg.dll','spng.dll','libwebpdecoder.dll','libwebpdemux.dll','libwebpmux.dll')
-Get-ChildItem (Join-Path $build "*.dll") | Where-Object {
-  $file = $_
-  -not @($unused | Where-Object { $file.Name -like $_ }).Count
-} | Copy-Item -Destination $bin
-foreach ($dir in "rocblas", "hipblaslt") {
-  if (Test-Path (Join-Path $build $dir)) { Copy-Item (Join-Path $build $dir) -Destination $bin -Recurse }
+# Route B: the archive never redistributes AMD runtime DLLs or kernel data.
+$bootstrapDlls = @('bubo-engine.dll', 'libcurl.dll', 'libcrypto-3-x64.dll',
+  'z.dll', 'icudt78.dll', 'icuin78.dll', 'icuuc78.dll', 'libpng16.dll',
+  'jpeg62.dll', 'libwebp.dll', 'libsharpyuv.dll')
+foreach ($dependency in $bootstrapDlls) {
+  if (-not (Test-Path -LiteralPath (Join-Path $build $dependency) -PathType Leaf)) {
+    throw "Missing package dependency: $dependency; rebuild before packaging"
+  }
 }
+Get-ChildItem (Join-Path $build "*.dll") | Where-Object {
+  $_.Name -in $bootstrapDlls
+} | Copy-Item -Destination $bin
 
 # Visual C++ runtime (app-local deployment of the redistributable files).
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -80,8 +81,13 @@ if ($LASTEXITCODE -ne 0) { throw 'Release import deny-list failed' }
 foreach ($entry in @($brand.exe, 'bubo-engine.dll')) {
   # The engine is loaded dynamically, so it is a separate closure root.
   $closure = Get-PeClosure (Join-Path $bin $entry)
+  # Only the lazy engine may have missing AMD imports before runtime prepare.
+  $amdRuntimeDlls = @(Get-Content -LiteralPath (Join-Path $root 'tools\release\runtime-members.tsv') |
+    Select-Object -Skip 1 | ForEach-Object { ($_ -split "`t")[2] } |
+    Where-Object { $_ -notmatch '/' -and $_ -like '*.dll' })
   $missing = @($closure.Edges | Where-Object {
     $_.Resolution -eq 'missing' -and -not $_.From.StartsWith("$env:SystemRoot\", [StringComparison]::OrdinalIgnoreCase)
+    -and -not ($entry -eq 'bubo-engine.dll' -and $_.Name -in $amdRuntimeDlls)
   })
   if ($missing.Count) { throw "Package import closure is incomplete: $($missing.Name -join ', ')" }
 }

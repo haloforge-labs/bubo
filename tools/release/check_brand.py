@@ -16,6 +16,66 @@ CATEGORIES = {'api', 'api-contract', 'schema', 'resource-path', 'cache-config',
               'engine', 'build-target', 'developer-tool', 'upstream-url',
               'historic-fixture', 'logging', 'compatibility'}
 
+# This is separate from the exact-line brand allow-list: security findings
+# cannot be waived by adding a historic name exception.
+SECOND_STACK = re.compile(
+    r'\b(?:WinHttp\w*|WINHTTP\w*|BCrypt\w*|BCRYPT\w*|'
+    r'tinfl\w*|puff|stbi_zlib\w*|Huffman\w*|InflateBits|'
+    r'SHA256_Transform|sha256_compress)\b', re.IGNORECASE)
+FIXTURE_OVERRIDE = re.compile(
+    r'\b(?:(?:RunModel|RunRuntime|RunAll|\w*(?:Manifest|Catalogue|Package))ForTesting|'
+    r'(?:Model|Runtime|Package|Manifest)TestEnvironment|test_loopback|origin_override|'
+    r'PIN_OVERRIDE|CATALOGUE_OVERRIDE|BUBO_FIXTURE\w*)\b')
+BINARY_HOOKS = (b'RunModelForTesting', b'RunRuntimeForTesting',
+                b'RunAllForTesting', b'origin_override', b'test_loopback',
+                b'http,https')
+
+
+def production_lines(text):
+    """Keep every non-test branch; remove only explicitly guarded test code."""
+    stack = []
+    for number, line in enumerate(text.splitlines(), 1):
+        directive = re.match(r'\s*#\s*(ifdef|ifndef|if|elif|else|endif)\b(.*)', line)
+        if directive:
+            kind, condition = directive.groups()
+            if kind in ('ifdef', 'ifndef', 'if'):
+                test = condition.strip() == 'BUBO_PREPARE_TESTING'
+                test = test or condition.strip() == 'defined(BUBO_PREPARE_TESTING)'
+                stack.append(False if test and kind != 'ifndef' else
+                             True if test else None)
+            elif kind in ('else', 'elif') and stack:
+                if stack[-1] is not None:
+                    stack[-1] = not stack[-1] if kind == 'else' else True
+            elif kind == 'endif' and stack:
+                stack.pop()
+            continue
+        if False not in stack:
+            yield number, line
+
+
+def prepare_security(root, prepare_library=None):
+    errors = []
+    for path in sorted((root / 'src').rglob('*')):
+        if not path.is_file() or path.suffix not in SOURCE | {'.hip', '.c'}:
+            continue
+        relative = path.relative_to(root).as_posix()
+        text = path.read_text(encoding='utf-8', errors='surrogateescape')
+        for number, line in enumerate(text.splitlines(), 1):
+            if SECOND_STACK.search(line):
+                errors.append(f'{relative}:{number}: forbidden second HTTP/hash/inflate stack: {line.strip()}')
+            # An inflater implementation cannot define the linked zlib API.
+            if re.search(r'\b(?:inflate|inflateInit2_?|inflateEnd)\s*\([^;]*\)\s*\{', line):
+                errors.append(f'{relative}:{number}: own inflater implementation')
+        for number, line in production_lines(text):
+            if FIXTURE_OVERRIDE.search(line):
+                errors.append(f'{relative}:{number}: fixture override in production code: {line.strip()}')
+    if prepare_library:
+        data = prepare_library.read_bytes()
+        for hook in BINARY_HOOKS:
+            if hook in data:
+                errors.append(f'{prepare_library}: release archive contains test hook {hook.decode()}')
+    return errors
+
 
 def scanned_paths(root):
     for directory, extensions in [('src/cli', SOURCE), ('docs', DOCS)]:
@@ -96,12 +156,22 @@ def main():
     parser.add_argument('--root', type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument('--package-folder', type=Path,
                         help='Also scan every shipped Windows EXE/DLL import')
+    parser.add_argument('--prepare-library', type=Path,
+                        help='Reject fixture hook symbols in the production prepare archive')
+    parser.add_argument('--release-gate', type=Path,
+                        help='Also run the offline production pin/evidence gate executable')
     args = parser.parse_args()
-    errors = check(args.root)
+    errors = check(args.root) + prepare_security(args.root, args.prepare_library)
+    if args.release_gate:
+        result = subprocess.run([str(args.release_gate), '--release',
+                                 str(args.root / 'tools/release/prepare-evidence')], check=False)
+        if result.returncode:
+            errors.append('prepare production PIN SLOT/source evidence gate failed')
     for error in errors:
         print('FAIL: ' + error)
     if not errors:
         print('PASS: Bubo program-name literal scan (src/cli, docs, README, tools/windows/*.ps1, start.cmd, flake.nix, .devops, CMakeLists.txt, cmake; categorized exact-line allow-list)')
+        print('PASS: production prepare source/archive fixture guard and forbidden second HTTP/hash/inflater stack scan')
     if args.package_folder:
         result = subprocess.run(['pwsh', '-NoProfile', '-File',
                                  str(args.root / 'tools/release/check-package.ps1'),
