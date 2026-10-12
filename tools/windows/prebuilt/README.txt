@@ -1,50 +1,49 @@
 Bubo for Windows - prebuilt
 ===========================
 
-A native Windows build of Bubo (https://github.com/gufo-org/gufo), the ROCm
-inference engine for AMD Strix Halo, with an OpenAI-compatible server.
-Source and docs: https://github.com/pixmaate/gufo
+This archive contains bubo.exe, the matching lazy bubo-engine.dll,
+non-AMD runtime dependencies and the app-local Visual C++ runtime.
+Bubo does not include AMD files or model weights.
 
 NEEDS
-  - AMD Ryzen AI Max / Max+ (Strix Halo, Radeon 8060S / 8050S = gfx1151).
-    No other GPU is supported.
-  - Windows 11 and a current AMD Software: Adrenalin Edition driver.
-  - GPU memory set in AMD Software > Performance > Tuning > Variable Graphics
-    Memory: 96 GB for Qwen3.8-Flash-Next, 48-64 GB is plenty for the others.
-  - Models in GGUF form (below). Nothing else: the ROCm runtime and the
-    Visual C++ runtime are in bin\.
+  - Windows 11 and an AMD Strix Halo gfx1151 GPU for inference.
+  - A current AMD Software: Adrenalin Edition driver installed separately.
+  - Local disk space for the prepared runtime and eight-file model package.
 
-MODELS (pip install -U huggingface_hub, then pick one or more)
-  Qwen3.8-Flash-Next (96 GB machines):
-    hf download unsloth/Qwen3.8-Flash-Next-GGUF --include "UD-Q4_K_XL/*" "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf" "mmproj-BF16.gguf"
-  Qwen3.8-27B (+ its DFlash2 draft):
-    hf download unsloth/Qwen3.8-27B-GGUF Qwen3.8-27B-UD-Q4_K_XL.gguf mmproj-BF16.gguf
-    hf download z-lab/Qwen3.8-27B-DFlash2-GGUF Qwen3.8-27B-DFlash2-Q4_K_M.gguf
-  Qwen3.6-35B-A3B (MTP is inside the GGUF; the mmproj comes from the base repo):
-    hf download unsloth/Qwen3.6-35B-A3B-MTP-GGUF Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf
-    hf download unsloth/Qwen3.6-35B-A3B-GGUF mmproj-BF16.gguf
-  The launcher finds them in the Hugging Face cache, LM Studio's folder, or a
-  "models" folder next to this one.
+PREPARE
+  Extract the archive to a per-user folder. Open a terminal in bin\ and run:
+    .\bubo.exe prepare runtime
+    .\bubo.exe prepare model --output "D:\BuboData"
+  Bare .\bubo.exe prepare or prepare all selects both steps and displays one
+  complete plan before approval. --yes accepts the displayed plan.
+  Preparation needs no administrator access, Python, GPU or local model build.
+  The runtime step acquires AMD ROCm 10.0.0 for gfx1151 directly from AMD.
+  Before transfer it prints the package URLs, sizes, SHA-256 values and licence
+  disclosure. Other AMD terms can apply. Continuing accepts applicable terms.
+  Full notices are saved in bin\licenses\, including NOTICE-windows.md.
+  Keep the runtime wheel cache if offline repair is needed.
 
-START
-  Unzip to a short folder such as C:\gufo: the GPU kernel files have long
-  names, and Windows' 260-character path limit breaks them in deep folders
-  (start.cmd checks and tells you).
-  Double-click start.cmd (or run it in a terminal):
-    - press the number of a model,
-    - toggle features with number keys, Enter starts the server.
-  Everything exact and measured faster is on by default: speculative decoding
-  (MTP / DFlash2), prompt lookup, survival stopping, images, thinking.
-  "Latin draft vocabulary" is off by default: turn it on (key 4) if you work in
-  English - about 5% faster, identical output.
-  start.cmd -Last starts the previous choice again.
+  Production model preparation requires approved source pins and model notices.
+  An OPEN gate fails before transfer. Public download/provenance qualification
+  and the final production HIP package are separate release checks.
 
-  The server speaks the OpenAI API at http://127.0.0.1:8080/v1 (chat
-  completions with streaming, tools and images). Point any OpenAI-compatible
-  client at it; the model name is shown when the server starts.
+EXISTING MODEL
+  Place the four exact catalogue-named shards in:
+    ROOT\models\huihui-qwen38-flash-next-ud-q4-k-xl-v1\
+  Then run prepare model --output ROOT. Existing files are checked and reused.
+  --verify forces full SHA-256 checks of all eight model files.
+  See bubo prepare --help for the final options and exit codes.
+
+SERVE
+  .\bubo.exe serve llm --model "D:\BuboData\models\huihui-qwen38-flash-next-ud-q4-k-xl-v1\Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf"
+  The prepared bubo-package.json binds the model sidecars under the default
+  profile. --profile stock suppresses twin, draft head and MTP unless positively
+  requested; --profile exact forbids those approximation/speculation features.
+  --verify-model is an optional full byte check before serving.
 
 TROUBLE
-  - "no Radeon GPU found" / HIP errors: update the AMD driver.
-  - It loads but is slow, or runs out of memory: raise Variable Graphics
-    Memory, or pick a smaller context (key 7).
-  - A missing DLL: install the latest Microsoft Visual C++ Redistributable (x64).
+  Configure HTTPS_PROXY=http://host:port if a proxy is required; system PAC
+  settings are not read. Keep TLS validation enabled.
+  Stop a process holding the runtime DLLs before repair; prepare names holders.
+  A corrupt existing model is preserved. Delete the named file and run prepare
+  again as instructed by its error message.

@@ -1,19 +1,20 @@
-Third-party components in bin\ (redistributed unmodified, under their licenses)
+Third-party dependencies in the Bubo Windows archive
+===================================================
 
-ROCm for Windows (TheRock build, https://github.com/ROCm/TheRock)
-  amdhip64_7.dll, hiprtc*.dll, amd_comgr*.dll, hipblas.dll, libhipblaslt.dll,
-  rocblas.dll, rocsolver.dll, rocsparse.dll, origami.dll, rocm_kpack.dll,
-  rocm-openblas*.dll, rocblas\library, hipblaslt\library
-  - MIT / NCSA / Apache-2.0 with LLVM exception (see the ROCm repositories)
-vcpkg libraries
-  OpenSSL (libcrypto) - Apache-2.0
-  curl (libcurl) - curl license
-  ICU (icudt, icuin, icuuc DLLs) - Unicode License V3
-  libpng (libpng16) - PNG Reference Library License
-  libjpeg-turbo (jpeg62) - IJG / BSD-3-Clause
-  WebP (libwebp.dll, libsharpyuv.dll) - BSD-3-Clause (licenses/libwebp.txt)
-  zlib, and any other vcpkg runtime DLL present - their own permissive licenses
-Microsoft Visual C++ runtime (msvcp140*.dll, vcruntime140*.dll)
-  - Microsoft Visual Studio redistributable files, app-local deployment
+AMD runtime files and model weights are acquired separately by bubo prepare.
+They are not included in this archive. Preparation prints the applicable
+runtime disclosure and saves the complete runtime notice bundle in licenses\
+beside bubo.exe. Model weights are subject to their model licence, not MIT.
 
-gufo itself: MIT (LICENSE).
+The archive includes these unmodified non-AMD dependencies:
+  OpenSSL libcrypto - Apache-2.0
+  curl libcurl - curl licence
+  ICU icudt78, icuin78, icuuc78 - Unicode License V3
+  libpng libpng16 - PNG Reference Library License
+  libjpeg-turbo jpeg62 - IJG / BSD-3-Clause
+  WebP libwebp and libsharpyuv - BSD-3-Clause (licenses/libwebp.txt)
+  zlib z.dll - zlib licence (licenses/zlib.txt)
+  Microsoft Visual C++ msvcp140/vcruntime140 - Microsoft redistributable terms
+
+Bubo's source licence is in LICENSE. Complete dependency/source notices and
+redistribution provenance remain subject to the release notice review.
