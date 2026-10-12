@@ -17,17 +17,17 @@ int main() {
     Step step;
   };
   std::vector<Case> cases = {
-      {{}, "C:\\Users\\fixture\\AppData\\Local", 10, Step::All},
-      {{"all"}, "C:\\Local", 10, Step::All},
-      {{"runtime"}, "C:\\Local", 10, Step::Runtime},
+      {{}, "C:\\Users\\fixture\\AppData\\Local", 4, Step::All},
+      {{"all"}, "C:\\Local", 4, Step::All},
+      {{"runtime"}, "C:\\Local", 4, Step::Runtime},
       {{"model"}, "C:\\Local", 4, Step::Model},
       {{"--output", "D:\\Bubo Data", "--yes", "--verify", "--offline"},
        "",
-       10,
+       4,
        Step::All},
       {{"runtime", "--output", "D:\\データ", "--offline"},
        "",
-       10,
+       4,
        Step::Runtime},
       {{"model", "--output", "D:\\Data", "--yes", "--yes"}, "", 4, Step::Model},
       {{"model", "--no-resume"}, "C:\\Local", 4, Step::Model},
@@ -40,12 +40,12 @@ int main() {
        Step::Model},
       {{"runtime", "--runtime-dir", "D:\\ROCm", "--cache-dir", "D:\\Cache"},
        "C:\\Local",
-       10,
+       4,
        Step::Runtime},
       {{"all", "--mtp-model", "D:\\mtp.gguf", "--mmproj", "D:\\mmproj.gguf",
         "--runtime-dir", "D:\\ROCm"},
        "C:\\Local",
-       10,
+       4,
        Step::All},
       {{"runtime", "--mtp-model", "D:\\mtp.gguf"}, "C:\\Local", 2, Step::All},
       {{"runtime", "--mmproj", "D:\\mmproj.gguf"}, "C:\\Local", 2, Step::All},
@@ -91,26 +91,34 @@ int main() {
   }
   for (const auto& test : cases) {
     std::ostringstream out, err;
-    assert(Run(test.args, test.local, out, err) == test.code);
     const auto parsed = Parse(test.args, test.local);
+    int expected_code = test.code;
+    if (parsed && parsed.options.step == Step::Runtime &&
+        !parsed.options.help) {
+      // Runtime grammar is checked above using the original matrix. Execute
+      // the real installation gate against a job-contained missing product;
+      // no test may contact AMD or write to an example C:/D: path.
+      const auto destination =
+          (std::filesystem::current_path() / "j3-args-missing-install")
+              .string();
+      assert(!std::filesystem::exists(destination));
+      const std::array<const char*, 6> runtime_probe{
+          "runtime",           "--offline", "--runtime-dir",
+          destination.c_str(), "--output",  destination.c_str()};
+      expected_code = 2;
+      assert(Run(runtime_probe, test.local, out, err) == expected_code);
+      assert(err.str().find("identical bubo.exe") != std::string::npos);
+      assert(!std::filesystem::exists(destination));
+    } else
+      assert(Run(test.args, test.local, out, err) == expected_code);
     if (test.code != 2) {
       assert(parsed && parsed.options.step == test.step);
-      if (test.code == 4) {
-        assert(err.str().starts_with("prepare: E4 "));
+      if (expected_code != 0) {
+        assert(err.str().starts_with("prepare: E" +
+                                     std::to_string(expected_code) + " "));
         assert(out.str().empty());
       } else {
         assert(err.str().empty());
-      }
-      if (test.code == 10) {
-        const bool runtime =
-            out.str().find(
-                "prepare runtime: not implemented in J2 (pending J3)\n") !=
-            std::string::npos;
-        const bool model =
-            out.str().find("prepare model: not implemented in I1\n") !=
-            std::string::npos;
-        assert(runtime == (test.step != Step::Model));
-        assert(!model);  // all stops at the runtime blocker before model I/O.
       }
     } else {
       assert(!parsed && out.str().empty());

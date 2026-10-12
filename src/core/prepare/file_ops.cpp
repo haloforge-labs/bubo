@@ -268,10 +268,20 @@ ReadLease ReadLease::AdoptVerifiedHandle(std::intptr_t handle) {
   return lease;
 }
 bool ReadLease::PromoteTo(const fs::path& partial, const fs::path& final,
-                          std::string& error) {
-  if (NativePath(partial).parent_path() != NativePath(final).parent_path()) {
+                          std::string& error, bool same_directory) {
+  if (same_directory &&
+      NativePath(partial).parent_path() != NativePath(final).parent_path()) {
     error = "promotion must stay in the same directory";
     return false;
+  }
+  if (!same_directory) {
+    const auto from_volume = QueryVolume(partial);
+    const auto to_volume = QueryVolume(final);
+    if (!from_volume.error.empty() || !to_volume.error.empty() ||
+        from_volume.identity != to_volume.identity) {
+      error = "runtime promotion must stay on the same local volume";
+      return false;
+    }
   }
 #ifdef _WIN32
   const auto name = Wide(final);

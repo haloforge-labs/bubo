@@ -30,10 +30,13 @@ int main() {
   assert(CheckUrl("https://stable.repo.amd.com/a", amd));
   assert(!CheckUrl("https://x.stable.repo.amd.com/a", amd));
   for (const auto& wheel : RuntimeWheels()) {
-    Entry entry{};
+    auto entry = ModelCatalogue()[0];
+    assert(ValidateFields(std::span(&entry, 1), false).empty());
     entry.direct_url = wheel.url;
     assert(OriginUrl(entry) == wheel.url);
-    assert(!ValidateFields(std::span(&entry, 1), false).empty());
+    assert(ValidateFields(std::span(&entry, 1), false) ==
+           std::string(entry.logical_name) +
+               ": model catalogue cannot set an AMD origin");
   }
   const auto broken = [](std::string_view host) {
     return host.find("huggingface.co") != host.npos ||

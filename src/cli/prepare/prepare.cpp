@@ -10,6 +10,7 @@
 #endif
 
 #include "src/cli/prepare/model_prepare.hpp"
+#include "src/cli/prepare/runtime_prepare.hpp"
 #include "src/core/prepare/release_catalogue.hpp"
 
 namespace bubo::prepare {
@@ -148,19 +149,21 @@ void PrintHelp(std::ostream& out) {
   out << "Usage: bubo prepare [all|runtime|model] [OPTIONS]\n\n"
          "Prepare pinned runtime and model files. The default step is all.\n"
          "The model step downloads and verifies the eight pinned model files.\n"
-         "The runtime step is pending J3 and currently exits 10.\n\n"
+         "The runtime step installs AMD ROCm 10.0.0 for gfx1151 beside "
+         "bubo.exe.\n\n"
          "Options:\n"
          "  --output ROOT  Parent folder (default: %LOCALAPPDATA%\\Bubo)\n"
          "  --yes          Accept the displayed download plan\n"
-         "  --verify       Force full SHA-256 verification of model files\n"
+         "  --verify       Force full SHA-256 verification of selected files\n"
          "  --offline      Use local files only; missing files fail before "
          "network\n"
          "  --resume       Resume tool-owned partial downloads (default)\n"
          "  --no-resume    Restart partial downloads\n"
          "  --mtp-model PATH  Copy a hash-matching existing MTP file\n"
          "  --mmproj PATH     Copy a hash-matching existing vision projector\n"
-         "  --cache-dir PATH  Runtime archive cache (runtime step pending J3)\n"
-         "  --runtime-dir PATH  Runtime destination (runtime step pending J3)\n"
+         "  --cache-dir PATH  Runtime archive cache\n"
+         "  --runtime-dir PATH  Runtime destination (default: beside "
+         "bubo.exe)\n"
          "  --help         Print help without writes, network or engine "
          "loading\n\n"
          "Model layout: "
@@ -171,8 +174,7 @@ void PrintHelp(std::ostream& out) {
          "consent/cancel;\n"
          "  4 offline/missing pin; 5 transport/TLS; 6 integrity; 7 "
          "storage/access;\n"
-         "  8 prepare lock; 9 archive/internal; 10 runtime step not "
-         "implemented.\n";
+         "  8 prepare lock; 9 archive/internal.\n";
 }
 
 int Run(std::span<const char* const> args, std::string_view local_app_data,
@@ -186,11 +188,16 @@ int Run(std::span<const char* const> args, std::string_view local_app_data,
     PrintHelp(out);
     return 0;
   }
-  if (parsed.options.step != Step::Model) {
-    out << "prepare runtime: not implemented in J2 (pending J3)\n";
-    return static_cast<int>(ExitCode::NotImplemented);
+  if (parsed.options.step == Step::All) {
+    err << "prepare: E4 the combined all-step plan is unavailable while model "
+           "source pins and notices are OPEN; use bubo prepare runtime\n";
+    return 4;
   }
   CancellationScope cancellation;
+  if (parsed.options.step == Step::Runtime)
+    return RunRuntime(parsed.options, out, err, [] {
+      return gCancelled.load(std::memory_order_relaxed);
+    });
   return RunModel(parsed.options, out, err,
                   [] { return gCancelled.load(std::memory_order_relaxed); });
 }

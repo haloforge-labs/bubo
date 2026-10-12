@@ -42,7 +42,8 @@ public:
   // Promote using the verified writer's ORIGINAL handle (Windows DELETE
   // access), while its sharing mode continues to deny writes and deletion.
   bool PromoteTo(const std::filesystem::path& partial,
-                 const std::filesystem::path& final, std::string& error);
+                 const std::filesystem::path& final, std::string& error,
+                 bool same_directory = true);
 
 private:
   ReadLease() = default;

@@ -1,6 +1,7 @@
 #include "src/core/prepare/runtime_table.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <map>
 #include <set>
 #include <sstream>

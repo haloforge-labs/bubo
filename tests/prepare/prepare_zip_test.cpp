@@ -114,7 +114,8 @@ int main(int argc, char** argv) {
            "real generator must refuse fixture archives");
     Check(CompiledRuntimeTable().size() == 263,
           "complete compiled production table");
-    std::filesystem::remove_all(root);
+    if (argc < 3 || std::string_view(argv[2]) != "--keep")
+      std::filesystem::remove_all(root);
     std::cout << "PASS: ZIP stored/raw DEFLATE, ZIP64 sizes/offsets/end "
                  "header, descriptors, CRC, SHA, "
                  "traversal/ADS/drive/absolute/duplicate, truncation, "

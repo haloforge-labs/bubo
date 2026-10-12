@@ -313,6 +313,7 @@ set(bubo_command_sources
   src/eval/http_client.cpp
 )
 set(bubo_prepare_sources
+  src/cli/prepare/runtime_prepare.cpp
   src/core/prepare/zip_reader.cpp
   src/core/prepare/runtime_table.cpp
   src/cli/prepare/prepare.cpp
@@ -329,6 +330,9 @@ set(bubo_prepare_sources
   src/core/quant/ggml_dequant.cpp)
 add_library(bubo_prepare STATIC ${bubo_prepare_sources})
 target_link_libraries(bubo_prepare PUBLIC CURL::libcurl OpenSSL::Crypto ZLIB::ZLIB)
+if(WIN32)
+  target_link_libraries(bubo_prepare PUBLIC Rstrtmgr)
+endif()
 add_executable(prepare_runtime_table EXCLUDE_FROM_ALL tools/release/prepare_runtime_table.cpp)
 target_link_libraries(prepare_runtime_table PRIVATE bubo_prepare)
 set_target_properties(prepare_runtime_table PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")

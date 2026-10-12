@@ -4,10 +4,15 @@
 #include <filesystem>
 #include <functional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace bubo::prepare {
+class ZipIntegrityError : public std::runtime_error {
+public:
+  using std::runtime_error::runtime_error;
+};
 struct ZipMember {
   std::string name;
   std::uint64_t compressed = 0, size = 0, offset = 0, data_offset = 0;

@@ -1,8 +1,10 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace bubo::prepare {

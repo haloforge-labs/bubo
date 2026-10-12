@@ -11,6 +11,9 @@
 
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/prepare/file_ops.hpp"
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace bubo::prepare {
 namespace {
@@ -18,6 +21,66 @@ using Bytes = std::vector<std::uint8_t>;
 [[noreturn]] void Bad(std::string_view why) {
   throw std::runtime_error("ZIP: " + std::string(why));
 }
+class Reader {
+public:
+  explicit Reader(const std::filesystem::path& path) {
+#ifdef _WIN32
+    // Verified J2 writers retain WRITE/DELETE access. Sharing these rights
+    // permits reading; their own FILE_SHARE_READ still denies mutation.
+    handle_ =
+        CreateFileW(path.c_str(), GENERIC_READ,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    LARGE_INTEGER size{};
+    if (handle_ == INVALID_HANDLE_VALUE)
+      Bad("cannot open archive");
+    if (!GetFileSizeEx(handle_, &size) || size.QuadPart < 0) {
+      CloseHandle(handle_);
+      handle_ = INVALID_HANDLE_VALUE;
+      Bad("archive size");
+    }
+    length = static_cast<std::uint64_t>(size.QuadPart);
+#else
+    file_.open(path, std::ios::binary | std::ios::ate);
+    if (!file_ || file_.tellg() < 0)
+      Bad("cannot open archive");
+    length = static_cast<std::uint64_t>(file_.tellg());
+#endif
+  }
+  ~Reader() {
+#ifdef _WIN32
+    if (handle_ != INVALID_HANDLE_VALUE)
+      CloseHandle(handle_);
+#endif
+  }
+  void ReadAt(std::uint64_t offset, std::span<std::uint8_t> bytes) {
+#ifdef _WIN32
+    LARGE_INTEGER position{};
+    position.QuadPart = static_cast<LONGLONG>(offset);
+    DWORD count = 0;
+    if (!SetFilePointerEx(handle_, position, nullptr, FILE_BEGIN) ||
+        !ReadFile(handle_, bytes.data(), static_cast<DWORD>(bytes.size()),
+                  &count, nullptr) ||
+        count != bytes.size())
+      Bad("truncated archive");
+#else
+    file_.clear();
+    file_.seekg(static_cast<std::streamoff>(offset));
+    file_.read(reinterpret_cast<char*>(bytes.data()),
+               static_cast<std::streamsize>(bytes.size()));
+    if (static_cast<std::size_t>(file_.gcount()) != bytes.size())
+      Bad("truncated archive");
+#endif
+  }
+  std::uint64_t length = 0;
+
+private:
+#ifdef _WIN32
+  HANDLE handle_ = INVALID_HANDLE_VALUE;
+#else
+  std::ifstream file_;
+#endif
+};
 std::uint64_t Number(const Bytes& b, std::size_t p, unsigned n) {
   if (p > b.size() || n > b.size() - p)
     Bad("truncated field");
@@ -26,16 +89,11 @@ std::uint64_t Number(const Bytes& b, std::size_t p, unsigned n) {
     v |= std::uint64_t(b[p + i]) << (8 * i);
   return v;
 }
-Bytes Read(std::ifstream& f, std::uint64_t p, std::size_t n,
-           std::uint64_t bound) {
+Bytes Read(Reader& f, std::uint64_t p, std::size_t n, std::uint64_t bound) {
   if (p > bound || n > bound - p || n > 16 * 1024 * 1024)
     Bad("read bounds");
   Bytes b(n);
-  f.clear();
-  f.seekg(static_cast<std::streamoff>(p));
-  f.read(reinterpret_cast<char*>(b.data()), static_cast<std::streamsize>(n));
-  if (static_cast<std::size_t>(f.gcount()) != n)
-    Bad("truncated archive");
+  f.ReadAt(p, b);
   return b;
 }
 std::string Fold(std::string s) {
@@ -117,10 +175,10 @@ ZipReader::ZipReader(const std::filesystem::path& path)
   const auto local = CheckLocalPath(path_);
   if (!local.empty())
     Bad(local);
-  std::ifstream f(path_, std::ios::binary | std::ios::ate);
-  if (!f || f.tellg() < 22)
+  Reader f(path_);
+  if (f.length < 22)
     Bad("truncated archive");
-  const auto length = static_cast<std::uint64_t>(f.tellg());
+  const auto length = f.length;
   const auto tail_size =
       static_cast<std::size_t>(std::min<std::uint64_t>(length, 65557));
   const auto tail_start = length - tail_size;
@@ -266,8 +324,7 @@ std::string ZipReader::Extract(
   const auto& m = *found;  // Never trust a caller-supplied offset or size.
   if (m.size > limit)
     Bad("selected member exceeds trusted length");
-  std::ifstream f(path_, std::ios::binary);
-  f.seekg(static_cast<std::streamoff>(m.data_offset));
+  Reader f(path_);
   std::array<std::uint8_t, 65536> in{}, out{};
   gufo::crypto::Sha256Hasher hash;
   auto crc = crc32(0, Z_NULL, 0);
@@ -299,9 +356,7 @@ std::string ZipReader::Extract(
       Bad("cancelled");
     const auto n = static_cast<std::size_t>(
         std::min<std::uint64_t>(in.size(), m.compressed - read));
-    f.read(reinterpret_cast<char*>(in.data()), static_cast<std::streamsize>(n));
-    if (static_cast<std::size_t>(f.gcount()) != n)
-      Bad("truncated payload");
+    f.ReadAt(m.data_offset + read, std::span(in).first(n));
     read += n;
     if (!deflated) {
       emit(std::span(in).first(n));
@@ -332,7 +387,7 @@ std::string ZipReader::Extract(
     Bad("length/CRC mismatch");
   const auto digest = hash.FinishHex();
   if (!expected_sha256.empty() && digest != expected_sha256)
-    Bad("SHA-256 mismatch");
+    throw ZipIntegrityError("ZIP: SHA-256 mismatch");
   return digest;
 }
 }  // namespace bubo::prepare

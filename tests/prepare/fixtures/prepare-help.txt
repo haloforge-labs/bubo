@@ -2,19 +2,19 @@ Usage: bubo prepare [all|runtime|model] [OPTIONS]
 
 Prepare pinned runtime and model files. The default step is all.
 The model step downloads and verifies the eight pinned model files.
-The runtime step is pending J3 and currently exits 10.
+The runtime step installs AMD ROCm 10.0.0 for gfx1151 beside bubo.exe.
 
 Options:
   --output ROOT  Parent folder (default: %LOCALAPPDATA%\Bubo)
   --yes          Accept the displayed download plan
-  --verify       Force full SHA-256 verification of model files
+  --verify       Force full SHA-256 verification of selected files
   --offline      Use local files only; missing files fail before network
   --resume       Resume tool-owned partial downloads (default)
   --no-resume    Restart partial downloads
   --mtp-model PATH  Copy a hash-matching existing MTP file
   --mmproj PATH     Copy a hash-matching existing vision projector
-  --cache-dir PATH  Runtime archive cache (runtime step pending J3)
-  --runtime-dir PATH  Runtime destination (runtime step pending J3)
+  --cache-dir PATH  Runtime archive cache
+  --runtime-dir PATH  Runtime destination (default: beside bubo.exe)
   --help         Print help without writes, network or engine loading
 
 Model layout: ROOT\models\huihui-qwen38-flash-next-ud-q4-k-xl-v1\
@@ -22,4 +22,4 @@ Model layout: ROOT\models\huihui-qwen38-flash-next-ud-q4-k-xl-v1\
 
 Exit codes: 0 success/help; 2 syntax/schema/header/profile; 3 consent/cancel;
   4 offline/missing pin; 5 transport/TLS; 6 integrity; 7 storage/access;
-  8 prepare lock; 9 archive/internal; 10 runtime step not implemented.
+  8 prepare lock; 9 archive/internal.
