@@ -127,6 +127,14 @@ UrlResult RedirectUrl(std::string_view current, std::string_view location,
   return CheckUrl(Part(url.get(), CURLUPART_URL), policy);
 }
 std::string OriginUrl(const Entry& entry) {
+  if (!entry.direct_url.empty()) {
+    HostPolicy amd;
+    amd.source = HostPolicy::Source::Amd;
+    const auto checked = CheckUrl(entry.direct_url, amd);
+    if (!checked)
+      throw std::invalid_argument(checked.error);
+    return checked.url;
+  }
   if (entry.commit.empty() || !IsLowerHex(entry.commit, 40) ||
       entry.source_repo == "PIN_SLOT_BUBO_REPO_ID")
     throw std::invalid_argument("unresolved PIN SLOT; no network request made");

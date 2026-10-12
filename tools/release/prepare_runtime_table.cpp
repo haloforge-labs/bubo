@@ -1,10 +1,59 @@
+#include <algorithm>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 
+#include "src/core/prepare/hash_file.hpp"
 #include "src/core/prepare/runtime_table.hpp"
+#include "src/core/prepare/zip_reader.hpp"
 
 int main(int argc, char** argv) {
   try {
+    if (argc == 4 && std::string_view(argv[1]) == "--notices") {
+      const auto root = std::filesystem::u8path(argv[2]);
+      std::vector<std::filesystem::path> files;
+      for (const auto& entry :
+           std::filesystem::recursive_directory_iterator(root)) {
+        if (entry.is_symlink())
+          throw std::runtime_error("notice symlink refused");
+        if (entry.is_regular_file())
+          files.push_back(entry.path());
+      }
+      std::sort(files.begin(), files.end());
+      std::ostringstream content;
+      content << "// Exact release-thread text bytes; generated with linked "
+                 "OpenSSL SHA-256.\n"
+                 "const std::vector<RuntimeNotice> kRuntimeNotices{\n";
+      for (const auto& file : files) {
+        const auto name = file.lexically_relative(root).generic_string();
+        if (!bubo::prepare::SafeZipPath(name) ||
+            std::filesystem::file_size(file) > 1024 * 1024)
+          throw std::runtime_error("invalid notice path/size");
+        std::ifstream input(file, std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(input)), {});
+        content << "{\"" << name << "\",\"" << bubo::prepare::HashFile(file)
+                << "\",\n\"";
+        unsigned column = 0;
+        for (unsigned char byte : text) {
+          content << "\\x" << std::hex << std::setw(2) << std::setfill('0')
+                  << unsigned(byte);
+          if (++column == 20) {
+            content << "\"\n\"";
+            column = 0;
+          }
+        }
+        content << "\"},\n";
+      }
+      content << "};\n";
+      std::ofstream output(std::filesystem::u8path(argv[3]), std::ios::binary);
+      output << content.str();
+      if (!output)
+        throw std::runtime_error("notice output failed");
+      std::cout << "PASS: embedded " << files.size()
+                << " exact release-thread notice files\n";
+      return 0;
+    }
     const bool fixture = argc == 7 && std::string_view(argv[1]) == "--fixture";
     if ((!fixture && argc != 6) || (fixture && argc != 7)) {
       std::cerr << "Usage: prepare_runtime_table [--fixture] CORE.whl "

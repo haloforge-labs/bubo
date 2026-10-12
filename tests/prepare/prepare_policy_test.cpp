@@ -1,6 +1,7 @@
 #include <cassert>
 #include <iostream>
 
+#include "src/core/prepare/runtime_table.hpp"
 #include "src/core/prepare/transport.hpp"
 
 template<class T>
@@ -28,6 +29,12 @@ int main() {
   amd.source = HostPolicy::Source::Amd;
   assert(CheckUrl("https://stable.repo.amd.com/a", amd));
   assert(!CheckUrl("https://x.stable.repo.amd.com/a", amd));
+  for (const auto& wheel : RuntimeWheels()) {
+    Entry entry{};
+    entry.direct_url = wheel.url;
+    assert(OriginUrl(entry) == wheel.url);
+    assert(!ValidateFields(std::span(&entry, 1), false).empty());
+  }
   const auto broken = [](std::string_view host) {
     return host.find("huggingface.co") != host.npos ||
            host.find("hf.co") != host.npos;

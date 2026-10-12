@@ -130,6 +130,8 @@ std::string ValidateFields(std::span<const Entry> entries, bool release) {
     const auto fail = [&](std::string_view why) {
       return std::string(entry.logical_name) + ": " + std::string(why);
     };
+    if (!entry.direct_url.empty())
+      return fail("model catalogue cannot set an AMD origin");
     if (!IsRelativePath(entry.logical_name) ||
         entry.logical_name.find('/') != entry.logical_name.npos ||
         !names.insert(FoldAscii(entry.logical_name)).second)

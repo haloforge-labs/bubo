@@ -31,6 +31,8 @@ struct Entry {
   // Relative evidence slot. J2 generates a table from each production shard;
   // an absent table is OPEN, never an empty table treated as verified.
   std::string_view fingerprint_table_slot = {};
+  // Internal compiled AMD wheel origin; model entries always leave this empty.
+  std::string_view direct_url = {};
 };
 const std::array<Entry, 8>& ModelCatalogue();
 std::string ValidateFields(std::span<const Entry> entries, bool release);
