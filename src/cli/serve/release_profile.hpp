@@ -12,13 +12,17 @@
 #include "src/cli/arg_parser.hpp"
 #include "src/cli/brand.hpp"
 #include "src/core/json.hpp"
+#include "src/cli/serve/model_manifest.hpp"
 
 namespace gufo::server {
 
 using ReleaseEnvironment = std::map<std::string, std::optional<std::string>>;
-// P1 extension point: production leaves this empty. No discovery or file checks
-// are implemented here. Tests can simulate an already reviewed manifest.
-struct ManifestArtefacts {};
+struct ResolvedModelArtefacts {
+  // present prevents engine getenv fallback even when a path is disabled.
+  bool present = false;
+  bool vision_disabled = false;
+  std::string twin, draft_head, mtp, mmproj;
+};
 struct ReleaseInputs {
   std::string profile = std::string(cli::kDefaultProfile);
   std::map<std::string, std::string> explicit_flags;
@@ -28,8 +32,8 @@ struct ReleaseInputs {
   std::string model_family;
   std::string architecture;
   std::optional<std::uint64_t> native_context;
-  ManifestArtefacts manifest;
-  // Simulate a future manifest's resolved defaults without a file loader.
+  bool manifest_present = false;
+  // Validated package paths; tests may supply fixture paths directly.
   std::map<std::string, std::string> manifest_defaults;
 };
 struct ReleaseSetting {
@@ -48,12 +52,14 @@ struct ReleaseResolution {
   std::vector<std::string> turned_off;
   std::string architecture;
   std::optional<std::uint64_t> native_context;
+  ResolvedModelArtefacts artefacts;
 };
 struct ReleaseStartup {
   ReleaseResolution resolved;
   std::string error;
   bool print_effective = false;
   bool active = false;
+  ModelPackage package;
 };
 const std::vector<json::Value>& ReleaseSwitchTable();
 void ValidateSwitchTable(std::span<const json::Value> rows);
@@ -68,5 +74,6 @@ json::Value ReleaseSettingsJson(const ReleaseResolution& resolved);
 json::Value ReleaseOrigins(const ReleaseResolution& resolved);
 std::string RenderReleaseDocs(std::span<const json::Value> rows);
 std::string RenderReleaseInclude(std::span<const json::Value> rows);
+std::string RenderArtefactBindingTable();
 }  // namespace gufo::server
 #endif

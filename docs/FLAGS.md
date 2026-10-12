@@ -18,6 +18,7 @@ Empty environment values count as unset and produce a warning.
 | `--cache-disk-staging-bytes` | Limit RAM used to stage disk prompt snapshots. | 0 = auto (<= disk budget, <= 1/8 available RAM) | Keep automatic sizing unless disk persistence needs a different RAM limit. | any; generic; any |
 | `--cache-ram-bytes` | Set the RAM snapshot cache budget. | 6442450944 | Keep the profile limit unless available host RAM requires a smaller cache. | any; strix-halo-tuned; qwen3.8-flash-next |
 | `--context` | Set the context token limit for each session. | 262144 | Keep the profile context unless the task requires a different token limit. | any; strix-halo-tuned; qwen3.8-flash-next |
+| `--draft-head-model` | Select the prepared MTP draft head. | Unset | Select the prepared MTP draft head. | any; strix-halo-tuned; qwen3.8-flash-next |
 | `--draft-tokens` | Set the maximum speculative draft length. | 7 | Keep seven tokens unless speculative draft length tests require another value. | any; generic; qwen3.8-flash-next |
 | `--exact` | Select the exact profile. | Unset | Enable it when output must repeat with the same build, prompt, and seed. | any; generic; any |
 | `--frequency-penalty` | Penalize tokens by their generated occurrence count. | 0.0 (off) | Keep zero unless the task needs fewer frequently repeated tokens. | any; generic; any |
@@ -66,6 +67,11 @@ Empty environment values count as unset and produce a warning.
 | `--think` | Set the default reasoning mode. | on | Keep on unless the task does not need reasoning. | any; strix-halo-tuned; qwen3.8-flash-next |
 | `--top-k` | Limit sampling to the highest probability candidates. | preset 20 (Qwen3.8) | Keep the model preset unless the task needs a different sampling candidate limit. | any; generic; any |
 | `--top-p` | Filter sampling candidates by cumulative probability. | preset (0.95 thinking; 0.8 non-thinking unless GUFO_PRODUCTION_SAMPLING=1) | Keep the model preset unless the task needs a different cumulative probability limit. | any; generic; any |
+| `--twin-model` | Select the prepared dense twin. | Unset | Select the prepared dense twin. | any; strix-halo-tuned; qwen3.8-flash-next |
+| `--verify-model` | Hash all eight manifest files plus distinct overrides before loading (about 2-4 minutes on SSD). | Unset | Use full verification to detect payload corruption before loading. | any; strix-halo-tuned; qwen3.8-flash-next |
+| `BUBO_MANIFEST` | Select bubo-package.json; explicit --manifest takes precedence. | Unset | Set a package manifest when automatic discovery cannot find it. | any; strix-halo-tuned; any |
+| `BUBO_MMPROJ` | Select the vision projector; explicit --mmproj takes precedence. | Unset | Select the vision projector; explicit --mmproj takes precedence. | any; strix-halo-tuned; any |
+| `BUBO_MTP_MODEL` | Select the MTP file; explicit --mtp-model takes precedence. | Unset | Select the MTP file; explicit --mtp-model takes precedence. | any; strix-halo-tuned; any |
 | `GUFO_CACHE_HOST_FLOOR_MB` | Reserve available host RAM during snapshot admission. | 0 (off) | Keep zero unless snapshot admission must reserve a minimum amount of available host RAM. | any; generic; any |
 | `GUFO_DENSE_TWIN_BATCH` | Enable dense twin decode with multiple sessions. | off | Keep the profile setting unless batched twin comparisons require a different setting. | any; generic; qwen3.8-flash-next |
 | `GUFO_DENSE_TWIN_MAX_N` | Limit the dense twin batch width. | 8 | Keep eight unless batched twin tests outside exact require a different batch limit. | any; generic; qwen3.8-flash-next |

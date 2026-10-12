@@ -75,6 +75,12 @@ struct ModelOptions {
   /// in the conversation proposes the tokens that followed it (PromptLookup).
   bool prompt_lookup = false;
   DraftVocabulary draft_vocabulary = DraftVocabulary::kFull;
+  // Serving supplies a complete typed selection. Empty paths stay disabled;
+  // only legacy callers without this state may read the path environment.
+  bool resolved_artefacts = false;
+  std::string twin_model_path;
+  std::string draft_head_model_path;
+  bool vision_disabled = false;
 };
 
 class Session;

@@ -229,6 +229,33 @@
       "echo": false
     },
     {
+      "name": "--draft-head-model",
+      "kind": "flag",
+      "class": "DEFAULT",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": null,
+        "subagents": null,
+        "exact": null
+      },
+      "exact_off": true,
+      "inject_with": null,
+      "suppressed_by": [
+        "--no-draft-head"
+      ],
+      "purpose": "Select the prepared MTP draft head.",
+      "default_text": "Unset",
+      "hardware_scope": "strix-halo-tuned",
+      "note": "Select the prepared MTP draft head.",
+      "built_in": null,
+      "value_rule": "text",
+      "aliases": [],
+      "takes_value": true,
+      "echo": false
+    },
+    {
       "name": "--draft-policy",
       "kind": "flag",
       "class": "OTHER_MODEL",
@@ -1688,6 +1715,33 @@
       "echo": false
     },
     {
+      "name": "--twin-model",
+      "kind": "flag",
+      "class": "DEFAULT",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": null,
+        "subagents": null,
+        "exact": null
+      },
+      "exact_off": true,
+      "inject_with": null,
+      "suppressed_by": [
+        "--no-twin"
+      ],
+      "purpose": "Select the prepared dense twin.",
+      "default_text": "Unset",
+      "hardware_scope": "strix-halo-tuned",
+      "note": "Select the prepared dense twin.",
+      "built_in": null,
+      "value_rule": "text",
+      "aliases": [],
+      "takes_value": true,
+      "echo": false
+    },
+    {
       "name": "--verbose",
       "kind": "flag",
       "class": "INTERNAL",
@@ -1711,6 +1765,31 @@
       "aliases": [
         "-v"
       ],
+      "takes_value": false,
+      "echo": false
+    },
+    {
+      "name": "--verify-model",
+      "kind": "flag",
+      "class": "DEFAULT",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": null,
+        "subagents": null,
+        "exact": null
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Hash all eight manifest files plus distinct overrides before loading (about 2-4 minutes on SSD).",
+      "default_text": "Unset",
+      "hardware_scope": "strix-halo-tuned",
+      "note": "Use full verification to detect payload corruption before loading.",
+      "built_in": null,
+      "value_rule": "bool",
+      "aliases": [],
       "takes_value": false,
       "echo": false
     },
@@ -2183,6 +2262,81 @@
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Other model or test configuration; no release default.",
+      "built_in": null,
+      "value_rule": "text",
+      "aliases": [],
+      "takes_value": true,
+      "echo": false
+    },
+    {
+      "name": "BUBO_MANIFEST",
+      "kind": "env",
+      "class": "DEFAULT",
+      "model_family": "any",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": null,
+        "subagents": null,
+        "exact": null
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Select bubo-package.json; explicit --manifest takes precedence.",
+      "default_text": "Unset",
+      "hardware_scope": "strix-halo-tuned",
+      "note": "Set a package manifest when automatic discovery cannot find it.",
+      "built_in": null,
+      "value_rule": "text",
+      "aliases": [],
+      "takes_value": true,
+      "echo": false
+    },
+    {
+      "name": "BUBO_MMPROJ",
+      "kind": "env",
+      "class": "DEFAULT",
+      "model_family": "any",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": null,
+        "subagents": null,
+        "exact": null
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Select the vision projector; explicit --mmproj takes precedence.",
+      "default_text": "Unset",
+      "hardware_scope": "strix-halo-tuned",
+      "note": "Select the vision projector; explicit --mmproj takes precedence.",
+      "built_in": null,
+      "value_rule": "text",
+      "aliases": [],
+      "takes_value": true,
+      "echo": false
+    },
+    {
+      "name": "BUBO_MTP_MODEL",
+      "kind": "env",
+      "class": "DEFAULT",
+      "model_family": "any",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": null,
+        "subagents": null,
+        "exact": null
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Select the MTP file; explicit --mtp-model takes precedence.",
+      "default_text": "Unset",
+      "hardware_scope": "strix-halo-tuned",
+      "note": "Select the MTP file; explicit --mtp-model takes precedence.",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],

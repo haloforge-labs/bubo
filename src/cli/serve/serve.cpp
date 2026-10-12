@@ -777,6 +777,10 @@ void PrintServeHelp(std::string_view program_name,
            "  --profile <default|subagents|exact|stock>\n"
            "  --exact                  Alias for --profile exact\n"
            "  --print-effective-settings  Print JSON and exit\n"
+           "  --manifest PATH           Select bubo-package.json\n"
+           "  --twin-model PATH --draft-head-model PATH\n"
+           "  --verify-model            Hash eight manifest files plus distinct overrides\n"
+           "                            (~2-4 minutes on SSD; before loading)\n"
            "  --no-behaviour --no-twin --no-draft-head --no-vision --no-mtp\n"
            "  --no-prompt-lookup --no-cache --no-cache-disk "
            "--allow-unmeasured-memory\n";
@@ -843,7 +847,18 @@ int RunServe(std::span<const char* const> args) {
   bool no_twin = false, no_draft_head = false, no_vision = false;
   bool no_mtp = false, no_behaviour = false, no_prompt_lookup = false;
   bool no_cache = false, no_cache_disk = false, allow_unmeasured_memory = false;
+  bool verify_model = false;
+  std::string twin_model_path, draft_head_model_path, package_manifest;
   const auto add_release_options = [&](ArgParser& parser) {
+    parser.AddOption("", "--manifest", "PATH", "Select bubo-package.json",
+                     "Profiles", &package_manifest);
+    parser.AddOption("", "--twin-model", "PATH", "Select the dense twin",
+                     "Profiles", &twin_model_path);
+    parser.AddOption("", "--draft-head-model", "PATH", "Select the MTP draft head",
+                     "Profiles", &draft_head_model_path);
+    parser.AddFlag("", "--verify-model",
+                   "Hash eight manifest files plus distinct overrides (~2-4 min on SSD)",
+                   "Profiles", &verify_model);
     parser.AddOption("", "--profile", "NAME",
                      "Release profile: default, subagents, exact, or stock",
                      "Profiles", &release_profile_name);
@@ -1457,6 +1472,11 @@ int RunServe(std::span<const char* const> args) {
       std::cout << server::ReleaseSettingsJson(release.resolved).dump() << '\n';
       return 0;
     }
+    if (!release.package.files.empty() &&
+        (model.empty() || std::filesystem::is_directory(std::filesystem::u8path(model)))) {
+      const auto path = release.package.files.front().path.u8string();
+      model.assign(path.begin(), path.end());
+    }
     if (no_mtp) {
       speculative_backend = "off";
       mtp_model_path.clear();
@@ -1529,6 +1549,10 @@ int RunServe(std::span<const char* const> args) {
     }
 
     server::TextSpeculativeConfig speculative_config;
+    speculative_config.resolved_artefacts = release.resolved.artefacts.present;
+    speculative_config.twin_model_path = release.resolved.artefacts.twin;
+    speculative_config.draft_head_model_path = release.resolved.artefacts.draft_head;
+    speculative_config.vision_disabled = release.resolved.artefacts.vision_disabled;
     if (speculative_backend.empty() && !dspark_model_path.empty()) {
       speculative_backend = "dspark";
     }
@@ -1619,7 +1643,10 @@ int RunServe(std::span<const char* const> args) {
                 .directory = cache_disk_directory,
                 .capacity_bytes = cache_disk_bytes,
                 .staging_capacity_bytes = cache_disk_staging_bytes,
-                .model_artifact_fingerprint = {},
+                .model_artifact_fingerprint = release.package.MainIdentity(),
+                .draft_model_artifact_fingerprint =
+                    speculative_config.draft_model_path.empty() ? std::string{} :
+                    release.package.IdentityFor(std::filesystem::u8path(speculative_config.draft_model_path)),
             },
             vision_model_path,
             server::TextRunnerRamCacheOptions{.capacity_bytes = cache_ram_bytes,
@@ -1677,9 +1704,10 @@ int RunServe(std::span<const char* const> args) {
         resolved["context"] =
             static_cast<unsigned long long>(backend->max_context());
         resolved["speculative_backend"] = speculative_backend;
-        for (const auto* field :
-             {"twin_loaded", "draft_head_loaded", "mmproj_loaded"})
-          resolved[field] = "unknown until the manifest job";
+        resolved["twin_bound"] = release.resolved.artefacts.twin;
+        resolved["draft_head_bound"] = release.resolved.artefacts.draft_head;
+        resolved["mtp_bound"] = release.resolved.artefacts.mtp;
+        resolved["mmproj_bound"] = release.resolved.artefacts.mmproj;
         auto transport = json::Value::object();
         transport["host"] = host;
         transport["port"] = port;

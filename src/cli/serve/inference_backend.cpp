@@ -3497,7 +3497,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
 #if defined(ENGINE_ENABLE_HIP)
   TextDiskCacheConfig resolved_disk_cache_config = disk_cache_config;
   std::string load_error;
-  auto reader_owner = core::GgufReader::OpenFile(model_path, &load_error);
+  auto reader_owner = core::GgufReader::OpenFile(std::filesystem::u8path(model_path), &load_error);
   if (reader_owner == nullptr) {
     SetError(error, "Failed to open GGUF: " + load_error);
     return false;
@@ -3623,6 +3623,10 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                 : speculative_config.mtp_latin_draft_vocabulary
                     ? models::qwen38_flash_next::DraftVocabulary::kLatinText
                     : models::qwen38_flash_next::DraftVocabulary::kFull,
+            .resolved_artefacts = speculative_config.resolved_artefacts,
+            .twin_model_path = speculative_config.twin_model_path,
+            .draft_head_model_path = speculative_config.draft_head_model_path,
+            .vision_disabled = speculative_config.vision_disabled,
         },
         &load_error);
     if (model == nullptr) {

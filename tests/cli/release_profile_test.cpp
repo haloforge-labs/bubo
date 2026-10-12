@@ -37,7 +37,8 @@ ReleaseInputs Inputs(const std::string& profile = "default") {
   inputs.model_family = "qwen3.8-flash-next";
   inputs.profile = profile;
   // Synthetic sidecar path: resolver tests never load tensors.
-  inputs.explicit_flags["--mtp-model"] = "mtp-test.gguf";
+  if (profile != "exact" && profile != "stock")
+    inputs.explicit_flags["--mtp-model"] = "mtp-test.gguf";
   return inputs;
 }
 const ReleaseSetting& Find(const ReleaseResolution& result,
@@ -321,8 +322,13 @@ void ReviewRegression(int finding) {
         inputs.explicit_flags[name] = on;
       else
         inputs.environment[name] = on;
+      if (name == "GUFO_DENSE_TWIN_MODEL" || name == "GUFO_DRAFT_OUT_MODEL") {
+        Expect(!Find(ResolveReleaseSettings(inputs), name).value,
+               "exact suppresses inherited artefact env before path checks: " + name);
+        inputs.explicit_flags[name == "GUFO_DENSE_TWIN_MODEL" ? "--twin-model" : "--draft-head-model"] = on;
+      }
       Reject([&] { (void)ResolveReleaseSettings(inputs); },
-             "exact rejects re-enabling: " + name);
+             "exact rejects positive re-enabling: " + name);
       inputs = Inputs("exact");
       inputs.manifest_defaults[name] = on;
       Expect(Find(ResolveReleaseSettings(inputs), name).value == value,
@@ -734,6 +740,11 @@ void TestResolver() {
     inputs = Inputs("exact");
     inputs.environment[name] =
         name == std::string("GUFO_LENIENT") ? "bounded" : "twin.gguf";
+    if (name == std::string("GUFO_DENSE_TWIN_MODEL")) {
+      Expect(ResolveReleaseSettings(inputs).artefacts.twin.empty(),
+             "exact suppresses inherited twin before binding");
+      inputs.explicit_flags["--twin-model"] = "twin.gguf";
+    }
     Reject([&] { (void)ResolveReleaseSettings(inputs); },
            "exact refuses explicit approximation");
   }

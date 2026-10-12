@@ -53,6 +53,10 @@ struct TextSpeculativeConfig {
   /// --mtp-draft-vocab auto (Qwen3.8-Flash-Next DraftVocabulary::kAuto).
   bool mtp_auto_draft_vocabulary{false};
   bool prompt_lookup{false};
+  bool resolved_artefacts{false};
+  std::string twin_model_path;
+  std::string draft_head_model_path;
+  bool vision_disabled{false};
 };
 
 struct TextDiskCacheConfig {
