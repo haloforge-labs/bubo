@@ -4,7 +4,7 @@ AMD Strix Halo `gfx1151`, 128 GB unified memory. Antirez Flash 0731 mixed
 `IQ2XXS` target, DSpark support sidecar. Greedy, thinking off.
 Reference: antirez/ds4 `0aaea5a2` (ROCm).
 
-Measured 2026-09-23–24. One warmed sample per point. Positive gain favors Gufo.
+One warmed sample per point. Positive gain favors Gufo.
 [Quality and measurement details](QUALITY.md#benchmark-method).
 
 ## Single user, autoregressive

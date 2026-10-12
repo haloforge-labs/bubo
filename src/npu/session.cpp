@@ -115,7 +115,7 @@ NpuResult NpuSession::Start() {
   auto& s = *state_;
   if (!s.options.authorization.Allows(core::ExperimentalFeature::Prefill))
     return {};
-  if (s.attempted || process_attempted.exchange(true))
+  if (ProcessFailed() || s.attempted || process_attempted.exchange(true))
     return {};
   s.attempted = true;
   try {
