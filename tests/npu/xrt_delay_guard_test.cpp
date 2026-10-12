@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <delayimp.h>
 #include <xrt/experimental/xrt_version.h>
 
 #include <iostream>
@@ -10,6 +11,21 @@
 int main() {
   if (GetModuleHandleW(L"xrt_coreutil.dll")) {
     std::cerr << "FAIL: XRT was loaded at process startup\n";
+    return 1;
+  }
+  DelayLoadInfo missing_export{};
+  missing_export.szDll = "xrt_coreutil.dll";
+  bool import_rejected = false;
+  if (__pfnDliFailureHook2) {
+    try {
+      (void)__pfnDliFailureHook2(dliFailGetProc, &missing_export);
+    } catch (const std::runtime_error& error) {
+      import_rejected = std::string_view(error.what()).find(
+                            "delayed import unavailable") != std::string_view::npos;
+    }
+  }
+  if (!import_rejected || GetModuleHandleW(L"xrt_coreutil.dll")) {
+    std::cerr << "FAIL: missing delayed export did not produce a C++ exception\n";
     return 1;
   }
   try {
