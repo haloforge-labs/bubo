@@ -623,6 +623,66 @@ void HeaderTest() {
          "architecture and native context come from header");
 }
 
+void NpuPolicyTest() {
+  using gufo::core::ExperimentalFeature;
+#ifdef GUFO_NPU
+  constexpr bool available = true;
+#else
+  constexpr bool available = false;
+#endif
+  for (const auto* profile : {"default", "subagents", "exact", "stock"}) {
+    const bool restricted = std::string_view(profile) == "exact" ||
+                            std::string_view(profile) == "stock";
+    auto inputs = Inputs(profile);
+    inputs.manifest_defaults["--npu-prefill"] = "off";
+    inputs.environment["--npu-prefill"] = "off";
+    auto resolved = ResolveReleaseSettings(inputs);
+    Expect(resolved.prefill_authorization.Allows(ExperimentalFeature::Prefill) ==
+               (available && !restricted),
+           "NPU profile default ignores manifest and environment flag values");
+    Expect(Find(resolved, "--npu-prefill").value ==
+               (available && !restricted ? "on" : "off"),
+           "NPU effective policy matches build and profile");
+    if (restricted) {
+      for (const auto& log : resolved.logs)
+        Expect(log.find("npu") == std::string::npos &&
+                   log.find("GUFO_NPU_") == std::string::npos,
+               "restricted profiles emit no NPU log");
+      inputs.environment["GUFO_NPU_KEEPALIVE"] = "";
+      inputs.environment["GUFO_NPU_SLICES"] = "malformed";
+      resolved = ResolveReleaseSettings(inputs);
+      bool called = false;
+      Expect(!gufo::core::CreateAuthorizedPrefill(
+                 resolved.prefill_authorization, [&](auto) { called = true; }) &&
+                 !called,
+             "restricted profile never creates an NPU session");
+    }
+    inputs.explicit_flags["--npu-prefill"] = "off";
+    inputs.manifest_defaults["--npu-prefill"] = "on";
+    inputs.environment["--npu-prefill"] = "on";
+    resolved = ResolveReleaseSettings(inputs);
+    Expect(!resolved.prefill_authorization.Allows(ExperimentalFeature::Prefill) &&
+               Find(resolved, "--npu-prefill").value == "off",
+           "explicit NPU OFF cannot be overridden");
+    inputs.explicit_flags["--npu-prefill"] = "on";
+    if (restricted) {
+      bool rejected = false;
+      try {
+        (void)ResolveReleaseSettings(inputs);
+      } catch (const std::invalid_argument& error) {
+        rejected = std::string(error.what()).find(
+                       "effective=off: profile=" + std::string(profile) +
+                       " forces OFF") != std::string::npos;
+      }
+      Expect(rejected, "restricted profile rejects explicit NPU ON");
+    } else {
+      resolved = ResolveReleaseSettings(inputs);
+      Expect(resolved.prefill_authorization.Allows(ExperimentalFeature::Prefill) ==
+                 available,
+             "explicit ON tolerates a build without NPU");
+    }
+  }
+}
 void TestResolver() {
   const auto baseline = ResolveReleaseSettings(Inputs());
   {
@@ -1042,6 +1102,7 @@ int main(int argc, char** argv) {
       ReviewRegression(finding);
     for (int finding = 1; finding <= 8; ++finding)
       Review2Regression(finding);
+    NpuPolicyTest();
     TestResolver();
     HeaderTest();
     AuditCatalog();

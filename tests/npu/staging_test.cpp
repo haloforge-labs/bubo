@@ -4,6 +4,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cstring>
 #include <iostream>
@@ -72,7 +73,7 @@ int main() {
     auto parsed = ParseKnobs(resolved.prefill_authorization, selected);
     assert(parsed.slices == (origin == 1 ? 1u : 12u));
     assert(parsed.artifacts == (origin == 1 ? "manifest-artifacts" : "0"));
-    inputs.explicit_flags.clear();
+    inputs.explicit_flags["--npu-prefill"] = "off";
     inputs.environment["GUFO_NPU_SLICES"] = "malformed";
     resolved = gufo::server::ResolveReleaseSettings(inputs);
     bool called = false;
@@ -89,12 +90,21 @@ int main() {
   }
   std::map<std::string, std::string> values{{"GUFO_NPU_DIR", "0"}};
   auto knobs = ParseKnobs(token, values);
-  assert(knobs.artifacts == "0" && knobs.slices == 6 && knobs.gate_slices == 8);
+  assert(knobs.artifacts == "0" && knobs.slices == 6 && knobs.gate_slices == 0);
   assert(knobs.shared_expert);
   assert(knobs.timing.timeout.count() == 8000 &&
          knobs.timing.keepalive_interval.count() == 1000);
   Reject([&] { ParseKnobs({}, values); });
-  Reject([&] { ParseKnobs(token, {}); });
+  const auto packaged = ParseKnobs(token, {});
+  std::array<wchar_t, 32768> executable{};
+  const auto length = GetModuleFileNameW(nullptr, executable.data(),
+                                         static_cast<DWORD>(executable.size()));
+  assert(length && length < executable.size());
+  assert(packaged.artifacts ==
+         (std::filesystem::path(executable.data()).parent_path() /
+          ".." / "tools" / "npu").lexically_normal());
+  assert(packaged.slices == 6 && packaged.gate_slices == 0 &&
+         packaged.shared_expert);
   for (auto directory : {std::string{}, std::string("path\0suffix", 11)}) {
     auto bad_path = values;
     bad_path["GUFO_NPU_DIR"] = directory;
@@ -139,6 +149,10 @@ int main() {
   invalid["GUFO_NPU_KEEPALIVE_MS"] = "60001";
   Reject([&] { ParseKnobs(token, invalid); });
   values["GUFO_NPU_SLICES"] = "12";
+  for (unsigned slices = 0; slices <= 12; ++slices) {
+    values["GUFO_NPU_GATE_SLICES"] = std::to_string(slices);
+    assert(ParseKnobs(token, values).gate_slices == slices);
+  }
   values["GUFO_NPU_GATE_SLICES"] = "0";
   values["GUFO_NPU_SHEXP"] = "0";
   values["GUFO_NPU_KEEPALIVE"] = "0";

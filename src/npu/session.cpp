@@ -37,8 +37,8 @@ void FailProcess(std::string_view message) noexcept {
     for (auto& c : error)
       if (c == '\n' || c == '\r' || c == '\t')
         c = ' ';
-    server::Logger::Error(
-        "npu", error + "; NPU disabled for process; later requests use GPU");
+    server::Logger::Warn(
+        "npu", error + "; NPU disabled for process; GPU path");
   } catch (...) {
   }
 }
@@ -127,8 +127,6 @@ NpuResult NpuSession::Start() {
     s.adapter = PrivateBoAdapter::Create(
         s.options.authorization, s.options.artifacts, s.heartbeat_a,
         s.heartbeat_b, s.options.timing.timeout);
-    const auto platform = json::parse(s.adapter->PowerMode());
-    server::Logger::Info("npu", "power mode (read-only)=" + platform.dump());
     DispatchInfo beat;
     beat.heartbeat = true;
     auto first = s.Run(s.heartbeat_a, s.heartbeat_b, beat);
@@ -154,9 +152,19 @@ NpuResult NpuSession::Start() {
         }
       });
     }
+    if (s.healthy) {
+      try {
+        const auto platform = json::parse(s.adapter->PowerMode());
+        server::Logger::Info("npu", "power mode (read-only)=" + platform.dump());
+      } catch (...) {
+        // Optional platform information must not disable a working session.
+      }
+    }
     return first;
   } catch (const std::exception& e) {
     return s.Fail(e.what());
+  } catch (...) {
+    return s.Fail("unknown startup failure");
   }
 }
 void NpuSession::PrepareWeight(std::span<const std::byte> b) {

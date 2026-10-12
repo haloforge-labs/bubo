@@ -16,7 +16,7 @@
 namespace gufo::npu {
 struct Knobs {
   std::filesystem::path artifacts;
-  unsigned slices = 6, gate_slices = 8;
+  unsigned slices = 6, gate_slices = 0;
   bool shared_expert = true;
   Timing timing;
 };

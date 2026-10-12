@@ -1,15 +1,20 @@
 // SPDX-License-Identifier: MIT
 #include "src/npu/session.hpp"
 
+#include <windows.h>
+
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <future>
 #include <iostream>
 
 #include "fake_hip.hpp"
 #include "fake_xrt.hpp"
 #include "file_io_hook.hpp"
+#include "src/cli/serve/logging.hpp"
 #include "src/npu/linear_z_hip.hpp"
 #include "src/npu/projection.hpp"
 #include "src/npu/request_stats.hpp"
@@ -28,9 +33,80 @@ int main(int argc, char** argv) {
   o.timing.keepalive_interval = 0ms;
   if (mode == "stream_timeout")
     o.timing.timeout = 20ms;
+  if (mode == "denied") {
+    o.authorization = {};
+    auto denied = std::make_shared<ServerPrefill>(o);
+    assert(!denied->Start() && !denied->ready() && !ProcessFailed());
+    assert(fake::control.calls.empty() && fake::control.devices == 0 &&
+           fake::control.allocations == 0 && fake::control.starts == 0);
+    gufo::server::Logger::FlushSync();
+    return 0;
+  }
+  if (mode.starts_with("startup_")) {
+    std::filesystem::path temporary;
+    if (mode == "startup_missing_dir") {
+      o.artifacts = std::filesystem::temp_directory_path() /
+                    ("npu-absent-" + std::to_string(GetCurrentProcessId()) +
+                     "-" + std::to_string(GetTickCount64()));
+      assert(!std::filesystem::exists(o.artifacts));
+    } else if (mode == "startup_hash" || mode == "startup_missing_insts" ||
+               mode == "startup_missing_xclbin") {
+      temporary = std::filesystem::temp_directory_path() /
+                  ("npu-session-" + std::to_string(GetCurrentProcessId()) +
+                   "-" + std::to_string(GetTickCount64()));
+      std::filesystem::create_directory(temporary);
+      for (const auto* name : {"insts_4096x2560x1024_128x64x128.txt",
+                               "final_4096x2560x1024_128x64x128.xclbin"})
+        std::filesystem::copy_file(o.artifacts / name, temporary / name);
+      o.artifacts = temporary;
+      if (mode == "startup_hash") {
+        std::fstream instructions(
+            temporary / "insts_4096x2560x1024_128x64x128.txt",
+            std::ios::in | std::ios::out | std::ios::binary);
+        char byte = 0;
+        instructions.read(&byte, 1);
+        byte ^= 1;
+        instructions.seekp(0);
+        instructions.write(&byte, 1);
+      } else {
+        std::filesystem::remove(
+            temporary / (mode == "startup_missing_insts"
+                             ? "insts_4096x2560x1024_128x64x128.txt"
+                             : "final_4096x2560x1024_128x64x128.xclbin"));
+      }
+    } else if (mode == "startup_version") {
+      fake::control.runtime_mismatch = true;
+    } else if (mode == "startup_runtime_missing") {
+      fake::control.fail_call = "runtime.verify";
+    } else {
+      assert(mode == "startup_device");
+      fake::control.fail_call = "device.create";
+    }
+    auto failed = std::make_shared<ServerPrefill>(o);
+    assert(!failed->Start() && !failed->ready() && ProcessFailed());
+    const auto calls = fake::control.calls;
+    assert(!failed->Start() && fake::control.calls == calls);
+    auto retry = std::make_shared<ServerPrefill>(o);
+    assert(!retry->Start() && fake::control.calls == calls);
+    assert(fake::control.allocations == 0 && fake::control.starts == 0);
+    if (mode != "startup_device")
+      assert(fake::control.devices == 0);
+    failed->session().RejectResult("second failure must not log");
+    if (!temporary.empty())
+      std::filesystem::remove_all(temporary);
+    gufo::server::Logger::FlushSync();
+    return 0;
+  }
+  if (mode == "power_unavailable")
+    fake::control.fail_call = "device.get_info.platform";
   auto service = std::make_shared<ServerPrefill>(o);
   auto& session = service->session();
   assert(service->Start());
+  if (mode == "power_unavailable") {
+    assert(service->ready() && !ProcessFailed());
+    gufo::server::Logger::FlushSync();
+    return 0;
+  }
   std::vector<std::byte> a(kABytes);
   auto weights = std::make_shared<LinearZWeights>();
   weights->gpu_rows = 10240;
@@ -220,4 +296,5 @@ int main(int argc, char** argv) {
             << ": stream-ordered fake HIP/XRT; zero dispatch "
                "file writes/flushes; allocations="
             << allocations << "\n";
+  gufo::server::Logger::FlushSync();
 }

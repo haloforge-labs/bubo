@@ -124,6 +124,11 @@ FARPROC WINAPI VerifiedDelayHook(unsigned notification, PDelayLoadInfo info) {
   return nullptr;
 }
 
+FARPROC WINAPI VerifiedDelayFailure(unsigned, PDelayLoadInfo info) {
+  if (std::strcmp(info->szDll, "xrt_coreutil.dll") == 0)
+    throw std::runtime_error("NPU XRT delayed import unavailable");
+  return nullptr;
+}
 }  // namespace
 
 void EnsureXrtRuntime() {
@@ -149,3 +154,5 @@ void EnsureXrtRuntime() {
 
 // Object inclusion (rather than archive extraction) makes the hook mandatory.
 extern "C" const PfnDliHook __pfnDliNotifyHook2 = gufo::npu::VerifiedDelayHook;
+
+extern "C" const PfnDliHook __pfnDliFailureHook2 = gufo::npu::VerifiedDelayFailure;

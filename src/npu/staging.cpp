@@ -2,6 +2,9 @@
 // Lane geometry selectively adapted from the MIT fork's device_model.cpp.
 #include "staging.hpp"
 
+#include <windows.h>
+
+#include <array>
 #include <charconv>
 #include <cstring>
 #include <limits>
@@ -68,15 +71,24 @@ Knobs ParseKnobs(const core::ExperimentalAuthorization& authorization,
   authorization.Require(core::ExperimentalFeature::Prefill);
   Knobs knobs;
   auto directory = Value(values, "GUFO_NPU_DIR");
-  if (directory.empty() || directory.find('\0') != std::string_view::npos)
-    throw std::invalid_argument(
-        "GUFO_NPU_DIR: nonempty artifact path required");
-  std::u8string utf8;
-  for (const auto byte : directory)
-    utf8.push_back(static_cast<char8_t>(static_cast<unsigned char>(byte)));
-  knobs.artifacts = std::filesystem::path(utf8);
+  if (directory.find('\0') != std::string_view::npos)
+    throw std::invalid_argument("GUFO_NPU_DIR: invalid artifact path");
+  if (directory.empty()) {
+    std::array<wchar_t, 32768> executable{};
+    const DWORD length = GetModuleFileNameW(nullptr, executable.data(),
+                                            static_cast<DWORD>(executable.size()));
+    if (!length || length >= executable.size())
+      throw std::invalid_argument("NPU executable directory unavailable");
+    knobs.artifacts = (std::filesystem::path(executable.data()).parent_path() /
+                       ".." / "tools" / "npu").lexically_normal();
+  } else {
+    std::u8string utf8;
+    for (const auto byte : directory)
+      utf8.push_back(static_cast<char8_t>(static_cast<unsigned char>(byte)));
+    knobs.artifacts = std::filesystem::path(utf8);
+  }
   knobs.slices = Number(values, "GUFO_NPU_SLICES", 6, 1, 12);
-  knobs.gate_slices = Number(values, "GUFO_NPU_GATE_SLICES", 8, 0, 12);
+  knobs.gate_slices = Number(values, "GUFO_NPU_GATE_SLICES", 0, 0, 12);
   knobs.shared_expert = Switch(values, "GUFO_NPU_SHEXP", true);
   (void)Switch(values, "GUFO_NPU_KEEPALIVE", true);
   knobs.timing = ParseTiming(Value(values, "GUFO_NPU_TIMEOUT_MS"),

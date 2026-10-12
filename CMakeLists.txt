@@ -577,7 +577,9 @@ if (BUILD_TESTING)
       target_compile_definitions(${npu_unit} PRIVATE __HIP_PLATFORM_AMD__=1)
     endforeach()
     target_compile_options(npu_session_test PRIVATE -include "${CMAKE_SOURCE_DIR}/tests/npu/file_io_hook.hpp")
-    foreach(npu_case clean timeout error layer single stream_timeout invalid)
+    foreach(npu_case clean timeout error layer single stream_timeout invalid
+        startup_missing_dir startup_missing_insts startup_missing_xclbin startup_hash
+        startup_version startup_runtime_missing startup_device denied power_unavailable)
       add_test(NAME npu_session_${npu_case}_test COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/npu/failure_log_test.py" "$<TARGET_FILE:npu_session_test>" "${npu_case}" "${GUFO_XRT_TOOLING_ROOT}")
       set_tests_properties(npu_session_${npu_case}_test PROPERTIES LABELS "cpu;npu;fake" TIMEOUT 120)
     endforeach()
@@ -691,6 +693,9 @@ if (BUILD_TESTING)
     GUFO_BRAND_SCAN_PYTHON="${Python3_EXECUTABLE}"
     GUFO_PRODUCTION_ENV_SPEC="${GUFO_PRODUCTION_ENV_SPEC_PATH}"
     GUFO_RELEASE_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+  if(GUFO_ENABLE_NPU)
+    target_compile_definitions(release_profile_test PRIVATE GUFO_NPU=1)
+  endif()
   add_test(NAME release_profile_test COMMAND release_profile_test)
   set_tests_properties(release_profile_test PROPERTIES LABELS "cpu;cli;release;check-pr")
 

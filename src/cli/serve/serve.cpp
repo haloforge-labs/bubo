@@ -854,7 +854,7 @@ int RunServe(std::span<const char* const> args) {
       std::cerr << line << '\n';
     }
   }
-  std::string requested_prefill = "off";
+  std::string requested_prefill = "on";
 #ifdef GUFO_NPU
   std::shared_ptr<npu::ServerPrefill> persistent_prefill;
   bool prefill_started = false;
@@ -880,7 +880,7 @@ int RunServe(std::span<const char* const> args) {
         "Profiles", &verify_model);
     parser.AddOption(
         "", "--npu-prefill", "off|on",
-        "Experimental NPU prefill (default: off; explicit CLI only)",
+        "NPU prefill when available (default: on; exact and stock: off)",
         "Profiles", &requested_prefill);
     parser.AddOption("", "--profile", "NAME",
                      "Release profile: default, subagents, exact, or stock",
@@ -1660,15 +1660,16 @@ int RunServe(std::span<const char* const> args) {
             prefill_started = persistent_prefill->Start();
           });
     } catch (const std::exception& error) {
-      std::cerr << "NPU effective=off; disabled for process; " << error.what()
-                << '\n';
-      (void)server::Logger::FlushSync();
-      return 2;
+      npu::FailProcess(error.what());
+      persistent_prefill.reset();
+    } catch (...) {
+      npu::FailProcess("unknown startup failure");
+      persistent_prefill.reset();
     }
-    if (release.resolved.prefill_authorization.Allows(
-            core::ExperimentalFeature::Prefill) &&
-        !prefill_started)
-      return 2;
+#else
+    if (release.resolved.prefill_authorization.reason() == "GUFO_ENABLE_NPU=OFF")
+      server::Logger::Info(
+          "npu", "GUFO_ENABLE_NPU=OFF; NPU disabled for process; GPU path");
 #endif
 #ifdef GUFO_NPU
     if (prefill_started)

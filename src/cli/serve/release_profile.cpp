@@ -314,32 +314,32 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
   result.profile = inputs.profile;
   result.architecture = inputs.architecture;
   result.native_context = inputs.native_context;
-  // Resolve opt-ins before model metadata, manifest defaults or env injection.
-  const auto authorize = [&](const std::string& flag,
-                             core::ExperimentalFeature feature) {
-    const auto found = inputs.explicit_flags.find(flag);
+  // Resolve NPU policy before model metadata or configuration injection.
+  const auto authorize = [&] {
+    const auto found = inputs.explicit_flags.find("--npu-prefill");
     const bool present = found != inputs.explicit_flags.end();
-    const std::string value = present ? found->second : "off";
-    const bool requested = value == "on";
+    const std::string value = present ? found->second : "on";
     if (value != "off" && value != "on")
-      throw std::invalid_argument(flag + ": invalid value '" + value + "'");
-    std::string reason =
-        present ? "explicit CLI OFF" : "no explicit CLI authorization";
-    if (inputs.profile == "exact" || inputs.profile == "stock")
-      reason = "profile=" + inputs.profile + " forces OFF";
+      throw std::invalid_argument("--npu-prefill: invalid value '" + value + "'");
+    const bool restricted =
+        inputs.profile == "exact" || inputs.profile == "stock";
+    if (restricted && present && value == "on")
+      throw std::invalid_argument("--npu-prefill effective=off: profile=" +
+                                  inputs.profile + " forces OFF");
+    bool allowed = !restricted && value == "on";
+    std::string reason = restricted ? "profile=" + inputs.profile + " forces OFF"
+                         : value == "off" ? "explicit CLI OFF"
+                         : present ? "explicit CLI ON" : "profile default ON";
 #ifndef GUFO_NPU
-    else if (feature == core::ExperimentalFeature::Prefill)
+    if (allowed) {
+      allowed = false;
       reason = "GUFO_ENABLE_NPU=OFF";
+    }
 #endif
-    else if (requested)
-      reason = "explicit CLI ON";
-    const bool allowed = requested && reason == "explicit CLI ON";
-    if (requested && !allowed)
-      throw std::invalid_argument(flag + " effective=off: " + reason);
-    return core::ExperimentalAuthorization(feature, allowed, std::move(reason));
+    return core::ExperimentalAuthorization(core::ExperimentalFeature::Prefill,
+                                           allowed, std::move(reason));
   };
-  result.prefill_authorization =
-      authorize("--npu-prefill", core::ExperimentalFeature::Prefill);
+  result.prefill_authorization = authorize();
   const bool exact_controls =
       inputs.profile == "exact" && inputs.model_family == "qwen3.8-flash-next";
   std::map<std::string, ReleaseSetting> settings;
@@ -372,14 +372,20 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
     const auto name = row.member_str("name");
     ReleaseSetting setting{
         name, Text(row, "built_in"), "built-in", row.member_str("class"), {}};
-    // These options are CLI-only for every model family. A manifest or
-    // environment entry named like a flag can never become an authorization.
+    // This policy is resolved before configuration for every model family. A
+    // manifest or environment entry cannot override the command-line flag.
     if (name == "--npu-prefill") {
       const auto& authorization = result.prefill_authorization;
       const bool on = authorization.Allows(core::ExperimentalFeature::Prefill);
       setting.value = on ? "on" : "off";
       setting.origin =
-          inputs.explicit_flags.contains(name) ? "flag" : "built-in";
+          inputs.explicit_flags.contains(name) ? "flag"
+                                              : "profile:" + inputs.profile;
+      settings.emplace(name, std::move(setting));
+      continue;
+    }
+    if (name.starts_with("GUFO_NPU_") &&
+        !result.prefill_authorization.Allows(core::ExperimentalFeature::Prefill)) {
       settings.emplace(name, std::move(setting));
       continue;
     }
@@ -760,9 +766,6 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
             ", sessions=1, cache=off";
     result.logs.push_back(line);
   }
-  result.logs.push_back(
-      "npu-prefill=" + result.effective_flags.at("--npu-prefill") +
-      "; reason=" + result.prefill_authorization.reason());
   return result;
 }
 void ApplyInjections(const ReleaseResolution& resolved) {

@@ -44,7 +44,7 @@ private:
       : feature_(feature), allowed_(allowed), reason_(std::move(reason)) {}
   ExperimentalFeature feature_ = ExperimentalFeature::Prefill;
   bool allowed_ = false;
-  std::string reason_ = "no explicit CLI authorization";
+  std::string reason_ = "NPU policy disabled";
 };
 
 // The production startup and CPU counter use this identical creation boundary.

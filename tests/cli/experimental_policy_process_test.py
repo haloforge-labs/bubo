@@ -39,8 +39,8 @@ with tempfile.TemporaryDirectory(prefix='prefill-policy-') as directory:
         r = subprocess.run(argv, env=env, text=True, stdout=subprocess.PIPE,
                            stderr=subprocess.STDOUT, timeout=15, creationflags=flags)
         records = counter.read_text().splitlines() if counter.exists() else []
-        rejected = request == 'on' and (mode == 'OFF' or profile in ('exact', 'stock'))
-        positive = request == 'on' and not rejected and entry != 'noncli'
+        rejected = request == 'on' and profile in ('exact', 'stock')
+        positive = mode == 'ON' and profile not in ('exact', 'stock') and (request != 'off' or entry == 'noncli')
         want = expected if expected is not None else 2 if rejected else 83 if positive else 0
         assert r.returncode == want, (argv, r.returncode, want, r.stdout)
         assert records == (['factory=1'] if want == 83 else []), (argv, records)
@@ -70,9 +70,7 @@ with tempfile.TemporaryDirectory(prefix='prefill-policy-') as directory:
                            text=True, capture_output=True, timeout=15, creationflags=flags)
         assert r.returncode == 2 and 'invalid value' in r.stdout and not counter.exists(), r.stdout
     print('PASS: strict off|on parsing rejects seven malformed variants before Create')
-    for profile in ('exact', 'stock', 'default'):
-        if profile == 'default' and mode == 'ON':
-            continue
+    for profile in ('exact', 'stock'):
         r = subprocess.run([host, 'cli', str(counter), str(manifest), '--profile', profile,
                             '--model', str(root/'missing.gguf'), '--npu-prefill', 'on'],
                            text=True, capture_output=True, timeout=15, creationflags=flags)

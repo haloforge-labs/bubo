@@ -3,7 +3,10 @@
 #define GUFO_NPU_SESSION_HPP_
 
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>

@@ -48,7 +48,7 @@ Empty environment values count as unset and produce a warning.
 | `--no-prompt-lookup` | Disable prompt lookup proposals. | Unset | Keep prompt lookup enabled with MTP unless lookup comparisons require it off. | any; generic; any |
 | `--no-twin` | Suppress the manifest dense twin. | Unset | Enable it when decoding must run without the supplied dense twin. | any; generic; any |
 | `--no-vision` | Suppress the manifest vision sidecar. | Unset | Enable it when the server must omit the vision sidecar. | any; generic; any |
-| `--npu-prefill` | Opt in to experimental NPU prefill. | off | Explicit CLI on only; exact, stock and build-OFF reject ON before creation. | any; generic; any |
+| `--npu-prefill` | Use NPU prefill when available. | on when usable | Default and subagents request ON; exact and stock force OFF. Startup failures retain the GPU path. | any; generic; any |
 | `--port` | Set the server listen port. | 8080 | Keep 8080 unless another service uses that port or clients require a different port. | any; generic; any |
 | `--prefill-chunk` | Limit prompt tokens between active decode rounds. | 512 | Keep 512 unless active sessions need shorter pauses during another request prefill. | any; strix-halo-tuned; qwen3.8-flash-next |
 | `--presence-penalty` | Penalize tokens already generated in the response. | Qwen3.8: 0.0 thinking; 1.5 non-thinking unless GUFO_PRODUCTION_SAMPLING=1 | Keep the model preset unless the task needs a different penalty for previously generated tokens. | any; generic; any |
@@ -100,13 +100,13 @@ Empty environment values count as unset and produce a warning.
 | `GUFO_LOOP_BREAKER_TRANSITION_TEXT` | Set the text used for loop breaker transitions. | built-in text | Keep the built-in text unless loop termination requires a different transition message. | any; generic; any |
 | `GUFO_MAX_IMAGE_TOKENS` | Limit image tokens admitted for a request. | no cap | Keep it unset unless image token admission needs a fixed limit. | any; generic; qwen3.8-flash-next |
 | `GUFO_MODEL_SUPPRESS_TOKENS` | Enable model token suppression. | off | Keep it off unless model token suppression is required. | any; generic; qwen3.8-flash-next |
-| `GUFO_NPU_DIR` | Locate NPU artifacts after explicit CLI authorization. | Unset | A path only, including 0; cannot enable NPU mode. | any; generic; any |
-| `GUFO_NPU_GATE_SLICES` | Select zero through twelve paired query and gate slices. | 8 within ON | Only consumed after CLI authorization; partial controls cannot exclude NPU exposure. | any; generic; any |
-| `GUFO_NPU_KEEPALIVE` | Enable periodic heartbeat with literal zero or one. | 1 within ON | Only consumed after CLI authorization; partial controls cannot exclude NPU exposure. | any; generic; any |
-| `GUFO_NPU_KEEPALIVE_MS` | Set heartbeat interval to zero or one hundred through sixty thousand milliseconds. | 1000 within ON | Only consumed after CLI authorization; partial controls cannot exclude NPU exposure. | any; generic; any |
-| `GUFO_NPU_SHEXP` | Enable shared expert staging with literal zero or one. | 1 within ON | Only consumed after CLI authorization; partial controls cannot exclude NPU exposure. | any; generic; any |
-| `GUFO_NPU_SLICES` | Select one through twelve linear z slices after authorization. | 6 within ON | Only consumed after CLI authorization; partial controls cannot exclude NPU exposure. | any; generic; any |
-| `GUFO_NPU_TIMEOUT_MS` | Bound NPU completion to one through eight thousand milliseconds. | 8000 within ON | Only consumed after CLI authorization; partial controls cannot exclude NPU exposure. | any; generic; any |
+| `GUFO_NPU_DIR` | Locate NPU artifacts for enabled prefill. | Executable folder/../tools/npu | Overrides the artifact directory beside the packaged bin folder; cannot enable NPU mode. | any; generic; any |
+| `GUFO_NPU_GATE_SLICES` | Select zero through twelve paired query and gate slices. | 0 | Consumed only when NPU prefill is enabled. | any; generic; any |
+| `GUFO_NPU_KEEPALIVE` | Enable periodic heartbeat with literal zero or one. | 1 | Consumed only when NPU prefill is enabled. | any; generic; any |
+| `GUFO_NPU_KEEPALIVE_MS` | Set heartbeat interval to zero or one hundred through sixty thousand milliseconds. | 1000 | Consumed only when NPU prefill is enabled. | any; generic; any |
+| `GUFO_NPU_SHEXP` | Enable shared expert staging with literal zero or one. | 1 | Consumed only when NPU prefill is enabled. | any; generic; any |
+| `GUFO_NPU_SLICES` | Select one through twelve linear z slices for enabled prefill. | 6 | Consumed only when NPU prefill is enabled. | any; generic; any |
+| `GUFO_NPU_TIMEOUT_MS` | Bound NPU completion to one through eight thousand milliseconds. | 8000 | Consumed only when NPU prefill is enabled. | any; generic; any |
 | `GUFO_PORT` | Set the server port through the environment. | Unset | Leave it unset unless the server port must come from this environment variable. | any; generic; any |
 | `GUFO_PREFILL_FORWARD_TOKENS` | Set the maximum tokens in each prefill forward pass. | 4096 | Keep 4096 unless prefill geometry tests outside exact require a different pass size. | any; generic; qwen3.8-flash-next |
 | `GUFO_PRODUCTION_SAMPLING` | Enable the production sampling preset. | off | Keep it off unless production sampling policy tests require it on. | any; generic; qwen3.8-flash-next |

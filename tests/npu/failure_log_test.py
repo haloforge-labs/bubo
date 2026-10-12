@@ -6,4 +6,10 @@ print(result.stdout, end="")
 print(result.stderr, end="")
 assert result.returncode == 0, result.returncode
 mode = sys.argv[2]
-assert result.stderr.count("[ERROR] [npu]") == (mode in ("error", "timeout", "stream_timeout", "invalid"))
+failure = mode.startswith("startup_") or mode in ("error", "timeout", "stream_timeout", "invalid")
+assert result.stderr.count("[WARN] [npu]") == int(failure), result.stderr
+if mode.startswith("startup_"):
+    lines = [line for line in result.stderr.splitlines() if "[npu]" in line]
+    assert len(lines) == 1 and "NPU disabled for process; GPU path" in lines[0], lines
+if mode in ("denied", "power_unavailable"):
+    assert "[npu]" not in result.stderr, result.stderr
