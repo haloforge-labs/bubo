@@ -82,7 +82,7 @@ Same 35 requests, same seeds, same laptop in Performance mode.
 | IMO 2026 (final answer) | 3/3 | 2/3 |
 | Total | 29/35 | 27/35 |
 
-Same or better accuracy, and about 24 % faster decode at about 70 W laptop power. The 95 % intervals overlap.
+Same or better accuracy, and about 24 % faster decode at about 70 W laptop power. Tokens used: Bubo generated 879,854 completion tokens and gufo (pixmaate’s Windows port) 612,035. One Bubo request repeated text until the context limit and used 261,913 of them; without it, Bubo generated 617,941. The 95 % intervals overlap.
 
 ## Fixed
 

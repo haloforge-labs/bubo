@@ -57,7 +57,7 @@ Both engines answered the same 35 requests (GPQA Diamond, AIME 2026, HMMT 2026, 
 | IMO 2026 (final answer) | 3/3 | 2/3 |
 | Total | 29/35 | 27/35 |
 
-Halowin Bubo gives the same or better accuracy and decodes about 24 % faster on these requests at about 70 W laptop power. The 95 % intervals overlap and each set is small. Read this as "no loss of accuracy". Details: the Benchmarks page on the site.
+Halowin Bubo gives the same or better accuracy and decodes about 24 % faster on these requests at about 70 W laptop power. The 95 % intervals overlap and each set is small. Read this as "no loss of accuracy". Tokens used: Bubo generated 879,854 completion tokens and gufo (pixmaate’s Windows port) 612,035. One Bubo request repeated text until the context limit and used 261,913 of them; without it, Bubo generated 617,941. Details: the Benchmarks page on the site.
 
 
 ## Requirements
