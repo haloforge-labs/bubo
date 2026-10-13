@@ -2,7 +2,7 @@
 
 First release from HaloForge Labs.
 
-Halowin Bubo brings the gufo engine to native Windows with AMD HIP.
+Halowin Bubo runs the gufo engine natively on Windows with AMD HIP.
 It targets Strix Halo laptops with Ryzen AI Max and Radeon 8060S graphics at approximately 70 W.
 The base is gufo v0.10.0 plus main commit `97b8645f`.
 The Windows layer comes from [pixmaate/gufo `windows-port`](https://github.com/pixmaate/gufo/tree/windows-port).
@@ -57,7 +57,7 @@ Bubo is tuned for Qwen3.8 Flash Next. The other models run with upstream gufo se
 
 The package contains no AMD files or model weights.
 Run `bubo prepare`. It downloads three official ROCm 10.0.0 wheels for `gfx1151` (967.2 MiB) and eight pinned model files (108.6 GiB) after you approve a displayed plan.
-It checks the SHA-256 hash of every file, resumes stopped downloads, honours `HTTPS_PROXY`, and writes `bubo-package.json` last.
+It checks the SHA-256 hash of every file, resumes stopped downloads, honors `HTTPS_PROXY`, and writes `bubo-package.json` last.
 The default checks find a wrong file, a wrong variant and a truncated file. `--verify` forces a full SHA-256 check.
 The server finds the model files through the manifest. It never hashes model payloads at startup. `--verify-model` checks all eight files on request.
 
@@ -72,7 +72,7 @@ See the [README](README.md#performance-at-70-w) for the conditions.
 
 ## Reasoning check against gufo (pixmaate’s Windows port)
 
-Same 35 requests, same seeds, same laptop in Performance mode.
+Pre-release build (B6.1), 2026-10-10, not v0.1.0. Same 35 requests, same seeds, same laptop in Performance mode.
 
 | Set | Halowin Bubo correct | gufo (pixmaate’s Windows port) correct |
 | --- | --- | --- |
@@ -82,7 +82,7 @@ Same 35 requests, same seeds, same laptop in Performance mode.
 | IMO 2026 (final answer) | 3/3 | 2/3 |
 | Total | 29/35 | 27/35 |
 
-Same or better accuracy, and about 24 % faster decode at about 70 W laptop power. Tokens used: Bubo generated 879,854 completion tokens and gufo (pixmaate’s Windows port) 612,035. One Bubo request repeated text until the context limit and used 261,913 of them; without it, Bubo generated 617,941. The 95 % intervals overlap.
+Same or better accuracy, and about 24 % faster decode at about 70 W laptop power. Tokens used, on the 32 requests that both engines answered: Bubo generated 580,456 completion tokens and gufo (pixmaate’s Windows port) 525,293. The median ratio per request is 1.00. On the pre-release build, one Bubo request (AIME item 29) repeated text until the context limit (261,913 tokens); it is left out of the 32. The 95 % intervals overlap.
 
 ## Fixed
 

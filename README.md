@@ -13,9 +13,9 @@ The base is gufo v0.10.0 plus main commit `97b8645f`.
 
 ## What makes Bubo fast
 
-One chip. One package. Every layer tuned for it. All numbers are our own measurements on one 70 W Strix Halo laptop.
+Bubo is tuned for one chip, AMD Strix Halo. All numbers are our own measurements on one 70 W Strix Halo laptop.
 
-<img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **Janus dense twin and Q4_K draft head.** A second, 4-bit copy of 252 dense weights serves decode and draft checking. Together with the draft head it makes decode 5.9 % faster at about 70 W laptop power. Prefill and `exact` mode use the 8-bit weights.
+<img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **Dense twin and Q4_K draft head.** A second, 4-bit copy of 252 dense weights serves decode and draft checking. Together with the draft head it makes decode 5.9 % faster at about 70 W laptop power. Prefill and `exact` mode use the 8-bit weights.
 
 <img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **MTP stack.** Draft length control, prompt lookup and bounded lenient acceptance in thinking. Decode at 128 tokens goes from 32.19 tok/s without MTP to 37.15 tok/s with MTP (release build v0.1.0, 2026-10-12), and up to 97.4 tok/s on a copy-heavy code edit, all at about 70 W laptop power.
 
@@ -29,7 +29,7 @@ One chip. One package. Every layer tuned for it. All numbers are our own measure
 
 <img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **Several users and real agents.** 102.2 tok/s in total for 8 users with plain decode, and 51.6 tok/s for a real coding agent, both at about 70 W laptop power.
 
-Details and limits: [Under the hood](https://haloforgelabs.com/docs/under-the-hood/).
+Details and limits: [How it works](https://haloforgelabs.com/docs/under-the-hood/).
 
 ## Performance at 70 W
 
@@ -47,7 +47,7 @@ Model choice, prompt content, and settings affect speed.
 
 ## Reasoning check against gufo (pixmaate’s Windows port)
 
-Both engines answered the same 35 requests (GPQA Diamond, AIME 2026, HMMT 2026, IMO 2026) on the same laptop in Performance mode, with the same seeds.
+Pre-release build (B6.1), 2026-10-10, not v0.1.0. Both engines answered the same 35 requests (GPQA Diamond, AIME 2026, HMMT 2026, IMO 2026) on the same laptop in Performance mode, with the same seeds.
 
 | Set | Halowin Bubo correct | gufo (pixmaate’s Windows port) correct |
 | --- | --- | --- |
@@ -57,7 +57,7 @@ Both engines answered the same 35 requests (GPQA Diamond, AIME 2026, HMMT 2026, 
 | IMO 2026 (final answer) | 3/3 | 2/3 |
 | Total | 29/35 | 27/35 |
 
-Halowin Bubo gives the same or better accuracy and decodes about 24 % faster on these requests at about 70 W laptop power. The 95 % intervals overlap and each set is small. Read this as "no loss of accuracy". Tokens used: Bubo generated 879,854 completion tokens and gufo (pixmaate’s Windows port) 612,035. One Bubo request repeated text until the context limit and used 261,913 of them; without it, Bubo generated 617,941. Details: the Benchmarks page on the site.
+Halowin Bubo gives the same or better accuracy and decodes about 24 % faster on these requests at about 70 W laptop power. The 95 % intervals overlap and each set is small. Read this as "no loss of accuracy". Tokens used, on the 32 requests that both engines answered: Bubo generated 580,456 completion tokens and gufo (pixmaate’s Windows port) 525,293. The median ratio per request is 1.00. On the pre-release build, one Bubo request (AIME item 29) repeated text until the context limit (261,913 tokens); it is left out of the 32. Details: the Benchmarks page on the site.
 
 
 ## Requirements

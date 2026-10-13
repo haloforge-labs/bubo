@@ -43,7 +43,7 @@ Use `bubo serve llm --help` for command-specific help.
 | `--context VALUE` | Set the context token limit for each session. | 262144 | Keep the profile context unless the task needs a different token limit. |
 | `--draft-tokens VALUE` | Set the maximum speculative draft length. | 7 | Keep seven tokens unless speculative draft length tests need another value. |
 | `--exact` | Select the exact profile. | Unset | Use it when output must repeat with the same build, prompt, and seed. |
-| `--frequency-penalty VALUE` | Penalise tokens by their generated occurrence count. | 0.0 (off) | Keep zero unless the task needs fewer frequently repeated tokens. |
+| `--frequency-penalty VALUE` | Penalize tokens by their generated occurrence count. | 0.0 (off) | Keep zero unless the task needs fewer frequently repeated tokens. |
 | `--host VALUE` | Set the server listen address. | 127.0.0.1 | Keep the local address unless remote clients must connect to the server. |
 | `--log-level VALUE` | Set the amount of server log detail. | info | Keep info unless diagnosis needs debug messages or normal operation needs fewer messages. |
 | `--log-progress` | Log prompt processing progress. | off | Keep it off unless prompt processing progress must appear in the log. |
@@ -73,14 +73,14 @@ Use `bubo serve llm --help` for command-specific help.
 | `--npu-prefill off\|on` | Use the Ryzen AI NPU for prompt processing when it is available. | On when usable. Exact and stock force it off. | Use `off` if the NPU driver gives problems. See [NPU prefill](npu.md). |
 | `--port VALUE` | Set the server listen port. | 8080 | Keep 8080 unless another service uses that port or clients need a different port. |
 | `--prefill-chunk VALUE` | Limit prompt tokens between active decode rounds. | 512 | Keep 512 unless active sessions need shorter pauses during another request prefill. |
-| `--presence-penalty VALUE` | Penalise tokens already generated in the response. | Qwen3.8: 0.0 thinking. 1.5 non-thinking unless GUFO_PRODUCTION_SAMPLING=1 | Keep the model preset unless the task needs a different penalty for previously generated tokens. |
+| `--presence-penalty VALUE` | Penalize tokens already generated in the response. | Qwen3.8: 0.0 thinking. 1.5 non-thinking unless GUFO_PRODUCTION_SAMPLING=1 | Keep the model preset unless the task needs a different penalty for previously generated tokens. |
 | `--preserve-thinking auto\|on\|off` | Select which thinking history to retain. | auto | Keep auto unless the client needs a different policy for retained thinking history. |
 | `--print-effective-settings` | Print resolved settings as JSON and exit. | Unset | Use it when resolved settings must be inspected without loading a model. |
 | `--profile default\|stock\|exact\|subagents` | Select the release settings profile. | default | Keep default for normal use. Use stock, exact, or subagents for their documented tasks. |
 | `--prompt-lookup` | Propose tokens from an earlier conversation match. | On with MTP. Otherwise off. | Keep it enabled with MTP unless prompt lookup comparisons need it off. |
 | `--reasoning-effort auto\|minimal\|low\|medium\|high\|xhigh\|max` | Set the default reasoning effort. | medium | Keep medium. Use low for shorter reasoning or xhigh for difficult tasks. |
 | `--repeat-last-n VALUE` | Set the recent token window for repetition penalties. | 64 | Keep 64 unless repetition penalties need a different recent token window. |
-| `--repeat-penalty VALUE` | Penalise recently used tokens. | 1.0 (off) | Keep one unless the task needs a penalty for recent repeated tokens. |
+| `--repeat-penalty VALUE` | Penalize recently used tokens. | 1.0 (off) | Keep one unless the task needs a penalty for recent repeated tokens. |
 | `--request-timeout-ms VALUE` | Limit request time in milliseconds. | 0 (off) | Keep zero unless requests must stop after a fixed time limit. |
 | `--seed VALUE` | Set the random sampling seed. | -1 (random). Exact uses 1. | Use a nonnegative seed for reproducibility. Exact uses 1 unless you supply another nonnegative seed. |
 | `--served-model-name VALUE` | Set the model identifier exposed by the API. | Unset (uses model metadata name) | Set a name when the client needs a fixed model identifier. |
