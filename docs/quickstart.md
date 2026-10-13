@@ -60,8 +60,7 @@ $response = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8080/v1/chat/c
 $response.choices[0].message.content
 ```
 
-The local API base URL is `http://127.0.0.1:8080/v1`.
-The model identifier in this example is `bubo`.
+The server speaks the OpenAI API. Point any OpenAI-compatible client, such as a coding agent, at the base URL `http://127.0.0.1:8080/v1` and use the model name `bubo`.
 Keep the local address for normal laptop use.
 
 ## Images
