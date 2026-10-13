@@ -1,244 +1,229 @@
-# Bubo: the Strix Halo inference product
+# Halowin Bubo
 
-<p align="center">
-  <img src="assets/gufo-logo.jpg" alt="Bubo logo" width="180">
-</p>
+**Local AI for Windows on AMD Strix Halo laptops.**
 
-Bubo uses the gufo vertical local inference engine specifically built and optimized for the AMD Strix Halo hardware:
-Ryzen AI MAX+ 395 systems with Radeon 8060S (`gfx1151`), up to 128 GiB of unified memory.
+**Supported hardware:** Bubo is built and tested for AMD Strix Halo with 128 GB of memory on Windows, mainly laptops. It can work on other machines, but we make no promise.
 
-**Contributions are welcome!**
+Halowin Bubo is a native Windows fork of [gufo](https://github.com/gufo-org/gufo), from HaloForge Labs.
+It uses AMD HIP and optimal defaults for Ryzen AI Max laptops with Radeon 8060S graphics at approximately 70 W.
+The command is `bubo`. The executable is `bubo.exe`.
 
-See the [changelog](CHANGELOG.md) and [GitHub Releases](https://github.com/gufo-org/gufo/releases)
-for user-facing changes and release history.
+Gufo provides the engine. The Windows layer comes from [pixmaate/gufo, branch `windows-port`](https://github.com/pixmaate/gufo/tree/windows-port).
+The base is gufo v0.10.0 plus main commit `97b8645f`.
 
-> [!TIP]
-> This tree combines upstream v0.6.0 with the **[Windows port](https://github.com/pixmaate/gufo)**. **[Gufo RDMA for Dual Strix Halo](https://github.com/neuhaus/gufo)** is a separate variant.
+## Performance at 70 W
 
-## Release profiles
+| Workload | Measured speed | Conditions |
+| --- | --- | --- |
+| Prompt processing | **1,325 tokens/s** | Median of five runs. Approximately 2,040 prompt tokens and 128 new tokens. Greedy decode. |
+| Real agent sessions | **51.6 tokens/s** | 90 requests. Context from 28K to 70K tokens. Temperature 1.0. Thinking on. |
+| Copy-heavy code edit | **Up to 93.8 tokens/s** | Rename edit. Second request with the prompt cached. Greedy decode. Thinking on. |
 
-The default profile follows upstream gufo practice: fast output that is not byte-exact.
-`--profile exact` is a reproducibility preset.
-Output is byte-identical across runs of the same build and seed.
-Output is identical to plain autoregressive decoding of that build with the same settings.
-Output is not identical across builds or to other engines.
-Exact decodes without speculation and without the prompt cache.
-It runs at about half the decode speed, and every request prefills its full prompt.
-Use `--no-cache` to disable RAM and disk prompt caches for all requests in any profile.
-See [Release switches](docs/FLAGS.md) for all settings.
+These results use an ASUS ProArt PX13 with Radeon 8060S graphics at approximately 70 W.
+The workloads differ. The edit result includes text copied from the prompt.
+Model choice, prompt content, and settings affect speed.
 
-The exact reference command, with a clean environment and matching model and request settings, is:
+## Reasoning check against stock gufo
 
-```sh
-bubo serve --profile stock --speculative off --no-cache --sessions 1 --seed 1 --think on --reasoning-effort medium
-```
+Both engines answered the same 35 requests (GPQA Diamond, AIME 2026, HMMT 2026, IMO 2026) on the same laptop in Performance mode, with the same seeds.
 
-## Models and benchmarks
+| Set | Halowin Bubo correct | Stock gufo correct |
+| --- | --- | --- |
+| GPQA Diamond | 20/24 | 19/24 |
+| AIME 2026 | 3/4 | 2/4 |
+| HMMT 2026 | 3/4 | 4/4 |
+| IMO 2026 (final answer) | 3/3 | 2/3 |
+| Total | 29/35 | 27/35 |
 
-All model documentation lives under [docs/models](docs/models/README.md):
+Halowin Bubo gives the same or better accuracy and decodes about 24 % faster on these requests. The 95 % intervals overlap and each set is small. Read this as "no loss of accuracy". Details: the Benchmarks page on the site.
 
-| Model | Inference modes | Hugging Face weights | Benchmarks | Quality |
-| --- | --- | --- | --- | --- |
-| [Qwen3.8 27B](docs/models/qwen3.8-27b/README.md) | Q4/Q8, images, AR, DFlash2 | Unsloth [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/blob/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf) / [Q8_K_XL](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/blob/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q8_K_XL.gguf) · [DFlash2 Q4_K_M](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2-GGUF/blob/2d9571f8ce46e151f61c6499c99dee6079e1d610/Qwen3.8-27B-DFlash2-Q4_K_M.gguf) | Q4: **656.33 tok/s pp**; up to **70.56 tok/s tg** single user and **123.00 aggregated tok/s** on 8 concurrent requests with DFlash2 · [Benchmarks](docs/models/qwen3.8-27b/BENCHMARKS.md) | [Quality](docs/models/qwen3.8-27b/QUALITY.md) |
-| [Qwen3.8 Flash-Next](docs/models/qwen3.8-flash-next/README.md) | Q4, images, AR, MTP | Unsloth [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/38bb39ee97821de2c9009abb7e93950eec396e66/UD-Q4_K_XL) · [MTP Q8_0](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/blob/38bb39ee97821de2c9009abb7e93950eec396e66/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf) | **1,700.52 tok/s pp**; up to **60.39 tok/s tg** single user and **162.98 aggregated tok/s** on 8 concurrent requests with MTP · [Benchmarks](docs/models/qwen3.8-flash-next/BENCHMARKS.md) | [Quality](docs/models/qwen3.8-flash-next/QUALITY.md) |
-| [DeepSeek V4 Flash](docs/models/deepseek-v4-flash/README.md) | AR, DSpark | [antirez Flash 0731 IQ2XXS](https://huggingface.co/antirez/deepseek-v4-gguf/blob/1cd7b564460821938add0475a60b942c409295e0/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf) · [DSpark](https://huggingface.co/antirez/deepseek-v4-gguf/blob/e7f04037032990db0346398d249baf9fb9df1ccc/DeepSeek-V4-Flash-DSpark-support-0731.gguf) | **484.62 tok/s pp**; up to **26.62 tok/s tg** single user and **54.74 aggregated tok/s** on 8 concurrent requests with DSpark · [Benchmarks](docs/models/deepseek-v4-flash/BENCHMARKS.md) | [Quality](docs/models/deepseek-v4-flash/QUALITY.md) |
-| [Qwen3-ASR 1.7B](docs/models/qwen3-asr/README.md) | Speech recognition | [BF16](https://huggingface.co/Qwen/Qwen3-ASR-1.7B/tree/7278e1e70fe206f11671096ffdd38061171dd6e5) | **15.27× realtime** · [Benchmarks](docs/models/qwen3-asr/BENCHMARKS.md) | [Quality](docs/models/qwen3-asr/QUALITY.md) |
-| [Qwen3-TTS 1.7B](docs/models/qwen3-tts/README.md) | Speech synthesis and voice cloning | BF16 [CustomVoice](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) / [VoiceDesign](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign) / [Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base) | Up to **2.54× realtime**; **201 ms** to first audio (CustomVoice) · [Benchmarks](docs/models/qwen3-tts/BENCHMARKS.md) | [Quality](docs/models/qwen3-tts/QUALITY.md) |
-| [Qwen-Image-2.1](docs/models/qwen-image-2.1/README.md) | BF16 image generation and editing | [Complete pipeline](https://huggingface.co/Qwen/Qwen-Image-2.1/tree/b3179ad355be050328e483a9dfdd9e60cd62adfa) | In progress · [Benchmarks](docs/models/qwen-image-2.1/BENCHMARKS.md) | [Quality](docs/models/qwen-image-2.1/QUALITY.md) |
-| [MiniMax H3](docs/models/minimax-h3/README.md) | BF16 text to video/audio | [FL2VA pipeline](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/42ed227ee7df40d41602854ae760620d6eb651fe/FL2VA) | In progress · [Benchmarks](docs/models/minimax-h3/BENCHMARKS.md) | [Quality](docs/models/minimax-h3/QUALITY.md) |
 
-Peak measured workloads; text pp is autoregressive (AR), while tg uses the
-named speculative mode. Peaks include repetitive output; aggregate tg sums
-individual request decode rates. Qwen27B's single-user peak uses the short-prompt
-C1 workload. Audio excludes loading.
-Each model guide lists the required files and complete benchmark settings.
+## Requirements
 
-## Philosophy
+Use this setup for Qwen3.8 Flash Next.
 
-- Contributions are welcome! We need the help of Strix Halo community to keep improving Bubo!
-- We would like this to be the one-stop shop for Strix Halo Local AI enthusiasts: batteries included for text, audio, image, and video models.
-- Build and optimize specifically for the Strix Halo 128 GiB hardware. Smaller memory configurations should still work and preserve the speed benefits for models that can fit on memory.
-- Support only the best available models for their size that can run on this hardware: less code to maintain, more focused optimization and testing work.
-- Preserve quality when optimizing. Each model's quality report records independent numerical checks, execution consistency and unresolved gaps. Don't reuse kernels across different models to limit blast radius of a code change.
-- Treat concurrent requests, cancellation and conversation caching as first-class workloads.
-- Keep production dependencies small and development tools separate.
-
-## Quickstart
-
-```sh
-hf download unsloth/Qwen3.8-27B-GGUF \
-  Qwen3.8-27B-UD-Q8_K_XL.gguf \
-  --revision 4ca720788d1e01f1bff70c033e0d0028fd02e502 \
-  --repo-type model \
-  --local-dir models/Qwen3.8-27B-GGUF
-hf download z-lab/Qwen3.8-27B-DFlash2-GGUF \
-  Qwen3.8-27B-DFlash2-Q4_K_M.gguf \
-  --revision 2d9571f8ce46e151f61c6499c99dee6079e1d610 \
-  --repo-type model \
-  --local-dir models/Qwen3.8-27B-DFlash2-GGUF
-podman pull ghcr.io/gufo-org/toolboxes/gufo-runtime:latest
-podman run --rm \
-  --userns=keep-id:uid=1000,gid=1000 \
-  --device /dev/kfd \
-  --device /dev/dri \
-  --group-add keep-groups \
-  --ulimit memlock=-1 \
-  -p 8080:8080 \
-  -v ./models:/models:ro \
-  ghcr.io/gufo-org/toolboxes/gufo-runtime:latest \
-  bubo serve --host 0.0.0.0 --port 8080 llm \
-  --model /models/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q8_K_XL.gguf \
-  --speculative dflash2 \
-  --dflash-model /models/Qwen3.8-27B-DFlash2-GGUF/Qwen3.8-27B-DFlash2-Q4_K_M.gguf
-```
-
-Rootless Podman needs `crun` for `--group-add keep-groups`. Your host user must
-have read/write access to `/dev/kfd` and `/dev/dri/renderD*`, usually through the
-`render` and `video` groups; log out and back in after changing membership.
-Container groups named `video`/`render` do not preserve host supplementary
-groups. Check `id`, `ls -l /dev/kfd /dev/dri/renderD*`, and
-`podman info --format '{{.Host.OCIRuntime.Name}}'` if ROCm reports no device.
-See [Podman's rootless group-access guidance](https://github.com/containers/podman/blob/main/troubleshooting.md#20-passed-in-devices-or-files-cant-be-accessed-in-rootless-container).
-
-On Fedora or another SELinux-enforcing host, GPU enumeration can succeed while
-SELinux blocks mapping `/dev/kfd`, causing ROCr to report a misleading
-“Memory critical” error. Check the **host** audit log:
-
-```sh
-sudo ausearch -m avc -ts recent | grep -E '/dev/kfd|hsa_device_t'
-```
-
-If it shows a denied `map` for the container, Podman documents this fix:
-
-```sh
-sudo setsebool -P container_use_devices true
-```
-
-This persistently allows containers to access device labels for devices passed
-into them; it affects all containers on that host. Review that policy scope
-before enabling it. See [Podman's device documentation](https://docs.podman.io/en/latest/markdown/podman-run.1.html#device-host-device-container-device-permissions)
-and the [SELinux container policy](https://github.com/containers/container-selinux/blob/main/container.te).
-
-Then, from another terminal, ask it something through the OpenAI-compatible API:
-
-```sh
-curl http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen3.8-27B-UD-Q8_K_XL",
-    "messages": [{"role": "user", "content": "Say something"}]
-  }'
-```
-
-For Open WebUI, VS Code, OpenAI SDK and Responses-API clients (for example
-Codex), set the API base URL to `http://localhost:8080/v1`. Chat Completions and
-Responses support text, images, function tools, structured output and streaming.
-See the [API contract](docs/SERVER.md).
-
-The text server uses the model's native context by default and generates until
-EOS or the context is full. `--context N` sets context capacity per session;
-`--max-tokens N` sets a default response limit that clients can override.
-Reasoning tokens count toward that response limit.
-
-## Harness notes
-
-- **Qwen with Codex:** Codex sends developer messages mid-conversation, after
-  compaction or a settings change. Qwen's template accepts only one leading
-  system turn, so Gufo moves them there. The request that introduces one is
-  prefilled again; later requests reuse the cache. See the
-  [API contract](docs/SERVER.md).
-
-## Build from source
-
-Linux x86-64 on AMD Strix Halo (`gfx1151`) is the supported target. CMake owns
-one production configuration for both Nix and ordinary Linux builds. Tests,
-profilers, tuning executables and Python reference runners are not installed
-with the production package. No `build.sh` wrapper is needed.
-
-Windows 11 x64 builds natively against AMD's TheRock ROCm; see
-[Windows](docs/WINDOWS.md) for the toolchain, a setup check, the build script
-and the launchers (`start.cmd`, `tools\windows\start.ps1`); releases carry a
-prebuilt zip.
-
-### With Nix
-
-```sh
-nix build
-./result/bin/bubo diagnose
-./result/bin/bubo serve llm --model /path/to/model.gguf
-```
-
-[flake.lock](flake.lock) pins the dependencies. `nix develop` adds profiling,
-model-download and independent evaluation tools; these are not runtime
-requirements. Optional benchmark baselines are selected separately with
-`nix shell .#ds4-reference`, `.#llama-cpp-reference` or
-`.#llama-cpp-mtp-reference`; see [benchmarking](docs/BENCHMARKS.md).
-See [testing](docs/TESTING.md) for the small hosted CI suite and
-explicit local quality checks.
-
-### Without Nix
-
-Install a C++20 compiler, CMake 3.21+, Ninja, pkg-config and the
-following development libraries. The currently qualified toolchain is GCC
-15.3 and ROCm 7.2.3. Attention and audio convolution kernels are compiled
-directly from HIP. Python, Triton/AOTriton, Composable Kernel and MIOpen are
-not production build or runtime requirements.
-
-| Dependency | Used for |
+| Item | Optimal setting |
 | --- | --- |
-| ROCm HIP compiler/runtime, hipBLAS, hipBLASLt, rocBLAS | GPU execution and matrix multiplication |
-| hipCUB, rocPRIM, rocWMMA headers | Compiled GPU kernels |
-| ICU, libcurl, OpenSSL, libpng, libjpeg, libwebp | Tokenization, HTTPS, hashing and images |
-| FFmpeg and ffprobe | Video/audio output; invoked as separate executables |
+| Operating system | Windows 11 x64. Tested on build 26200. |
+| Microsoft runtime | Microsoft Visual C++ 2015-2022 Redistributable (x64), from https://aka.ms/vs/17/release/vc_redist.x64.exe. Most PCs already have it. Install it before you run `bubo.exe`: Windows stops `bubo.exe` at start if the runtime is missing. The start script checks for it. |
+| Hardware | AMD Strix Halo with Ryzen AI Max and Radeon 8060S graphics (`gfx1151`). |
+| System RAM | 128 GB for the documented large-model setup. |
+| GPU memory | 96 GB in the BIOS or the laptop control app. |
+| Page file | Fixed 128 GB on the system drive. Initial and maximum size: 131072 MB. |
+| Power mode | Performance mode at approximately 70 W. |
+| Graphics driver | AMD 32.0.31041.1004 (2026-08-16) or newer. |
+| Model | Qwen3.8 Flash Next, GGUF, `UD-Q4_K_XL`. `bubo prepare` downloads all four shards. |
 
-Install ROCm using [AMD's Linux instructions](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/).
-Use the development packages for the libraries above. ROCm normally installs
-under `/opt/rocm`.
+The default context is 262144 tokens for one session.
+More context, images, and more sessions need more memory.
+A page file does not replace physical RAM for full-speed operation.
 
-For example, on Debian/Ubuntu the ordinary system libraries are:
+## Install
 
-```sh
-sudo apt install build-essential cmake ninja-build pkg-config \
-  libicu-dev libcurl4-openssl-dev libssl-dev libpng-dev libjpeg-dev libwebp-dev ffmpeg
+1. Download `bubo-v0.1.0-windows-x64-gfx1151.zip` from the [Bubo release page](https://github.com/haloforge-labs/bubo/releases/tag/v0.1.0). The file is 44,096,931 bytes. Its SHA-256 value is `d1c92dacf68e8e379b8e02c8d68ba18ba102b2fd22784e25cb06b0757fac1306`. `bubo --version` prints `bubo 0.1.0 (3ff74dce), engine gufo 0.10.0`.
+2. Extract the complete package into a folder.
+3. Open PowerShell in that folder.
+4. Run `.\bubo.exe prepare`.
 
-# ROCm libraries from the table, named as AMD's repository ships them.
-sudo apt install hipblas-dev hipblaslt-dev rocblas-dev \
-  hipcub-dev rocprim-dev rocwmma-dev
+The Bubo package contains no AMD runtime files or model weights.
+The `bubo prepare` command downloads them. It needs no Python and no administrator access.
+It has two steps, `runtime` and `model`. With no step name it runs both and asks once.
 
-cmake --preset release -DCMAKE_INSTALL_PREFIX="$HOME/.local"
-cmake --build --preset release --parallel 4
-./build/release/bubo diagnose
-./build/release/bubo serve llm --model /path/to/model.gguf
+| Step | What it downloads | Size |
+| --- | --- | ---: |
+| `runtime` | Three official AMD ROCm 10.0.0 wheels for `gfx1151` from `stable.repo.amd.com` | 1,014,229,359 bytes (967.2 MiB) |
+| `model` | Eight pinned model files: four `UD-Q4_K_XL` shards, MTP predictor, vision projector, dense twin and Q4_K draft head | 116,617,136,608 bytes (108.6 GiB) |
+
+Before a download, the command shows each address, size and SHA-256 value, the AMD licence information and the destination, and asks for approval (`--yes` accepts the plan).
+It checks the hash of every file and writes `bubo-package.json` last.
+The default checks find a wrong file, a wrong variant and a truncated file. Add `--verify` for a full SHA-256 check.
+If a download stops, run the command again. It resumes.
+If your network needs a proxy, set `HTTPS_PROXY`.
+Plan about 113 GiB of free space (an estimate).
+The default folder for the model is `%LOCALAPPDATA%\Bubo`. Use `--output ROOT` to change it.
+The twin and the draft head come from the HaloForge Labs Hugging Face repository (commit `bb72204d`).
+See the [install guide](docs/install.md) for all options.
+
+## First run
+
+After `bubo prepare`, start a text server with your first model shard.
+The server finds the other shards and the sidecar files through `bubo-package.json`.
+
+```powershell
+.\bubo.exe serve llm --model "$env:LOCALAPPDATA\Bubo\models\huihui-qwen38-flash-next-ud-q4-k-xl-v1\Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf"
 ```
 
-Configuring fails at `find_package(hipblas)` when those ROCm packages are
-missing. Other distributions name them `-devel` instead of `-dev`.
-For nonstandard installations, pass ordinary CMake paths, for example
-`cmake --preset release -DCMAKE_PREFIX_PATH="/opt/rocm"`.
-If compiler discovery picks a system Clang, also pass
-`-DCMAKE_HIP_COMPILER=/opt/rocm/llvm/bin/clang++`.
-Use `cmake --install build/release` to install Bubo,
-its runtime data and license notices. The GPU driver must allow your user to
-access `/dev/kfd` and `/dev/dri`; model weights are acquired separately.
+This command uses the `default` profile.
+The manifest supplies the MTP predictor, the dense twin, the draft head and the vision projector.
+Use the [quickstart](docs/quickstart.md) for a first API request.
 
-The same source, compiler flags and install rules serve both builds. Nix pins
-the complete toolchain for reproducible comparisons; changing the compiler or
-math libraries requires the affected model's quality checks.
+The local API address is `http://127.0.0.1:8080/v1`.
+Keep the local address for normal laptop use.
 
-## License
+## Fast restarts with the disk cache
 
-Gufo's original code is [MIT licensed](LICENSE). Adapted code and dependencies
-retain their own notices in [NOTICE](NOTICE), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
-and `licenses/`, installed under `share/licenses/gufo`. Model weights are not
-bundled and retain their publishers' terms.
+The disk prompt cache is off by default. When you turn it on, Bubo keeps the computed prompt state of long conversations on the disk. After a server restart, or after the RAM cache drops a conversation, the conversation continues without processing the whole prompt again.
 
-## Reference Projects
+See the [quickstart](docs/quickstart.md#fast-restarts-with-the-disk-cache) for the same steps. Measured on a 70 W Strix Halo laptop with a 30K-token session:
 
-The initial design is informed by the following open source projects:
+| Measured | Value |
+| --- | --- |
+| Cold prompt processing, 30K tokens | About 25 s |
+| Next turn, same server, from memory | 0.9 s |
+| Continue after a server restart, with the disk cache | About 2 s (1.8 to 2.4 s in two runs; about 30,400 prompt tokens restored) |
+| First start with the cache (one-time model check) | 74 s |
+| Later starts with the cache | 29 to 32 s |
+| Size of one saved snapshot | About 954 MB for 30K tokens (about 31 KB for each token) |
 
-- [llama.cpp](https://github.com/ggml-org/llama.cpp) for compact model serving, GGUF, and CPU/GPU correctness paths.
-- [LaurentZuijdwijk/llama.cpp](https://github.com/LaurentZuijdwijk/llama.cpp), [Nathanw1014/strix-halo-llamacpp](https://github.com/Nathanw1014/strix-halo-llamacpp), and [gaetan-puleo/llama-cpp-strix-halo](https://github.com/gaetan-puleo/llama-cpp-strix-halo) for Strix Halo optimization inspiration.
-- [vLLM](https://github.com/vllm-project/vllm) for continuous batching and paged request scheduling.
-- [hipEngine](https://github.com/shisa-ai/hipEngine) for torch-free HIP execution, and native speculative-cycle work.
-- [ds4](https://github.com/antirez/ds4) for DeepSeek V4 Flash, MoE scheduling, and DSpark.
-- [audio.cpp](https://github.com/0xShug0/audio.cpp) for audio models for tts and asr tasks.
+In an earlier test, a 109K-token session continued after a restart in 3.5 s instead of 88.8 s. A long saved session writes about 3 GB to the SSD. A 90-request agent replay wrote about 5.1 GB. Decode speed cost is about 2.5 %. The cache writes to your SSD. Use these numbers to decide if the cache is right for your disk.
+
+To turn it on, start Bubo with the folder for the cache:
+
+```powershell
+start.cmd -CacheDisk D:\BuboCache
+```
+
+The first start with the cache reads the eight model files once and checks them. Bubo saves a stamp. Later starts use the stamp and do not read the files again. Without a prepared model package the server refuses the cache.
+
+To use the server command directly, add `--cache-disk "D:\BuboCache"` to it. Run `start.cmd -DryRun` to print the command that `start.cmd` runs.
+
+- Bubo saves a snapshot about 30 s after the conversation goes idle.
+- The disk budget is 8 GiB by default. Change it with `--cache-disk-bytes`. A long session can need more.
+- `start.cmd -CacheDisk <folder>` is all you need. It also sets a 5 GiB staging area. Change the staging size with `-CacheDiskStagingBytes`.
+- If you run `bubo serve` directly, add `--cache-disk-staging-bytes 5368709120` for long sessions. Bubo stages each snapshot in RAM before it writes it. The automatic staging size follows the free RAM at start, and it can be too small for one snapshot. With about 7 GiB free, the area was 941 MB, smaller than one 30K-token snapshot (954 MB). Bubo then dropped the snapshots and the restart processed the whole prompt again (25 s).
+- Turn the cache off again with `--no-cache-disk`. The `exact` profile turns all caches off and ignores the disk cache.
+
+## Profiles
+
+| Profile | Use | Main settings |
+| --- | --- | --- |
+| `default` | Normal use. This is the optimal profile. | One session, 262144 context tokens, 6 GiB RAM cache, medium effort. |
+| `stock` | Plain gufo settings. | No Bubo profile defaults. Existing flags and environment values still apply. |
+| `exact` | Reproducible-output mode for Qwen3.8 Flash Next. | One session, seed 1, fixed prefill size, no speculation or prompt cache. |
+| `subagents` | Concurrent agent requests. | Four sessions, 131072 context tokens each, 4 GiB RAM cache. |
+
+Select a profile with `--profile NAME`.
+The `exact` profile pins one session, seed 1, a fixed prefill size, and turns off speculation and prompt caches, to make output repeatable.
+Each exact request processes its full prompt.
+See [profiles](docs/profiles.md) for the full scope, what was tested (one build, one machine) and memory limits.
+
+## Options
+
+These defaults apply to Qwen3.8 Flash Next.
+
+| Option | Default | When to change |
+| --- | --- | --- |
+| `--profile` | `default` | Select `stock`, `exact`, or `subagents` for the uses above. |
+| `--reasoning-effort` | `medium` | Use `low` for shorter reasoning or `xhigh` for difficult tasks. |
+| `--think` | `on` | Use `off` when the task does not need reasoning. |
+| `--context` | `262144` | Reduce it if memory is limited. |
+| `--sessions` | `1` | Use the `subagents` profile for concurrent requests. |
+| `--mtp-model` | From the manifest | Supply another matching MTP sidecar for speculative decode. |
+| `--mmproj` | From the manifest | Supply another BF16 vision sidecar for images. `--no-vision` leaves it out. |
+| `--cache-ram-bytes` | `6442450944` (6 GiB) | Reduce the budget if host RAM is limited. Zero means automatic sizing. |
+| `--cache-disk` | Off | Set a folder only when prompts must persist across restarts. |
+| `--port` | `8080` | Change it if another service uses the port. |
+| `--print-effective-settings` | Off | Print the resolved settings before you load the model. |
+
+Adaptive thinking uses the effort map `low:-2,medium:-1,xhigh:0` for thinking markers.
+Behaviour policies include the engine loop breaker.
+Bounded lenient acceptance applies to thinking with MTP.
+The dense twin and Q4_K draft head are the optimal decode files outside `exact`.
+The default output is not byte-exact.
+
+Full model SHA-256 examination is opt-in: `bubo prepare --verify` or `bubo serve llm --verify-model`.
+See [all options](docs/options.md) for the current options and preparation status.
+
+## Supported models
+
+Bubo is tuned for Qwen3.8 Flash Next. The other models run with upstream gufo settings.
+
+| Model | Files and inputs | Guide |
+| --- | --- | --- |
+| DeepSeek V4 Flash | Flash 0731 mixed IQ2/Q2/Q8 GGUF. Text. | [Usage](https://github.com/gufo-org/gufo/blob/97b8645f/docs/models/deepseek-v4-flash/README.md) |
+| Qwen3.8 27B | Q4/Q8 GGUF. Text and images. | [Usage](https://github.com/gufo-org/gufo/blob/97b8645f/docs/models/qwen3.8-27b/README.md) |
+| Qwen3.8 Flash-Next | Sharded Q4 GGUF. Text and images. | [Usage](https://github.com/gufo-org/gufo/blob/97b8645f/docs/models/qwen3.8-flash-next/README.md) |
+| Qwen3.6 35B-A3B | Q8 GGUF (`qwen35moe`) and fine-tunes. Text. | [Usage](https://github.com/gufo-org/gufo/blob/97b8645f/docs/models/qwen3.6-35b-a3b/README.md) |
+| Qwen3-ASR 1.7B | BF16 safetensors. Audio to text. | [Usage](https://github.com/gufo-org/gufo/blob/97b8645f/docs/models/qwen3-asr/README.md) |
+| Qwen3-TTS 12Hz 1.7B | BF16 safetensors. Text and reference audio to speech. | [Usage](https://github.com/gufo-org/gufo/blob/97b8645f/docs/models/qwen3-tts/README.md) |
+| Qwen-Image-2.1 | BF16 safetensors. Image generation and edits. | [Usage](https://github.com/gufo-org/gufo/blob/97b8645f/docs/models/qwen-image-2.1/README.md) |
+| MiniMax H3 FL2VA | Pinned safetensors. Text to audio and video. | [Usage](https://github.com/gufo-org/gufo/blob/97b8645f/docs/models/minimax-h3/README.md) |
+
+
+## Known issues
+
+- The answer loop breaker detects repeat periods up to 16 tokens. Longer answer repeats can continue.
+- Disk prompt cache is off by default to limit SSD writes. Automatic staging can limit disk snapshots near 70K tokens.
+- Deep sessions and images need more memory. Reduce context if memory is limited.
+- The disk prompt cache stages each snapshot in RAM before it writes it. With little free RAM at start (about 7 GiB), the staging area can be smaller than one long snapshot, and Bubo drops the snapshot. `start.cmd -CacheDisk` sets a 5 GiB staging area. If you run `bubo serve` directly, add `--cache-disk-staging-bytes 5368709120`. See [Fast restarts with the disk cache](docs/quickstart.md#fast-restarts-with-the-disk-cache).
+- The NPU kernel file ships as the fork built it. The compiler toolchain that built it is not recorded. We plan a rebuild with the open-source Peano compiler in a later release.
+- With the prompt cache on (default profile), a restore from the cache is not bit-identical to a fresh prefill of the same prompt. The `exact` profile turns the cache off for this reason.
+- Chat logprobs need thinking off, plain text (no tools or images) and no stop sequences. Otherwise the server returns 400. The `/debug/prompt` endpoint accepts plain text without tools only. See [options](docs/options.md#chat-api-limits).
+- The `exact` profile stops with a one-line error when an explicit flag or environment value would change an exact-profile value, for example `Error: profile=exact: explicit value re-enables GUFO_DENSE_TWIN_MAX_N`. Remove that setting, or do not combine it with `--profile exact`.
+
+
+## Licences and credits
+
+Gufo and the Windows layer use the MIT licence.
+Credit goes to the gufo contributors and pixmaate/gufo `windows-port`.
+HaloForge Labs provides the Bubo release defaults and Windows package.
+
+AMD runtime components have separate licences.
+Read `NOTICE-windows.md`, `THIRD_PARTY_NOTICES.md`, and the `licenses` folder in the package.
+Keep these notices with the installed runtime.
+
+Qwen licences apply to model weights and the derived dense twin and draft head.
+Read the [Qwen licence](https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/main/LICENSE) and the [Huihui licence](https://huggingface.co/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/blob/main/LICENSE).
+
+## Links
+
+- [Install](docs/install.md)
+- [Quickstart](docs/quickstart.md)
+- [Options](docs/options.md)
+- [Profiles](docs/profiles.md)
+- [Release notes](RELEASE-NOTES.md)
+- [NPU prefill](docs/npu.md)
+- [Model files on Hugging Face](https://huggingface.co/HaloForgeLabs/bubo-qwen3.8-flash-next)
+- [gufo](https://github.com/gufo-org/gufo)
+- [Releases](https://github.com/haloforge-labs/bubo/releases)
+- [HaloForge Labs](https://haloforgelabs.com)
