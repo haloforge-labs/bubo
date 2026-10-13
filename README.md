@@ -223,18 +223,17 @@ Bubo is tuned for Qwen3.8 Flash Next. The other models run with upstream gufo se
 - The `exact` profile stops with a one-line error when an explicit flag or environment value would change an exact-profile value, for example `Error: profile=exact: explicit value re-enables GUFO_DENSE_TWIN_MAX_N`. Remove that setting, or do not combine it with `--profile exact`.
 
 
-## Licences and credits
+## License and credits
 
-Gufo and the Windows layer use the MIT licence.
+Bubo is open source under the MIT license, the same license as gufo. The code is copyright HaloForge Labs and the gufo contributors. Read [LICENSE](LICENSE) and [NOTICE](NOTICE).
 Credit goes to the gufo contributors and pixmaate/gufo `windows-port`.
 HaloForge Labs provides the Bubo release defaults and Windows package.
 
-AMD runtime components have separate licences.
-Read `NOTICE-windows.md`, `THIRD_PARTY_NOTICES.md`, and the `licenses` folder in the package.
-Keep these notices with the installed runtime.
+Third-party components keep their own licenses. Read `THIRD_PARTY_NOTICES.md`.
+AMD runtime components have separate licenses. Read `NOTICE-windows.md` and the `licenses` folder in the package, and keep these notices with the installed runtime.
 
-Qwen licences apply to model weights and the derived dense twin and draft head.
-Read the [Qwen licence](https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/main/LICENSE) and the [Huihui licence](https://huggingface.co/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/blob/main/LICENSE).
+The Qwen Community License 1.0 applies to the model weights and to the derived dense twin and draft head, as the [Hugging Face model card](https://huggingface.co/HaloForgeLabs/bubo-qwen3.8-flash-next) states.
+Read the [Qwen license](https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/main/LICENSE) and the [Huihui license](https://huggingface.co/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/blob/main/LICENSE).
 
 ## Links
 
