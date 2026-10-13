@@ -32,7 +32,7 @@ PowerShell uses `.\bubo.exe` when the executable is in the current folder.
 
 ## Windows security prompts
 
-Bubo v0.1.0 is not code-signed. Windows can show warnings.
+Like many open-source Windows builds, Bubo v0.1.0 is not code-signed. Windows can show warnings.
 
 - A zip that a browser downloaded carries a "downloaded from the internet" mark. Right-click the zip, select **Properties**, tick **Unblock**, select **OK**, then extract it.
 - If SmartScreen shows "Windows protected your PC" for `start.cmd`, select **More info**, then **Run anyway**.
