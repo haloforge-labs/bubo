@@ -145,6 +145,12 @@ try {
     if ($LASTEXITCODE -ne 0 -or "$output" -match '--cache-disk') { throw 'disk cache must default off' }
     $output = & cmd.exe /d /c start.cmd -Last -DryRun -Bin $scratch -CacheDisk '   ' 2>&1
     if ($LASTEXITCODE -eq 0 -or "$output" -notmatch 'non-empty valid folder path') { throw 'blank cache folder accepted' }
+    $output = & cmd.exe /d /c start.cmd -Last -DryRun -Bin $scratch -CacheDisk $cacheFolder 2>&1
+    if ($LASTEXITCODE -ne 0 -or "$output" -notmatch '--cache-disk-staging-bytes 5368709120') { throw 'disk cache staging default' }
+    $output = & cmd.exe /d /c start.cmd -Last -DryRun -Bin $scratch -CacheDisk $cacheFolder -CacheDiskStagingBytes 2147483648 2>&1
+    if ($LASTEXITCODE -ne 0 -or "$output" -notmatch '--cache-disk-staging-bytes 2147483648') { throw 'disk cache staging override' }
+    $output = & cmd.exe /d /c start.cmd -Last -DryRun -Bin $scratch -CacheDisk $cacheFolder -CacheDiskStagingBytes 0 2>&1
+    if ($LASTEXITCODE -eq 0 -or "$output" -notmatch 'positive whole number') { throw 'bad staging bytes accepted' }
   } finally {
     Pop-Location
     $env:PATH = $oldPath

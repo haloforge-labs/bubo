@@ -8,6 +8,7 @@
 #   start.cmd -DryRun    print the bubo command instead of starting it
 #   start.cmd -Bin DIR   use bubo.exe from DIR
 #   start.cmd -CacheDisk BuboCache   keep prompt snapshots for fast restarts
+#                        (-CacheDiskStagingBytes N sets the RAM staging area, default 5 GiB)
 #
 # Choices are remembered in %LOCALAPPDATA%\gufo\launcher.json. The full
 # question-by-question launcher is tools\windows\start.ps1.
@@ -16,6 +17,7 @@ param(
   [switch]$DryRun,
   [string]$Bin = "",
   [string]$CacheDisk = "",
+  [string]$CacheDiskStagingBytes = "5368709120",
   # Testing: key presses to replay instead of reading the keyboard (E = Enter).
   [string]$Keys = ""
 )
@@ -26,6 +28,9 @@ if ($PSBoundParameters.ContainsKey('CacheDisk')) {
     throw '-CacheDisk requires a non-empty valid folder path'
   }
   [void][IO.Path]::GetFullPath($CacheDisk)
+}
+if ($CacheDiskStagingBytes -notmatch '^[1-9][0-9]{0,15}$') {
+  throw '-CacheDiskStagingBytes requires a positive whole number of bytes'
 }
 . (Join-Path $PSScriptRoot "vc-runtime.ps1")
 if (-not (Confirm-BuboVcRuntime)) { exit 4 }
@@ -81,7 +86,7 @@ function Start-Plan($Plan) {
   $gufoArgs = @($Plan.Args)
   $title = $Plan.Title
   if ($CacheDisk) {
-    $gufoArgs += @("--cache-disk", $CacheDisk)
+    $gufoArgs += @("--cache-disk", $CacheDisk, "--cache-disk-staging-bytes", $CacheDiskStagingBytes)
     $title += ", disk cache"
   }
   $port = [int]$Plan.Port
