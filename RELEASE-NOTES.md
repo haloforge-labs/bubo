@@ -66,8 +66,8 @@ Qwen licenses apply to these derived model files.
 
 ## Measured performance
 
-The 70 W laptop measurements include 1,325 tokens/s for prompt processing and 51.6 tokens/s across real agent requests.
-A copy-heavy rename edit reaches up to 93.8 tokens/s on its second request with the prompt cached.
+The 70 W laptop measurements include 1,364 tokens/s for prompt processing (pp2048, release build v0.1.0, 2026-10-12) and 51.6 tokens/s across real agent requests (2026-10-10).
+A copy-heavy rename edit reaches up to 97.4 tokens/s on its second request with the prompt cached (release build v0.1.0, 2026-10-12).
 See the [README](README.md#performance-at-70-w) for the conditions.
 
 ## Reasoning check against gufo with pixmaate’s Windows port

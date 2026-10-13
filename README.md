@@ -17,7 +17,7 @@ One chip. One package. Every layer tuned for it. All numbers are our own measure
 
 <img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **Janus dense twin and Q4_K draft head.** A second, 4-bit copy of 252 dense weights serves decode and draft checking. Together with the draft head it makes decode 5.9 % faster. Prefill and `exact` mode use the 8-bit weights.
 
-<img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **MTP stack.** Draft length control, prompt lookup and bounded lenient acceptance in thinking. Decode goes from 27.8 to 34.5 tok/s on the standard test, and up to 93.8 tok/s on a copy-heavy code edit.
+<img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **MTP stack.** Draft length control, prompt lookup and bounded lenient acceptance in thinking. Decode at 128 tokens goes from 32.19 tok/s without MTP to 37.15 tok/s with MTP (release build v0.1.0, 2026-10-12), and up to 97.4 tok/s on a copy-heavy code edit.
 
 <img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **Loop and end-of-turn fixes.** In a test of 15 long answers, 14 stopped mid-answer without the fix and 1 with it.
 
@@ -35,9 +35,11 @@ Details and limits: [Under the hood](https://haloforgelabs.com/docs/under-the-ho
 
 | Workload | Measured speed | Conditions |
 | --- | --- | --- |
-| Prompt processing | **1,325 tokens/s** | Median of five runs. Approximately 2,040 prompt tokens and 128 new tokens. Greedy decode. |
-| Real agent sessions | **51.6 tokens/s** | 90 requests. Context from 28K to 70K tokens. Temperature 1.0. Thinking on. |
-| Copy-heavy code edit | **Up to 93.8 tokens/s** | Rename edit. Second request with the prompt cached. Greedy decode. Thinking on. |
+| Prompt processing, pp2048 | **1,364 tokens/s** | Without MTP. Median of 3. Approximately 2,040 prompt tokens. Release build v0.1.0, 2026-10-12. |
+| Prompt processing, natural text, 2K / 8K / 32K | **1,240 / 1,292 / 1,287 tokens/s** | Research-notes text. Median of 2 to 3 rounds. Release build v0.1.0, 2026-10-12. |
+| Decode, tg128 | **32.19 tokens/s without MTP, 37.15 with MTP** | Upstream's benchmark program. Greedy. Median of 3. Release build v0.1.0, 2026-10-12. |
+| Real agent sessions | **51.6 tokens/s** | 90 requests. Context from 28K to 70K tokens. Temperature 1.0. Thinking on. 2026-10-10. |
+| Copy-heavy code edit | **Up to 97.4 tokens/s** | Rename edit. 96.5 on the first request and 97.4 on the second, with the prompt cached. Release build v0.1.0, 2026-10-12. |
 
 These results use an ASUS ProArt PX13 with Radeon 8060S graphics at approximately 70 W.
 The workloads differ. The edit result includes text copied from the prompt.
