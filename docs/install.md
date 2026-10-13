@@ -13,7 +13,7 @@ Deep context and images need more memory than short text requests.
 1. Set GPU memory to 96 GB in the BIOS or the laptop control app.
 2. Set the page file initial size to 131072 MB on the system drive.
 3. Set the page file maximum size to 131072 MB.
-4. Select Performance mode.
+4. Plug in the laptop's own full-power adapter, then select the Performance profile of your maker (in Armoury Crate on ASUS laptops) and the Windows power mode **Best performance**. This gives about 70 W. See [Power mode](https://haloforgelabs.com/docs/system-setup/#power-mode).
 5. Install AMD graphics driver 32.0.31041.1004 (2026-08-16) or newer.
 6. Install the [Microsoft Visual C++ 2015-2022 Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe). Most PCs already have it. Install it before you run `bubo.exe`: Windows stops `bubo.exe` at start if the runtime is missing. The start script checks for it. The Bubo package does not contain the Microsoft runtime files.
 
