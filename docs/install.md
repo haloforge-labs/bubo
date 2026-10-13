@@ -30,6 +30,14 @@ A page file does not replace physical RAM for full-speed operation.
 The release command is `bubo`.
 PowerShell uses `.\bubo.exe` when the executable is in the current folder.
 
+## Windows security prompts
+
+Bubo v0.1.0 is not code-signed. Windows can show warnings.
+
+- A zip that a browser downloaded carries a "downloaded from the internet" mark. Right-click the zip, select **Properties**, tick **Unblock**, select **OK**, then extract it.
+- If SmartScreen shows "Windows protected your PC" for `start.cmd`, select **More info**, then **Run anyway**.
+- If Smart App Control is on (common on new Windows 11 installs), Windows blocks unsigned apps and offers no per-app override. Bubo v0.1.0 does not run while Smart App Control is on.
+
 ## Prepare the AMD runtime
 
 The Bubo package carries no AMD files. The `bubo prepare` command downloads them.

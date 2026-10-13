@@ -215,6 +215,7 @@ Bubo is tuned for Qwen3.8 Flash Next. The other models run with upstream gufo se
 - The answer loop breaker detects repeat periods up to 16 tokens. Longer answer repeats can continue.
 - Disk prompt cache is off by default to limit SSD writes. Automatic staging can limit disk snapshots near 70K tokens.
 - Deep sessions and images need more memory. Reduce context if memory is limited.
+- Bubo v0.1.0 is not code-signed. SmartScreen can show a warning, and Smart App Control blocks the program. See [Windows security prompts](docs/install.md#windows-security-prompts).
 - The disk prompt cache stages each snapshot in RAM before it writes it. With little free RAM at start (about 7 GiB), the staging area can be smaller than one long snapshot, and Bubo drops the snapshot. `start.cmd -CacheDisk` sets a 5 GiB staging area. If you run `bubo serve` directly, add `--cache-disk-staging-bytes 5368709120`. See [Fast restarts with the disk cache](docs/quickstart.md#fast-restarts-with-the-disk-cache).
 - The NPU kernel file ships as the fork built it. The compiler toolchain that built it is not recorded. We plan a rebuild with the open-source Peano compiler in a later release.
 - With the prompt cache on (default profile), a restore from the cache is not bit-identical to a fresh prefill of the same prompt. The `exact` profile turns the cache off for this reason.
