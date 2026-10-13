@@ -1,4 +1,4 @@
-# Halowin Bubo v0.1.0
+# <img src="assets/owl.svg" width="32" alt="Owl (Egyptian hieroglyph G17)" align="absmiddle"> Halowin Bubo v0.1.0
 
 First release from HaloForge Labs.
 

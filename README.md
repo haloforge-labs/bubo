@@ -1,4 +1,4 @@
-# Halowin Bubo
+# <img src="assets/owl.svg" width="40" alt="Owl (Egyptian hieroglyph G17)" align="absmiddle"> Halowin Bubo
 
 **Local AI for Windows on AMD Strix Halo laptops.**
 
@@ -10,6 +10,26 @@ The command is `bubo`. The executable is `bubo.exe`.
 
 Gufo provides the engine. The Windows layer comes from [pixmaate/gufo, branch `windows-port`](https://github.com/pixmaate/gufo/tree/windows-port).
 The base is gufo v0.10.0 plus main commit `97b8645f`.
+
+## What makes Bubo fast
+
+One chip. One package. Every layer tuned for it. All numbers are our own measurements on one 70 W Strix Halo laptop.
+
+<img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **Janus dense twin and Q4_K draft head.** A second, 4-bit copy of 252 dense weights serves decode and draft checking. Together with the draft head it makes decode 5.9 % faster. Prefill and `exact` mode use the 8-bit weights.
+
+<img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **MTP stack.** Draft length control, prompt lookup and bounded lenient acceptance in thinking. Decode goes from 27.8 to 34.5 tok/s on the standard test, and up to 93.8 tok/s on a copy-heavy code edit.
+
+<img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **Loop and end-of-turn fixes.** In a test of 15 long answers, 14 stopped mid-answer without the fix and 1 with it.
+
+<img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **NPU prefill on Windows.** About 5 to 7 % faster prefill at 8K tokens and about 3.5 to 5.5 % at 16K. Decode does not change.
+
+<img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **Disk prompt cache (optional).** A 30K-token conversation continues after a restart in about 2 s instead of about 25 s. A 109K-token conversation: 3.5 s instead of 88.8 s.
+
+<img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **Exact mode.** In our proof, `exact` gave the same tokens as the stock reference on 24 fixed cases.
+
+<img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **Several users and real agents.** 102.2 tok/s in total for 8 users with plain decode, and 51.6 tok/s for a real coding agent.
+
+Details and limits: [Under the hood](https://haloforgelabs.com/docs/under-the-hood/).
 
 ## Performance at 70 W
 
