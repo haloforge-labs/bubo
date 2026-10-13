@@ -91,7 +91,7 @@ is required for `--verify-model`. Runtime files, JSON and unrelated files are
 outside that hash extent. No imatrix is prepared or verified.
 
 The fingerprint-only `prepare-state.json` records target digests and cannot
-authorize persistent disk-cache identity. Full checks that match catalogue
+authorize persistent disk-cache identity. Full checks that match catalog
 pins save separate rows in `.bubo/verified-state.json`, keyed by logical name
 and pinned SHA-256. A row authorizes identity only when size, modification
 stamp and file identity match the file's held read lease. Read leases deny

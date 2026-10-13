@@ -30,12 +30,12 @@ match the configured build metadata.
 
 The Bubo brand defaults to `GUFO_ENABLE_OPENMP=OFF`. The CPU/Bubo build and
 its package inventory/import closure show no libomp in our Bubo archive;
-no libomp licence is needed for those absent files. The package gate rejects
+no libomp license is needed for those absent files. The package gate rejects
 libomp files/imports in our archive. Production HIP closure remains OPEN
 and must be re-checked. The gate cannot inspect the ROCm wheels that
 `bubo prepare runtime` downloads separately from AMD. Those are AMD's files;
 the supplied runtime inventory lists `libomp140.x86_64.dll` in
-`tools/release/runtime-notices/OPEN-ITEMS.md`, with source/licence provenance
+`tools/release/runtime-notices/OPEN-ITEMS.md`, with source/license provenance
 still OPEN. That DLL is not in the selected `runtime-members.tsv` extraction
 list; its presence in the exact wheels is not established by this CPU check.
 Release CRT and UCRT system imports are permitted; CRT files, including
@@ -176,7 +176,7 @@ kernels tuned for the Windows compiler, and A3B's own runtime.
 
 ## Windows-validated switches
 
-Some behaviour changes were developed and measured on Windows only. They live
+Some behavior changes were developed and measured on Windows only. They live
 in `src/core/platform/tuning.hpp`: each is on by default on Windows and off
 elsewhere, so Linux runs exactly the code it ran before. The decode switches
 change timing and memory placement only. `GUFO_PLATFORM_TUNING` overrides the
@@ -227,7 +227,7 @@ carve-out works, but the load takes ~2 minutes and decode is slower.
 
 ## Test status
 
-- All Flash-Next operator tests pass, plus 86/92 CPU-labelled tests.
+- All Flash-Next operator tests pass, plus 86/92 CPU-labeled tests.
 - Not ported: Linux-only Python dev tools (`h3_profile*`, `qwen27b.tools`,
   TTS reference verification needs numpy), and `video_jobs_test` needs
   symlink privileges (Developer Mode).

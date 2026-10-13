@@ -94,7 +94,7 @@ It has two steps, `runtime` and `model`. With no step name it runs both and asks
 | `runtime` | Three official AMD ROCm 10.0.0 wheels for `gfx1151` from `stable.repo.amd.com` | 1,014,229,359 bytes (967.2 MiB) |
 | `model` | Eight pinned model files: four `UD-Q4_K_XL` shards, MTP predictor, vision projector, dense twin and Q4_K draft head | 116,617,136,608 bytes (108.6 GiB) |
 
-Before a download, the command shows each address, size and SHA-256 value, the AMD licence information and the destination, and asks for approval (`--yes` accepts the plan).
+Before a download, the command shows each address, size and SHA-256 value, the AMD license information and the destination, and asks for approval (`--yes` accepts the plan).
 It checks the hash of every file and writes `bubo-package.json` last.
 The default checks find a wrong file, a wrong variant and a truncated file. Add `--verify` for a full SHA-256 check.
 If a download stops, run the command again. It resumes.
@@ -186,7 +186,7 @@ These defaults apply to Qwen3.8 Flash Next.
 | `--print-effective-settings` | Off | Print the resolved settings before you load the model. |
 
 Adaptive thinking uses the effort map `low:-2,medium:-1,xhigh:0` for thinking markers.
-Behaviour policies include the engine loop breaker.
+Behavior policies include the engine loop breaker.
 Bounded lenient acceptance applies to thinking with MTP.
 The dense twin and Q4_K draft head are the optimal decode files outside `exact`.
 The default output is not byte-exact.

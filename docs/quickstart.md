@@ -93,7 +93,7 @@ This command prints JSON and exits before it starts a server.
 
 The exact profile leaves out the MTP predictor, the dense twin and the draft head, even when the manifest names them.
 It refuses flags that turn on approximation or speculation (exit code 2).
-It disables speculation, behaviour policies, and prompt caches.
+It disables speculation, behavior policies, and prompt caches.
 Each request processes its full prompt.
 Keep the prompt and request settings fixed for reproducibility.
 See [profiles](profiles.md) for the exact scope.

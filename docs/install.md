@@ -55,10 +55,10 @@ The command downloads these official AMD wheels from [AMD's ROCm index](https://
 | `rocm_sdk_device_gfx1151` | `10.0.0` |
 
 The total download is 1,014,229,359 bytes (967.2 MiB).
-Before the download, the command shows the address, exact size and full SHA-256 value of each wheel, the destination folders and the AMD licence information. It then asks for your approval. If you decline, nothing is installed (exit code 3).
+Before the download, the command shows the address, exact size and full SHA-256 value of each wheel, the destination folders and the AMD license information. It then asks for your approval. If you decline, nothing is installed (exit code 3).
 The `--yes` option accepts the displayed plan. It prints the same text first.
 The command checks the SHA-256 value of each archive before it extracts any file.
-It installs 13 DLLs and the `gfx1151` data files (about 303 MiB) beside `bubo.exe`. It saves the licence texts in the `licenses` folder.
+It installs 13 DLLs and the `gfx1151` data files (about 303 MiB) beside `bubo.exe`. It saves the license texts in the `licenses` folder.
 The step needs no Python and no administrator access.
 
 By default the runtime goes beside `bubo.exe`. Use `--runtime-dir PATH` to choose another folder. The downloaded wheels stay in a cache folder (default `ROOT\cache\rocm-10.0.0-gfx1151`; change it with `--cache-dir PATH`).
@@ -71,17 +71,17 @@ If your network needs a proxy, set `HTTPS_PROXY` before you run the command. Set
 $env:HTTPS_PROXY = "http://proxy.example:8080"
 ```
 
-### AMD licence terms
+### AMD license terms
 
-Bubo does not include AMD files. The runtime step of `bubo prepare` downloads AMD's ROCm 10.0.0 packages for `gfx1151` directly from `stable.repo.amd.com`. Before it downloads, it shows the address, size and SHA-256 value of each package, and the licence information. AMD licenses ROCm per component, and components can have third-party terms. Read the [AMD ROCm 10.0.0 licence page](https://rocm.docs.amd.com/en/docs-10.0.0/about/license.html) and the licence texts that Bubo saves in the `licenses` folder. Other AMD terms can apply to these files. If you continue, you accept the terms that apply.
+Bubo does not include AMD files. The runtime step of `bubo prepare` downloads AMD's ROCm 10.0.0 packages for `gfx1151` directly from `stable.repo.amd.com`. Before it downloads, it shows the address, size and SHA-256 value of each package, and the license information. AMD licenses ROCm per component, and components can have third-party terms. Read the [AMD ROCm 10.0.0 license page](https://rocm.docs.amd.com/en/docs-10.0.0/about/license.html) and the license texts that Bubo saves in the `licenses` folder. Other AMD terms can apply to these files. If you continue, you accept the terms that apply.
 
 The pinned runtime is ROCm 10.0.0 for `gfx1151`.
 ROCm 10.1.0 does not match the tested runtime files.
 
 ## Get the model
 
-Model files have separate licences.
-Read the [Qwen licence](https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/main/LICENSE) before the download. The command also saves the licence and notice files with the model.
+Model files have separate licenses.
+Read the [Qwen license](https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/main/LICENSE) before the download. The command also saves the license and notice files with the model.
 
 ```powershell
 .\bubo.exe prepare model
@@ -150,7 +150,7 @@ The base twin and the draft head work only with these shards. The Huihui twin do
 2. Read `THIRD_PARTY_NOTICES.md`.
 3. Keep the `licenses` folder beside the installed runtime.
 
-Gufo and the pixmaate Windows layer retain the MIT licence.
-AMD components and model files retain their separate licences.
+Gufo and the pixmaate Windows layer retain the MIT license.
+AMD components and model files retain their separate licenses.
 
 Continue with the [quickstart](quickstart.md).

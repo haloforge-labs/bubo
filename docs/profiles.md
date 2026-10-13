@@ -22,7 +22,7 @@ For other model families, `exact` supplies the seed rule and keeps their existin
 | MTP policy | Survival | Upstream settings | Unused | Survival |
 | MTP draft vocabulary | Auto | Upstream settings | Unused | Latin |
 | Prompt lookup | On with MTP | Upstream settings | Off | On with MTP |
-| Behaviour policies | On | No profile defaults | Off | On |
+| Behavior policies | On | No profile defaults | Off | On |
 | Lenient acceptance | Bounded with MTP | No profile defaults | Off | Bounded with MTP |
 | Dense twin | With matching file | No profile defaults | Disabled | With matching file and batched twin enabled |
 | Q4_K draft head | With matching file and MTP | No profile defaults | Disabled | With matching file and MTP |
@@ -37,7 +37,7 @@ Use this profile for normal chat, code tasks, and agent work.
 Its optimal setup includes the MTP predictor, dense twin, and Q4_K draft head.
 Medium effort selects marker bias `-1` in the map `low:-2,medium:-1,xhigh:0`.
 Bounded lenient acceptance applies inside thinking spans.
-The behaviour set includes the engine loop breaker.
+The behavior set includes the engine loop breaker.
 
 The default output is not byte-exact.
 Without an MTP predictor, the source skips MTP defaults and uses plain autoregressive decode.
@@ -48,7 +48,7 @@ Without a manifest or explicit paths, the twin and the draft head do not load.
 Select this profile with `--profile stock`.
 It injects no Bubo environment values or flag defaults.
 Existing environment values and explicit flags still apply.
-Plain gufo behaviour needs an environment without Bubo tuning overrides.
+Plain gufo behavior needs an environment without Bubo tuning overrides.
 
 ## Exact
 
@@ -62,7 +62,7 @@ The guarantee does not extend across builds, hardware, or other engines.
 Exact disables these features.
 
 - Speculative decode and prompt lookup.
-- Behaviour policies and lenient acceptance.
+- Behavior policies and lenient acceptance.
 - Dense twin and draft head.
 - RAM and disk prompt caches.
 

@@ -18,7 +18,7 @@ The Windows layer comes from [pixmaate/gufo `windows-port`](https://github.com/p
 - NPU prefill (on by default when usable): prefill is about 5 to 7 % faster on an 8K-token prompt and about 3.5 to 5.5 % faster on a 16K-token prompt at 70 W. Decode does not change. Prompts under 4,096 tokens do not use it. It needs the AMD NPU driver and XRT, and it is off in `exact` and `stock`. See [NPU prefill](docs/npu.md).
 - Optional grouped decode expert kernels, adapted from Strata (MIT): off by default. Turn them on with `GUFO_EXPERT_V2K=1`. They are not available in `exact`.
 - Resolved settings output through `--print-effective-settings`.
-- Windows notices and component licences.
+- Windows notices and component licenses.
 
 ## Default settings
 
@@ -29,7 +29,7 @@ The Windows layer comes from [pixmaate/gufo `windows-port`](https://github.com/p
 | Context | `262144` tokens |
 | Reasoning | Thinking on, medium effort |
 | Adaptive thinking | Marker bias map `low:-2,medium:-1,xhigh:0` |
-| Behaviour | Policies on, with the engine loop breaker |
+| Behavior | Policies on, with the engine loop breaker |
 | Speculative decode | MTP when the matching sidecar is supplied |
 | MTP control | `survival`, draft vocabulary `auto`, prompt lookup on |
 | Lenient acceptance | `bounded`, thinking spans with MTP |
@@ -40,7 +40,7 @@ The Windows layer comes from [pixmaate/gufo `windows-port`](https://github.com/p
 
 The default output is not byte-exact.
 Use `--profile exact` for reproducibility with the same build, machine, files, prompt, seed, and request settings.
-Exact disables speculation, behaviour policies, the dense twin, the draft head, and prompt caches.
+Exact disables speculation, behavior policies, the dense twin, the draft head, and prompt caches.
 It uses one session and fixed prefill geometry.
 Each request processes its full prompt.
 
@@ -62,7 +62,7 @@ The default checks find a wrong file, a wrong variant and a truncated file. `--v
 The server finds the model files through the manifest. It never hashes model payloads at startup. `--verify-model` checks all eight files on request.
 
 The dense twin and Q4_K draft head come from the HaloForge Labs Hugging Face repository (commit `bb72204d`).
-Qwen licences apply to these derived model files.
+Qwen licenses apply to these derived model files.
 
 ## Measured performance
 
@@ -96,11 +96,11 @@ Same or better accuracy, and about 24 % faster decode. The 95 % intervals overla
 - Deep sessions and images need more memory. Use the documented memory setup or reduce context.
 
 
-## Credits and licences
+## Credits and licenses
 
 Thanks to the [gufo contributors](https://github.com/gufo-org/gufo) and [pixmaate/gufo](https://github.com/pixmaate/gufo).
-Their code retains the MIT licence.
-AMD runtime components retain their separate licences.
-Model files retain the [Qwen licence](https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/main/LICENSE).
+Their code retains the MIT license.
+AMD runtime components retain their separate licenses.
+Model files retain the [Qwen license](https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/main/LICENSE).
 
 See [install](docs/install.md), [quickstart](docs/quickstart.md), [options](docs/options.md), and [profiles](docs/profiles.md).

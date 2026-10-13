@@ -62,7 +62,7 @@ Use `bubo serve llm --help` for command-specific help.
 | `--mtp-draft-vocab auto\|full\|latin` | Select the MTP draft head vocabulary. | Auto with MTP. Otherwise unused. | Keep the profile vocabulary unless draft vocabulary tests need another setting. |
 | `--mtp-model VALUE` | Set the MTP sidecar file. | Unset | Set the matching MTP sidecar when speculative decoding is necessary. |
 | `--mtp-policy survival\|length` | Select the MTP draft length controller. | Survival with MTP. Otherwise unused. | Keep survival unless draft acceptance tests need the length policy. |
-| `--no-behaviour` | Turn off the nine behaviour defaults. | Off. Exact enables it. | Keep policies enabled unless plain sampling is necessary outside the exact profile. |
+| `--no-behavior` | Turn off the nine behavior defaults. | Off. Exact enables it. | Keep policies enabled unless plain sampling is necessary outside the exact profile. |
 | `--no-cache` | Turn off RAM and disk prompt caches for all requests. | Off. Exact enables it. | Keep caches on for normal use. Use exact when every request must process its full prompt. |
 | `--no-cache-disk` | Turn off the disk snapshot cache. | Unset | Use it when the supplied disk cache directory must be ignored. |
 | `--no-draft-head` | Omit a default Q4_K draft head. Explicit environment paths still apply. | Off. Exact refuses a set draft-head path. | Use it to suppress a default file. Remove explicit environment paths separately. |
@@ -150,9 +150,9 @@ $env:GUFO_DENSE_TWIN_MODEL = "D:\Models\Qwen3.8-Flash-Next\iq4-nofullattn-nohc.g
 | `HOST` | Set the server address through the environment fallback. | Unset | Leave it unset unless the server address must come from the environment fallback. |
 | `PORT` | Set the server port through the environment fallback. | Unset | Leave it unset unless the server port must come from the environment fallback. |
 
-## Default behaviour
+## Default behavior
 
-The default profile enables the behaviour policies.
+The default profile enables the behavior policies.
 They control response boundaries, unfinished thinking, and repeat loops.
 Adaptive thinking uses the map `low:-2,medium:-1,xhigh:0`.
 Medium is the default effort.
@@ -203,7 +203,7 @@ Set `HTTPS_PROXY` (and `NO_PROXY` if needed) when your network needs a proxy.
 | ---: | --- |
 | 0 | Success, help, or nothing to do. |
 | 2 | Syntax, schema, header or profile error. |
-| 3 | You declined the plan, or there was no answer, or you cancelled. |
+| 3 | You declined the plan, or there was no answer, or you canceled. |
 | 4 | Offline and a file is missing, or a source is not pinned. |
 | 5 | Network or TLS failure. |
 | 6 | Size or hash check failed. |
@@ -223,7 +223,7 @@ The server checks file sizes, GGUF headers and tensor tables, and the manifest e
 
 ## Chat API limits
 
-Two requests have fixed conditions. Both are designed behaviour.
+Two requests have fixed conditions. Both are designed behavior.
 
 - **Logprobs.** A chat request can return logprobs only when thinking is off, the request is plain text (no tools and no images), and it has no stop sequences. Otherwise the server returns HTTP 400 with the message `chat logprobs require thinking off, plain text, and no stop sequences`.
 - **Prompt inspection.** The `/debug/prompt` endpoint accepts plain text only. A request with tools or images returns the message `prompt inspection requires plain text without tools`.
