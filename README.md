@@ -57,7 +57,7 @@ Pre-release build (B6.1), 2026-10-10, not v0.1.0. Both engines answered the same
 | IMO 2026 (final answer) | 3/3 | 2/3 |
 | Total | 29/35 | 27/35 |
 
-Halowin Bubo gives the same or better accuracy and decodes about 24 % faster on these requests at about 70 W laptop power. The 95 % intervals overlap and each set is small. Read this as "no loss of accuracy". Tokens used, on the 32 requests that both engines answered: Bubo generated 580,456 completion tokens and gufo (pixmaate’s Windows port) 525,293. The median ratio per request is 1.00. On the pre-release build, one Bubo request (AIME item 29) repeated text until the context limit (261,913 tokens); it is left out of the 32. Details: the Benchmarks page on the site.
+Halowin Bubo gives the same or better accuracy and decodes about 24 % faster on these requests at about 70 W laptop power. The 95 % intervals overlap and each set is small. Read this as "no loss of accuracy". Details: the Benchmarks page on the site.
 
 
 ## Requirements
