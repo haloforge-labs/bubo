@@ -67,14 +67,14 @@ Qwen licenses apply to these derived model files.
 ## Measured performance
 
 The 70 W laptop measurements include 1,364 tokens/s for prompt processing (pp2048, release build v0.1.0, 2026-10-12) and 51.6 tokens/s across real agent requests (2026-10-10).
-A copy-heavy rename edit reaches up to 97.4 tokens/s on its second request with the prompt cached (release build v0.1.0, 2026-10-12).
+A copy-heavy rename edit reaches up to 97.4 tokens/s on its second request with the prompt cached (release build v0.1.0, 2026-10-12), also at about 70 W laptop power.
 See the [README](README.md#performance-at-70-w) for the conditions.
 
-## Reasoning check against gufo with pixmaate’s Windows port
+## Reasoning check against gufo (pixmaate’s Windows port)
 
 Same 35 requests, same seeds, same laptop in Performance mode.
 
-| Set | Halowin Bubo correct | gufo with pixmaate’s Windows port correct |
+| Set | Halowin Bubo correct | gufo (pixmaate’s Windows port) correct |
 | --- | --- | --- |
 | GPQA Diamond | 20/24 | 19/24 |
 | AIME 2026 | 3/4 | 2/4 |
@@ -82,7 +82,7 @@ Same 35 requests, same seeds, same laptop in Performance mode.
 | IMO 2026 (final answer) | 3/3 | 2/3 |
 | Total | 29/35 | 27/35 |
 
-Same or better accuracy, and about 24 % faster decode. The 95 % intervals overlap.
+Same or better accuracy, and about 24 % faster decode at about 70 W laptop power. The 95 % intervals overlap.
 
 ## Fixed
 

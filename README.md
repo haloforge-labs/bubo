@@ -15,19 +15,19 @@ The base is gufo v0.10.0 plus main commit `97b8645f`.
 
 One chip. One package. Every layer tuned for it. All numbers are our own measurements on one 70 W Strix Halo laptop.
 
-<img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **Janus dense twin and Q4_K draft head.** A second, 4-bit copy of 252 dense weights serves decode and draft checking. Together with the draft head it makes decode 5.9 % faster. Prefill and `exact` mode use the 8-bit weights.
+<img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **Janus dense twin and Q4_K draft head.** A second, 4-bit copy of 252 dense weights serves decode and draft checking. Together with the draft head it makes decode 5.9 % faster at about 70 W laptop power. Prefill and `exact` mode use the 8-bit weights.
 
-<img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **MTP stack.** Draft length control, prompt lookup and bounded lenient acceptance in thinking. Decode at 128 tokens goes from 32.19 tok/s without MTP to 37.15 tok/s with MTP (release build v0.1.0, 2026-10-12), and up to 97.4 tok/s on a copy-heavy code edit.
+<img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **MTP stack.** Draft length control, prompt lookup and bounded lenient acceptance in thinking. Decode at 128 tokens goes from 32.19 tok/s without MTP to 37.15 tok/s with MTP (release build v0.1.0, 2026-10-12), and up to 97.4 tok/s on a copy-heavy code edit, all at about 70 W laptop power.
 
 <img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **Loop and end-of-turn fixes.** In a test of 15 long answers, 14 stopped mid-answer without the fix and 1 with it.
 
-<img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **NPU prefill on Windows.** About 5 to 7 % faster prefill at 8K tokens and about 3.5 to 5.5 % at 16K. Decode does not change.
+<img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **NPU prefill on Windows.** About 5 to 7 % faster prefill at 8K tokens and about 3.5 to 5.5 % at 16K at about 70 W laptop power. Decode does not change.
 
 <img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **Disk prompt cache (optional).** A 30K-token conversation continues after a restart in about 2 s instead of about 25 s. A 109K-token conversation: 3.5 s instead of 88.8 s.
 
 <img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **Exact mode.** In our proof, `exact` gave the same tokens as the stock reference on 24 fixed cases.
 
-<img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **Several users and real agents.** 102.2 tok/s in total for 8 users with plain decode, and 51.6 tok/s for a real coding agent.
+<img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **Several users and real agents.** 102.2 tok/s in total for 8 users with plain decode, and 51.6 tok/s for a real coding agent, both at about 70 W laptop power.
 
 Details and limits: [Under the hood](https://haloforgelabs.com/docs/under-the-hood/).
 
@@ -45,11 +45,11 @@ These results use an ASUS ProArt PX13 with Radeon 8060S graphics at approximatel
 The workloads differ. The edit result includes text copied from the prompt.
 Model choice, prompt content, and settings affect speed.
 
-## Reasoning check against gufo with pixmaate’s Windows port
+## Reasoning check against gufo (pixmaate’s Windows port)
 
 Both engines answered the same 35 requests (GPQA Diamond, AIME 2026, HMMT 2026, IMO 2026) on the same laptop in Performance mode, with the same seeds.
 
-| Set | Halowin Bubo correct | gufo with pixmaate’s Windows port correct |
+| Set | Halowin Bubo correct | gufo (pixmaate’s Windows port) correct |
 | --- | --- | --- |
 | GPQA Diamond | 20/24 | 19/24 |
 | AIME 2026 | 3/4 | 2/4 |
@@ -57,7 +57,7 @@ Both engines answered the same 35 requests (GPQA Diamond, AIME 2026, HMMT 2026, 
 | IMO 2026 (final answer) | 3/3 | 2/3 |
 | Total | 29/35 | 27/35 |
 
-Halowin Bubo gives the same or better accuracy and decodes about 24 % faster on these requests. The 95 % intervals overlap and each set is small. Read this as "no loss of accuracy". Details: the Benchmarks page on the site.
+Halowin Bubo gives the same or better accuracy and decodes about 24 % faster on these requests at about 70 W laptop power. The 95 % intervals overlap and each set is small. Read this as "no loss of accuracy". Details: the Benchmarks page on the site.
 
 
 ## Requirements
