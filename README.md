@@ -43,11 +43,11 @@ These results use an ASUS ProArt PX13 with Radeon 8060S graphics at approximatel
 The workloads differ. The edit result includes text copied from the prompt.
 Model choice, prompt content, and settings affect speed.
 
-## Reasoning check against stock gufo
+## Reasoning check against gufo with pixmaate’s Windows port
 
 Both engines answered the same 35 requests (GPQA Diamond, AIME 2026, HMMT 2026, IMO 2026) on the same laptop in Performance mode, with the same seeds.
 
-| Set | Halowin Bubo correct | Stock gufo correct |
+| Set | Halowin Bubo correct | gufo with pixmaate’s Windows port correct |
 | --- | --- | --- |
 | GPQA Diamond | 20/24 | 19/24 |
 | AIME 2026 | 3/4 | 2/4 |

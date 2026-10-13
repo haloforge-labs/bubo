@@ -70,11 +70,11 @@ The 70 W laptop measurements include 1,325 tokens/s for prompt processing and 51
 A copy-heavy rename edit reaches up to 93.8 tokens/s on its second request with the prompt cached.
 See the [README](README.md#performance-at-70-w) for the conditions.
 
-## Reasoning check against stock gufo
+## Reasoning check against gufo with pixmaate’s Windows port
 
 Same 35 requests, same seeds, same laptop in Performance mode.
 
-| Set | Halowin Bubo correct | Stock gufo correct |
+| Set | Halowin Bubo correct | gufo with pixmaate’s Windows port correct |
 | --- | --- | --- |
 | GPQA Diamond | 20/24 | 19/24 |
 | AIME 2026 | 3/4 | 2/4 |

@@ -126,6 +126,24 @@ The server never reads every model byte at startup, including the first start.
 To check every byte, add `--verify` to the prepare command. It forces a full SHA-256 check of the selected files. The server option `--verify-model` does the same for the eight prepared files before the server starts. On an SSD this takes about 2 to 4 minutes (an estimate).
 
 
+## Use the original (non-abliterated) model
+
+The default model is an abliterated build. If you need the original Qwen3.8 Flash Next, use the plain Unsloth shards with the base twin. `bubo prepare` does not download this set yet, so you download the files yourself.
+
+1. Download the four `UD-Q4_K_XL` shards from [unsloth/Qwen3.8-Flash-Next-GGUF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/766911a6b7369840a91dbcd95f9f997acaab6cd6/UD-Q4_K_XL) (revision `766911a6`).
+2. From the same repository, download `MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf`. For images, also download `mmproj-BF16.gguf`.
+3. From [HaloForgeLabs/bubo-qwen3.8-flash-next](https://huggingface.co/HaloForgeLabs/bubo-qwen3.8-flash-next), download `twin-base/iq4-nofullattn-nohc.gguf` and `draft_head/draft-out-q4k.gguf`.
+4. Put all files in one folder. Start the server with the paths of your files.
+
+```powershell
+$d = "D:\Models\Qwen3.8-Flash-Next-base"
+.\bubo.exe serve llm --model "$d\Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf" --twin-model "$d\iq4-nofullattn-nohc.gguf" --draft-head-model "$d\draft-out-q4k.gguf" --mtp-model "$d\mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf" --mmproj "$d\mmproj-BF16.gguf" --served-model-name bubo
+```
+
+The default profile applies on its own. To check that the server bound the twin and the draft head, add `--print-effective-settings` to the command. It prints `twin_bound` and `draft_head_bound`.
+
+The base twin and the draft head work only with these shards. The Huihui twin does not fit them. The draft head is the same file for both models. On the original model the twin and the draft head gave 46.06 to 51.76 tok/s (+12.4 %) in our six-probe test. See the [model card](https://huggingface.co/HaloForgeLabs/bubo-qwen3.8-flash-next) for the quality checks.
+
 ## Notices
 
 1. Read `NOTICE-windows.md` in the package.
