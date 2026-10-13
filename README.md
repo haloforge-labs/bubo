@@ -15,7 +15,7 @@ The base is gufo v0.10.0 plus main commit `97b8645f`.
 
 Bubo is tuned for one chip, AMD Strix Halo. All numbers are our own measurements on one 70 W Strix Halo laptop.
 
-<img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **Dense twin and Q4_K draft head.** A second, 4-bit copy of 252 dense weights serves decode and draft checking. Together with the draft head it makes decode 5.9 % faster at about 70 W laptop power. Prefill and `exact` mode use the 8-bit weights.
+<img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **Janus dense twin and Q4_K draft head.** A second, 4-bit copy of 252 dense weights serves decode and draft checking. Together with the draft head it makes decode 5.9 % faster at about 70 W laptop power. Prefill and `exact` mode use the 8-bit weights.
 
 <img src="assets/owl.svg" width="18" alt="" align="absmiddle"> **MTP stack.** Draft length control, prompt lookup and bounded lenient acceptance in thinking. Decode at 128 tokens goes from 32.19 tok/s without MTP to 37.15 tok/s with MTP (release build v0.1.0, 2026-10-12), and up to 97.4 tok/s on a copy-heavy code edit, all at about 70 W laptop power.
 
