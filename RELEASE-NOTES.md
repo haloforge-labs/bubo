@@ -49,7 +49,7 @@ Exact-profile result: in exact mode, Bubo gives the same tokens as the stock ref
 - Logprobs were compared only where the product supports them (thinking-off cases). The other cases were compared by text and token ids.
 - The prompt and continuation cache is off in `--exact`. Cached restores are not bit-identical to a fresh prefill (3 of 3 measured cases differed) and are outside this guarantee.
 - One machine (Windows, AMD Radeon 8060S, ROCm path). Other hardware, seeds and prompts are not covered. No speed claim.
-- The `exact` and `stock` profiles refuse the NPU and Strata switches and reject the tested production environment overrides (`GUFO_DENSE_TWIN_MAX_N`). Other user overrides were not tested.
+- The `exact` and `stock` profiles refuse the NPU and grouped expert kernel switches and reject the tested production environment overrides (`GUFO_DENSE_TWIN_MAX_N`). Other user overrides were not tested.
 
 Bubo is tuned for Qwen3.8 Flash Next. The other models run with upstream gufo settings.
 

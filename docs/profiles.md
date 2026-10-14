@@ -83,7 +83,7 @@ In exact mode, Bubo gives the same tokens as the stock reference. We tested this
 2. Logprobs were compared only where the product supports them (thinking-off cases). The thinking, tool, stop and image cases were compared by text and token ids.
 3. The prompt and continuation cache is off in `--exact` (RAM and disk), and `cached_tokens` was 0 on every row. Cached restores are not bit-identical to a fresh prefill (3 of 3 measured cases differed) and are outside this guarantee.
 4. The full exact proof ran on build `163762d9`. The release revision `3ff74dce` differs from that tree only in the Windows launcher script and its test. The test used one machine: Windows, AMD Radeon 8060S (Strix Halo), ROCm path. Other hardware, seeds and prompts are not covered. No speed claim.
-5. The `exact` and `stock` profiles refuse the NPU and Strata switches, and the profile rejects the production environment overrides that were tested (`GUFO_DENSE_TWIN_MAX_N`). Other user overrides were not tested.
+5. The `exact` and `stock` profiles refuse the NPU and grouped expert kernel switches, and the profile rejects the production environment overrides that were tested (`GUFO_DENSE_TWIN_MAX_N`). Other user overrides were not tested.
 
 ## Subagents
 
