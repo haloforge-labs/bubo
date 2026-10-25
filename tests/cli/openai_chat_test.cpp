@@ -5969,6 +5969,25 @@ void TestBracketDenseContent() {
   }
 }
 
+void TestChatUsageReportsReasoningTokens() {
+  for (const std::size_t reasoning : {std::size_t{0}, std::size_t{3}}) {
+    FakeBackend backend;
+    backend.pieces = {"Answer"};
+    backend.reasoning_tokens = reasoning;
+    auto response = gufo::server::HandleOpenAiChat(
+        Request(
+            R"({"model":"test-model","messages":[{"role":"user","content":"hello"}]})"),
+        backend);
+    Expect(response.status == 200, "Chat completion succeeds");
+    const auto body = gufo::json::parse(response.body);
+    const auto* usage = body.find("usage");
+    const auto* details =
+        usage ? usage->find("completion_tokens_details") : nullptr;
+    Expect(details && details->member_size("reasoning_tokens") == reasoning,
+           "Chat usage reports the reasoning split");
+  }
+}
+
 int main(int argc, char** argv) {
   if (argc == 2 && std::string_view(argv[1]) == "--debug-hooks") {
     DebugHooksSettingsTest();
@@ -5998,6 +6017,7 @@ int main(int argc, char** argv) {
   TestExplicitStopOutputFraming();
   TestStopInsideToolArguments();
   TestResponsesOutput();
+  TestChatUsageReportsReasoningTokens();
   TestNativeToolTransports();
   TestJsonToolStringOwnership();
   TestNativeToolDialectSelection();
