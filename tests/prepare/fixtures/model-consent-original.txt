@@ -1,0 +1,69 @@
+Bubo will prepare these files.
+Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf | huggingface.co |
+https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/resolve/766911a6b7369840a
+91dbcd95f9f997acaab6cd6/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.
+gguf | 10946624 bytes | 0.010 GiB | 4448186216b3 |
+4448186216b3af4cc558bbce2c3213f01608f8f8b2e5267a9767971dd3ec8082 |
+qwen-community-1.0 | M/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf |
+download
+Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf | huggingface.co |
+https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/resolve/766911a6b7369840a
+91dbcd95f9f997acaab6cd6/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.
+gguf | 49859583136 bytes | 46.435 GiB | 3f342f1c1580 |
+3f342f1c1580473f1ee94ddd5b28206e8c07a70fa1a366f59d1d6c922919a6c9 |
+qwen-community-1.0 | M/Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf |
+download
+Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf | huggingface.co |
+https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/resolve/766911a6b7369840a
+91dbcd95f9f997acaab6cd6/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.
+gguf | 49376141504 bytes | 45.985 GiB | 56758f40269c |
+56758f40269cad5cd9b0d3d6fbae0f40f6d5be6de49e4ab392dbe83157d9cbd3 |
+qwen-community-1.0 | M/Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf |
+download
+Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf | huggingface.co |
+https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/resolve/766911a6b7369840a
+91dbcd95f9f997acaab6cd6/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.
+gguf | 12087983520 bytes | 11.258 GiB | 753bda48b98b |
+753bda48b98ba4f1636134a90a967de1b2d3908a236c026e464777342e53510a |
+qwen-community-1.0 | M/Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf |
+download
+mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf | huggingface.co |
+https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/resolve/766911a6b7369840a
+91dbcd95f9f997acaab6cd6/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf | 2786568256
+bytes | 2.595 GiB | 5ff54097406a |
+5ff54097406a905cf3a724c709124ceb0e3e10235ee862298969e91c96fa96e6 |
+qwen-community-1.0 | M/mtp/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf | download
+mmproj-BF16.gguf | huggingface.co |
+https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/resolve/766911a6b7369840a
+91dbcd95f9f997acaab6cd6/mmproj-BF16.gguf | 907542944 bytes | 0.845 GiB |
+2e788f8c511d | 2e788f8c511d8093c7b43cb87b2fd7e14228340318057f8fb20c86df2efe2355
+| qwen-community-1.0 | M/mmproj/mmproj-Qwen3.8-Flash-Next-BF16.gguf | download
+iq4-nofullattn-nohc.gguf | huggingface.co |
+https://huggingface.co/HaloForgeLabs/bubo-qwen3.8-flash-next/resolve/0a3c343bec2
+095f43f2906371c83e4faa8a47da1/twin-base/iq4-nofullattn-nohc.gguf | 1230788768
+bytes | 1.146 GiB | d6aa3c042524 |
+d6aa3c0425247aca2ae37680a96a401ba09431addc552a1ee60af3a51927e13e |
+qwen-community-1.0 | M/twin/iq4-nofullattn-nohc.gguf | download
+draft-out-q4k.gguf | huggingface.co |
+https://huggingface.co/HaloForgeLabs/bubo-qwen3.8-flash-next/resolve/0a3c343bec2
+095f43f2906371c83e4faa8a47da1/draft_head/draft-out-q4k.gguf | 357581248 bytes |
+0.333 GiB | 6867948dc9f5 |
+6867948dc9f5c467818daa4281c4878dc64b53cd1bba9d16970fd77cd1656777 |
+qwen-community-1.0 | M/draft_head/draft-out-q4k.gguf | download
+Total file size: 116617136000 bytes (108.608 GiB).
+Total download size: 116617136000 bytes (108.608 GiB).
+Free space: 400000000000 bytes. Required space: 116619283648 bytes. Volume:
+fixture.
+The derived files are hosted by the Bubo project.
+Qwen Community License 1.0 applies to the model files. They are not MIT
+licensed.
+A copy of LICENSE and NOTICE is saved in M/licenses after the download.
+Read the MaaS and AI Work Assistant conditions in the licence.
+The main shards total 111334654784 bytes (103.688 GiB).
+Estimated download time: unknown; download speed is not known.
+Bubo checks each download's full SHA-256 while it receives the file.
+Existing main shards use GGUF and tensor fingerprint checks; --verify checks
+full SHA-256.
+HF downloads can redirect to allowed hosts under huggingface.co or hf.co.
+Bubo will not build a model on this computer.
+Download and prepare all files in this plan? [y/N]

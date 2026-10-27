@@ -1,8 +1,11 @@
 #include "src/cli/diagnose/diagnose.h"
 
+#include <charconv>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <span>
 #include <sstream>
 #include <string>
@@ -11,6 +14,9 @@
 
 #include "src/cli/arg_parser.hpp"
 #include "src/cli/brand.hpp"
+#include "src/cli/machine_adapter.hpp"
+#include "src/cli/machine_output.hpp"
+#include "src/cli/machine_warnings.hpp"
 #include "src/core/diagnostics/allocation_benchmark.h"
 #include "src/core/diagnostics/artifact_validator.h"
 #include "src/core/diagnostics/bandwidth.h"
@@ -26,6 +32,16 @@
 namespace gufo::cli {
 
 namespace {
+
+std::uint32_t ParseDiagnosticInteger(std::string_view text) {
+  std::uint32_t value = 0;
+  const auto [end, error] =
+      std::from_chars(text.data(), text.data() + text.size(), value);
+  if (text.empty() || error != std::errc{} || end != text.data() + text.size())
+    throw std::invalid_argument(
+        "diagnostic count must be an unsigned 32-bit integer");
+  return value;
+}
 
 void PrintDiagnoseHelp(std::string_view program_name) {
   std::cout
@@ -61,7 +77,33 @@ void PrintDiagnoseHelp(std::string_view program_name) {
       << "  -h, --help                   Print help information\n";
 }
 
-void OutputContent(std::string_view content, std::string_view output_file) {
+void OutputContent(std::string_view content, std::string_view output_file,
+                   bubo::cli::MachineWriter* writer = nullptr,
+                   bool failed = false) {
+  if (writer) {
+    auto document = gufo::json::parse(content);
+    document["schema_version"] = 1;
+    if (document.contains("checks")) {
+      auto probe = bubo::cli::CreateSystemMachineProbe();
+      document["machine"] = bubo::cli::MachineReport(*probe);
+    }
+    if (failed || document.member_str("status") == "FAIL")
+      document["error"] = bubo::cli::Error(
+          "diagnostic_failed", "diagnose", "checks", false,
+          "Read the failed checks. Apply the reported remedy.");
+    // Retain the advertised diagnostic keys at the top level. The payload
+    // contains the same v1.0.0 report for shared machine clients.
+    if (!output_file.empty()) {
+      std::ofstream file(std::filesystem::u8path(output_file),
+                         std::ios::binary);
+      if (!file || !(file << document.dump() << '\n'))
+        throw std::runtime_error("cannot write diagnostic output file");
+    }
+    writer->Write(
+        document.contains("checks") ? "diagnose" : "diagnose_artifact",
+        document, &document);
+    return;
+  }
   std::cout << content;
   if (!output_file.empty()) {
     std::ofstream out{std::string(output_file)};
@@ -198,139 +240,176 @@ diagnostics::DiagnosticReport CollectDiagnostics(
   return report;
 }
 
-int RunDiagnose(std::span<const char* const> args) {
-  bool json_mode = false;
-  bool fingerprint_mode = false;
-  std::string validate_artifact_path;
-  std::string benchmark_name;
-  std::string backends_csv = "cpu,hip";
-  std::uint32_t warmup = 3;
-  std::uint32_t repetitions = 10;
-  std::uint32_t duration_ms = 2000;
-  std::string working_set_mib = "64";
-  std::string output_file;
-  std::string section = "all";
-  std::size_t start_idx = 0;
-
-  if (!args.empty()) {
-    const std::string_view first = args[0];
-    if (first == kProductName ||
-        first.ends_with("/" + std::string(kProductName))) {
-      start_idx = 1;
-    }
-  }
-  if (start_idx < args.size()) {
-    const std::string_view cmd = args[start_idx];
-    if (cmd == "diagnose" || cmd == "probe") {
-      start_idx++;
-    }
-  }
-
-  for (std::size_t i = start_idx; i < args.size(); ++i) {
-    const std::string_view arg = args[i];
-    if (arg == "--json") {
-      json_mode = true;
-    } else if (arg == "--fingerprint") {
-      fingerprint_mode = true;
-    } else if (arg == "--validate-artifact") {
-      if (i + 1 >= args.size()) {
-        std::cerr << "Error: --validate-artifact requires a path argument\n";
-        PrintDiagnoseHelp(gufo::cli::kProductName);
-        return 2;
-      }
-      validate_artifact_path = args[++i];
-    } else if (arg.starts_with("--validate-artifact=")) {
-      validate_artifact_path = std::string(arg.substr(20));
-    } else if (arg == "--benchmark") {
-      if (i + 1 >= args.size()) {
-        std::cerr << "Error: --benchmark requires an argument\n";
-        PrintDiagnoseHelp(gufo::cli::kProductName);
-        return 2;
-      }
-      benchmark_name = args[++i];
-    } else if (arg.starts_with("--benchmark=")) {
-      benchmark_name = std::string(arg.substr(12));
-    } else if (arg == "--backends") {
-      if (i + 1 >= args.size()) {
-        std::cerr << "Error: --backends requires an argument\n";
-        PrintDiagnoseHelp(gufo::cli::kProductName);
-        return 2;
-      }
-      backends_csv = args[++i];
-    } else if (arg.starts_with("--backends=")) {
-      backends_csv = std::string(arg.substr(11));
-    } else if (arg == "--warmup") {
-      if (i + 1 >= args.size()) {
-        std::cerr << "Error: --warmup requires an integer argument\n";
-        PrintDiagnoseHelp(gufo::cli::kProductName);
-        return 2;
-      }
-      warmup = static_cast<std::uint32_t>(std::stoul(args[++i]));
-    } else if (arg.starts_with("--warmup=")) {
-      warmup =
-          static_cast<std::uint32_t>(std::stoul(std::string(arg.substr(9))));
-    } else if (arg == "--repetitions") {
-      if (i + 1 >= args.size()) {
-        std::cerr << "Error: --repetitions requires an integer argument\n";
-        PrintDiagnoseHelp(gufo::cli::kProductName);
-        return 2;
-      }
-      repetitions = static_cast<std::uint32_t>(std::stoul(args[++i]));
-    } else if (arg.starts_with("--repetitions=")) {
-      repetitions =
-          static_cast<std::uint32_t>(std::stoul(std::string(arg.substr(14))));
-    } else if (arg == "--duration-ms") {
-      if (i + 1 >= args.size()) {
-        std::cerr << "Error: --duration-ms requires an integer argument\n";
-        PrintDiagnoseHelp(gufo::cli::kProductName);
-        return 2;
-      }
-      duration_ms = static_cast<std::uint32_t>(std::stoul(args[++i]));
-    } else if (arg.starts_with("--duration-ms=")) {
-      duration_ms =
-          static_cast<std::uint32_t>(std::stoul(std::string(arg.substr(14))));
-    } else if (arg == "--working-set-mib") {
-      if (i + 1 >= args.size()) {
-        std::cerr << "Error: --working-set-mib requires a comma-separated "
-                     "size list\n";
-        PrintDiagnoseHelp(gufo::cli::kProductName);
-        return 2;
-      }
-      working_set_mib = args[++i];
-    } else if (arg.starts_with("--working-set-mib=")) {
-      working_set_mib = std::string(arg.substr(18));
-    } else if (arg == "--output") {
-      if (i + 1 >= args.size()) {
-        std::cerr << "Error: --output requires a file path argument\n";
-        PrintDiagnoseHelp(gufo::cli::kProductName);
-        return 2;
-      }
-      output_file = args[++i];
-    } else if (arg.starts_with("--output=")) {
-      output_file = std::string(arg.substr(9));
-    } else if (arg == "--help" || arg == "-h") {
-      PrintDiagnoseHelp(gufo::cli::kProductName);
-      return 0;
-    } else if (arg == "--section") {
-      if (i + 1 >= args.size()) {
-        std::cerr << "Error: --section requires an argument\n";
-        PrintDiagnoseHelp(gufo::cli::kProductName);
-        return 2;
-      }
-      section = args[++i];
-    } else if (arg.starts_with("--section=")) {
-      section = std::string(arg.substr(10));
+void AddMachineSettingChecks(diagnostics::DiagnosticReport& report,
+                             const bubo::cli::MachineWarningInputs& inputs) {
+  const auto warnings = bubo::cli::EvaluateMachineWarnings(inputs);
+  const auto find = [&](std::string_view name) -> const bubo::cli::MachineWarning* {
+    for (const auto& warning : warnings)
+      if (warning.check == name)
+        return &warning;
+    return nullptr;
+  };
+  // A setting that cannot be read adds no row. A differing setting adds a
+  // WARN row; the exit code stays 0 because a warning never fails the command.
+  const auto add = [&](std::string name, bool readable, std::string pass_message,
+                       std::map<std::string, std::string> details) {
+    if (!readable)
+      return;
+    diagnostics::DiagnosticCheck check;
+    check.name = name;
+    check.details = std::move(details);
+    if (const auto* warning = find(name)) {
+      check.status = diagnostics::DiagnosticStatus::kWarn;
+      check.message = warning->message;
+      check.details["remedy"] = warning->remedy;
+      report.AddWarning(warning->message);
     } else {
-      std::cerr << "Error: unknown diagnose option '" << arg << "'\n";
-      PrintDiagnoseHelp(gufo::cli::kProductName);
-      return 2;
+      check.status = diagnostics::DiagnosticStatus::kPass;
+      check.message = std::move(pass_message);
     }
+    report.AddCheck(std::move(check));
+  };
+  std::map<std::string, std::string> reservation_details;
+  if (inputs.gpu_reservation_bytes)
+    reservation_details["dedicatedVideoMemoryBytes"] =
+        std::to_string(*inputs.gpu_reservation_bytes);
+  add("gpu_reservation", inputs.gpu_reservation_bytes.has_value(),
+      inputs.is_96gb_strix_halo ? bubo::cli::k96GbReservationPass
+                               : "GPU memory reservation matches the tested 96 GB setting",
+      std::move(reservation_details));
+  std::map<std::string, std::string> page_details;
+  if (inputs.page_files) {
+    std::string files;
+    for (const auto& file : *inputs.page_files) {
+      if (!files.empty())
+        files += "; ";
+      files += file.path;
+      files += file.system_managed
+                   ? " (system managed)"
+                   : " (" + std::to_string(file.initial_mib) + "-" +
+                         std::to_string(file.maximum_mib) + " MiB)";
+    }
+    page_details["pageFiles"] = files.empty() ? "none" : files;
   }
+  add("page_file", inputs.page_files.has_value(),
+      "Page file is a fixed size", std::move(page_details));
+  // The power mode is a reading, not a warning: the Windows value does not
+  // reliably follow the profile that the docs tell people to set.
+  if (inputs.effective_power_mode) {
+    const auto raw = *inputs.effective_power_mode;
+    const auto name = bubo::cli::WindowsEffectivePowerModeName(raw);
+    diagnostics::DiagnosticCheck check;
+    check.name = "power_mode";
+    check.status = diagnostics::DiagnosticStatus::kPass;
+    check.message = "Windows effective power mode: " +
+                    (name ? *name : std::string("unknown")) + " (" +
+                    std::to_string(raw) + ")";
+    check.details["effectivePowerMode"] = std::to_string(raw);
+    if (name)
+      check.details["effectivePowerModeName"] = *name;
+    report.AddCheck(std::move(check));
+  }
+}
 
+bool ParseDiagnoseOptions(std::span<const char* const> args,
+                          DiagnoseOptions& options, std::string& error) {
+  std::size_t first = 0;
+  if (!args.empty()) {
+    const std::string_view name = args[0];
+    if (name == kProductName || name.ends_with("/" + std::string(kProductName)))
+      ++first;
+  }
+  if (first < args.size() && (std::string_view(args[first]) == "diagnose" ||
+                              std::string_view(args[first]) == "probe"))
+    ++first;
+  ArgParser parser(ProductCommand("diagnose"));
+  parser.SetErrorHandler([](auto kind, std::string_view flag) {
+    if (kind != ArgParser::ParseError::MissingValue)
+      return "unknown diagnose option '" + std::string(flag) + "'";
+    std::string hint = "an argument";
+    if (flag == "--validate-artifact")
+      hint = "a path argument";
+    else if (flag == "--warmup" || flag == "--repetitions" ||
+             flag == "--duration-ms")
+      hint = "an integer argument";
+    else if (flag == "--working-set-mib")
+      hint = "a comma-separated size list";
+    else if (flag == "--output")
+      hint = "a file path argument";
+    return std::string(flag) + " requires " + hint;
+  });
+  parser.AddFlag("", "--json", "Machine output", "Output", &options.json_mode);
+  parser.AddFlag("", "--jsonl", "Machine stream", "Output", &options.json_mode);
+  parser.AddFlag("", "--fingerprint", "Machine fingerprint", "Diagnostics",
+                 &options.fingerprint_mode);
+  parser.AddOption("", "--validate-artifact", "PATH", "Validate artifact",
+                   "Diagnostics", &options.validate_artifact_path);
+  parser.AddOption("", "--benchmark", "NAME", "Benchmark", "Diagnostics",
+                   &options.benchmark_name);
+  parser.AddOption("", "--backends", "CSV", "Backends", "Diagnostics",
+                   &options.backends_csv);
+  parser.AddOption("", "--working-set-mib", "CSV", "Working set", "Diagnostics",
+                   &options.working_set_mib);
+  parser.AddOption("", "--output", "PATH", "Output file", "Output",
+                   &options.output_file);
+  parser.AddOption("", "--section", "NAME", "Diagnostic section", "Diagnostics",
+                   &options.section);
+  const auto count = [&](std::string_view flag, std::uint32_t* target) {
+    parser.AddCustomOption("", flag, "N", "Count", "Diagnostics",
+                           [target](auto, auto value, auto*) {
+                             *target = ParseDiagnosticInteger(value);
+                             return true;
+                           });
+  };
+  count("--warmup", &options.warmup);
+  count("--repetitions", &options.repetitions);
+  count("--duration-ms", &options.duration_ms);
+  const bool parsed = parser.Parse(args.subspan(first), &error);
+  options.help = parser.IsHelpRequested();
+  return parsed;
+}
+
+static int RunDiagnoseImpl(std::span<const char* const> args,
+                           bubo::cli::MachineWriter* writer) {
+  bool json_mode = writer != nullptr;
+  const auto invalid = [&] {
+    if (writer)
+      writer->Write("error", bubo::cli::Error("invalid_arguments", "diagnose",
+                                              "arguments", false,
+                                              "Run bubo diagnose --help."));
+    return 2;
+  };
+  DiagnoseOptions options;
+  options.json_mode = json_mode;
+  std::string parse_error;
+  if (!ParseDiagnoseOptions(args, options, parse_error)) {
+    std::cerr << "Error: " << parse_error << '\n';
+    if (!writer)
+      PrintDiagnoseHelp(gufo::cli::kProductName);
+    return invalid();
+  }
+  if (options.help) {
+    if (writer)
+      writer->Write("capabilities", bubo::cli::Capabilities());
+    else
+      PrintDiagnoseHelp(gufo::cli::kProductName);
+    return 0;
+  }
+  json_mode = options.json_mode;
+  auto& fingerprint_mode = options.fingerprint_mode;
+  auto& validate_artifact_path = options.validate_artifact_path;
+  auto& benchmark_name = options.benchmark_name;
+  auto& backends_csv = options.backends_csv;
+  auto& warmup = options.warmup;
+  auto& repetitions = options.repetitions;
+  auto& duration_ms = options.duration_ms;
+  auto& working_set_mib = options.working_set_mib;
+  auto& output_file = options.output_file;
+  auto& section = options.section;
   if (section != "all" && section != "inventory" && section != "platform" &&
       section != "gpu") {
     std::cerr << "Error: unknown diagnostic section '" << section << "'\n";
-    return 2;
+    return invalid();
   }
 
   // Handle artifact validation mode
@@ -338,7 +417,7 @@ int RunDiagnose(std::span<const char* const> args) {
     const auto result =
         diagnostics::ValidateArtifactFile(validate_artifact_path);
     const std::string content = json_mode ? result.ToJson() : result.ToHuman();
-    OutputContent(content, output_file);
+    OutputContent(content, output_file, writer, !result.is_valid);
     return result.is_valid ? 0 : 1;
   }
 
@@ -348,7 +427,7 @@ int RunDiagnose(std::span<const char* const> args) {
         benchmark_name != "hip-allocation") {
       std::cerr << "Error: unsupported benchmark '" << benchmark_name
                 << "'. Supported: bandwidth, allocation\n";
-      return 2;
+      return invalid();
     }
 
     const auto inventory =
@@ -360,12 +439,12 @@ int RunDiagnose(std::span<const char* const> args) {
       bw_options.backends = SplitCommaSeparated(backends_csv);
       if (bw_options.backends.empty()) {
         std::cerr << "Error: --backends requires at least one backend\n";
-        return 2;
+        return invalid();
       }
       for (const auto& backend : bw_options.backends) {
         if (backend != "cpu" && backend != "hip") {
           std::cerr << "Error: unknown bandwidth backend '" << backend << "'\n";
-          return 2;
+          return invalid();
         }
       }
       bw_options.warmup = warmup;
@@ -375,7 +454,7 @@ int RunDiagnose(std::span<const char* const> args) {
           diagnostics::RunBandwidthBenchmark(bw_options, fingerprint);
       const std::string content =
           json_mode ? report.ToJson() : report.ToHuman();
-      OutputContent(content, output_file);
+      OutputContent(content, output_file, writer);
       return 0;
     }
 
@@ -385,19 +464,19 @@ int RunDiagnose(std::span<const char* const> args) {
     if (allocation_options.repetitions == 0) {
       std::cerr << "Error: --repetitions must be at least 1 for the allocation "
                    "diagnostic\n";
-      return 2;
+      return invalid();
     }
     std::string size_error;
     if (!diagnostics::ParseWorkingSetSizes(
             working_set_mib, &allocation_options.working_set_bytes,
             &size_error)) {
       std::cerr << "Error: " << size_error << "\n";
-      return 2;
+      return invalid();
     }
     const auto report = diagnostics::RunHipAllocationBenchmark(
         allocation_options, inventory, fingerprint);
     const std::string content = json_mode ? report.ToJson() : report.ToHuman();
-    OutputContent(content, output_file);
+    OutputContent(content, output_file, writer, !report.Success());
     return report.Success() ? 0 : 1;
   }
 
@@ -408,19 +487,53 @@ int RunDiagnose(std::span<const char* const> args) {
     const auto fingerprint = diagnostics::GenerateMachineFingerprint(inventory);
     const std::string content =
         json_mode ? fingerprint.ToJson() : fingerprint.ToHuman();
-    OutputContent(content, output_file);
+    OutputContent(content, output_file, writer);
     return 0;
   }
 
   // Handle default diagnostics report
-  const auto report = CollectDiagnostics(diagnostics::LinuxSysfs(), section);
+  auto report = CollectDiagnostics(diagnostics::LinuxSysfs(), section);
+  if (section == "all" || section == "inventory" || section == "gpu") {
+    auto probe = bubo::cli::CreateSystemMachineProbe();
+    AddMachineSettingChecks(report, bubo::cli::ReadMachineWarningInputs(*probe));
+  }
   const std::string content = json_mode ? report.ToJson() : report.ToHuman();
-  OutputContent(content, output_file);
+  OutputContent(content, output_file, writer);
 
-  if (report.Status() == diagnostics::DiagnosticStatus::kFail) {
+  return DiagnosticExitCode(report);
+}
+
+int DiagnosticExitCode(const diagnostics::DiagnosticReport& report) {
+  return report.Status() == diagnostics::DiagnosticStatus::kFail ? 1 : 0;
+}
+
+int RunDiagnose(std::span<const char* const> args) {
+  std::unique_ptr<bubo::cli::MachineWriter> writer;
+  if (bubo::cli::MachineRequested(args))
+    writer = std::make_unique<bubo::cli::MachineWriter>(std::cout);
+  try {
+    const auto mode = bubo::cli::ParseMachineMode(args);
+    if (writer && mode == bubo::cli::MachineMode::JsonLines)
+      writer->Write("capabilities", bubo::cli::Capabilities());
+    return RunDiagnoseImpl(args, writer.get());
+  } catch (const std::invalid_argument& error) {
+    if (writer)
+      writer->Write("error", bubo::cli::Error("invalid_arguments", "diagnose",
+                                              "arguments", false,
+                                              "Run bubo diagnose --help."));
+    else
+      std::cerr << "Error: " << error.what() << '\n';
+    return 2;
+  } catch (const std::exception& error) {
+    if (writer)
+      writer->Write("error",
+                    bubo::cli::Error(
+                        "unexpected_failure", "diagnose", "diagnostics", false,
+                        "Run diagnose again. Check the output folder."));
+    else
+      std::cerr << "Error: " << error.what() << '\n';
     return 1;
   }
-  return 0;
 }
 
 #if defined(ENGINE_ENABLE_HIP)

@@ -19,7 +19,7 @@ loading, planning, progress, and media composition.
 | MiniMax H3 Community License Agreement | August 2, 2026 |
 | License SHA-256 | `59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44` |
 
-The operator obtains the checkpoint and accepts its terms independently.
+The user obtains the checkpoint and accepts its terms independently.
 Gufo distributes engine code and binaries, without H3 weights, tokenizer
 payloads, converted weights, or private authorization documents. Build,
 installation, and server startup do not download this model.

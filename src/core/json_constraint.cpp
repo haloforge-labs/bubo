@@ -5,14 +5,28 @@
 #include <bitset>
 #include <charconv>
 #include <cmath>
+#include <condition_variable>
+#include <cstdlib>
 #include <deque>
+#include <exception>
+#include <future>
 #include <map>
 #include <mutex>
+#include <numeric>
 #include <optional>
+#include <queue>
 #include <set>
 #include <stdexcept>
 #include <string_view>
+#include <thread>
 #include <tuple>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace gufo::sampling {
 namespace {
@@ -25,6 +39,89 @@ constexpr std::size_t kMaxDepth = 16;
 constexpr std::size_t kMaxStates = 8192;
 constexpr std::size_t kMaxStack = 16384;
 constexpr std::size_t kMaxWork = 2000000;
+
+class MaskPool {
+public:
+  MaskPool() {
+    const auto hardware = std::thread::hardware_concurrency();
+    const auto count = std::min(8U, std::max(1U, hardware));
+    try {
+      for (unsigned i = 0; i < count; ++i)
+        workers_.emplace_back([this] {
+#ifdef _WIN32
+          SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#endif
+          for (;;) {
+            std::function<void()> task;
+            {
+              std::unique_lock lock(mutex_);
+              ready_.wait(lock, [&] { return stopping_ || !tasks_.empty(); });
+              if (stopping_ && tasks_.empty())
+                return;
+              task = std::move(tasks_.front());
+              tasks_.pop();
+            }
+            task();
+          }
+        });
+    } catch (...) {
+      Stop();
+      throw;
+    }
+  }
+
+  ~MaskPool() { Stop(); }
+
+  MaskPool(const MaskPool&) = delete;
+  MaskPool& operator=(const MaskPool&) = delete;
+
+  std::size_t size() const { return workers_.size(); }
+
+  std::future<void> Submit(std::function<void()> task) {
+    auto promise = std::make_shared<std::promise<void>>();
+    auto result = promise->get_future();
+    {
+      const std::lock_guard lock(mutex_);
+      tasks_.push([task = std::move(task), promise] {
+        try {
+          task();
+          promise->set_value();
+        } catch (...) {
+          promise->set_exception(std::current_exception());
+        }
+      });
+    }
+    ready_.notify_one();
+    return result;
+  }
+
+private:
+  void Stop() {
+    {
+      const std::lock_guard lock(mutex_);
+      stopping_ = true;
+    }
+    ready_.notify_all();
+    for (auto& worker : workers_)
+      worker.join();
+  }
+
+  std::mutex mutex_;
+  std::condition_variable ready_;
+  std::queue<std::function<void()>> tasks_;
+  std::vector<std::thread> workers_;
+  bool stopping_{false};
+};
+
+unsigned MaskThreadCount() {
+  const auto* value = std::getenv("GUFO_MASK_THREADS");
+  if (!value)
+    return 8;  // one process-wide pool, capped by hardware threads
+  unsigned parsed = 0;
+  const auto end = value + std::char_traits<char>::length(value);
+  const auto [last, error] = std::from_chars(value, end, parsed);
+  return error == std::errc{} && last == end ? std::min(parsed, 8U) : 0;
+}
 
 [[noreturn]] void Invalid(std::string_view message) {
   throw std::invalid_argument("JSON Schema: " + std::string(message));
@@ -58,6 +155,20 @@ bool ClosedProperties(const json::Value& schema, bool best_effort) {
   const auto* unevaluated = schema.find("unevaluatedProperties");
   return best_effort && unevaluated && unevaluated->is_bool() &&
          !unevaluated->as_bool();
+}
+
+// Gemma 4 call arguments: `<|"|>`-delimited raw strings, bare keys.
+constexpr std::string_view kGemmaQuote = "<|\"|>";
+
+// A bare Gemma 4 key ends at its first ':' and may not hold structure bytes;
+// its parser trims surrounding whitespace and reads `<|"|>` as a quoted key.
+// Other names use the quoted form.
+bool BareGemmaKey(std::string_view name) {
+  constexpr std::string_view kSpace = " \t\r\n\f\v";
+  return !name.empty() && name.find_first_of(":{}[],") == std::string::npos &&
+         kSpace.find(name.front()) == std::string_view::npos &&
+         kSpace.find(name.back()) == std::string_view::npos &&
+         !name.starts_with(kGemmaQuote.substr(0, 1));
 }
 
 std::string RegexLiteral(std::string_view text) {
@@ -124,9 +235,16 @@ class JsonConstraintCompiler {
 public:
   using Sequence = JsonConstraint::Sequence;
   using Rule = JsonConstraint::Rule;
+  // `gemma` compiles values in the Gemma 4 call-argument syntax instead of
+  // JSON: the same schema semantics with the spelling its chat template uses.
   explicit JsonConstraintCompiler(const json::Value& schema, bool strict,
-                                  bool tool = false)
-      : schema_(schema), strict_(strict), open_objects_(tool && !strict) {
+                                  bool tool = false, bool gemma = false,
+                                  bool open_response_objects = false)
+      : schema_(schema),
+        strict_(strict),
+        open_objects_(tool && !strict),
+        open_response_objects_(open_response_objects),
+        gemma_(gemma) {
     // Literal bytes occupy the first 256 terminal classes.
     for (unsigned i = 0; i < 256; ++i) {
       std::bitset<256> bits;
@@ -160,6 +278,13 @@ public:
         Seq({Literal("\\u"), unicode}),
     });
     string_ = Seq({Byte('"'), Repeat(character), Byte('"')});
+    key_ = string_;
+    if (gemma_) {
+      // The template renders arguments compactly; keep the model on it.
+      ws_ = Seq({});
+      string_ = GemmaString(json::Value::object());
+      key_ = GemmaKey({});
+    }
     const auto positive =
         Alt({Byte('0'), Seq({Range('1', '9'), Repeat(digits)})});
     integer_ = Seq({Optional(Byte('-')), positive});
@@ -825,7 +950,7 @@ private:
   }
   std::uint32_t GenericObject(std::size_t depth) {
     const auto value = GenericValue(depth - 1);
-    const auto member = Seq({string_, ws_, Byte(':'), ws_, value});
+    const auto member = Seq({key_, ws_, Byte(':'), ws_, value});
     const auto members =
         Seq({member, Repeat(Seq({ws_, Byte(','), ws_, member}))});
     return Seq({Byte('{'), ws_, Optional(members), ws_, Byte('}')});
@@ -1136,6 +1261,12 @@ private:
     return result;
   }
   std::uint32_t ValueLiteral(const json::Value& value) {
+    if (gemma_ && value.is_string()) {
+      if (value.str().find(kGemmaQuote) != std::string::npos)
+        Invalid("string value cannot be a Gemma 4 string");
+      return Literal(std::string(kGemmaQuote) + value.str() +
+                     std::string(kGemmaQuote));
+    }
     if (!value.is_object() && !value.is_array())
       return Literal(value.dump());
     Sequence parts{Byte(value.is_object() ? '{' : '['), ws_};
@@ -1146,10 +1277,10 @@ private:
       comma = true;
     };
     if (value.is_object()) {
-      for (const auto& [name, item] : value.members()) {
+      for (const auto& [name, item] : Members(value)) {
         separator();
-        parts.insert(parts.end(), {Literal(json::Value(name).dump()), ws_,
-                                   Byte(':'), ws_, ValueLiteral(item)});
+        parts.insert(parts.end(), {KeyLiteral(name), ws_, Byte(':'), ws_,
+                                   ValueLiteral(*item)});
       }
     } else {
       for (const auto& item : value.items()) {
@@ -1159,6 +1290,55 @@ private:
     }
     parts.insert(parts.end(), {ws_, Byte(value.is_object() ? '}' : ']')});
     return Seq(std::move(parts));
+  }
+  // A Gemma 4 string satisfying the JSON string predicate. Its raw text cannot
+  // contain the closing quote, which the parser takes at its first occurrence.
+  std::uint32_t GemmaString(const json::Value& predicate) {
+    const auto raw =
+        JsonSchemaLexeme::RawString(predicate, std::string(kGemmaQuote));
+    auto text = Lexeme(raw);
+    if (raw->Check("").complete)
+      text = Optional(text);
+    return Seq({Literal(kGemmaQuote), text, Literal(kGemmaQuote)});
+  }
+  // A dynamic bare key other than the declared names.
+  std::uint32_t GemmaKey(const std::set<std::string>& excluded) {
+    std::string pattern = "^";
+    if (!excluded.empty()) {
+      pattern += "(?!(?:";
+      bool separator = false;
+      for (const auto& name : excluded) {
+        if (separator)
+          pattern += '|';
+        separator = true;
+        pattern += RegexLiteral(name);
+      }
+      pattern += ")$)";
+    }
+    pattern += "[^:{}\\[\\],<\\s](?:[^:{}\\[\\],]*[^:{}\\[\\],\\s])?$";
+    auto predicate = json::Value::object();
+    predicate["pattern"] = std::move(pattern);
+    return Lexeme(JsonSchemaLexeme::RawString(predicate, ":"));
+  }
+  std::uint32_t KeyLiteral(const std::string& name) {
+    if (!gemma_)
+      return Literal(json::Value(name).dump());
+    if (BareGemmaKey(name))
+      return Literal(name);
+    // The parser also reads `<|"|>`-quoted keys, as declarations render them.
+    if (name.find(kGemmaQuote) != std::string::npos)
+      Invalid("property name cannot be a Gemma 4 key");
+    return Literal(std::string(kGemmaQuote) + name + std::string(kGemmaQuote));
+  }
+  // Gemma 4 renders object keys in sorted order at every depth.
+  std::vector<std::pair<std::string, const json::Value*>> Members(
+      const json::Value& object) const {
+    std::vector<std::pair<std::string, const json::Value*>> members;
+    for (const auto& [name, value] : object.members())
+      members.emplace_back(name, &value);
+    if (gemma_)
+      std::ranges::sort(members, {}, &decltype(members)::value_type::first);
+    return members;
   }
   std::uint32_t Primitive(std::string_view type) {
     if (type == "string")
@@ -1541,7 +1721,8 @@ private:
                (schema.contains("pattern") || schema.contains("format") ||
                 schema.contains("minLength") || schema.contains("maxLength")))
         alternatives.push_back(
-            Lexeme(JsonSchemaLexeme::String(StringPredicate(schema))));
+            gemma_ ? GemmaString(StringPredicate(schema))
+                   : Lexeme(JsonSchemaLexeme::String(StringPredicate(schema))));
       else if (name == "integer")
         alternatives.push_back(Integer(schema));
       else
@@ -1558,11 +1739,15 @@ private:
     if (!properties)
       properties = &empty_properties;
     const auto* additional = schema.find("additionalProperties");
-    const bool closed = ClosedProperties(schema, ignore_unknown_keys_);
+    // As in llama.cpp common/json-schema.cpp at 23b0202a1, a response object
+    // that declares properties without additionalProperties stays closed.
+    const bool closed = ClosedProperties(schema, ignore_unknown_keys_) ||
+                        (open_response_objects_ && !additional &&
+                         schema.contains("properties"));
     if (!properties->is_object() ||
         (additional && !additional->is_bool() && !additional->is_object()))
       Invalid("invalid object properties or additionalProperties");
-    if (!closed && !open_objects_)
+    if (!closed && !open_objects_ && !open_response_objects_)
       Invalid("objects require properties and additionalProperties: false");
     properties_ += properties->size();
     if (properties_ > 5000)
@@ -1592,7 +1777,14 @@ private:
       // could overwrite the validated field. Match decoded Unicode so JSON
       // escapes cannot bypass the exclusion.
       std::uint32_t key = string_;
-      if (!properties->empty()) {
+      if (gemma_) {
+        std::set<std::string> declared;
+        for (const auto& [name, value] : properties->members()) {
+          (void)value;
+          declared.insert(name);
+        }
+        key = GemmaKey(declared);
+      } else if (!properties->empty()) {
         std::string pattern = "^(?!(?:";
         bool separator = false;
         for (const auto& [name, value] : properties->members()) {
@@ -1616,12 +1808,12 @@ private:
       const auto tail = Repeat(Seq({ws_, Byte(','), ws_, member}));
       suffix = {Optional(Seq({member, tail})), tail};
     }
-    for (auto it = properties->members().rbegin();
-         it != properties->members().rend(); ++it) {
+    const auto members = Members(*properties);
+    for (auto it = members.rbegin(); it != members.rend(); ++it) {
       const auto& [key, value] = *it;
       CountStrings(key);
-      const auto member = Seq({Literal(json::Value(key).dump()), ws_, Byte(':'),
-                               ws_, Visit(value, depth + 1)});
+      const auto member =
+          Seq({KeyLiteral(key), ws_, Byte(':'), ws_, Visit(*value, depth + 1)});
       std::array<std::uint32_t, 2> next;
       for (unsigned comma = 0; comma < 2; ++comma) {
         Sequence sequence;
@@ -1672,9 +1864,14 @@ private:
   const json::Value& schema_;
   bool strict_;
   bool open_objects_;
+  // This only admits extra response keys with an explicit additional schema,
+  // additionalProperties: true, or no declared properties. Tools keep their
+  // existing admission and native Gemma syntax.
+  bool open_response_objects_;
   bool ignore_unknown_keys_{false};
+  bool gemma_;
   std::shared_ptr<JsonConstraint> grammar_{new JsonConstraint};
-  std::uint32_t ws_, string_, integer_, number_, bool_, null_;
+  std::uint32_t ws_, string_, key_, integer_, number_, bool_, null_;
   std::map<std::size_t, std::uint32_t> generic_values_;
   std::map<const json::Value*, std::uint32_t> compiled_;
   std::deque<json::Value> derived_;
@@ -1685,8 +1882,9 @@ private:
 };
 
 std::shared_ptr<const JsonConstraint> JsonConstraint::Compile(
-    const json::Value& schema, bool strict) {
-  const auto key = std::string(strict ? "strict:" : "schema:") + schema.dump();
+    const json::Value& schema, bool strict, bool open_objects) {
+  const auto key = std::string(strict ? "strict:" : "schema:") +
+                   (open_objects ? "open:" : "") + schema.dump();
   if (key.size() > kMaxSchemaBytes)
     Invalid("maximum schema size is 2 MiB");
   // Bounded cache; compile outside the lock so unrelated HTTP requests proceed.
@@ -1697,7 +1895,9 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::Compile(
     if (const auto found = cache.find(key); found != cache.end())
       return found->second;
   }
-  auto grammar = JsonConstraintCompiler(schema, strict).Compile(false);
+  auto grammar =
+      JsonConstraintCompiler(schema, strict, false, false, open_objects)
+          .Compile(false);
   const std::lock_guard lock(mutex);
   if (cache.size() >= 16)
     cache.erase(cache.begin());
@@ -1779,6 +1979,16 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::ToolParameters(
       !(format == ToolFormat::kQwen && HasPropertySchemas(schema));
   if (open_untyped) {
     grammar = OpenToolParameters(format);
+  } else if (grammar && format == ToolFormat::kGemma4) {
+    try {
+      grammar = JsonConstraintCompiler(normalized, strict, true, true)
+                    .Compile(false, best_effort);
+    } catch (const std::invalid_argument&) {
+      if (strict)
+        throw;
+      grammar.reset();
+      best_effort = true;
+    }
   } else if (grammar && format != ToolFormat::kJson) {
     try {
       grammar = JsonConstraintCompiler(normalized, strict, true)
@@ -1794,10 +2004,15 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::ToolParameters(
     grammar = Object();
   if (!grammar && best_effort && open_untyped)
     grammar = OpenToolParameters(format);
+  // Gemma 4 has no second call syntax to fall back to: a best-effort tool keeps
+  // its native envelope with arbitrary arguments.
+  if (!grammar && format == ToolFormat::kGemma4 && !strict)
+    grammar = OpenToolParameters(format);
   // Never switch a native model to a JSON envelope: one tool's schema would
   // change every call's syntax and contradict the chat template and history
   // (#383). Keep native tags and enforce what they can carry, as llama.cpp.
-  if (!grammar && format != ToolFormat::kJson) {
+  if (!grammar &&
+      (format == ToolFormat::kQwen || format == ToolFormat::kDeepSeek)) {
     try {
       grammar = JsonConstraintCompiler(normalized, strict, true)
                     .LooseToolParameters(format);
@@ -1806,8 +2021,31 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::ToolParameters(
     }
   }
   const std::lock_guard lock(mutex);
-  if (cache.size() >= 16)
+  // One entry per tool schema (about 30 KiB each for a typical agent tool). A
+  // request carries up to 128 tools; WithTools and WithReasoning key their
+  // cached grammars on these pointers. With a 16-entry cache that evicts the
+  // smallest schema text, a request with more tools than fit (or one sharing
+  // the cache with another client) recompiled schemas on every request, so no
+  // later request got the same grammar (or the same token-mask cache) back.
+  // Bound the bytes as well as the count: the key is the whole schema text
+  // (up to 2 MiB) and the compiled grammar is many times larger. A schema over
+  // 256 KiB is compiled for its request and not cached; the cached keys stay
+  // under 32 MiB in total.
+  constexpr std::size_t kMaxCachedSchemaBytes = 256 * 1024;
+  constexpr std::size_t kMaxCachedKeyBytes = 32 * 1024 * 1024;
+  static std::size_t cached_key_bytes = 0;
+  const std::size_t key_bytes = std::get<0>(key).size();
+  if (key_bytes > kMaxCachedSchemaBytes)
+    return grammar;
+  // Another thread may have compiled and cached the same schema meanwhile.
+  if (const auto existing = cache.find(key); existing != cache.end())
+    return existing->second;
+  while (!cache.empty() &&
+         (cache.size() >= 256 || cached_key_bytes + key_bytes > kMaxCachedKeyBytes)) {
+    cached_key_bytes -= std::get<0>(cache.begin()->first).size();
     cache.erase(cache.begin());
+  }
+  cached_key_bytes += key_bytes;
   return cache.emplace(key, std::move(grammar)).first->second;
 }
 
@@ -1815,6 +2053,13 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::OpenToolParameters(
     ToolFormat format) {
   if (format == ToolFormat::kJson)
     return Object();
+  if (format == ToolFormat::kGemma4) {
+    static const auto gemma = [] {
+      const auto schema = json::Value::object();
+      return JsonConstraintCompiler(schema, false, true, true).Compile(true);
+    }();
+    return gemma;
+  }
   static const auto qwen = [] {
     const auto schema = json::Value::object();
     return JsonConstraintCompiler(schema, false)
@@ -1829,27 +2074,35 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::OpenToolParameters(
 }
 
 std::shared_ptr<const JsonConstraint> JsonConstraint::WithReasoning(
-    std::shared_ptr<const JsonConstraint> answer) {
+    std::shared_ptr<const JsonConstraint> answer, std::string_view end,
+    std::string_view start) {
+  if (end.empty())
+    throw std::invalid_argument("reasoning end marker is empty");
   // Cache separately from schema compilation. No mutable phase belongs to the
   // model or cache: the normal grammar stack carries it through sampler copies,
   // draft rejection and request restart.
   static std::mutex mutex;
-  static std::map<std::shared_ptr<const JsonConstraint>,
-                  std::shared_ptr<const JsonConstraint>>
-      cache;
+  using Key = std::tuple<std::shared_ptr<const JsonConstraint>, std::string,
+                         std::string>;
+  static std::map<Key, std::shared_ptr<const JsonConstraint>> cache;
+  Key key{answer, std::string(end), std::string(start)};
   {
     const std::lock_guard lock(mutex);
-    if (const auto found = cache.find(answer); found != cache.end())
+    if (const auto found = cache.find(key); found != cache.end())
       return found->second;
   }
   auto grammar = std::shared_ptr<JsonConstraint>(new JsonConstraint(*answer));
+  std::uint32_t reasoning = 0;
   if (!answer->reasoning_tool_prefix_.empty()) {
+    // The tool-header boundary exists only for `</think>` dialects.
+    if (end != "</think>")
+      throw std::invalid_argument("native tool header needs </think>");
     using End = JsonSchemaLexeme::ReasoningEnd;
-    const auto lexeme = [&](End end) {
+    const auto lexeme = [&](End kind) {
       const auto id =
           static_cast<std::uint32_t>(kLexeme | grammar->lexemes_.size());
       grammar->lexemes_.push_back(
-          JsonSchemaLexeme::Reasoning(answer->reasoning_tool_prefix_, end));
+          JsonSchemaLexeme::Reasoning(answer->reasoning_tool_prefix_, kind));
       return id;
     };
     Rule roots{{lexeme(End::kExplicit), answer->root_},
@@ -1858,48 +2111,54 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithReasoning(
       roots.push_back({});
       roots.push_back({lexeme(End::kUnfinished)});
     }
-    grammar->root_ = grammar->rules_.size();
+    reasoning = static_cast<std::uint32_t>(grammar->rules_.size());
     grammar->rules_.push_back(std::move(roots));
-    const std::lock_guard lock(mutex);
-    if (cache.size() >= 16)
-      cache.erase(cache.begin());
-    return cache.emplace(std::move(answer), std::move(grammar)).first->second;
-  }
-  constexpr std::string_view end = "</think>";
-  const auto base = static_cast<std::uint32_t>(grammar->rules_.size());
-  grammar->rules_.resize(base + end.size());
-  for (std::size_t prefix = 0; prefix < end.size(); ++prefix) {
-    // Automatic calls must not turn a natural reasoning-only stop into a
-    // mandatory call. The request's output cap also remains independent.
-    if (grammar->automatic_tools_)
-      grammar->rules_[base + prefix].push_back({});
-    std::array<std::bitset<256>, end.size() + 1> transitions;
-    for (unsigned byte = 0; byte < 256; ++byte) {
-      std::string candidate(end.substr(0, prefix));
-      candidate += static_cast<char>(byte);
-      std::size_t matched = std::min(candidate.size(), end.size());
-      while (matched && !candidate.ends_with(end.substr(0, matched)))
-        --matched;
-      transitions[matched].set(byte);
+  } else {
+    const auto base = static_cast<std::uint32_t>(grammar->rules_.size());
+    grammar->rules_.resize(base + end.size());
+    for (std::size_t prefix = 0; prefix < end.size(); ++prefix) {
+      // Automatic calls must not turn a natural reasoning-only stop into a
+      // mandatory call. The request's output cap also remains independent.
+      if (grammar->automatic_tools_)
+        grammar->rules_[base + prefix].push_back({});
+      std::vector<std::bitset<256>> transitions(end.size() + 1);
+      for (unsigned byte = 0; byte < 256; ++byte) {
+        std::string candidate(end.substr(0, prefix));
+        candidate += static_cast<char>(byte);
+        std::size_t matched = std::min(candidate.size(), end.size());
+        while (matched && !candidate.ends_with(end.substr(0, matched)))
+          --matched;
+        transitions[matched].set(byte);
+      }
+      for (std::size_t matched = 0; matched <= end.size(); ++matched) {
+        if (transitions[matched].none())
+          continue;
+        const auto terminal = kTerminal | grammar->classes_.size();
+        grammar->classes_.push_back(transitions[matched]);
+        grammar->rules_[base + prefix].push_back(
+            {static_cast<std::uint32_t>(terminal),
+             matched == end.size()
+                 ? answer->root_
+                 : base + static_cast<std::uint32_t>(matched)});
+      }
     }
-    for (std::size_t matched = 0; matched <= end.size(); ++matched) {
-      if (transitions[matched].none())
-        continue;
-      const auto terminal = kTerminal | grammar->classes_.size();
-      grammar->classes_.push_back(transitions[matched]);
-      grammar->rules_[base + prefix].push_back(
-          {static_cast<std::uint32_t>(terminal),
-           matched == end.size() ? answer->root_
-                                 : base + static_cast<std::uint32_t>(matched)});
-    }
+    reasoning = base;
   }
-  grammar->root_ = base;
+  grammar->root_ = reasoning;
+  if (!start.empty()) {
+    JsonConstraint::Sequence opened;
+    for (const unsigned char byte : start)
+      opened.push_back(kTerminal | byte);
+    opened.push_back(reasoning);
+    grammar->root_ = static_cast<std::uint32_t>(grammar->rules_.size());
+    grammar->rules_.push_back({{answer->root_}, std::move(opened)});
+  }
   const std::lock_guard lock(mutex);
-  if (const auto found = cache.find(answer); found != cache.end())
+  if (const auto found = cache.find(key); found != cache.end())
     return found->second;
   if (cache.size() >= 16)
     cache.erase(cache.begin());
-  return cache.emplace(std::move(answer), std::move(grammar)).first->second;
+  return cache.emplace(std::move(key), std::move(grammar)).first->second;
 }
 
 std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
@@ -1945,11 +2204,18 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
     return id;
   };
   const bool deepseek = format == ToolFormat::kDeepSeek;
-  const std::string_view marker =
-      deepseek ? "<｜DSML｜tool_calls>" : "<tool_call>";
+  const bool gemma = format == ToolFormat::kGemma4;
+  // Qwen and DeepSeek name the called tool in a header that reasoning may
+  // precede; JSON and Gemma 4 calls have no such header.
+  const bool tool_header = format == ToolFormat::kQwen || deepseek;
+  const std::string_view marker = deepseek ? "<｜DSML｜tool_calls>"
+                                  : gemma  ? "<|tool_call>"
+                                           : "<tool_call>";
   const auto end = literal(format == ToolFormat::kJson ? "}</tool_call>"
                            : deepseek                  ? "</｜DSML｜invoke>"
-                                      : "</function>\n</tool_call>");
+                           : gemma                     ? "<tool_call|>"
+                                   : "</function>\n</tool_call>");
+  if (format == ToolFormat::kQwen) grammar->tool_call_end_rule_ = end;
   const auto calls = static_cast<std::uint32_t>(grammar->rules_.size());
   grammar->rules_.push_back({});
   // In tool-only mode ordinary text remains unconstrained until a canonical
@@ -2040,7 +2306,7 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
   std::map<const JsonConstraint*, std::uint32_t> imported;
   if (answer)
     imported.emplace(answer.get(), answer->root_);
-  if (format != ToolFormat::kJson) {
+  if (tool_header) {
     grammar->reasoning_tool_prefix_ =
         deepseek ? "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\""
                  : "<tool_call>\n<function=";
@@ -2048,15 +2314,19 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
     grammar->rules_.push_back({});
   }
   for (const auto& [name, arguments] : tools) {
+    // Gemma 4 ends a function name at its first brace.
+    if (gemma && name.find('{') != std::string::npos)
+      Invalid("function name cannot be a Gemma 4 call name: " + name);
     const auto begin = literal(
         format == ToolFormat::kJson
             ? "{\"name\":" + json::Value(name).dump() + ",\"arguments\":"
         : deepseek ? "\n<｜DSML｜invoke name=\"" + name + "\">\n"
+        : gemma    ? "call:" + name
                    : "\n<function=" + name + ">\n");
     if (const auto found = imported.find(arguments.get());
         found != imported.end()) {
       grammar->rules_[calls].push_back({begin, found->second, end, after});
-      if (format != ToolFormat::kJson) {
+      if (tool_header) {
         const auto named = literal(name + (deepseek ? "\">\n" : ">\n"));
         grammar->rules_[grammar->reasoning_tool_root_].push_back(
             {named, found->second, end, after});
@@ -2087,7 +2357,7 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
     const auto root = static_cast<std::uint32_t>(arguments->root_ + rules);
     imported.emplace(arguments.get(), root);
     grammar->rules_[calls].push_back({begin, root, end, after});
-    if (format != ToolFormat::kJson) {
+    if (tool_header) {
       const auto named = literal(name + (deepseek ? "\">\n" : ">\n"));
       grammar->rules_[grammar->reasoning_tool_root_].push_back(
           {named, root, end, after});
@@ -2184,6 +2454,15 @@ bool JsonConstraint::Complete(const State& state) const {
       state, [](const auto& stack) { return stack.symbols.empty(); });
 }
 
+bool JsonConstraint::InsideToolCall(const State& state) const {
+  if (tool_call_end_rule_ == UINT32_MAX) return false;
+  // The unconsumed call end is below the function/argument rules on each
+  // native-call stack. A JSON answer's string lexeme never owns that rule.
+  return std::ranges::any_of(state, [&](const auto& stack) {
+    return std::ranges::find(stack.symbols, tool_call_end_rule_) != stack.symbols.end();
+  });
+}
+
 JsonConstraint::State JsonConstraint::CanonicalMaskState(
     const State& state, std::size_t token_bytes) const {
   auto canonical = state;
@@ -2198,7 +2477,8 @@ JsonConstraint::State JsonConstraint::CanonicalMaskState(
 }
 
 ConstraintVocabulary::ConstraintVocabulary(std::uint32_t size,
-                                           const Reader& reader) {
+                                           const Reader& reader)
+    : mask_threads_(MaskThreadCount()) {
   if (size == 0 || size > 1048576)
     throw std::invalid_argument("constraint vocabulary size is unsupported");
   pieces_.reserve(size);
@@ -2264,6 +2544,23 @@ ConstraintVocabulary::ConstraintVocabulary(std::uint32_t size,
     next_token_[token] = trie_[node].token;
     trie_[node].token = token;
   }
+  // Balance root-edge work without walking the entire trie on every miss.
+  std::vector<std::uint32_t> pending;
+  for (auto root = trie_[0].child; root != UINT32_MAX;
+       root = trie_[root].sibling) {
+    std::uint32_t nodes = 0;
+    pending.push_back(root);
+    while (!pending.empty()) {
+      const auto node = pending.back();
+      pending.pop_back();
+      ++nodes;
+      for (auto child = trie_[node].child; child != UINT32_MAX;
+           child = trie_[child].sibling)
+        pending.push_back(child);
+    }
+    root_children_.push_back({root, nodes});
+  }
+  std::ranges::sort(root_children_, std::greater{}, &RootChild::nodes);
 }
 
 std::vector<std::uint8_t> ConstraintVocabulary::Allowed(
@@ -2296,70 +2593,153 @@ std::vector<std::uint8_t> ConstraintVocabulary::Allowed(
   struct CachedState {
     JsonConstraint::State state;
     std::array<std::uint32_t, 256> next;
-    explicit CachedState(JsonConstraint::State s) : state(std::move(s)) {
+    bool direct;
+    CachedState(JsonConstraint::State s, bool use_direct)
+        : state(std::move(s)), direct(use_direct) {
       next.fill(UINT32_MAX);
     }
   };
-  std::deque<CachedState> states;
-  states.emplace_back(JsonConstraint::State{});
-  states.emplace_back(state);
-  std::map<JsonConstraint::State, std::uint32_t> intern{{{}, 0}, {state, 1}};
-  std::size_t work = 0;
+  const auto needs_direct = [&](const JsonConstraint::State& current) {
+    return std::ranges::any_of(current, [&](const auto& stack) {
+      return !stack.symbols.empty() && (stack.symbols.back() & kLexeme) &&
+             !grammar.lexemes_.at(stack.symbols.back() & ~kLexeme)
+                  ->CacheTransitions();
+    });
+  };
   // Numeric predicates retain their scalar text; strings use compact lexer/DFA
   // states. Walk numeric branches with depth-bounded scratch rather than
   // allocating a 256-way transition table for every vocabulary prefix.
-  auto direct = [&](auto&& self, std::uint32_t node,
-                    const JsonConstraint::State& current) -> void {
-    if (++work > kMaxWork)
-      throw std::runtime_error("JSON token mask work limit exceeded");
-    for (auto token = trie_[node].token; token != UINT32_MAX;
-         token = next_token_[token])
-      mask[token] = 1;
-    for (auto child = trie_[node].child; child != UINT32_MAX;
-         child = trie_[child].sibling) {
-      auto next = grammar.Advance(current, trie_[child].byte);
-      if (!next.empty())
-        self(self, child, next);
-    }
+  struct RootTask {
+    std::uint32_t node;
+    std::uint32_t nodes;
+    JsonConstraint::State state;
   };
-  auto walk = [&](auto&& self, std::uint32_t node,
-                  std::uint32_t current) -> void {
-    if (std::ranges::any_of(states[current].state, [&](const auto& stack) {
-          return !stack.symbols.empty() && (stack.symbols.back() & kLexeme) &&
-                 !grammar.lexemes_.at(stack.symbols.back() & ~kLexeme)
-                      ->CacheTransitions();
-        })) {
-      direct(direct, node, states[current].state);
-      return;
-    }
-    if (++work > kMaxWork)
-      throw std::runtime_error("JSON token mask work limit exceeded");
-    for (auto token = trie_[node].token; token != UINT32_MAX;
-         token = next_token_[token])
-      mask[token] = 1;
-    for (auto child = trie_[node].child; child != UINT32_MAX;
-         child = trie_[child].sibling) {
-      const auto byte = trie_[child].byte;
-      auto& transition = states[current].next[byte];
-      if (transition == UINT32_MAX) {
-        auto next = grammar.Advance(states[current].state, byte);
-        if (states.size() >= 8192 && !intern.contains(next)) {
-          // Cache capacity is an optimization limit, not a language limit.
-          if (!next.empty())
-            direct(direct, child, next);
-          continue;
+  const auto process = [&](const std::vector<RootTask>& roots,
+                           bool include_root, bool root_direct) {
+    std::deque<CachedState> states;
+    states.emplace_back(JsonConstraint::State{}, false);
+    states.emplace_back(state, needs_direct(state));
+    std::map<JsonConstraint::State, std::uint32_t> intern{{{}, 0}, {state, 1}};
+    std::size_t work = 0;
+    auto direct = [&](auto&& self, std::uint32_t node,
+                      const JsonConstraint::State& current) -> void {
+      if (++work > kMaxWork)
+        throw std::runtime_error("JSON token mask work limit exceeded");
+      for (auto token = trie_[node].token; token != UINT32_MAX;
+           token = next_token_[token])
+        mask[token] = 1;
+      for (auto child = trie_[node].child; child != UINT32_MAX;
+           child = trie_[child].sibling) {
+        auto next = grammar.Advance(current, trie_[child].byte);
+        if (!next.empty())
+          self(self, child, next);
+      }
+    };
+    auto walk = [&](auto&& self, std::uint32_t node,
+                    std::uint32_t current) -> void {
+      if (states[current].direct) {
+        direct(direct, node, states[current].state);
+        return;
+      }
+      if (++work > kMaxWork)
+        throw std::runtime_error("JSON token mask work limit exceeded");
+      for (auto token = trie_[node].token; token != UINT32_MAX;
+           token = next_token_[token])
+        mask[token] = 1;
+      for (auto child = trie_[node].child; child != UINT32_MAX;
+           child = trie_[child].sibling) {
+        const auto byte = trie_[child].byte;
+        auto& transition = states[current].next[byte];
+        if (transition == UINT32_MAX) {
+          auto next = grammar.Advance(states[current].state, byte);
+          if (states.size() >= 8192 && !intern.contains(next)) {
+            // Cache capacity is an optimization limit, not a language limit.
+            if (!next.empty())
+              direct(direct, child, next);
+            continue;
+          }
+          auto [found, inserted] = intern.emplace(next, states.size());
+          transition = found->second;
+          if (inserted) {
+            const auto use_direct = needs_direct(next);
+            states.emplace_back(std::move(next), use_direct);
+          }
         }
-        auto [found, inserted] = intern.emplace(next, states.size());
-        transition = found->second;
-        if (inserted) {
-          states.emplace_back(std::move(next));
+        if (transition != 0)
+          self(self, child, transition);
+      }
+    };
+    if (include_root) {
+      walk(walk, 0, 1);
+    } else {
+      for (const auto& root : roots) {
+        if (root_direct) {
+          direct(direct, root.node, root.state);
+        } else {
+          auto [found, inserted] = intern.emplace(root.state, states.size());
+          if (inserted) {
+            const auto use_direct = needs_direct(root.state);
+            states.emplace_back(root.state, use_direct);
+          }
+          walk(walk, root.node, found->second);
         }
       }
-      if (transition != 0)
-        self(self, child, transition);
     }
+    return work;
   };
-  walk(walk, 0, 1);
+  const auto requested = mask_threads_;
+  if (!requested || pieces_.size() < 4096) {
+    (void)process({}, true, false);
+  } else {
+    // Each token belongs to exactly one trie node. Root children therefore
+    // write disjoint mask bytes, including duplicate tokens at one leaf.
+    const bool root_direct = needs_direct(state);
+    for (auto token = trie_[0].token; token != UINT32_MAX;
+         token = next_token_[token])
+      mask[token] = 1;
+    std::vector<RootTask> roots;
+    for (const auto& child : root_children_) {
+      auto next = grammar.Advance(state, trie_[child.node].byte);
+      if (!next.empty())
+        roots.push_back({child.node, child.nodes, std::move(next)});
+    }
+    static MaskPool pool;
+    const auto count =
+        std::min<std::size_t>({requested, pool.size(), roots.size()});
+    std::vector<std::vector<RootTask>> groups(count);
+    std::vector<std::size_t> loads(count);
+    for (auto& root : roots) {
+      const auto group =
+          std::min_element(loads.begin(), loads.end()) - loads.begin();
+      loads[group] += root.nodes;
+      groups[group].push_back(std::move(root));
+    }
+    std::vector<std::size_t> work(count);
+    std::vector<std::future<void>> futures;
+    futures.reserve(count);
+    std::exception_ptr failure;
+    try {
+      for (std::size_t i = 0; i < count; ++i)
+        futures.push_back(pool.Submit(
+            [&, i] { work[i] = process(groups[i], false, root_direct); }));
+    } catch (...) {
+      // Earlier tasks still reference these locals. Wait before unwinding.
+      failure = std::current_exception();
+    }
+    for (auto& future : futures) {
+      try {
+        future.get();
+      } catch (...) {
+        if (!failure)
+          failure = std::current_exception();
+      }
+    }
+    if (failure)
+      std::rethrow_exception(failure);
+    if (1 + std::accumulate(work.begin(), work.end(), std::size_t{0}) >
+        kMaxWork)
+      throw std::runtime_error("JSON token mask work limit exceeded");
+  }
   if (std::ranges::none_of(mask, [](auto value) { return value != 0; }))
     throw std::runtime_error("JSON constraint has no valid token");
   return mask;
@@ -2410,23 +2790,38 @@ std::shared_ptr<const std::vector<std::uint8_t>> TokenConstraint::Allowed(
     if (initial_state_.empty())
       initial_state_ = grammar->CanonicalMaskState(
           grammar->Start(), vocabulary->max_token_bytes_);
-    if (const auto found = masks_.find(canonical); found != masks_.end())
-      return found->second;
+    if (const auto found = masks_.find(canonical); found != masks_.end()) {
+      found->second.last_used = ++use_clock_;
+      return found->second.mask;
+    }
   }
   auto mask = std::make_shared<const std::vector<std::uint8_t>>(
       vocabulary->Allowed(*grammar, canonical));
   const std::lock_guard lock(mutex_);
-  if (const auto found = masks_.find(canonical); found != masks_.end())
-    return found->second;
-  if (masks_.size() >= 16) {
-    // Every request needs the initial mask, even when the model state is
-    // cached. Keep it within the same 16-entry budget instead of rebuilding
-    // the entire vocabulary mask after each completed native call.
-    auto victim = masks_.begin();
-    if (victim->first == initial_state_)
-      ++victim;
-    masks_.erase(victim);
+  if (const auto found = masks_.find(canonical); found != masks_.end()) {
+    found->second.last_used = ++use_clock_;
+    return found->second.mask;
   }
-  return masks_.emplace(std::move(canonical), std::move(mask)).first->second;
+  if (masks_.size() >= kMaskCacheEntries) {
+    // Evict the least recently used mask. Every request needs the initial
+    // mask, even when the model state is cached. Keep it instead of rebuilding
+    // the entire vocabulary mask after each completed native call.
+    auto victim = masks_.end();
+    for (auto it = masks_.begin(); it != masks_.end(); ++it)
+      if (it->first != initial_state_ &&
+          (victim == masks_.end() ||
+           it->second.last_used < victim->second.last_used))
+        victim = it;
+    if (victim != masks_.end())
+      masks_.erase(victim);
+  }
+  return masks_
+      .emplace(std::move(canonical), CachedMask{std::move(mask), ++use_clock_})
+      .first->second.mask;
+}
+
+std::size_t TokenConstraint::CachedMaskCount() const {
+  const std::lock_guard lock(mutex_);
+  return masks_.size();
 }
 }  // namespace gufo::sampling

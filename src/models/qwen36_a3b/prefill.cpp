@@ -14,10 +14,12 @@
 #include <cstring>
 #include <vector>
 
+#include "qfn_mmq.h"
 #include "src/models/qwen36_a3b/attention.hpp"
 #include "src/models/qwen36_a3b/engine.hpp"
 #include "src/models/qwen36_a3b/kernels.hpp"
 #include "src/models/qwen36_a3b/prefill_kernels.hpp"
+#include "src/models/qwen36_a3b/weight_format.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
 namespace gufo::models::qwen36_a3b {
@@ -34,6 +36,11 @@ constexpr std::uint32_t kF16MinRows = 512;
 constexpr std::uint32_t kF16MaxCols = 4096;
 // Routed expert buckets pad to 16 rows (RoutedCompact).
 constexpr std::uint32_t kBucket = 16;
+
+// Expert types with a raw MMQ mul_mat_id entry (qfn_mmq_k_moe_raw).
+constexpr bool HasMmqRoute(GgmlType t) {
+  return IsKQuant(t) || t == GgmlType::kQ8_0;
+}
 
 void Fail(std::string* error, std::string message) {
   if (error != nullptr && error->empty())
@@ -278,6 +285,15 @@ bool Engine::BlasBf16(const void* w, const void* x, const void* x_lo,
 
 bool Engine::WideDense(const Tensor& w, const float* x, float* out,
                        std::uint32_t n, std::string* error) {
+  if (IsKQuant(w.type)) {
+    if (qfn_mmq_k_dense(static_cast<int>(w.type), w.data, x, out,
+                        static_cast<int>(w.rows), static_cast<int>(n),
+                        static_cast<int>(w.cols), stream_) != 0) {
+      Fail(error, "K-quant prefill GEMM failed");
+      return false;
+    }
+    return true;
+  }
   const std::uint32_t m = w.rows;
   const std::uint32_t k = w.cols;
   Wide& s = wide_;
@@ -469,6 +485,38 @@ bool Engine::WideAttention(const Layer& l, __half* k_cache, __half* v_cache,
 bool Engine::WideMoe(const Layer& l, float* res, std::uint32_t n,
                      std::string* error) {
   const std::uint32_t H = c_.hidden;
+  const bool kquant_experts = IsKQuant(l.gate_exps.type) ||
+                              IsKQuant(l.up_exps.type) ||
+                              IsKQuant(l.down_exps.type);
+  // K-quant layers run the vendored MMQ mul_mat_id (qfn_mmq_k_moe_raw) when
+  // all three expert tensors have a raw MMQ entry.
+  const bool mmq_experts = kquant_experts && HasMmqRoute(l.gate_exps.type) &&
+                           HasMmqRoute(l.up_exps.type) &&
+                           HasMmqRoute(l.down_exps.type);
+  if (kquant_experts && !mmq_experts) {
+    static bool logged = false;
+    if (!logged) {
+      logged = true;
+      std::fprintf(stderr,
+                   "qwen36_a3b: wide prefill has no MMQ route for expert types "
+                   "%d/%d/%d; using the 8-row decode path\n",
+                   static_cast<int>(l.gate_exps.type),
+                   static_cast<int>(l.up_exps.type),
+                   static_cast<int>(l.down_exps.type));
+    }
+    // The generic gated vector launcher accepts at most eight token rows.
+    // Reuse decode scratch in stream order, including the ragged last group.
+    for (std::uint32_t t = 0; t < n; t += kMaxRows) {
+      const std::uint32_t rows = std::min(kMaxRows, n - t);
+      const std::size_t offset = static_cast<std::size_t>(t) * H;
+      fn::CopyDevice(wide_.xn + offset, xn_, static_cast<std::size_t>(rows) * H,
+                     stream_);
+      Moe(l, rows);
+      AddInPlace(res + offset, blk_, static_cast<std::size_t>(rows) * H,
+                 stream_);
+    }
+    return true;
+  }
   const std::uint32_t E = c_.experts;
   const std::uint32_t U = c_.experts_used;
   const std::uint32_t ff = l.gate_exps.rows;
@@ -505,6 +553,45 @@ bool Engine::WideMoe(const Layer& l, float* res, std::uint32_t n,
   WideMark(kWRouteHost);
   if (!Ok(hipEventSynchronize(s.counts_ready), "expert counts", error))
     return false;
+  if (mmq_experts) {
+    // The MMQ grid is cut to the largest expert bucket and the tile width
+    // fitted to the whole distribution (Flash-Next's RoutedHints). The ids
+    // map is built inside the call; down reads the slot rows with one
+    // expert each.
+    std::uint32_t max_rows = 1;
+    for (std::uint32_t e = 0; e < E; ++e)
+      max_rows = std::max(max_rows, s.counts_host[e]);
+    qfn_mmq_set_routed_max_expert_rows(static_cast<int>(max_rows));
+    qfn_mmq_set_routed_tile_cols(qfn_mmq_routed_tile_cols_for_counts(
+        s.counts_host, static_cast<int>(E)));
+    const auto routed = [&](const Tensor& w, const float* x, float* out,
+                            std::uint32_t rows, std::uint32_t used) {
+      return qfn_mmq_k_moe_raw(static_cast<int>(w.type), w.data, x, s.ids, out,
+                               static_cast<int>(w.rows),
+                               static_cast<int>(w.cols),
+                               static_cast<int>(rows), static_cast<int>(E),
+                               static_cast<int>(used), stream_) == 0;
+    };
+    WideMark(kWGateUp);
+    bool ok = routed(l.gate_exps, s.xn, s.gate_e, n, U) &&
+              routed(l.up_exps, s.xn, s.gc, n, U);
+    if (ok) {
+      fn::Swiglu(s.gate_e, s.gc, static_cast<std::size_t>(slots) * ff, stream_);
+      WideMark(kWDown);
+      ok = routed(l.down_exps, s.gate_e, s.dc, slots, 1);
+    }
+    qfn_mmq_set_routed_max_expert_rows(0);
+    qfn_mmq_set_routed_tile_cols(0);
+    if (!ok) {
+      Fail(error, "routed MMQ expert GEMM failed");
+      return false;
+    }
+    WideMark(kWEpilogue);
+    fn::MoeEpilogueVec4(s.dc, s.weights, s.sh_out, s.router + E, E + 1, s.blk,
+                        n, U, H, stream_);
+    AddInPlace(res, s.blk, static_cast<std::size_t>(n) * H, stream_);
+    return true;
+  }
   // One launched tile per (expert, 16- or 48-row slice of its padded
   // bucket); host bounds mirror RoutedCompact's padding.
   const std::uint32_t tile_rows = slots >= 16u * E ? 48u : 16u;
@@ -818,9 +905,14 @@ bool Engine::SpecPrefillWide(std::span<const std::int32_t> tokens,
       // the 8-row path's final chunk).
       AddNormQuant(s.res + static_cast<std::size_t>(n - 1) * H, nullptr,
                    output_norm_.f32(), xn_, aq_, 1, H, c_.eps, stream_);
-      const GemvSeg head{output_.data,  nullptr,          logits_, output_.rows,
-                         Kind(output_), GemvMode::kStore, c_.vocab};
-      MultiGemv(&head, 1, aq_, xn_, 1, H, stream_);
+      if (IsKQuant(output_.type)) {
+        Dense(output_, xn_, logits_, 1);
+      } else {
+        const GemvSeg head{output_.data, nullptr,       logits_,
+                           output_.rows, Kind(output_), GemvMode::kStore,
+                           c_.vocab};
+        MultiGemv(&head, 1, aq_, xn_, 1, H, stream_);
+      }
       TopCandidates(1);
     }
     WideMark(kWMtp);

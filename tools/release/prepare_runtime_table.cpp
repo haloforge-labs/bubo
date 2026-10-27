@@ -22,7 +22,7 @@ int main(int argc, char** argv) {
       }
       std::sort(files.begin(), files.end());
       std::ostringstream content;
-      content << "// Exact release-thread text bytes; generated with linked "
+      content << "// Exact release notice text bytes; generated with linked "
                  "OpenSSL SHA-256.\n"
                  "const std::vector<RuntimeNotice> kRuntimeNotices{\n";
       for (const auto& file : files) {
@@ -51,7 +51,7 @@ int main(int argc, char** argv) {
       if (!output)
         throw std::runtime_error("notice output failed");
       std::cout << "PASS: embedded " << files.size()
-                << " exact release-thread notice files\n";
+                << " exact release notice files\n";
       return 0;
     }
     const bool fixture = argc == 7 && std::string_view(argv[1]) == "--fixture";

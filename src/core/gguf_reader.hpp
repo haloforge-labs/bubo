@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -35,11 +36,16 @@ enum class GgmlType : std::uint16_t {
   kQ6_K = 14,
   kQ8_K = 15,
   kIQ2_XXS = 16,
+  kIQ2_XS = 17,
+  kIQ3_XXS = 18,
   kIQ4_NL = 20,
   kIQ3_S = 21,
+  kIQ2_S = 22,
   kIQ4_XS = 23,
   kI32 = 26,
   kBF16 = 30,
+  /// ggml-org/llama.cpp GGML_TYPE_Q2_0 (2026-07-07): 64 values, fp16 scale, 2-bit codes.
+  kQ2_0 = 42,
 };
 
 [[nodiscard]] constexpr std::string_view ToString(GgmlType type) noexcept {
@@ -74,6 +80,14 @@ enum class GgmlType : std::uint16_t {
       return "Q8_K";
     case GgmlType::kIQ2_XXS:
       return "IQ2_XXS";
+    case GgmlType::kIQ2_XS:
+      return "IQ2_XS";
+    case GgmlType::kIQ3_XXS:
+      return "IQ3_XXS";
+    case GgmlType::kIQ2_S:
+      return "IQ2_S";
+    case GgmlType::kQ2_0:
+      return "Q2_0";
     case GgmlType::kIQ4_NL:
       return "IQ4_NL";
     case GgmlType::kIQ3_S:
@@ -190,6 +204,15 @@ public:
       const noexcept {
     return mapped_regions_;
   }
+
+  /// Experimental tensor overlay: replaces every tensor of this reader for which `take` returns true by the same-named tensor of the
+  /// single GGUF file `overlay_path` (same shape required, the type may differ). Metadata stay this reader's. The overlay file is mapped
+  /// for the reader's lifetime and appended as one more mapped region. Fails, leaving the reader unchanged, when a taken name is missing
+  /// from the overlay, shapes differ, or nothing matched.
+  [[nodiscard]] bool OverlayTensors(
+      const std::filesystem::path& overlay_path,
+      const std::function<bool(std::string_view)>& take,
+      std::string* error_msg = nullptr);
 
   /// Metadata lookup helpers
   [[nodiscard]] const GgufMetadataValue* FindMetadata(

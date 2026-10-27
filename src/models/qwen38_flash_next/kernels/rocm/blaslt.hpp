@@ -37,6 +37,11 @@ public:
   [[nodiscard]] bool UsesOwnKernel(hipDataType type, int m, int n, int k,
                                    std::string* error_msg);
 
+  /// Device absolute start position; nullptr for mixed-session batches.
+  void SetTokenOffset(const std::uint32_t* position) noexcept {
+    token_offset_ = position;
+  }
+
 private:
   BlasLt() = default;
 
@@ -49,6 +54,7 @@ private:
 
   hipblasLtHandle_t handle_{nullptr};
   hipStream_t stream_{nullptr};
+  const std::uint32_t* token_offset_{nullptr};
   std::map<std::array<int, 4>, std::unique_ptr<Plan>> plans_;
 };
 

@@ -103,12 +103,66 @@ void TestUnexpectedPositionalsAndParserReuse() {
   assert(!parser.WasSupplied("--text"));
 }
 
+void TestCommandGrammarPolicies() {
+  using Parser = gufo::cli::ArgParser;
+  Parser parser("test");
+  parser.SetImplicitHelp(false).SetInlineValues(false);
+  bool help = false;
+  unsigned flags = 0;
+  std::string text, error;
+  parser.AddFlag("", "--help", "Help", "General", &help);
+  parser.AddCustomFlag("", "--flag", "Count", "General",
+                       [&](auto, auto, auto*) {
+                         ++flags;
+                         return true;
+                       });
+  parser.AddOption("", "--text", "TEXT", "Text", "General", &text);
+  parser.SetErrorHandler([](Parser::ParseError kind, std::string_view arg) {
+    return std::to_string(static_cast<int>(kind)) + ":" + std::string(arg);
+  });
+  const char* invalid[] = {"--help", "--text=inline"};
+  assert(!parser.Parse(invalid, &error));
+  assert(help && !parser.IsHelpRequested());
+  assert(error == "0:--text=inline");
+  const char* missing[] = {"--text"};
+  assert(!parser.Parse(missing, &error) && error == "1:--text");
+  const char* repeated[] = {"--flag", "--flag"};
+  assert(parser.Parse(repeated, &error) && flags == 2);
+  parser.SetInlineValues(true);
+  const char* flag_value[] = {"--flag=true"};
+  assert(!parser.Parse(flag_value, &error) && error == "2:--flag=true");
+  std::vector<std::string> delegated;
+  parser.SetUnrecognizedHandler([&](std::string_view arg, auto*) {
+    delegated.emplace_back(arg);
+    return true;
+  });
+  const char* mixed[] = {"llm", "--unknown=1", "--text", "--flag", "--json"};
+  assert(parser.Parse(mixed, &error) && text == "--flag" && flags == 2);
+  assert(
+      (delegated == std::vector<std::string>{"llm", "--unknown=1", "--json"}));
+  assert(Parser::Contains(mixed, {"--json"}));
+  assert(!Parser::Contains(mixed, {"--unknown"}));
+  assert(Parser::Contains(mixed, {"--unknown"}, true));
+  assert(Parser::Contains(mixed, {"--flag"}));  // Raw value-position detection.
+  parser.SetOptionInlineValues("--flag", false);
+  assert(parser.Parse(flag_value, &error));
+  assert(delegated.back() == "--flag=true" && flags == 2);
+  const wchar_t* wide[] = {L"--model", L"--jsonl", L"--bundle=a"};
+  assert(Parser::Contains(wide, {L"--jsonl"}));
+  assert(!Parser::Contains(wide, {L"--bundle"}));
+  assert(Parser::Contains(wide, {L"--bundle"}, true));
+  const char* help_first[] = {"--help", "--text"};
+  parser.SetImplicitHelp(true);
+  assert(parser.Parse(help_first, &error) && parser.IsHelpRequested());
+}
+
 int main() {
   TestBasicFlagsAndOptions();
   TestListParsing();
   TestPositionals();
   TestHelpFormatting();
   TestUnexpectedPositionalsAndParserReuse();
-  std::cout << "All ArgParser tests passed.\n";
+  TestCommandGrammarPolicies();
+  std::cout << "ArgParser: 6 cases passed, 0 failed.\n";
   return 0;
 }

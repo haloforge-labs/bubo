@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "operation_id": "11111111111111111111111111111111",
+  "seq": 1,
+  "time": "2026-10-13T18:00:00Z",
+  "product": {
+    "name": "bubo",
+    "version": "0.1.0",
+    "revision": "3ff74dce",
+    "engine_version": "0.1.0"
+  },
+  "type": "request_completed",
+  "payload": {
+    "id": "r1",
+    "time": "2026-10-13T18:00:00Z",
+    "slot": null,
+    "prompt_tokens": 100,
+    "completion_tokens": 10,
+    "cached_tokens": 0,
+    "ttft_ms": 20,
+    "prefill_tps": 2000,
+    "decode_tps": 50,
+    "cache_kind": "miss",
+    "finish_reason": "length",
+    "outcome": "completed"
+  }
+}

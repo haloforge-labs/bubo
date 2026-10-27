@@ -7,14 +7,21 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <tuple>
 
+#include "src/cli/instance_control.hpp"
+#include "src/cli/machine_exit.hpp"
+#include "src/cli/prepared_default.hpp"
 #include "src/cli/serve/artefact_binding_cases.hpp"
 #include "src/cli/serve/behaviour_options.hpp"
+#include "src/cli/settings_support.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/platform/tuning.hpp"
+#include "src/core/text_sampling_defaults.hpp"
 #include "src/models/qwen38_flash_next/batch_twin_policy.hpp"
 
 namespace gufo::server {
@@ -34,7 +41,7 @@ std::optional<std::string> Text(const json::Value& row,
 }
 std::optional<std::string> ProfileValue(const json::Value& row,
                                         const std::string& profile) {
-  if (profile == "stock")
+  if (profile == "vanilla")
     return {};
   const auto& values = *row.find("values");
   if (auto value = Text(values, profile))
@@ -44,65 +51,48 @@ std::optional<std::string> ProfileValue(const json::Value& row,
 void ValidateValue(const json::Value& row, const std::string& value) {
   const auto rule = row.member_str("value_rule");
   const auto fail = [&] {
-    throw std::invalid_argument(row.member_str("name") + ": invalid value '" +
-                                value + "'");
+    throw ReleaseSettingError(
+        row.member_str("name"),
+        row.member_str("name") + ": invalid value '" +
+            (row.find("secret")->as_bool() ? "<redacted>" : value) + "'");
   };
-  const auto name = row.member_str("name");
-  if (row.member_str("kind") == "flag") {
-    if (name == "--npu-prefill" && !Has(value, {"off", "on"}))
+  const auto& allowed = *row.find("allowed");
+  if (const auto* values = allowed.find("values")) {
+    const bool listed =
+        std::ranges::any_of(values->items(), [&](const auto& item) {
+          return value == (item.is_string() ? item.str()
+                           : item.is_bool() ? (item.as_bool() ? "1" : "0")
+                                            : item.dump());
+        });
+    if (!listed)
       fail();
-    if (name == "--speculative" &&
-        !Has(value, {"mtp", "off", "dspark", "dflash2"}))
-      fail();
-    if (name == "--mtp-policy" && !Has(value, {"survival", "length"}))
-      fail();
-    if (name == "--mtp-draft-vocab" && !Has(value, {"auto", "latin", "full"}))
-      fail();
-    if (name == "--think" && !Has(value, {"auto", "on", "off"}))
-      fail();
-    if (name == "--reasoning-effort" &&
-        !Has(value,
-             {"auto", "minimal", "low", "medium", "high", "xhigh", "max"}))
-      fail();
+    return;
   }
   if (rule == "uint" || rule == "int31") {
-    std::uint64_t number = 0;
-    const auto parsed =
-        std::from_chars(value.data(), value.data() + value.size(), number);
-    if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size())
-      fail();
-    if (rule == "int31" && number > 2147483647)
-      fail();
-    if ((name == "--sessions" || name == "--max-request-bytes" ||
-         name == "--max-connections") &&
-        number == 0)
-      fail();
-    if (name == "GUFO_DISK_EVICT_SKIP_TOKENS" && number > 1000000)
-      fail();
-    if ((name == "GUFO_DISK_IDLE_MS" || name == "GUFO_DISK_DEFER_MS") &&
-        number > 600000)
-      fail();
+    const auto parse = [&](const std::string& text) {
+      std::uint64_t number = 0;
+      const auto parsed =
+          std::from_chars(text.data(), text.data() + text.size(), number);
+      if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size())
+        fail();
+      return number;
+    };
+    const auto number = parse(value);
+    // Use exact JSON number text: uint64 maxima cannot round through double.
+    for (const auto* key : {"minimum", "exclusive_minimum", "maximum"}) {
+      if (const auto* bound = allowed.find(key)) {
+        const auto limit = parse(bound->dump());
+        if ((std::string_view(key) == "minimum" && number < limit) ||
+            (std::string_view(key) == "exclusive_minimum" && number <= limit) ||
+            (std::string_view(key) == "maximum" && number > limit))
+          fail();
+      }
+    }
     return;
   }
-  if (rule == "forward") {
-    // Match PrefillChunkTokens' base-10 prefix grammar before checking its
-    // range.
-    const long number = std::strtol(value.c_str(), nullptr, 10);
-    if (number < 64 || number > 16384)
-      fail();
-    return;
-  }
-  if (rule == "text" || rule == "twin_width")
-    return;
-  if (rule == "lenient") {
-    // The reader enables only bounded; every other literal means off.
-    return;
-  }
-  if (rule == "bool") {
-    if (value != "0" && value != "1")
-      fail();
-    return;
-  }
+  // Effort maps and platform tuning have reader-owned structured grammars;
+  // allowed describes them as formatted strings rather than duplicating
+  // parsers.
   if (rule == "effort_map") {
     sampling::BehaviourConfig config;
     config.marker_bias_by_effort = value;
@@ -128,42 +118,55 @@ void ValidateValue(const json::Value& row, const std::string& value) {
     }
     return;
   }
+  if (allowed.member_str("type") == "string")
+    return;
   std::size_t end = 0;
   double number = 0;
-  try {
-    number = std::stod(value, &end);
-  } catch (...) {
-    fail();
-  }
-  if (end != value.size() || !std::isfinite(number))
-    fail();
-  if (rule == "number")
-    return;
-  if (rule == "min_prob") {
-    if (number != -1 && (number < 0 || number > 1))
-      fail();
-  } else if (rule == "prob") {
-    if (number < 0 || number > 1)
-      fail();
-  } else if (rule == "lambda") {
-    if (number <= 0 || number > 2)
-      fail();
+  if (rule == "forward") {
+    // PrefillChunkTokens uses strtol's signed decimal prefix grammar, which
+    // allowed cannot express. Only that grammar stays here; bounds are row
+    // data.
+    number = std::strtol(value.c_str(), nullptr, 10);
   } else {
-    if (number != std::floor(number))
+    try {
+      number = std::stod(value, &end);
+    } catch (...) {
       fail();
-    if (rule == "transition" && (number < 0 || number > 2))
-      fail();
-    if (rule == "twin_width" && (number < 1 || number > 8))
-      fail();
-    if (rule == "readers" && (number < 1 || number > 16))
-      fail();
-    if (rule == "uint" && (number < 0 || number > 9007199254740991.0))
+    }
+    if (end != value.size() || !std::isfinite(number))
       fail();
   }
+  if (allowed.member_str("type") == "integer" && number != std::floor(number))
+    fail();
+  if (const auto* alternatives = allowed.find("also"))
+    for (const auto& alternative : alternatives->items())
+      if (number == alternative.as_double())
+        return;
+  if (const auto* minimum = allowed.find("minimum"))
+    if (number < minimum->as_double())
+      fail();
+  if (const auto* minimum = allowed.find("exclusive_minimum"))
+    if (number <= minimum->as_double())
+      fail();
+  if (const auto* maximum = allowed.find("maximum"))
+    if (number > maximum->as_double())
+      fail();
 }
+
+// The two rows that bind an MTP head and decode with it are scoped to Flash
+// Next in the registry. A Gemma 4 package that carries an mtp head shares
+// them. Every other row and every other family is unchanged.
+bool SharedWithGemma4(const json::Value& row, const ReleaseInputs& inputs) {
+  const auto name = row.member_str("name");
+  return inputs.model_family == "gemma4" &&
+         row.member_str("model_family") == "qwen3.8-flash-next" &&
+         (name == "--speculative" || name == "--mtp-model");
+}
+
 bool Matches(const json::Value& row, const ReleaseInputs& inputs) {
   const auto family = row.member_str("model_family");
-  if (family != "any" && family != inputs.model_family)
+  if (family != "any" && family != inputs.model_family &&
+      !SharedWithGemma4(row, inputs))
     return false;
 #ifndef _WIN32
   if (row.member_str("platform") == "windows")
@@ -181,14 +184,102 @@ std::string EscapeCell(std::string text) {
     text.replace(at, 5, "Follow-up:");
   return text.empty() ? "None" : text;
 }
+std::string AllowedText(const json::Value& allowed) {
+  if (const auto* values = allowed.find("values")) {
+    std::string result;
+    for (const auto& value : values->items()) {
+      if (!result.empty())
+        result += ", ";
+      result += value.is_string() ? value.str() : value.dump();
+    }
+    return result;
+  }
+  const auto* minimum = allowed.find("minimum");
+  const auto* exclusive = allowed.find("exclusive_minimum");
+  if (minimum || exclusive) {
+    std::string result =
+        allowed.member_str("type") + " " + (exclusive ? "(" : "[") +
+        (exclusive ? exclusive->dump() : minimum->dump()) + ", ";
+    const auto* maximum = allowed.find("maximum");
+    result += maximum ? maximum->dump() : "\xE2\x88\x9E";
+    result += "]";
+    if (const auto* also = allowed.find("also")) {
+      result += " or ";
+      bool first = true;
+      for (const auto& value : also->items()) {
+        if (!first)
+          result += ", ";
+        result += value.dump();
+        first = false;
+      }
+    }
+    return result;
+  }
+  std::string result = allowed.member_str("type");
+  if (const auto* format = allowed.find("format"))
+    result += ": " + format->str();
+  return result;
+}
+std::string ProfileDefaultsText(const json::Value& row) {
+  const auto& values = *row.find("values");
+  const auto value = [&](std::string_view name) {
+    const auto* selected = values.find(std::string(name));
+    return selected && selected->is_string()
+               ? selected->str()
+               : row.member_str("default_text") + " (built-in)";
+  };
+  const auto* exact = values.find("exact");
+  return "default=" + value("default") + ". subagents=" + value("subagents") +
+         ". exact=" +
+         (exact && exact->is_string() ? exact->str() : value("default"));
+}
+const json::Value& SwitchNormalization() {
+  static const json::Value contract =
+#define GUFO_RELEASE_NORMALIZATION
+#include "src/cli/serve/release_switches.inc"
+#undef GUFO_RELEASE_NORMALIZATION
+      ;
+  return contract;
+}
 }  // namespace
 
+void ValidateSwitchValue(const json::Value& row, const std::string& value) {
+  ValidateValue(row, value);
+}
+
+std::vector<json::Value> NormalizeSwitchTable(
+    std::span<const json::Value> rows) {
+  std::vector<json::Value> normalized;
+  normalized.reserve(rows.size());
+  for (const auto& source : rows) {
+    if (!source.is_object())
+      throw std::invalid_argument("invalid switch row");
+    auto row = source;
+    for (const auto& [key, value] :
+         SwitchNormalization().find("defaults")->members())
+      if (!row.contains(key))
+        row[key] = value;
+    if (!source.contains("restart_required") &&
+        row.member_str("class") == "REMOVED")
+      row["restart_required"] =
+          *SwitchNormalization().find("removed_restart_required");
+    normalized.push_back(std::move(row));
+  }
+  std::stable_sort(normalized.begin(), normalized.end(),
+                   [](const auto& a, const auto& b) {
+                     return a.member_str("name") < b.member_str("name");
+                   });
+  return normalized;
+}
 const std::vector<json::Value>& ReleaseSwitchTable() {
-  static const std::vector<json::Value> rows = {
+  static const auto rows = [] {
+    const std::vector<json::Value> source = {
 #define GUFO_RELEASE_ROWS
 #include "src/cli/serve/release_switches.inc"
 #undef GUFO_RELEASE_ROWS
-  };
+    };
+    return NormalizeSwitchTable(source);
+  }();
   return rows;
 }
 ReleaseEnvironment SnapshotReleaseEnvironment() {
@@ -198,40 +289,55 @@ ReleaseEnvironment SnapshotReleaseEnvironment() {
 #undef GUFO_RELEASE_SNAPSHOT
   return environment;
 }
-void ValidateSwitchTable(std::span<const json::Value> rows) {
+void ValidateSwitchTable(std::span<const json::Value> source_rows) {
+  const auto rows = NormalizeSwitchTable(source_rows);
   const std::set<std::string> fields = {
-      "name",           "kind",          "class",    "model_family",
-      "platform",       "requires",      "values",   "exact_off",
-      "inject_with",    "suppressed_by", "purpose",  "default_text",
-      "hardware_scope", "note",          "built_in", "value_rule",
-      "aliases",        "takes_value",   "echo"};
+      "name",           "kind",          "class",        "model_family",
+      "platform",       "requires",      "values",       "exact_off",
+      "inject_with",    "suppressed_by", "purpose",      "default_text",
+      "hardware_scope", "note",          "built_in",     "value_rule",
+      "aliases",        "takes_value",   "echo",         "secret",
+      "group",          "audience",      "experimental", "restart_required",
+      "gui_control",    "allowed"};
   std::set<std::string> names;
   for (const auto& row : rows) {
     const auto name = row.member_str("name");
     const auto fail = [&] {
       throw std::invalid_argument("invalid switch row: " + name);
     };
-    if (!row.is_object() || row.size() != fields.size() || name.empty() ||
-        !names.insert(name).second)
+    if (row.size() != fields.size() + (row.contains("label") ? 1 : 0) ||
+        name.empty() || !names.insert(name).second)
       fail();
     for (const auto& key : fields)
       if (!row.contains(key))
+        fail();
+    if (const auto* label = row.find("label"))
+      if (!label->is_string() ||
+          label->str().find_first_not_of(" \t\r\n\v\f") == std::string::npos)
         fail();
     if (!Has(row.member_str("kind"), {"env", "flag"}) ||
         !Has(row.member_str("class"), {"DEFAULT", "OPTION", "DEBUG", "INTERNAL",
                                        "REMOVED", "OTHER_MODEL"}) ||
         !Has(row.member_str("model_family"),
              {"any", "qwen3.8-flash-next", "qwen3.8-27b", "deepseek-v4-flash",
-              "minimax-h3", "qwen-image-2.1", "qwen3-tts", "qwen3-asr"}) ||
+              "qwen3.6-a3b", "minimax-h3", "qwen-image-2.1", "qwen3-tts",
+              "qwen3-asr"}) ||
         !Has(row.member_str("platform"), {"any", "windows"}) ||
         !Has(row.member_str("hardware_scope"),
              {"generic", "strix-halo-tuned"}) ||
         !Has(row.member_str("value_rule"),
              {"text", "bool", "min_prob", "prob", "lambda", "transition",
               "number", "effort_map", "lenient", "forward", "twin_width",
-              "uint", "int31", "readers", "tuning"}))
-      fail();
-    if (Has(name, {"GUFO_EVAL_API_KEY", "PATH"}) && row.find("echo")->as_bool())
+              "uint", "int31", "readers", "tuning", "on_off"}) ||
+        !std::ranges::any_of(SwitchNormalization().find("groups")->items(),
+                             [&](const auto& group) {
+                               return row.member_str("group") == group.str();
+                             }) ||
+        !Has(row.member_str("audience"), {"user", "advanced", "debug"}) ||
+        !row.find("experimental")->is_bool() ||
+        !row.find("restart_required")->is_bool() ||
+        !row.find("gui_control")->is_bool() ||
+        !row.find("allowed")->is_object())
       fail();
     const bool flag_name =
         name.starts_with("--") && name.size() > 2 &&
@@ -277,7 +383,10 @@ void ValidateSwitchTable(std::span<const json::Value> rows) {
                 "artefact:twin", "artefact:draft_head", "artefact:mtp",
                 "artefact:mmproj", "think!=off"}))
         fail();
-    if (!row.find("echo")->is_bool() || !row.find("exact_off")->is_bool() ||
+    if (!row.find("secret")->is_bool() ||
+        (row.find("secret")->as_bool() &&
+         (row.find("echo")->as_bool() || row.find("gui_control")->as_bool())) ||
+        !row.find("echo")->is_bool() || !row.find("exact_off")->is_bool() ||
         !row.find("takes_value")->is_bool() || !row.find("note")->is_string())
       fail();
     for (const auto* key : {"inject_with", "built_in"})
@@ -306,31 +415,53 @@ void ValidateSwitchTable(std::span<const json::Value> rows) {
   }
 }
 
+json::Value ReleaseSettingSummary(const json::Value& row) {
+  auto summary = json::Value::object();
+  for (const auto* key :
+       {"requested", "effective", "source", "reason", "allowed"})
+    if (const auto* value = row.find(key))
+      summary[key] = *value;
+  return summary;
+}
+
 ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
-  if (!Has(inputs.profile, {"default", "subagents", "exact", "stock"}))
-    throw std::invalid_argument("unknown profile: " + inputs.profile);
-  const auto& rows = ReleaseSwitchTable();
+  return ResolveReleaseSettings(inputs, ReleaseSwitchTable());
+}
+
+ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& requested,
+                                         std::span<const json::Value> rows) {
+  auto inputs = requested;
+  if (inputs.profile == "stock")
+    inputs.profile = "vanilla";
+  if (!Has(inputs.profile, {"default", "subagents", "exact", "vanilla"}))
+    throw ReleaseSettingError("--profile",
+                              "unknown profile: " + inputs.profile);
   ValidateSwitchTable(rows);
   ReleaseResolution result;
   result.profile = inputs.profile;
   result.architecture = inputs.architecture;
+  result.model_family = inputs.model_family;
   result.native_context = inputs.native_context;
   // Resolve NPU policy before model metadata or configuration injection.
   const auto authorize = [&] {
     const auto found = inputs.explicit_flags.find("--npu-prefill");
     const bool present = found != inputs.explicit_flags.end();
-    const std::string value = present ? found->second : "on";
+    const std::string value = present ? found->second : "off";
     if (value != "off" && value != "on")
-      throw std::invalid_argument("--npu-prefill: invalid value '" + value + "'");
+      throw ReleaseSettingError("--npu-prefill",
+                                "--npu-prefill: invalid value '" + value + "'");
     const bool restricted =
-        inputs.profile == "exact" || inputs.profile == "stock";
+        inputs.profile == "exact" || inputs.profile == "vanilla";
     if (restricted && present && value == "on")
-      throw std::invalid_argument("--npu-prefill effective=off: profile=" +
-                                  inputs.profile + " forces OFF");
+      throw ReleaseSettingError("--npu-prefill",
+                                "--npu-prefill effective=off: profile=" +
+                                    inputs.profile + " forces OFF");
     bool allowed = !restricted && value == "on";
-    std::string reason = restricted ? "profile=" + inputs.profile + " forces OFF"
-                         : value == "off" ? "explicit CLI OFF"
-                         : present ? "explicit CLI ON" : "profile default ON";
+    std::string reason = restricted
+                             ? "profile=" + inputs.profile + " forces OFF"
+                         : present && value == "off" ? "explicit CLI OFF"
+                         : present                   ? "explicit CLI ON"
+                                                     : "profile default OFF";
 #ifndef GUFO_NPU
     if (allowed) {
       allowed = false;
@@ -357,36 +488,44 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
   for (const auto& [key, control] : path_controls) {
     if (inputs.explicit_flags.contains(control.first) &&
         enabled(control.second))
-      throw std::invalid_argument(control.first + " conflicts with " +
-                                  control.second);
+      throw ReleaseSettingError(
+          control.first, control.first + " conflicts with " + control.second);
     if (exact_controls && key != "--mmproj" &&
         inputs.explicit_flags.contains(control.first))
-      throw std::invalid_argument("profile=exact: explicit value re-enables " +
-                                  control.first);
+      throw ReleaseSettingError(
+          control.first,
+          "profile=exact: explicit value re-enables " + control.first);
   }
   if (enabled("--no-mtp") && inputs.explicit_flags.contains("--speculative") &&
       inputs.explicit_flags.at("--speculative") == "mtp")
-    throw std::invalid_argument("--speculative mtp conflicts with --no-mtp");
+    throw ReleaseSettingError("--speculative",
+                              "--speculative mtp conflicts with --no-mtp");
   // Resolve every candidate before evaluating dependencies; row order cannot
   // affect sessions, backend, or twin-batch requirements.
   for (const auto& row : rows) {
     const auto name = row.member_str("name");
     ReleaseSetting setting{
         name, Text(row, "built_in"), "built-in", row.member_str("class"), {}};
+    if (const auto requested = inputs.explicit_flags.find(name);
+        requested != inputs.explicit_flags.end() &&
+        row.member_str("kind") == "flag" && !row.find("secret")->as_bool())
+      setting.requested = requested->second;
     // This policy is resolved before configuration for every model family. A
     // manifest or environment entry cannot override the command-line flag.
     if (name == "--npu-prefill") {
       const auto& authorization = result.prefill_authorization;
       const bool on = authorization.Allows(core::ExperimentalFeature::Prefill);
       setting.value = on ? "on" : "off";
-      setting.origin =
-          inputs.explicit_flags.contains(name) ? "flag"
-                                              : "profile:" + inputs.profile;
+      setting.origin = inputs.explicit_flags.contains(name)
+                           ? "flag"
+                           : "profile:" + inputs.profile;
+      if (!on)
+        setting.skipped_reason = authorization.reason();
       settings.emplace(name, std::move(setting));
       continue;
     }
-    if (name.find("_NPU_") == 4 &&
-        !result.prefill_authorization.Allows(core::ExperimentalFeature::Prefill)) {
+    if (name.find("_NPU_") == 4 && !result.prefill_authorization.Allows(
+                                       core::ExperimentalFeature::Prefill)) {
       settings.emplace(name, std::move(setting));
       continue;
     }
@@ -413,12 +552,18 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
                               " (treated as unset)");
         real.reset();
       }
+      if (((name == "GUFO_THINK_MARKER_BIAS" ||
+            name == "GUFO_THINK_MARKER_BIAS_BY_EFFORT") &&
+           inputs.explicit_flags.contains("--think-marker-bias")) ||
+          (name == "GUFO_LOOP_BREAKER" &&
+           inputs.explicit_flags.contains("--loop-breaker")))
+        real.reset();
     }
     const bool match = Matches(row, inputs);
     const auto path_control = path_controls.find(name);
-    const bool restricted_path = match && path_control != path_controls.end() &&
-                                 name != "--mmproj" &&
-                                 (inputs.profile == "stock" || exact_controls);
+    const bool restricted_path =
+        match && path_control != path_controls.end() && name != "--mmproj" &&
+        (inputs.profile == "vanilla" || exact_controls);
     if (restricted_path && real) {
       result.logs.push_back(
           name + ": inherited env suppressed by profile=" + inputs.profile);
@@ -450,14 +595,14 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
           flag != inputs.explicit_flags.end() &&
           row.member_str("kind") == "flag" &&
           std::optional<std::string>(flag->second) != profile)
-        throw std::invalid_argument(
-            "profile=exact: explicit value re-enables " + name);
+        throw ReleaseSettingError(
+            name, "profile=exact: explicit value re-enables " + name);
       if (real && ((name == "GUFO_LENIENT" && *real == "bounded") ||
                    (name != "GUFO_LENIENT" && real != profile)))
-        throw std::invalid_argument(
-            "profile=exact: explicit value re-enables " + name);
+        throw ReleaseSettingError(
+            name, "profile=exact: explicit value re-enables " + name);
     }
-    if (suppressed && match && inputs.profile != "stock") {
+    if (suppressed && match && inputs.profile != "vanilla") {
       if (enabled("--no-behaviour") &&
           std::find_if(row.find("suppressed_by")->items().begin(),
                        row.find("suppressed_by")->items().end(),
@@ -477,19 +622,24 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
       setting.origin = suppressed ? "flag" : "profile:" + inputs.profile;
     }
     auto manifest = inputs.manifest_defaults.find(name);
-    if ((inputs.profile != "stock" || name == "--mmproj") && match &&
-        !suppressed && manifest != inputs.manifest_defaults.end() &&
-        !exact_off) {
+    // Every engine reads --mmproj, so a packaged projector applies to every
+    // model family (Flash Next packages and plain catalogue models).
+    if ((inputs.profile != "vanilla" || name == "--mmproj") &&
+        (match || name == "--mmproj") && !suppressed &&
+        manifest != inputs.manifest_defaults.end() && !exact_off) {
       setting.value = manifest->second;
       setting.origin = "manifest";
     }
     if (real) {
       setting.value = real;
       setting.origin = "env";
-      if (suppressed && !profile && inputs.profile != "stock")
+      if (row.find("echo")->as_bool() && !row.find("secret")->as_bool())
+        setting.requested = real;
+      if (suppressed && !profile && inputs.profile != "vanilla" &&
+          !row.find("secret")->as_bool())
         result.logs.push_back("env override: " + name + "=" + *real +
                               " (profile default says unset)");
-      if (profile && real != profile)
+      if (profile && real != profile && !row.find("secret")->as_bool())
         result.logs.push_back("env override: " + name + "=" + *real +
                               " (profile default says " + *profile + ")");
     }
@@ -536,8 +686,8 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
         ((name == "GUFO_LENIENT" && *setting.value == "bounded") ||
          (name != "GUFO_LENIENT" &&
           setting.value != Text(*row.find("values"), "exact"))))
-      throw std::invalid_argument("profile=exact: explicit value re-enables " +
-                                  name);
+      throw ReleaseSettingError(
+          name, "profile=exact: explicit value re-enables " + name);
     if (inputs.profile == "exact" && name == "--seed" && setting.value) {
       std::int64_t seed = -1;
       const auto parsed =
@@ -546,19 +696,21 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
       if (parsed.ec != std::errc{} ||
           parsed.ptr != setting.value->data() + setting.value->size() ||
           seed < 0)
-        throw std::invalid_argument("profile=exact: --seed must be 0 or more");
+        throw ReleaseSettingError("--seed",
+                                  "profile=exact: --seed must be 0 or more");
     }
     if (exact_controls && match && real &&
         row.member_str("class") == "INTERNAL" &&
-        !row.find("exact_off")->as_bool())
+        !row.find("secret")->as_bool() && !row.find("exact_off")->as_bool())
       result.logs.push_back("profile=exact: " + name +
                             " is set (internal control)");
     if (setting.value) {
       try {
         ValidateValue(row, *setting.value);
       } catch (const std::invalid_argument& error) {
-        if (match && inputs.profile != "stock" &&
-            inputs.model_family == "qwen3.8-flash-next")
+        if (Has(name, {"--think-marker-bias", "--loop-breaker"}) ||
+            (match && inputs.profile != "vanilla" &&
+             inputs.model_family == "qwen3.8-flash-next"))
           throw;
         result.logs.push_back("warning: " + std::string(error.what()));
       }
@@ -575,38 +727,161 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
     }
     if (name == "--cache-disk" && setting.value && setting.value->empty())
       setting.value.reset();
+    // Exact is byte-exact only when every prefill launch starts at a multiple
+    // of 4 (the sparse-attention query group). Forward size 4096 guarantees it.
+    if (exact_controls && match && name == "GUFO_PREFILL_FORWARD_TOKENS" &&
+        setting.value &&
+        std::strtol(setting.value->c_str(), nullptr, 10) != 4096)
+      throw ReleaseSettingError(
+          name, "profile=exact: incompatible " + name + "=" + *setting.value +
+                    "; exact requires 4096 (a multiple of 4: exact is "
+                    "byte-exact only for prefill starts aligned to 4)");
     if (exact_controls && match &&
         ((name == "--sessions" &&
           setting.value != std::optional<std::string>("1")) ||
-         (name == "GUFO_PREFILL_FORWARD_TOKENS" && setting.value &&
-          std::strtol(setting.value->c_str(), nullptr, 10) != 4096) ||
          (name == "--no-cache" &&
           setting.value != std::optional<std::string>("1"))))
-      throw std::invalid_argument("profile=exact: incompatible " + name);
+      throw ReleaseSettingError(name, "profile=exact: incompatible " + name);
     if (match && !real && !inputs.explicit_flags.contains(name) &&
         ((suppressed && !setting.value) || (exact_off && !setting.value)))
       setting.skipped_reason = exact_off ? "suppressed by profile=exact"
                                          : "suppressed by explicit flag";
     settings.emplace(name, std::move(setting));
   }
-  if ((inputs.profile == "stock" || exact_controls) &&
+  const auto environment_value =
+      [&](const char* name) -> std::optional<std::string> {
+    std::optional<std::string> value;
+    if (inputs.real_environment)
+      value = CopyEnvironmentValue(inputs.real_environment(name));
+    else if (const auto found = inputs.environment.find(name);
+             found != inputs.environment.end())
+      value = found->second;
+    return value && !value->empty() ? value : std::nullopt;
+  };
+  // These two environment fallbacks are read by serve before parsing flags.
+  // Mirror that order here so the settings contract reports the same endpoint.
+  if (auto& host = settings.at("--host"); host.origin == "built-in") {
+    auto value = environment_value("HOST");
+    if (!value)
+      value = environment_value("GUFO_HOST");
+    if (value) {
+      host.value = value;
+      host.origin = "env";
+      host.requested = value;
+    }
+  }
+  if (auto& port = settings.at("--port"); port.origin == "built-in") {
+    auto value = environment_value("PORT");
+    if (!value)
+      value = environment_value("GUFO_PORT");
+    if (value) {
+      int parsed_port = 0;
+      const auto parsed = std::from_chars(
+          value->data(), value->data() + value->size(), parsed_port);
+      if (parsed.ec == std::errc{} &&
+          parsed.ptr == value->data() + value->size()) {
+        port.value = std::to_string(parsed_port);
+        port.origin = "env";
+        port.requested = value;
+      }
+    }
+  }
+  // BehaviourOptions reads these environment names at request time. Resolve
+  // the CLI controls into those same rows, then inject their effective values.
+  if (const auto flag = inputs.explicit_flags.find("--think-marker-bias");
+      flag != inputs.explicit_flags.end()) {
+    if (enabled("--no-behaviour"))
+      throw ReleaseSettingError(
+          "--think-marker-bias",
+          "--think-marker-bias conflicts with --no-behaviour");
+    if (exact_controls && std::stod(flag->second) != 0.0)
+      throw ReleaseSettingError(
+          "--think-marker-bias",
+          "profile=exact: --think-marker-bias must be zero");
+    auto& bias = settings.at("GUFO_THINK_MARKER_BIAS");
+    bias.value = flag->second;
+    bias.origin = "flag";
+    bias.requested = flag->second;
+    bias.skipped_reason.clear();
+    auto& effort_map = settings.at("GUFO_THINK_MARKER_BIAS_BY_EFFORT");
+    effort_map.value.reset();
+    effort_map.origin = "flag";
+    effort_map.skipped_reason = "overridden by --think-marker-bias";
+  }
+  if (const auto flag = inputs.explicit_flags.find("--loop-breaker");
+      flag != inputs.explicit_flags.end()) {
+    if (enabled("--no-behaviour"))
+      throw ReleaseSettingError("--loop-breaker",
+                                "--loop-breaker conflicts with --no-behaviour");
+    if (exact_controls && flag->second == "on")
+      throw ReleaseSettingError("--loop-breaker",
+                                "profile=exact: --loop-breaker must be off");
+    auto& breaker = settings.at("GUFO_LOOP_BREAKER");
+    breaker.value = flag->second == "on" ? "1" : "0";
+    breaker.origin = "flag";
+    breaker.requested = flag->second;
+    breaker.skipped_reason.clear();
+  }
+  // The public flag rows show the setting read by the request path, including
+  // vanilla mode and direct environment overrides.
+  if (settings.contains("--loop-breaker")) {
+    const auto& effective = settings.at("GUFO_LOOP_BREAKER");
+    auto& flag = settings.at("--loop-breaker");
+    flag.value =
+        effective.value == std::optional<std::string>("1") ? "on" : "off";
+    flag.origin = effective.origin;
+    flag.skipped_reason = effective.skipped_reason;
+  }
+  if (settings.contains("--think-marker-bias")) {
+    const auto& effective = settings.at("GUFO_THINK_MARKER_BIAS");
+    auto& flag = settings.at("--think-marker-bias");
+    flag.value = effective.value.value_or("0");
+    flag.origin = effective.origin;
+    flag.skipped_reason = effective.skipped_reason;
+  }
+  if ((inputs.profile == "vanilla" || exact_controls) &&
       inputs.model_family == "qwen3.8-flash-next" &&
-      !(inputs.profile == "stock" &&
+      !(inputs.profile == "vanilla" &&
         inputs.explicit_flags.contains("--mtp-model") &&
         inputs.explicit_flags.contains("--speculative") &&
         inputs.explicit_flags.at("--speculative") == "mtp")) {
     if (inputs.explicit_flags.contains("--mtp-model"))
-      throw std::invalid_argument(
-          "profile=stock: --mtp-model requires explicit --speculative mtp");
-    if (inputs.profile == "stock" &&
+      throw ReleaseSettingError(
+          "--mtp-model",
+          "profile=vanilla: --mtp-model requires explicit --speculative mtp");
+    if (inputs.profile == "vanilla" &&
         inputs.explicit_flags.contains("--speculative") &&
         inputs.explicit_flags.at("--speculative") == "mtp")
-      throw std::invalid_argument(
-          "profile=stock: --speculative mtp requires explicit --mtp-model");
+      throw ReleaseSettingError(
+          "--speculative",
+          "profile=vanilla: --speculative mtp requires explicit --mtp-model");
     settings.at("--mtp-model").value.reset();
     if (!inputs.explicit_flags.contains("--speculative") || exact_controls) {
       settings.at("--speculative").value = "off";
       settings.at("--speculative").origin = "profile:" + inputs.profile;
+    }
+  }
+  // The dense decode twin with more than one session needs the batched twin
+  // (decode gate passed 2026-10-14, w4c4-onpass-twin-nonexact-batch). Set it
+  // here, as the subagents profile does, so every profile sees one rule. An
+  // explicit env or flag value keeps its place and the requirement below then
+  // decides, as before.
+  std::optional<ReleaseSetting> auto_batch_before;
+  if (inputs.model_family == "qwen3.8-flash-next" &&
+      inputs.profile != "vanilla" && !exact_controls) {
+    auto& batch = settings.at("GUFO_DENSE_TWIN_BATCH");
+    const auto& twin = settings.at("GUFO_DENSE_TWIN_MODEL");
+    const auto& sessions_value = settings.at("--sessions").value;
+    std::uint64_t sessions = 1;
+    if (sessions_value)
+      std::from_chars(sessions_value->data(),
+                      sessions_value->data() + sessions_value->size(),
+                      sessions);
+    if (batch.origin == "built-in" && sessions > 1 && twin.value &&
+        !twin.value->empty() && twin.skipped_reason.empty()) {
+      auto_batch_before = batch;
+      batch.value = "1";
+      batch.origin = "profile:" + inputs.profile;
     }
   }
   // Defaults can depend on defaults removed later in sorted row order.
@@ -652,6 +927,12 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
               {"artefact:draft_head", "GUFO_DRAFT_OUT_MODEL"}};
           const auto& value = settings.at(artefacts.at(req.str())).value;
           met = value && !value->empty();
+          // An MTP head inside the model file meets the MTP artefact for the
+          // other families. Flash-Next keeps requiring its own sidecar.
+          if (req.str() == "artefact:mtp" && inputs.model_has_mtp &&
+              inputs.model_family != "qwen3.8-flash-next" &&
+              inputs.model_family != "gemma4")
+            met = true;
           // The MTP artefact is required only by the MTP backend.
           if (setting.name == "--speculative" && setting.value &&
               *setting.value != "mtp")
@@ -665,10 +946,11 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
             inputs.explicit_flags.contains(path->second.first);
         if (positive_path && Matches(row, inputs) &&
             inputs.model_family == "qwen3.8-flash-next")
-          throw std::invalid_argument(path->second.first + ": needs " +
-                                      req.str());
-        if (!Matches(row, inputs) || inputs.profile == "stock" ||
-            inputs.model_family != "qwen3.8-flash-next") {
+          throw ReleaseSettingError(
+              path->second.first, path->second.first + ": needs " + req.str());
+        if (!Matches(row, inputs) || inputs.profile == "vanilla" ||
+            (inputs.model_family != "qwen3.8-flash-next" &&
+             !SharedWithGemma4(row, inputs))) {
           if (candidate)
             result.logs.push_back("warning: " + setting.name + ": needs " +
                                   req.str());
@@ -679,7 +961,8 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
             (setting.origin == "flag" &&
              inputs.explicit_flags.contains(setting.name));
         if (explicit_value)
-          throw std::invalid_argument(setting.name + ": needs " + req.str());
+          throw ReleaseSettingError(setting.name,
+                                    setting.name + ": needs " + req.str());
         setting.skipped_reason = "skipped: needs " + req.str();
         result.logs.push_back(setting.name + ": " + setting.skipped_reason);
         setting.value.reset();
@@ -688,15 +971,20 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
       }
     }
   } while (changed);
+  // The batched setting only follows a twin that stays on.
+  if (auto_batch_before &&
+      settings.at("GUFO_DENSE_TWIN_MODEL").value.value_or("").empty())
+    settings.at("GUFO_DENSE_TWIN_BATCH") = *auto_batch_before;
   for (const auto& row : rows) {
     auto& setting = settings.at(row.member_str("name"));
-    if (Matches(row, inputs) && inputs.profile != "stock" &&
+    if (Matches(row, inputs) && inputs.profile != "vanilla" &&
         setting.name == "GUFO_DENSE_TWIN_MAX_N" && setting.value &&
         settings.at("GUFO_DENSE_TWIN_BATCH").value ==
             std::optional<std::string>("1") &&
         settings.at("--sessions").value != std::optional<std::string>("1") &&
         models::qwen38_flash_next::TwinMaxNValue(setting.value->c_str()) < 8)
-      throw std::invalid_argument(
+      throw ReleaseSettingError(
+          "GUFO_DENSE_TWIN_MAX_N",
           "GUFO_DENSE_TWIN_MAX_N must be at least 8 for batched twin");
     if (row.member_str("kind") == "flag" && setting.value)
       result.effective_flags[setting.name] = *setting.value;
@@ -704,20 +992,28 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
         !path_controls.contains(setting.name) && setting.value &&
         (setting.origin == "manifest" ||
          setting.origin.starts_with("profile:") || setting.origin == "flag") &&
-        inputs.profile != "stock")
+        (inputs.profile != "vanilla" || setting.origin == "flag"))
+      result.injections.push_back(setting);
+    if (setting.name == "GUFO_THINK_MARKER_BIAS_BY_EFFORT" &&
+        setting.origin == "flag" && !setting.value)
       result.injections.push_back(setting);
     result.settings.push_back(setting);
   }
+  const auto path = [&](const std::string& key) {
+    return settings.at(key).value.value_or("");
+  };
+  // The vision projector is read by every engine; the other typed artefacts
+  // belong to Flash Next.
+  result.artefacts.mmproj = path("--mmproj");
+  result.artefacts.vision_disabled = enabled("--no-vision");
   if (inputs.model_family == "qwen3.8-flash-next") {
     result.artefacts.present = true;
-    const auto path = [&](const std::string& key) {
-      return settings.at(key).value.value_or("");
-    };
     result.artefacts.twin = path("GUFO_DENSE_TWIN_MODEL");
     result.artefacts.draft_head = path("GUFO_DRAFT_OUT_MODEL");
     result.artefacts.mtp = path("--mtp-model");
-    result.artefacts.mmproj = path("--mmproj");
-    result.artefacts.vision_disabled = enabled("--no-vision");
+  } else if (inputs.model_family == "gemma4") {
+    // The MTP head is the one typed artefact Gemma 4 shares with Flash Next.
+    result.artefacts.mtp = path("--mtp-model");
   }
   if (inputs.profile == "subagents" &&
       inputs.model_family == "qwen3.8-flash-next" &&
@@ -726,14 +1022,16 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& inputs) {
     auto context = std::stoull(result.effective_flags.at("--context"));
     if (context == 0) {
       if (!inputs.native_context)
-        throw std::invalid_argument(
+        throw ReleaseSettingError(
+            "--context",
             "profile=subagents: native context requires a model header or "
             "--allow-unmeasured-memory");
       context = *inputs.native_context;
     }
     if (context > 524288 ||
         sessions > 524288 / std::max<std::uint64_t>(context, 1))
-      throw std::invalid_argument(
+      throw ReleaseSettingError(
+          "--context",
           "profile=subagents: sessions x context exceeds measured 524288 "
           "tokens; lower context or pass --allow-unmeasured-memory");
   }
@@ -780,12 +1078,16 @@ void ApplyInjections(const ReleaseResolution& resolved) {
           return item.member_str("name") == injection.name;
         });
     if (row == rows.end() || row->member_str("kind") != "env" ||
-        row->member_str("class") == "REMOVED" || !injection.value)
+        row->member_str("class") == "REMOVED" ||
+        (!injection.value &&
+         !(injection.name == "GUFO_THINK_MARKER_BIAS_BY_EFFORT" &&
+           injection.origin == "flag")))
       throw std::invalid_argument("invalid injection: " + injection.name);
-    ValidateValue(*row, *injection.value);
+    if (injection.value)
+      ValidateValue(*row, *injection.value);
   }
   const auto real = SnapshotReleaseEnvironment();
-  // Empty CRT values must not reach strict readers, even in stock or another
+  // Empty CRT values must not reach strict readers, even in vanilla or another
   // family where this resolver injects no defaults.
   for (const auto& [name, value] : real) {
     if (!value || !value->empty())
@@ -800,14 +1102,17 @@ void ApplyInjections(const ReleaseResolution& resolved) {
   }
   for (const auto& injection : resolved.injections) {
     const auto found = real.find(injection.name);
-    if (found != real.end() && found->second && !found->second->empty())
+    if (injection.origin != "flag" && found != real.end() && found->second &&
+        !found->second->empty())
       continue;
 #ifdef _WIN32
     const int status =
-        _putenv_s(injection.name.c_str(), injection.value->c_str());
+        _putenv_s(injection.name.c_str(),
+                  injection.value ? injection.value->c_str() : "");
 #else
-    const int status =
-        ::setenv(injection.name.c_str(), injection.value->c_str(), 1);
+    const int status = injection.value ? ::setenv(injection.name.c_str(),
+                                                  injection.value->c_str(), 1)
+                                       : ::unsetenv(injection.name.c_str());
 #endif
     if (status != 0)
       throw std::runtime_error("cannot inject " + injection.name);
@@ -816,7 +1121,8 @@ void ApplyInjections(const ReleaseResolution& resolved) {
 
 ReleaseStartup PrepareReleaseSettings(
     std::span<const char* const> args,
-    const std::map<std::string, std::string>& manifest_defaults) {
+    const std::map<std::string, std::string>& manifest_defaults,
+    bool inspect_only) {
   ReleaseStartup startup;
   try {
     ReleaseInputs inputs;
@@ -828,11 +1134,13 @@ ReleaseStartup PrepareReleaseSettings(
                                                   "--sessions",
                                                   "--max-connections",
                                                   "--max-request-bytes",
-                                                  "--api-key",
                                                   "--log-level",
                                                   "--verbose",
                                                   "--debug-hooks",
                                                   "--max-score-tokens"};
+    // Prefix observation skips registry flags without validating their inline
+    // values, before any GGUF-header work. ArgParser validates later; using it
+    // here would change malformed-value/modality/help preflight ordering.
     for (std::size_t i = 0; i < args.size(); ++i) {
       const std::string arg(args[i]);
       const auto equals = arg.find('=');
@@ -843,7 +1151,8 @@ ReleaseStartup PrepareReleaseSettings(
         for (const auto& alias : row.find("aliases")->items())
           named |= alias.str() == name;
         if (row.member_str("kind") == "flag" && named &&
-            (server_options.contains(row.member_str("name")) ||
+            (row.find("secret")->as_bool() ||
+             server_options.contains(row.member_str("name")) ||
              row.member_str("name") == "--profile" ||
              row.member_str("name").starts_with("--no-") ||
              Has(row.member_str("name"),
@@ -866,6 +1175,10 @@ ReleaseStartup PrepareReleaseSettings(
     }
     if (help)
       return startup;
+    // Registry provenance observation, not command validation: unknown engine
+    // flags are ignored token by token and raw help ends header preflight.
+    // ArgParser has no non-validating registry observer with these semantics;
+    // keep this bounded pass until it does, rather than add a second parser.
     for (std::size_t i = 0; i < args.size(); ++i) {
       std::string arg(args[i]);
       if (arg == "help" || arg == "--help" || arg == "-h") {
@@ -929,6 +1242,8 @@ ReleaseStartup PrepareReleaseSettings(
     if (auto found = inputs.explicit_flags.find("--profile");
         found != inputs.explicit_flags.end())
       inputs.profile = found->second;
+    if (inputs.profile == "stock")
+      inputs.profile = "vanilla";
     if (inputs.explicit_flags.contains("--exact")) {
       if (inputs.explicit_flags.contains("--profile") &&
           inputs.profile != "exact")
@@ -937,6 +1252,11 @@ ReleaseStartup PrepareReleaseSettings(
     }
     startup.print_effective =
         inputs.explicit_flags.contains("--print-effective-settings");
+    for (const auto* name : {"--model", "--manifest"})
+      if (inputs.explicit_flags.contains(name) &&
+          inputs.explicit_flags.at(name).empty())
+        throw std::invalid_argument(std::string(name) +
+                                    " requires a nonempty path");
     if (auto found = inputs.explicit_flags.find("--model");
         found != inputs.explicit_flags.end())
       inputs.model_path = std::filesystem::u8path(found->second);
@@ -950,13 +1270,26 @@ ReleaseStartup PrepareReleaseSettings(
         return *found->second;
       return {};
     };
-    const auto selected_manifest = inputs.explicit_flags.contains("--manifest")
-                                       ? inputs.explicit_flags.at("--manifest")
-                                       : selector("BUBO_MANIFEST");
+    const auto selection = bubo::cli::ResolvePreparedDefault(
+        inputs.model_path,
+        inputs.explicit_flags.contains("--manifest")
+            ? std::filesystem::u8path(inputs.explicit_flags.at("--manifest"))
+            : std::filesystem::path{},
+        bubo::cli::EnvironmentUtf8("BUBO_MANIFEST"),
+        bubo::cli::EnvironmentUtf8("LOCALAPPDATA"));
     const bool verify = inputs.explicit_flags.contains("--verify-model");
+    startup.model_missing =
+        (!selection.model.empty() &&
+         !std::filesystem::is_regular_file(selection.model) &&
+         !std::filesystem::is_directory(selection.model)) ||
+        (!selection.manifest.empty() &&
+         !std::filesystem::is_regular_file(selection.manifest));
     startup.package =
         LoadModelPackage(inputs.model_path, inputs.profile, verify, &std::cerr,
-                         std::filesystem::u8path(selected_manifest));
+                         selection.source == "standard_location" &&
+                                 !std::filesystem::exists(selection.manifest)
+                             ? std::filesystem::path{}
+                             : selection.manifest);
     inputs.manifest_present = !startup.package.manifest_path.empty();
     if (!startup.package.files.empty() &&
         (inputs.model_path.empty() ||
@@ -980,9 +1313,12 @@ ReleaseStartup PrepareReleaseSettings(
       if (!architecture)
         throw std::invalid_argument("model header has no general.architecture");
       inputs.architecture = std::string(*architecture);
-      inputs.model_family = *architecture == "qwen4exp"
-                                ? "qwen3.8-flash-next"
-                                : std::string(*architecture);
+      inputs.model_family =
+          std::string(bubo::prepare::ModelFamilyForArchitecture(*architecture));
+      inputs.model_has_mtp =
+          reader->GetMetadataUint32(inputs.architecture +
+                                    ".nextn_predict_layers")
+              .value_or(0) > 0;
       inputs.native_context =
           reader->GetMetadataUint64(inputs.architecture + ".context_length");
       if (!inputs.native_context)
@@ -992,6 +1328,13 @@ ReleaseStartup PrepareReleaseSettings(
     } else if (startup.print_effective)
       inputs.model_family = "qwen3.8-flash-next";
     startup.resolved = ResolveReleaseSettings(inputs);
+    startup.resolved.model_selection = bubo::cli::SelectionJson(selection);
+    // For example a plain catalogue model whose projector is not prepared.
+    for (const auto& note : startup.package.notes)
+      if (note.starts_with("mtp:") ||
+          (startup.resolved.artefacts.mmproj.empty() &&
+           !startup.resolved.artefacts.vision_disabled))
+        startup.resolved.logs.push_back(note);
     std::map<std::string, std::string> selected;
     for (const auto& setting : startup.resolved.settings)
       if (setting.value &&
@@ -1014,7 +1357,7 @@ ReleaseStartup PrepareReleaseSettings(
     }
     if (const auto cache =
             startup.resolved.effective_flags.find("--cache-disk");
-        cache != startup.resolved.effective_flags.end() &&
+        !inspect_only && cache != startup.resolved.effective_flags.end() &&
         !cache->second.empty()) {
       const auto& artefacts = startup.resolved.artefacts;
       const std::array<std::filesystem::path, 4> paths{
@@ -1024,15 +1367,86 @@ ReleaseStartup PrepareReleaseSettings(
           std::filesystem::u8path(artefacts.draft_head)};
       EnsureDiskCacheIdentity(startup.package, paths, &std::cerr);
     }
-    ApplyInjections(startup.resolved);
+    if (!inspect_only)
+      ApplyInjections(startup.resolved);
   } catch (const std::exception& error) {
     startup.error = error.what();
+    if (const auto* setting = dynamic_cast<const ReleaseSettingError*>(&error))
+      startup.error_switch = setting->switch_name;
+    startup.model_missing =
+        startup.model_missing ||
+        dynamic_cast<const ModelMissingError*>(&error) != nullptr;
     std::replace_if(
         startup.error.begin(), startup.error.end(),
         [](unsigned char c) { return c < 32 || c == 127; }, ' ');
   }
   return startup;
 }
+std::optional<std::uint64_t> ResolveDefaultSessionContext(
+    ReleaseResolution& resolved, std::uint64_t sessions,
+    const json::Value& memory_estimate, bool allow_single_session_adaptation) {
+  const bool adapt_one_session = allow_single_session_adaptation && sessions == 1;
+  const auto setting =
+      std::find_if(resolved.settings.begin(), resolved.settings.end(),
+                   [](const auto& row) { return row.name == "--context"; });
+  if ((sessions <= 1 && !adapt_one_session) ||
+      setting == resolved.settings.end() || setting->origin == "flag")
+    return std::nullopt;
+  if (adapt_one_session) {
+    const auto* recommended = memory_estimate.find("recommended");
+    if (recommended && recommended->is_bool() && recommended->as_bool())
+      return std::nullopt;
+  }
+  const auto* recommendation = memory_estimate.find("recommended_context");
+  const auto* rows =
+      recommendation ? recommendation->find("by_sessions") : nullptr;
+  if (rows && rows->is_array())
+    for (const auto& row : rows->items()) {
+      if (row.member_size("sessions") != sessions)
+        continue;
+      auto context = row.member_size("context_per_session");
+      const auto* fits = row.find("fits");
+      const auto* recommended = row.find("recommended");
+      if (!fits || !fits->is_bool() || !fits->as_bool() || context == 0 ||
+          (recommended && !recommended->as_bool()) ||
+          context > std::numeric_limits<std::uint32_t>::max()) {
+        if (adapt_one_session)
+          return std::nullopt;
+        else
+          throw std::invalid_argument(
+              "--context: recommended_context for --sessions " +
+              std::to_string(sessions) +
+              " does not fit: " + row.member_str("reason"));
+      }
+      if (adapt_one_session)
+        context =
+            std::min(context, memory_estimate.member_size("context_tokens"));
+      setting->value = std::to_string(context);
+      setting->origin = "recommended_context";
+      resolved.effective_flags["--context"] = *setting->value;
+      resolved.context_resolution_reason =
+          adapt_one_session ? "Using " + std::to_string(context) +
+                                     " tokens per session to leave room for "
+                                     "the model and its cache."
+                               : "Resolved " + std::to_string(context) +
+                                     " tokens per session from CLI "
+                                     "recommended_context.by_sessions for " +
+                                     std::to_string(sessions) +
+                                     " sessions (no --context override).";
+      resolved.logs.push_back("--context: " +
+                              resolved.context_resolution_reason);
+      return context;
+    }
+  const auto reason = memory_estimate.member_str("recommended_context_reason");
+  if (adapt_one_session)
+    return std::nullopt;
+  throw bubo::cli::ControlError(
+      static_cast<int>(bubo::cli::MachineExit::Unsupported),
+      "--context: CLI recommended_context is unavailable for --sessions " +
+          std::to_string(sessions) +
+          (reason.empty() ? "; supply an explicit --context." : ": " + reason));
+}
+
 void PrefillReleaseFlags(const ReleaseResolution& resolved,
                          const cli::ArgParser& parser) {
   for (const auto& setting : resolved.settings) {
@@ -1052,20 +1466,74 @@ void PrefillReleaseFlags(const ReleaseResolution& resolved,
 }
 json::Value ReleaseOrigins(const ReleaseResolution& resolved) {
   auto origins = json::Value::object();
-  for (const auto& setting : resolved.settings)
+  for (const auto& setting : resolved.settings) {
+    if (setting.name == "GUFO_THINK_MARKER_ENTROPY_GATE" && !setting.value)
+      continue;
     origins[setting.name] = setting.origin;
+  }
   return origins;
 }
-json::Value ReleaseSettingsJson(const ReleaseResolution& resolved) {
+json::Value ReleaseSettingsJson(const ReleaseResolution& resolved,
+                                std::span<const json::Value> catalog) {
+  const auto setting_for = [&](std::string_view name) -> const ReleaseSetting* {
+    const auto found =
+        std::find_if(resolved.settings.begin(), resolved.settings.end(),
+                     [&](const auto& setting) { return setting.name == name; });
+    return found == resolved.settings.end() ? nullptr : &*found;
+  };
+  const auto source_for = [](const ReleaseSetting* setting,
+                             bool inference_default = false) {
+    if (!setting || setting->origin == "built-in" ||
+        setting->origin == "recommended_context")
+      return std::string("default");
+    if (setting->origin == "env")
+      return std::string("env");
+    if (setting->origin == "flag")
+      return std::string(inference_default ? "flag" : "user");
+    return std::string("profile");
+  };
+  // Text environment variables can contain paths, prompt text, or credentials.
+  // Only validated scalar environment controls are shown in machine output.
+  const auto visible = [](const json::Value& row,
+                          const ReleaseSetting* setting) {
+    if (row.member_str("kind") != "env")
+      return true;
+    if (row.find("secret")->as_bool())
+      return false;
+    if (!row.find("echo")->as_bool())
+      return false;
+    // Static built-in wording contains no user paths or credentials. A null
+    // value here means the engine default applies, not that it defaults to 0.
+    if (setting && !setting->value && setting->origin == "built-in" &&
+        setting->skipped_reason.empty())
+      return true;
+    if (!Has(row.member_str("value_rule"),
+             {"bool", "min_prob", "prob", "lambda", "transition", "number",
+              "twin_width", "uint", "int31", "readers", "forward"}))
+      return false;
+    if (setting && setting->value) {
+      try {
+        ValidateValue(row, *setting->value);
+      } catch (const std::invalid_argument&) {
+        return false;
+      }
+    }
+    return true;
+  };
   auto output = json::Value::object();
   output["profile"] = resolved.profile;
+  output["model_selection"] = resolved.model_selection;
+  const bool npu_on = resolved.runtime_npu_enabled.value_or(
+      resolved.prefill_authorization.Allows(
+          core::ExperimentalFeature::Prefill));
+  const std::string npu_reason = resolved.runtime_npu_reason.empty()
+                                     ? resolved.prefill_authorization.reason()
+                                     : resolved.runtime_npu_reason;
   auto experimental = json::Value::object();
-  experimental["npu_prefill"] = resolved.effective_flags.at("--npu-prefill");
-  experimental["npu_reason"] = resolved.prefill_authorization.reason();
+  experimental["npu_prefill"] = npu_on ? "on" : "off";
+  experimental["npu_reason"] = npu_reason;
   experimental["npu_deny_reason"] =
-      resolved.prefill_authorization.Allows(core::ExperimentalFeature::Prefill)
-          ? json::Value()
-          : json::Value(resolved.prefill_authorization.reason());
+      npu_on ? json::Value() : json::Value(npu_reason);
   output["experimental"] = std::move(experimental);
   output["architecture"] = resolved.architecture.empty()
                                ? json::Value()
@@ -1076,23 +1544,35 @@ json::Value ReleaseSettingsJson(const ReleaseResolution& resolved) {
                                  : json::Value();
   auto table = json::Value::array();
   for (const auto& setting : resolved.settings) {
-    const auto& catalog = ReleaseSwitchTable();
+    if (setting.name == "GUFO_THINK_MARKER_ENTROPY_GATE" && !setting.value)
+      continue;
     const auto found =
         std::find_if(catalog.begin(), catalog.end(), [&](const auto& item) {
           return item.member_str("name") == setting.name;
         });
-    if (found->member_str("kind") == "env" && !found->find("echo")->as_bool())
+    if (found == catalog.end() || !visible(*found, &setting))
       continue;
     auto row = json::Value::object();
     row["name"] = setting.name;
-    row["value"] = setting.name == "--api-key" && setting.value
+    row["value"] = found->find("secret")->as_bool() && setting.value
                        ? json::Value("<redacted>")
                    : setting.value ? json::Value(*setting.value)
                                    : json::Value();
+    if (!setting.value && setting.origin == "built-in" &&
+        setting.skipped_reason.empty())
+      row["value"] = found->member_str("default_text");
+    if (setting.name == "--npu-prefill")
+      row["value"] = npu_on ? "on" : "off";
+    else if (setting.name == "--host" && resolved.runtime_host)
+      row["value"] = *resolved.runtime_host;
+    else if (setting.name == "--port" && resolved.runtime_port)
+      row["value"] = std::to_string(*resolved.runtime_port);
     row["origin"] = setting.origin;
     row["class"] = setting.release_class;
     if (!setting.skipped_reason.empty())
       row["skipped_reason"] = setting.skipped_reason;
+    if (setting.name == "--npu-prefill" && !npu_on)
+      row["skipped_reason"] = npu_reason;
     table.push_back(std::move(row));
   }
   output["settings"] = std::move(table);
@@ -1121,6 +1601,15 @@ json::Value ReleaseSettingsJson(const ReleaseResolution& resolved) {
                                                 : json::Value(found->second);
   }
   engine["twin_bound"] = resolved.artefacts.twin;
+  // True when more than one session decodes with the batched 4-bit twin.
+  {
+    const auto* batch = setting_for("GUFO_DENSE_TWIN_BATCH");
+    const auto sessions = resolved.effective_flags.find("--sessions");
+    engine["twin_batched"] = !resolved.artefacts.twin.empty() && batch &&
+                             batch->value == std::optional<std::string>("1") &&
+                             sessions != resolved.effective_flags.end() &&
+                             sessions->second != "1";
+  }
   engine["draft_head_bound"] = resolved.artefacts.draft_head;
   engine["mtp_bound"] = resolved.artefacts.mtp;
   engine["mmproj_bound"] = resolved.artefacts.mmproj;
@@ -1128,11 +1617,312 @@ json::Value ReleaseSettingsJson(const ReleaseResolution& resolved) {
   engine["typed_artefacts"] = resolved.artefacts.present;
   if (resolved.native_context && engine.member_str("context") == "0")
     engine["context"] = std::to_string(*resolved.native_context);
+  if (resolved.runtime_context)
+    engine["context"] = std::to_string(*resolved.runtime_context);
   output["engine"] = std::move(engine);
+
+  auto capabilities = json::Value::object();
+  capabilities["profiles"] = bubo::cli::SettingsProfiles();
+#ifdef GUFO_NPU
+  capabilities["npu_prefill"] = true;
+#else
+  capabilities["npu_prefill"] = false;
+#endif
+  output["capabilities"] = std::move(capabilities);
+
+  const auto requested = [](const ReleaseSetting* setting) -> json::Value {
+    return setting && setting->requested ? json::Value(*setting->requested)
+                                         : json::Value();
+  };
+  const auto field = [](json::Value value, std::string source) {
+    auto entry = json::Value::object();
+    entry["value"] = std::move(value);
+    entry["source"] = std::move(source);
+    return entry;
+  };
+  const auto has_override = [&](std::string_view name) {
+    const auto* setting = setting_for(name);
+    return setting && setting->value && setting->origin != "built-in";
+  };
+  const auto number = [&](std::string_view name, double fallback) {
+    const auto* setting = setting_for(name);
+    return setting && setting->value ? std::stod(*setting->value) : fallback;
+  };
+  sampling::SamplingConfig configured;
+  sampling::SamplingOverrides supplied;
+  supplied.temperature = has_override("--temperature");
+  supplied.top_k = has_override("--top-k");
+  supplied.top_p = has_override("--top-p");
+  supplied.min_p = has_override("--min-p");
+  supplied.seed = has_override("--seed");
+  supplied.repeat_penalty = has_override("--repeat-penalty");
+  supplied.presence_penalty = has_override("--presence-penalty");
+  if (supplied.temperature)
+    configured.temperature = static_cast<float>(number("--temperature", 0));
+  if (supplied.top_k)
+    configured.top_k = static_cast<std::int32_t>(number("--top-k", 0));
+  if (supplied.top_p)
+    configured.top_p = static_cast<float>(number("--top-p", 1));
+  if (supplied.min_p)
+    configured.min_p = static_cast<float>(number("--min-p", 0));
+  if (supplied.seed)
+    configured.seed = static_cast<std::int64_t>(number("--seed", -1));
+  if (supplied.repeat_penalty)
+    configured.repeat_penalty =
+        static_cast<float>(number("--repeat-penalty", 1));
+  if (supplied.presence_penalty)
+    configured.presence_penalty =
+        static_cast<float>(number("--presence-penalty", 0));
+  const auto* think_setting = setting_for("--think");
+  const auto* effort_setting = setting_for("--reasoning-effort");
+  std::string think =
+      think_setting && think_setting->value ? *think_setting->value : "auto";
+  const std::string effort =
+      effort_setting && effort_setting->value ? *effort_setting->value : "auto";
+  std::string think_source = source_for(think_setting, true);
+  if (think == "auto" && effort != "auto") {
+    think = "on";
+    think_source = source_for(effort_setting, true);
+  }
+  const std::optional<bool> thinking = think == "on" ? std::optional<bool>(true)
+                                       : think == "off"
+                                           ? std::optional<bool>(false)
+                                           : std::nullopt;
+  const auto model = resolved.architecture == "qwen4exp" ||
+                             resolved.model_family == "qwen3.8-flash-next"
+                         ? sampling::TextModelPreset::kQwen38
+                     : resolved.architecture == "deepseek4" ||
+                             resolved.model_family == "deepseek-v4-flash"
+                         ? sampling::TextModelPreset::kDeepSeekV4Flash
+                         : sampling::TextModelPreset::kUnspecified;
+  const auto* production_setting = setting_for("GUFO_PRODUCTION_SAMPLING");
+  const bool production = production_setting && production_setting->value &&
+                          *production_setting->value == "1";
+  const auto native = sampling::ResolveTextSampling(model, thinking, configured,
+                                                    supplied, false);
+  const auto effective =
+      resolved.runtime_sampling.value_or(sampling::ResolveTextSampling(
+          model, thinking, configured, supplied, production));
+  const auto sampling_source = [&](std::string_view name, bool changed) {
+    if (has_override(name))
+      return source_for(setting_for(name), true);
+    if (production && changed)
+      return source_for(production_setting, true);
+    return std::string("default");
+  };
+  auto inference = json::Value::object();
+  inference["temperature"] =
+      field(effective.temperature,
+            sampling_source("--temperature",
+                            effective.temperature != native.temperature));
+  inference["top_p"] =
+      field(effective.top_p,
+            sampling_source("--top-p", effective.top_p != native.top_p));
+  inference["top_k"] =
+      field(effective.top_k,
+            sampling_source("--top-k", effective.top_k != native.top_k));
+  inference["min_p"] =
+      field(effective.min_p,
+            sampling_source("--min-p", effective.min_p != native.min_p));
+  inference["repeat_penalty"] =
+      field(effective.repeat_penalty,
+            sampling_source("--repeat-penalty",
+                            effective.repeat_penalty != native.repeat_penalty));
+  inference["presence_penalty"] =
+      field(effective.presence_penalty,
+            sampling_source("--presence-penalty", effective.presence_penalty !=
+                                                      native.presence_penalty));
+  inference["seed"] =
+      field(effective.seed, source_for(setting_for("--seed"), true));
+  inference["reasoning_effort"] =
+      field(effort, source_for(effort_setting, true));
+  inference["think"] = field(think, think_source);
+  const auto* max_tokens = setting_for("--max-tokens");
+  const auto token_limit =
+      max_tokens && max_tokens->value ? std::stoll(*max_tokens->value) : -1;
+  inference["max_tokens"] =
+      field(token_limit < 0 ? 0 : token_limit, source_for(max_tokens, true));
+  output["inference_defaults"] = std::move(inference);
+
+  const auto* bias_setting = setting_for("GUFO_THINK_MARKER_BIAS");
+  const auto* map_setting = setting_for("GUFO_THINK_MARKER_BIAS_BY_EFFORT");
+  sampling::BehaviourConfig behaviour;
+  behaviour.marker_bias = number("GUFO_THINK_MARKER_BIAS", 0);
+  if (map_setting && map_setting->value)
+    behaviour.marker_bias_by_effort = *map_setting->value;
+  auto bias = json::Value::object();
+  bias["value"] = behaviour.marker_bias;
+  bias["source"] = source_for(bias_setting);
+  bias["requested"] = requested(bias_setting);
+  auto effort_biases = json::Value::object();
+  for (const auto* name : {"low", "medium", "high", "xhigh"}) {
+    const auto mapped = [&] {
+      std::string_view map(behaviour.marker_bias_by_effort);
+      const std::string_view effective_name =
+          std::string_view(name) == "high" ? "xhigh" : name;
+      while (!map.empty()) {
+        const auto comma = map.find(',');
+        auto entry = map.substr(0, comma);
+        const auto colon = entry.find(':');
+        if (colon != std::string_view::npos) {
+          auto label = entry.substr(0, colon);
+          while (!label.empty() &&
+                 std::isspace(static_cast<unsigned char>(label.front())))
+            label.remove_prefix(1);
+          while (!label.empty() &&
+                 std::isspace(static_cast<unsigned char>(label.back())))
+            label.remove_suffix(1);
+          if (label == effective_name)
+            return true;
+        }
+        if (comma == std::string_view::npos)
+          break;
+        map.remove_prefix(comma + 1);
+      }
+      return false;
+    }();
+    effort_biases[name] =
+        field(ResolveMarkerBias(behaviour, name),
+              source_for(mapped ? map_setting : bias_setting));
+  }
+  bias["by_effort"] = std::move(effort_biases);
+  output["think_marker_bias"] = std::move(bias);
+  const auto* breaker = setting_for("GUFO_LOOP_BREAKER");
+  auto loop = json::Value::object();
+  loop["value"] = breaker && breaker->value && *breaker->value == "1";
+  loop["source"] = source_for(breaker);
+  loop["requested"] = requested(breaker);
+  output["loop_breaker"] = std::move(loop);
+  auto entropy = json::Value::object();
+  entropy["available"] = false;
+  output["entropy_gate"] = std::move(entropy);
+  output["think_marker_entropy_gate"] = output["entropy_gate"];
+
+  const auto* npu_setting = setting_for("--npu-prefill");
+  auto npu = json::Value::object();
+  npu["requested"] = npu_setting && npu_setting->requested
+                         ? json::Value(*npu_setting->requested)
+                         : json::Value("off");
+  npu["effective"] = npu_on ? "on" : "off";
+  npu["source"] =
+      npu_reason == "GUFO_ENABLE_NPU=OFF" ? "default" : source_for(npu_setting);
+  npu["reason"] = npu_reason;
+  npu["forced"] = !npu_on && (!npu_setting || !npu_setting->requested ||
+                              *npu_setting->requested != "off");
+  auto npu_allowed = json::Value::array();
+  npu_allowed.push_back("off");
+  if (resolved.prefill_authorization.Allows(core::ExperimentalFeature::Prefill))
+    npu_allowed.push_back("on");
+  npu["allowed"] = std::move(npu_allowed);
+  output["npu_prefill"] = npu;
+
+  auto switches = json::Value::array();
+  auto environment_overrides = json::Value::array();
+  const auto& inference_defaults = *output.find("inference_defaults");
+  for (const auto& catalog_row : catalog) {
+    const auto name = catalog_row.member_str("name");
+    const auto* setting = setting_for(name);
+    const bool show_value =
+        visible(catalog_row, setting) && !catalog_row.find("secret")->as_bool();
+    auto effective_value = setting && setting->value && show_value
+                               ? json::Value(*setting->value)
+                               : json::Value();
+    if (show_value && setting && !setting->value &&
+        setting->origin == "built-in" && setting->skipped_reason.empty())
+      effective_value = catalog_row.member_str("default_text");
+    if (catalog_row.member_str("kind") == "flag" &&
+        !catalog_row.find("takes_value")->as_bool())
+      effective_value = setting && setting->value && *setting->value != "0";
+    std::string effective_source = source_for(setting);
+    if (name == "--profile") {
+      effective_value = resolved.profile;
+      const auto* exact_alias = setting_for("--exact");
+      if (exact_alias && exact_alias->origin == "flag" &&
+          exact_alias->value == std::optional<std::string>("1"))
+        effective_source = "user";
+    }
+    if (name.starts_with("--")) {
+      std::string key = name.substr(2);
+      std::replace(key.begin(), key.end(), '-', '_');
+      if (const auto* default_entry = inference_defaults.find(key)) {
+        effective_value = *default_entry->find("value");
+        effective_source = default_entry->member_str("source");
+        if (effective_source == "flag")
+          effective_source = "user";
+      }
+    }
+    if (name == "--npu-prefill")
+      effective_value = npu_on ? "on" : "off";
+    else if (name == "--host" && resolved.runtime_host)
+      effective_value = *resolved.runtime_host;
+    else if (name == "--port" && resolved.runtime_port)
+      effective_value = *resolved.runtime_port;
+    else if (name == "--context" && resolved.runtime_context)
+      effective_value =
+          static_cast<unsigned long long>(*resolved.runtime_context);
+    else if (name == "--context" && resolved.native_context && setting &&
+             setting->value == std::optional<std::string>("0"))
+      effective_value =
+          static_cast<unsigned long long>(*resolved.native_context);
+    if (name.find("_NPU_") == 4 && !npu_on)
+      effective_value = json::Value();
+    auto switch_row = json::Value::object();
+    switch_row["name"] = name;
+    if (const auto* label = catalog_row.find("label"))
+      switch_row["label"] = *label;
+    switch_row["kind"] = catalog_row.member_str("kind");
+    switch_row["group"] = *catalog_row.find("group");
+    switch_row["audience"] = *catalog_row.find("audience");
+    switch_row["allowed"] = *catalog_row.find("allowed");
+    if (name == "--npu-prefill" && !resolved.prefill_authorization.Allows(
+                                       core::ExperimentalFeature::Prefill)) {
+      auto allowed = json::Value::object();
+      allowed["type"] = "enum";
+      allowed["values"] = *npu.find("allowed");
+      switch_row["allowed"] = std::move(allowed);
+    }
+    switch_row["experimental"] = *catalog_row.find("experimental");
+    switch_row["restart_required"] = *catalog_row.find("restart_required");
+    switch_row["gui_control"] = *catalog_row.find("gui_control");
+    switch_row["requested"] = show_value ? requested(setting) : json::Value();
+    switch_row["effective"] = effective_value;
+    switch_row["source"] =
+        name == "--npu-prefill" ? npu.member_str("source") : effective_source;
+    std::string reason =
+        name == "--context" && !resolved.context_resolution_reason.empty()
+            ? resolved.context_resolution_reason
+        : setting ? setting->skipped_reason
+                  : "";
+    if (name == "--npu-prefill" && !npu_on)
+      reason = npu_reason;
+    else if (name.find("_NPU_") == 4 && !npu_on)
+      reason = npu_reason;
+    else if (resolved.profile == "exact" && setting &&
+             std::find(resolved.turned_off.begin(), resolved.turned_off.end(),
+                       name) != resolved.turned_off.end())
+      reason = "profile=exact forces this switch off";
+    else if (!show_value && setting && setting->value)
+      reason = "Value omitted from settings output.";
+    else if (name == "--port" && resolved.runtime_port && setting &&
+             setting->value == std::optional<std::string>("0"))
+      reason = "The server assigned the listening port.";
+    switch_row["reason"] = reason.empty() ? json::Value() : json::Value(reason);
+    switches.push_back(std::move(switch_row));
+    if (setting && setting->origin == "env" && show_value && setting->value) {
+      auto override_row = json::Value::object();
+      override_row["name"] = name;
+      override_row["value"] = effective_value;
+      environment_overrides.push_back(std::move(override_row));
+    }
+  }
+  output["effective_switches"] = std::move(switches);
+  output["environment_overrides"] = std::move(environment_overrides);
   return output;
 }
 
-std::string RenderReleaseInclude(std::span<const json::Value> rows) {
+std::string RenderReleaseInclude(std::span<const json::Value> source_rows) {
+  const auto rows = NormalizeSwitchTable(source_rows);
+  ValidateSwitchTable(rows);
   std::string out =
       "// Generated by tools/release/gen_switches.py. Do not edit.\n#if "
       "defined(GUFO_RELEASE_ROWS)\n";
@@ -1154,6 +1944,9 @@ std::string RenderReleaseInclude(std::span<const json::Value> rows) {
         row.member_str("class") != "REMOVED" && row.find("echo")->as_bool())
       out += json::Value(row.member_str("name")).dump() + ",\n";
   }
+  out += "#elif defined(GUFO_RELEASE_NORMALIZATION)\n";
+  out +=
+      "json::parse(R\"switch(" + SwitchNormalization().dump() + ")switch\")\n";
   return out + "#endif\n";
 }
 std::string RenderArtefactBindingTable() {
@@ -1169,30 +1962,70 @@ std::string RenderArtefactBindingTable() {
   }
   return out;
 }
-std::string RenderReleaseDocs(std::span<const json::Value> rows) {
+std::string RenderReleaseDocs(std::span<const json::Value> source_rows) {
+  const auto rows = NormalizeSwitchTable(source_rows);
+  ValidateSwitchTable(rows);
   std::string out =
       "# Release switches\n\nGenerated from "
       "`src/cli/serve/release_switches.json`.\n\nProfile defaults apply to "
-      "Qwen3.8 Flash Next.\nOther model families keep their existing "
-      "defaults except for the exact seed and NPU profile policy.\nExplicit flags "
+      "Qwen3.8 Flash Next. A Gemma 4 package with an MTP file shares the MTP "
+      "rows (`--speculative`, `--mtp-model`).\nOther model families keep their "
+      "existing "
+      "defaults except for the exact seed and NPU profile policy.\nExplicit "
+      "flags "
       "and real "
       "environment values take "
       "precedence.\nEmpty environment values count as unset and produce a "
-      "warning.\n\n";
+      "warning.\n\n"
+      "The optional `label` field supplies short display wording.\n"
+      "The `group`, `audience`, `experimental`, `restart_required`, and "
+      "`allowed` fields are typed registry metadata.\n"
+      "Each row owns its group and allowed values; suggested values document "
+      "reader recommendations, not enforced limits.\n"
+      "The default audience is debug, with no GUI control.\n"
+      "Switches default to non-experimental and require restart, except "
+      "removed switches.\n"
+      "A null profile value means no value is injected: the engine built-in in "
+      "default_text applies. The exact profile inherits a non-null default "
+      "profile value where shown.\n"
+      "Changing a setting marked Restart requires a new server start.\n"
+      "The `debug` audience appears in the collapsed Debug section of the "
+      "Advanced panel.\n\n";
+  const auto join = [](const json::Value& array) {
+    std::string result;
+    for (const auto& value : array.items()) {
+      if (!result.empty())
+        result += ", ";
+      result += value.str();
+    }
+    return result;
+  };
   const auto table = [&](std::initializer_list<std::string_view> classes) {
     out +=
-        "| Name | What it does | Default | When to change | Platform and "
-        "hardware |\n| --- | --- | --- | --- | --- |\n";
+        "| Name | Group | Audience | What it does | Profile defaults | "
+        "Built-in | Allowed | Restart | Experimental | Platform and "
+        "hardware | Requires | Suppressed by | When to change |\n"
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | "
+        "--- | --- |\n";
     for (const auto& row : rows) {
       if (!Has(row.member_str("class"), classes))
         continue;
       const auto scope = row.member_str("platform") + "; " +
                          row.member_str("hardware_scope") + "; " +
                          row.member_str("model_family");
-      out += "| `" + row.member_str("name") + "` | " +
-             EscapeCell(row.member_str("purpose")) + " | " +
-             EscapeCell(row.member_str("default_text")) + " | " +
-             EscapeCell(row.member_str("note")) + " | " + scope + " |\n";
+      out +=
+          "| `" + row.member_str("name") + "` | " + row.member_str("group") +
+          " | " + row.member_str("audience") + " | " +
+          EscapeCell(row.member_str("purpose")) + " | " +
+          EscapeCell(ProfileDefaultsText(row)) + " | " +
+          EscapeCell(
+              Text(row, "built_in").value_or(row.member_str("default_text"))) +
+          " | " + EscapeCell(AllowedText(*row.find("allowed"))) + " | " +
+          (row.find("restart_required")->as_bool() ? "yes" : "no") + " | " +
+          (row.find("experimental")->as_bool() ? "yes" : "no") + " | " + scope +
+          " | " + EscapeCell(join(*row.find("requires"))) + " | " +
+          EscapeCell(join(*row.find("suppressed_by"))) + " | " +
+          EscapeCell(row.member_str("note")) + " |\n";
     }
     out += "\n";
   };
@@ -1209,7 +2042,8 @@ std::string RenderReleaseDocs(std::span<const json::Value> rows) {
       "GiB RAM cache. |\n"
       "| exact | Use reproducible plain autoregressive decoding with one "
       "session and no prompt cache. |\n"
-      "| stock | Keep upstream defaults. Inject no environment values or flag "
+      "| vanilla | Keep upstream defaults. Inject no environment values or "
+      "flag "
       "defaults. |\n"
       "\n"
       "Subagents verifies up to 524288 total context tokens.\n"
@@ -1233,7 +2067,7 @@ std::string RenderReleaseDocs(std::span<const json::Value> rows) {
       "full prompt.\n"
       "Sidecar files (MTP, vision, dense twin, draft head) are set with their "
       "own options.\n"
-      "Reference: `bubo serve --profile stock --speculative off --no-cache "
+      "Reference: `bubo serve --profile vanilla --speculative off --no-cache "
       "--sessions 1 --seed 1 --think on --reasoning-effort medium`.\n"
       "Use `--print-effective-settings` to inspect settings without loading "
       "tensors or starting a server.\n"
@@ -1241,9 +2075,18 @@ std::string RenderReleaseDocs(std::span<const json::Value> rows) {
   out += "## Diagnostics\n\n";
   table({"DEBUG", "INTERNAL"});
   out +=
-      "## Removed\n\nOther model switches remain available for their model "
+      "## Removed and other models\n\nOther model switches remain available "
+      "for their model "
       "families.\n\n";
   table({"REMOVED", "OTHER_MODEL"});
+  out +=
+      "## Engine-managed queue cap\n\n"
+      "| Name | What it does | Default | When to change | Platform and "
+      "hardware |\n"
+      "| --- | --- | --- | --- | --- |\n"
+      "| `GPU_MAX_HW_QUEUES` | Set the hardware queue cap. | engine sets | The "
+      "engine manages this queue cap; a real environment value wins. | any; "
+      "generic; any |\n\n";
   out.pop_back();  // Keep one final newline, matching the Python renderer.
   return out;
 }

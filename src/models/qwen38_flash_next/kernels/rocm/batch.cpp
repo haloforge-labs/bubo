@@ -137,6 +137,7 @@ bool Executor::HcMixBatch(const DeviceMixer& m, const float* res, bool normed,
                           std::string* error, bool multi_session) const {
   const auto& c = config();
   xn_half_ = false;
+  DropReadyQ8();  // the batched route rewrites xn and mixed unfused
   if (!normed)
     RmsNormRows(res, m.norm.f32(), s_.xn, rows, c.HcDim(), c.hc_count,
                 c.rms_eps, stream_);
@@ -165,17 +166,20 @@ bool Executor::HcMixBatch(const DeviceMixer& m, const float* res, bool normed,
 void Executor::CombineBatch(float* res, const float* gamma,
                             std::uint32_t rows) const {
   const auto& c = config();
+  DropReadyQ8();
   HcCombine(res, s_.block_out, s_.inject, inject_parts_, gamma, s_.xn, rows,
             c.hidden_size, c.hc_count, c.rms_eps, stream_, true);
 }
 
 bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
                                std::string* error) const {
+  blaslt_->SetTokenOffset(nullptr);
   const bool multi_session = UsesMultiSessionTwin() || items.size() > 1;
   if (!UsePrimaryStream(error)) {
     return false;
   }
   const Config& c = config();
+  DropReadyQ8();
   if (!has_mtp() || items.empty() || items.size() > kBatchSessions) {
     return Fail(error, "invalid MTP body batch");
   }
@@ -766,11 +770,13 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
 
 bool Executor::ForwardBatch(std::span<const BatchItem> items,
                             std::string* error) const {
+  blaslt_->SetTokenOffset(nullptr);
   const bool multi_session = UsesMultiSessionTwin() || items.size() > 1;
   if (!UsePrimaryStream(error)) {
     return false;
   }
   selected_logits_ = nullptr;
+  DropReadyQ8();
   const Config& c = config();
   if (items.empty() || items.size() > kBatchSessions) {
     return Fail(error, "decode batch must contain 1..8 sessions");

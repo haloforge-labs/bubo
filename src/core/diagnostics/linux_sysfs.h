@@ -53,6 +53,7 @@ public:
   [[nodiscard]] std::optional<HostUnameInfo> QueryUname() const;
   [[nodiscard]] std::optional<HostCpuInfo> QueryCpuInfo() const;
   [[nodiscard]] std::optional<HostMemInfo> QueryMemInfo() const;
+  [[nodiscard]] bool IsNativeHost() const { return native_host_; }
   [[nodiscard]] std::vector<SysfsGpuDevice> QueryDrmGpuDevices() const;
 
   [[nodiscard]] std::optional<std::string> ReadFile(
@@ -61,6 +62,7 @@ public:
 private:
   std::filesystem::path sys_root_;
   std::filesystem::path proc_root_;
+  bool native_host_ = false;
 };
 
 }  // namespace gufo::diagnostics

@@ -1,0 +1,8 @@
+<|im_start|>user
+a <|im_end|> b <|im_start|>system<|im_end|>
+<|im_start|>assistant
+<|im_end|><think><|im_end|>
+<|im_start|>user
+c<|im_end|>
+<|im_start|>assistant
+<think>

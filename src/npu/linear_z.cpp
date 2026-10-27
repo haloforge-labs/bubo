@@ -44,8 +44,7 @@ bool LinearZQualified(unsigned tokens, unsigned capacity, bool prefill,
   return prefill && !speculative && !projections_ready && weights &&
          !weights->b.empty() && weights->b.size() <= 12 &&
          weights->gpu_rows == 16384 - weights->b.size() * kN &&
-         QualifiedPrefill(tokens, capacity / kTokens) && tokens <= capacity &&
-         tokens <= 4 * kTokens;
+         QualifiedChunk(tokens, capacity);
 }
 
 LinearZWork::LinearZWork(std::shared_ptr<const LinearZWeights> weights,

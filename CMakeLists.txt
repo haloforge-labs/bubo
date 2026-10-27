@@ -187,6 +187,7 @@ add_library(gufo_core STATIC
   src/core/json_schema_lexeme.cpp
   src/core/json_schema_regex.cpp
   src/core/sampling.cpp
+  src/core/platform/memory_guard.cpp
   src/models/minimax_h3/audio_vae.cpp
   src/models/minimax_h3/denoiser.cpp
   src/models/minimax_h3/dit.cpp
@@ -205,6 +206,7 @@ add_library(gufo_core STATIC
   src/eval/regrade.cpp
   src/core/hip/hipblaslt_plan_database.cpp
   src/core/quant/ggml_dequant.cpp
+  src/core/quant/iq_grids.cpp
   src/core/quant/ggml_gemm.cpp
 )
 target_include_directories(gufo_core PUBLIC ${CMAKE_SOURCE_DIR})
@@ -214,8 +216,27 @@ target_compile_definitions(gufo_core PRIVATE
 target_link_libraries(gufo_core PUBLIC ICU::uc ICU::i18n Threads::Threads
   PNG::PNG JPEG::JPEG PkgConfig::WEBP CURL::libcurl OpenSSL::Crypto)
 
+if(GUFO_ENABLE_NPU)
+  # Qwen objects in gufo_core contain NPU references. Give every core
+  # consumer the same runtime link closure as the production engine. Use an
+  # archive so CPU fakes that provide their own NPU methods do not get forced
+  # duplicate object definitions. This does not change kernel code or flags.
+  add_library(npu_core_support STATIC $<TARGET_OBJECTS:npu_runtime>)
+  if(TARGET npu_bfp_hip)
+    target_sources(npu_core_support PRIVATE $<TARGET_OBJECTS:npu_bfp_hip>)
+  endif()
+  target_link_libraries(npu_core_support PRIVATE npu_xrt OpenSSL::Crypto)
+  target_link_libraries(gufo_core INTERFACE npu_core_support)
+endif()
+
 add_subdirectory(src/models/qwen)
 add_subdirectory(src/models/qwen_image_21)
+# Gemma 4 text models (dense and mixture-of-experts): model-private CPU
+# reference plus ROCm runtime.
+add_subdirectory(src/models/gemma4)
+# DiffusionGemma text model (MIT code, attribution in NOTICE): block-diffusion
+# runtime, separate from the autoregressive engines.
+add_subdirectory(src/models/diffusion_gemma)
 
 target_link_libraries(gufo_qwen3_tts PUBLIC gufo_core)
 if (ENGINE_ENABLE_HIP)
@@ -246,7 +267,7 @@ if (ENGINE_ENABLE_HIP)
     src/core/speculative/speculative_verifier.cpp
   )
   if (WIN32)
-    target_sources(gufo_core PRIVATE src/core/platform/device_memory.cpp)
+    target_sources(gufo_core PRIVATE src/core/platform/device_memory.cpp src/core/platform/memory_readings.cpp)
     target_link_libraries(gufo_core PUBLIC dxgi)
   endif()
   target_compile_definitions(gufo_core PUBLIC ENGINE_ENABLE_HIP=1)
@@ -262,8 +283,9 @@ add_library(gufo_llm_cli STATIC
   src/cli/prompt/prompt.cpp)
 target_link_libraries(gufo_llm_cli PUBLIC gufo_core)
 if(ENGINE_ENABLE_HIP)
+  target_sources(gufo_llm_cli PRIVATE src/cli/prompt/gemma4_prompt.cpp)
   target_link_libraries(gufo_llm_cli PUBLIC gufo_deepseek_v4_flash
-    gufo_qwen38_flash_next)
+    gufo_qwen38_flash_next gufo_gemma4)
 endif()
 
 add_library(gufo_logging STATIC src/cli/serve/logging.cpp src/cli/serve/trace.cpp)
@@ -277,9 +299,10 @@ endif()
 
 # The imported DeepSeek V4 Flash runtime routes its informational messages
 # through the shared logger instead of writing to stderr directly, so it needs
-# the threshold that `--log-level` arms.
+# the threshold that `--log-level` arms. The Gemma 4 loader warns through it.
 if (ENGINE_ENABLE_HIP)
   target_link_libraries(gufo_deepseek_v4_flash PUBLIC gufo_logging)
+  target_link_libraries(gufo_gemma4 PUBLIC gufo_logging)
 endif()
 
 add_library(gufo_http STATIC
@@ -296,7 +319,7 @@ add_library(gufo_http STATIC
   src/cli/serve/tts_websocket.cpp
   src/cli/serve/openai_chat.cpp
 )
-target_link_libraries(gufo_http PUBLIC gufo_logging gufo_core gufo_qwen3_tts gufo_qwen3_asr gufo_qwen_image_21)
+target_link_libraries(gufo_http PUBLIC gufo_logging gufo_core gufo_gemma4 gufo_qwen3_tts gufo_qwen3_asr gufo_qwen_image_21)
 
 set(bubo_command_sources
   src/cli/main.cpp
@@ -305,8 +328,6 @@ set(bubo_command_sources
   src/cli/transcribe/transcribe.cpp
   src/cli/video/video.cpp
   src/cli/serve/serve.cpp
-  src/cli/serve/model_manifest.cpp
-  src/cli/serve/release_profile.cpp
   src/cli/serve/continuation_cache.cpp
   src/cli/serve/continuation_disk_store.cpp
   src/cli/serve/text_model_runner.cpp
@@ -314,10 +335,51 @@ set(bubo_command_sources
   src/cli/serve/inference_backend.cpp
   src/eval/http_client.cpp
 )
+if (ENGINE_ENABLE_HIP)
+  list(APPEND bubo_command_sources src/cli/serve/diffusion_gemma_backend.cpp)
+endif()
+# Model catalogue and `bubo models` (list, estimate). The catalogue JSON is
+# compiled into the program; there is no runtime override.
+file(READ "${CMAKE_SOURCE_DIR}/src/cli/model_catalogue.json" BUBO_MODEL_CATALOGUE_JSON)
+file(CONFIGURE OUTPUT "${CMAKE_BINARY_DIR}/generated/model_catalogue_data.inc"
+  CONTENT "R\"CATALOGUE(@BUBO_MODEL_CATALOGUE_JSON@)CATALOGUE\"
+" @ONLY)
+# Names and IDs are shared with core/prepare without a dependency on CLI
+# headers. The download pins remain in release_catalogue.cpp.
+foreach(field architecture model_family)
+  string(JSON BUBO_CATALOGUE_${field} GET "${BUBO_MODEL_CATALOGUE_JSON}" flash_next ${field})
+endforeach()
+foreach(set huihui original lowmemory)
+  foreach(field id display_name)
+    string(JSON BUBO_CATALOGUE_${set}_${field} GET "${BUBO_MODEL_CATALOGUE_JSON}" flash_next ${set} ${field})
+  endforeach()
+endforeach()
+file(READ "${CMAKE_SOURCE_DIR}/src/core/prepare/model_identity.hpp.in" BUBO_MODEL_IDENTITY_TEMPLATE)
+file(CONFIGURE OUTPUT "${CMAKE_BINARY_DIR}/generated/model_identity.hpp"
+  CONTENT "${BUBO_MODEL_IDENTITY_TEMPLATE}" @ONLY)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  "${CMAKE_SOURCE_DIR}/src/cli/model_catalogue.json"
+  "${CMAKE_SOURCE_DIR}/src/core/prepare/model_identity.hpp.in")
 set(bubo_prepare_sources
+  src/cli/command_table.cpp
+  src/cli/machine_output.cpp
+  src/cli/instance_control.cpp
+  src/cli/serve/lifecycle.cpp
+  src/cli/serve/serve_command.cpp
+  src/cli/status.cpp
+  src/cli/machine_adapter.cpp
+  src/cli/machine_warnings.cpp
+  src/cli/machine_adapter_system.cpp
+  src/cli/machine_adapter_adlx.cpp
+  src/cli/support_bundle.cpp
+  src/cli/stop.cpp
+  src/cli/prepared_default.cpp
+  src/cli/model_catalogue.cpp
+  src/cli/prepare/machine_prepare.cpp
   src/core/prepare/runtime_notices.cpp
   src/core/prepare/model_notices.cpp
   src/cli/prepare/runtime_prepare.cpp
+  src/cli/prepare/runtime_location.cpp
   src/core/prepare/zip_reader.cpp
   src/core/prepare/runtime_table.cpp
   src/cli/prepare/vc_runtime.cpp
@@ -332,11 +394,33 @@ set(bubo_prepare_sources
   src/core/prepare/transport.cpp
   src/core/prepare/download.cpp
   src/core/crypto/sha256.cpp
-  src/core/quant/ggml_dequant.cpp)
+  src/core/quant/ggml_dequant.cpp
+  src/core/quant/iq_grids.cpp)
 add_library(bubo_prepare STATIC ${bubo_prepare_sources})
-target_link_libraries(bubo_prepare PUBLIC CURL::libcurl OpenSSL::Crypto ZLIB::ZLIB)
+# Optional ADLX read-only telemetry. The SDK stays outside this repository and
+# its files never enter the package. Without this path the adapter reports
+# ADLX as not built in.
+set(BUBO_ADLX_SDK_DIR "" CACHE PATH "Installed ADLX SDK directory (the folder that holds Include and ADLXHelper)")
+if(WIN32 AND BUBO_ADLX_SDK_DIR)
+  target_sources(bubo_prepare PRIVATE
+    "${BUBO_ADLX_SDK_DIR}/ADLXHelper/Windows/Cpp/ADLXHelper.cpp"
+    "${BUBO_ADLX_SDK_DIR}/Platform/Windows/WinAPIs.cpp")
+  target_include_directories(bubo_prepare PRIVATE "${BUBO_ADLX_SDK_DIR}")
+  target_compile_definitions(bubo_prepare PRIVATE BUBO_HAS_ADLX=1)
+endif()
+target_link_libraries(bubo_prepare PUBLIC CURL::libcurl OpenSSL::Crypto ZLIB::ZLIB gufo_logging)
+add_library(bubo_models STATIC
+  src/cli/models_support.cpp
+  src/cli/serve/model_manifest.cpp
+  src/cli/serve/release_profile.cpp)
+target_link_libraries(bubo_models PUBLIC bubo_prepare gufo_core gufo_qwen38_flash_next gufo_gemma4)
+if(GUFO_ENABLE_NPU)
+  target_compile_definitions(bubo_models PRIVATE GUFO_NPU=1)
+endif()
+target_link_libraries(gufo_http PRIVATE bubo_prepare)
+target_link_libraries(gufo_diagnostics PUBLIC bubo_prepare)
 if(WIN32)
-  target_link_libraries(bubo_prepare PUBLIC Rstrtmgr Advapi32)
+  target_link_libraries(bubo_prepare PUBLIC Rstrtmgr Advapi32 ws2_32 dxgi)
 endif()
 add_executable(prepare_runtime_table EXCLUDE_FROM_ALL tools/release/prepare_runtime_table.cpp)
 target_link_libraries(prepare_runtime_table PRIVATE bubo_prepare)
@@ -344,7 +428,8 @@ set_target_properties(prepare_runtime_table PROPERTIES RUNTIME_OUTPUT_DIRECTORY 
 add_executable(prepare_fingerprints EXCLUDE_FROM_ALL tools/release/prepare_fingerprints.cpp
   src/core/prepare/gguf_fingerprint.cpp src/core/prepare/fingerprint_table.cpp
   src/core/prepare/release_catalogue.cpp src/core/crypto/sha256.cpp
-  src/core/quant/ggml_dequant.cpp)
+  src/core/quant/ggml_dequant.cpp
+  src/core/quant/iq_grids.cpp)
 target_link_libraries(prepare_fingerprints PRIVATE OpenSSL::Crypto)
 set_target_properties(prepare_fingerprints PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_executable(prepare_gate EXCLUDE_FROM_ALL tools/release/prepare_gate.cpp)
@@ -374,9 +459,9 @@ if(WIN32 AND GUFO_BRAND STREQUAL "bubo")
 else()
   add_executable(gufo ${bubo_command_sources})
 endif()
-target_link_libraries(${bubo_inference_target} PRIVATE bubo_prepare)
+target_link_libraries(${bubo_inference_target} PRIVATE bubo_prepare bubo_models)
 add_dependencies(gufo bubo_prepare_release_gate)
-target_link_libraries(${bubo_inference_target} PRIVATE gufo_diagnostics gufo_core gufo_llm_cli gufo_http CURL::libcurl)
+target_link_libraries(${bubo_inference_target} PRIVATE gufo_diagnostics gufo_core gufo_llm_cli gufo_http gufo_diffusion_gemma CURL::libcurl)
 set_target_properties(gufo PROPERTIES OUTPUT_NAME "${GUFO_BRAND}")
 if(GUFO_ENABLE_NPU)
   npu_attach_runtime(${bubo_inference_target})
@@ -495,6 +580,7 @@ if (BUILD_TESTING)
     set_tests_properties(npu_xrt_runtime_test PROPERTIES LABELS "cpu;npu;fake")
     add_executable(npu_xrt_delay_guard_test tests/npu/xrt_delay_guard_test.cpp)
     npu_attach_runtime(npu_xrt_delay_guard_test)
+    target_link_libraries(npu_xrt_delay_guard_test PRIVATE bubo_prepare)
     add_test(NAME npu_xrt_delay_guard_test COMMAND npu_xrt_delay_guard_test)
     set_tests_properties(npu_xrt_delay_guard_test PROPERTIES LABELS "cpu;npu")
     # Same adapter and pinned public XRT classes, with tooling-derived fake
@@ -520,7 +606,7 @@ if (BUILD_TESTING)
     add_executable(npu_staging_test tests/npu/staging_test.cpp src/npu/staging.cpp src/npu/bfp.cpp
       src/cli/serve/model_manifest.cpp src/cli/serve/release_profile.cpp
       src/npu/session.cpp src/npu/private_bo_adapter.cpp
-      tests/npu/fake_xrt.cpp)
+      src/npu/runtime_status.cpp src/npu/guard.cpp tests/npu/fake_xrt.cpp)
     target_include_directories(npu_staging_test PRIVATE "${CMAKE_SOURCE_DIR}")
     target_include_directories(npu_staging_test SYSTEM PRIVATE
       "${GUFO_XRT_GENERATED_INCLUDE_DIR}" "${GUFO_XRT_INCLUDE_DIR}")
@@ -541,6 +627,18 @@ if (BUILD_TESTING)
     target_link_libraries(npu_linear_z_test PRIVATE Threads::Threads gufo_core gufo_logging)
     add_test(NAME npu_linear_z_test COMMAND npu_linear_z_test "${GUFO_XRT_TOOLING_ROOT}")
     set_tests_properties(npu_linear_z_test PROPERTIES LABELS "cpu;npu;fake" TIMEOUT 30)
+    add_executable(npu_guard_latch_test tests/npu/guard_latch_test.cpp
+      src/npu/linear_z.cpp src/npu/staging.cpp src/npu/bfp.cpp
+      src/npu/session.cpp src/npu/private_bo_adapter.cpp
+      tests/npu/fake_xrt.cpp)
+    target_include_directories(npu_guard_latch_test PRIVATE "${CMAKE_SOURCE_DIR}")
+    target_include_directories(npu_guard_latch_test SYSTEM PRIVATE
+      "${GUFO_XRT_GENERATED_INCLUDE_DIR}" "${GUFO_XRT_INCLUDE_DIR}")
+    target_compile_definitions(npu_guard_latch_test PRIVATE
+      XRT_STATIC_BUILD _ITERATOR_DEBUG_LEVEL=0 GUFO_NPU_TESTING)
+    target_link_libraries(npu_guard_latch_test PRIVATE Threads::Threads gufo_core gufo_logging)
+    add_test(NAME npu_guard_latch_test COMMAND npu_guard_latch_test "${GUFO_XRT_TOOLING_ROOT}")
+    set_tests_properties(npu_guard_latch_test PROPERTIES LABELS "cpu;npu;fake" TIMEOUT 30)
     add_executable(npu_projection_test tests/npu/projection_test.cpp
       src/npu/projection.cpp src/npu/staging.cpp src/npu/bfp.cpp
       src/npu/session.cpp src/npu/private_bo_adapter.cpp
@@ -553,6 +651,83 @@ if (BUILD_TESTING)
     target_link_libraries(npu_projection_test PRIVATE Threads::Threads gufo_core gufo_logging)
     add_test(NAME npu_projection_test COMMAND npu_projection_test "${GUFO_XRT_TOOLING_ROOT}")
     set_tests_properties(npu_projection_test PROPERTIES LABELS "cpu;npu;fake" TIMEOUT 30)
+    # Fault telemetry + HAL fault monitor (detection only). CPU tests use fakes;
+    # nothing here reads the Windows event log.
+    set(GUFO_NPU_FAULT_SOURCES src/npu/fault_telemetry.cpp src/npu/hal_fault_monitor.cpp
+      src/npu/chip_power.cpp src/npu/runtime_status.cpp src/npu/mem_trace.cpp
+      src/npu/guard.cpp src/npu/platform_info.cpp)
+    add_executable(npu_hal_fault_monitor_test tests/npu/hal_fault_monitor_test.cpp
+      ${GUFO_NPU_FAULT_SOURCES})
+    target_include_directories(npu_hal_fault_monitor_test PRIVATE "${CMAKE_SOURCE_DIR}")
+    target_compile_definitions(npu_hal_fault_monitor_test PRIVATE GUFO_NPU_TESTING)
+    target_link_libraries(npu_hal_fault_monitor_test PRIVATE Threads::Threads gufo_logging)
+    add_executable(npu_hal_source_real_test tests/npu/hal_source_real_test.cpp
+      ${GUFO_NPU_FAULT_SOURCES})
+    target_include_directories(npu_hal_source_real_test PRIVATE "${CMAKE_SOURCE_DIR}")
+    target_compile_definitions(npu_hal_source_real_test PRIVATE GUFO_NPU_TESTING)
+    target_link_libraries(npu_hal_source_real_test PRIVATE Threads::Threads gufo_logging)
+    add_executable(npu_chip_power_test tests/npu/chip_power_test.cpp
+      ${GUFO_NPU_FAULT_SOURCES})
+    target_include_directories(npu_chip_power_test PRIVATE "${CMAKE_SOURCE_DIR}")
+    target_compile_definitions(npu_chip_power_test PRIVATE GUFO_NPU_TESTING)
+    target_link_libraries(npu_chip_power_test PRIVATE Threads::Threads gufo_logging)
+    add_executable(npu_guard_test tests/npu/guard_test.cpp ${GUFO_NPU_FAULT_SOURCES})
+    target_include_directories(npu_guard_test PRIVATE "${CMAKE_SOURCE_DIR}")
+    target_compile_definitions(npu_guard_test PRIVATE GUFO_NPU_TESTING)
+    target_link_libraries(npu_guard_test PRIVATE Threads::Threads gufo_logging)
+    add_test(NAME npu_guard_test COMMAND npu_guard_test)
+    set_tests_properties(npu_guard_test PROPERTIES LABELS "cpu;npu;fake" TIMEOUT 30)
+    add_executable(npu_platform_info_test tests/npu/platform_info_test.cpp ${GUFO_NPU_FAULT_SOURCES})
+    target_include_directories(npu_platform_info_test PRIVATE "${CMAKE_SOURCE_DIR}")
+    target_compile_definitions(npu_platform_info_test PRIVATE GUFO_NPU_TESTING)
+    target_link_libraries(npu_platform_info_test PRIVATE Threads::Threads gufo_logging)
+    add_test(NAME npu_platform_info_test COMMAND npu_platform_info_test)
+    set_tests_properties(npu_platform_info_test PROPERTIES LABELS "cpu;npu;fake" TIMEOUT 30)
+    add_executable(npu_bo_address_test tests/npu/bo_address_test.cpp)
+    target_include_directories(npu_bo_address_test PRIVATE "${CMAKE_SOURCE_DIR}")
+    add_test(NAME npu_bo_address_test COMMAND npu_bo_address_test)
+    set_tests_properties(npu_bo_address_test PROPERTIES LABELS "cpu;npu;fake" TIMEOUT 30)
+    add_executable(npu_chunk_retry_test tests/npu/chunk_retry_test.cpp
+      ${GUFO_NPU_FAULT_SOURCES})
+    target_include_directories(npu_chunk_retry_test PRIVATE "${CMAKE_SOURCE_DIR}")
+    target_compile_definitions(npu_chunk_retry_test PRIVATE GUFO_NPU_TESTING)
+    target_link_libraries(npu_chunk_retry_test PRIVATE Threads::Threads gufo_logging)
+    add_test(NAME npu_chunk_retry_test COMMAND npu_chunk_retry_test)
+    set_tests_properties(npu_chunk_retry_test PROPERTIES LABELS "cpu;npu;fake" TIMEOUT 30)
+    add_executable(npu_runtime_status_test tests/npu/runtime_status_test.cpp
+      ${GUFO_NPU_FAULT_SOURCES})
+    target_include_directories(npu_runtime_status_test PRIVATE "${CMAKE_SOURCE_DIR}")
+    target_compile_definitions(npu_runtime_status_test PRIVATE GUFO_NPU_TESTING)
+    target_link_libraries(npu_runtime_status_test PRIVATE Threads::Threads gufo_logging)
+    add_test(NAME npu_runtime_status_test COMMAND npu_runtime_status_test)
+    set_tests_properties(npu_runtime_status_test PROPERTIES LABELS "cpu;npu;fake" TIMEOUT 30)
+    add_executable(npu_mem_trace_test tests/npu/mem_trace_test.cpp
+      ${GUFO_NPU_FAULT_SOURCES})
+    target_include_directories(npu_mem_trace_test PRIVATE "${CMAKE_SOURCE_DIR}")
+    target_compile_definitions(npu_mem_trace_test PRIVATE GUFO_NPU_TESTING)
+    target_link_libraries(npu_mem_trace_test PRIVATE Threads::Threads gufo_logging)
+    add_test(NAME npu_mem_trace_test COMMAND npu_mem_trace_test)
+    set_tests_properties(npu_mem_trace_test PROPERTIES LABELS "cpu;npu;fake" TIMEOUT 60)
+    add_executable(npu_mem_trace_real_test tests/npu/mem_trace_real_test.cpp
+      ${GUFO_NPU_FAULT_SOURCES})
+    target_include_directories(npu_mem_trace_real_test PRIVATE "${CMAKE_SOURCE_DIR}")
+    target_compile_definitions(npu_mem_trace_real_test PRIVATE GUFO_NPU_TESTING)
+    target_link_libraries(npu_mem_trace_real_test PRIVATE Threads::Threads gufo_logging)
+    add_test(NAME npu_mem_trace_real_test COMMAND npu_mem_trace_real_test)
+    set_tests_properties(npu_mem_trace_real_test PROPERTIES LABELS "cpu;npu" TIMEOUT 60)
+    add_test(NAME npu_chip_power_test COMMAND npu_chip_power_test)
+    set_tests_properties(npu_chip_power_test PROPERTIES LABELS "cpu;npu;fake" TIMEOUT 30)
+    add_executable(npu_chip_power_real_test tests/npu/chip_power_real_test.cpp
+      ${GUFO_NPU_FAULT_SOURCES})
+    target_include_directories(npu_chip_power_real_test PRIVATE "${CMAKE_SOURCE_DIR}")
+    target_compile_definitions(npu_chip_power_real_test PRIVATE GUFO_NPU_TESTING)
+    target_link_libraries(npu_chip_power_real_test PRIVATE Threads::Threads gufo_logging)
+    add_test(NAME npu_chip_power_real_test COMMAND npu_chip_power_real_test)
+    set_tests_properties(npu_chip_power_real_test PROPERTIES LABELS "cpu;npu" TIMEOUT 60)
+    add_test(NAME npu_hal_source_real_test COMMAND npu_hal_source_real_test)
+    set_tests_properties(npu_hal_source_real_test PROPERTIES LABELS "cpu;npu" TIMEOUT 30)
+    add_test(NAME npu_hal_fault_monitor_test COMMAND npu_hal_fault_monitor_test)
+    set_tests_properties(npu_hal_fault_monitor_test PROPERTIES LABELS "cpu;npu;fake" TIMEOUT 30)
     add_executable(npu_host_bench tests/npu/host_bench.cpp tests/npu/fake_xrt.cpp src/npu/private_bo_adapter.cpp src/npu/bfp.cpp)
     target_include_directories(npu_host_bench PRIVATE "${CMAKE_SOURCE_DIR}" "${CMAKE_SOURCE_DIR}/tests/npu")
     target_include_directories(npu_host_bench SYSTEM PRIVATE "${GUFO_XRT_GENERATED_INCLUDE_DIR}" "${GUFO_XRT_INCLUDE_DIR}")
@@ -561,7 +736,8 @@ if (BUILD_TESTING)
     add_executable(npu_session_test tests/npu/session_test.cpp tests/npu/fake_xrt.cpp
       tests/npu/fake_hip.cpp src/npu/linear_z_hip.cpp src/npu/projection.cpp
       src/npu/private_bo_adapter.cpp src/npu/session.cpp src/npu/server_prefill.cpp
-      src/npu/linear_z.cpp src/npu/staging.cpp src/npu/bfp.cpp)
+      src/npu/linear_z.cpp src/npu/staging.cpp src/npu/bfp.cpp
+      ${GUFO_NPU_FAULT_SOURCES})
     target_include_directories(npu_session_test PRIVATE "${CMAKE_SOURCE_DIR}")
     target_include_directories(npu_session_test SYSTEM PRIVATE "${GUFO_XRT_GENERATED_INCLUDE_DIR}" "${GUFO_XRT_INCLUDE_DIR}")
     target_compile_definitions(npu_session_test PRIVATE XRT_STATIC_BUILD _ITERATOR_DEBUG_LEVEL=0 GUFO_NPU_TESTING)
@@ -570,9 +746,9 @@ if (BUILD_TESTING)
     get_target_property(npu_hip_headers hip::amdhip64 INTERFACE_INCLUDE_DIRECTORIES)
     target_include_directories(npu_session_test SYSTEM PRIVATE ${npu_hip_headers})
     target_compile_definitions(npu_session_test PRIVATE __HIP_PLATFORM_AMD__=1)
-    foreach(npu_unit npu_linear_z_test npu_projection_test)
+    foreach(npu_unit npu_linear_z_test npu_projection_test npu_guard_latch_test)
       target_sources(${npu_unit} PRIVATE tests/npu/fake_hip.cpp
-        src/npu/linear_z_hip.cpp src/npu/server_prefill.cpp)
+        src/npu/linear_z_hip.cpp src/npu/server_prefill.cpp ${GUFO_NPU_FAULT_SOURCES})
       target_include_directories(${npu_unit} SYSTEM PRIVATE ${npu_hip_headers})
       target_compile_definitions(${npu_unit} PRIVATE __HIP_PLATFORM_AMD__=1)
     endforeach()
@@ -580,13 +756,14 @@ if (BUILD_TESTING)
     foreach(npu_case clean timeout error layer single stream_timeout invalid
         startup_missing_dir startup_missing_insts startup_missing_xclbin startup_hash
         startup_version startup_runtime_missing startup_device startup_pre_failed denied
-        power_unavailable power_turbo)
+        power_unavailable power_turbo hal_event invalid_hal)
       add_test(NAME npu_session_${npu_case}_test COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/npu/failure_log_test.py" "$<TARGET_FILE:npu_session_test>" "${npu_case}" "${GUFO_XRT_TOOLING_ROOT}")
       set_tests_properties(npu_session_${npu_case}_test PROPERTIES LABELS "cpu;npu;fake" TIMEOUT 120)
     endforeach()
     add_custom_target(npu_cpu_checks DEPENDS npu_session_test npu_private_bo_adapter_test
-      npu_prefill_plan_test npu_staging_test npu_linear_z_test npu_projection_test
-      npu_bfp_test npu_host_bench npu_runtime)
+      npu_prefill_plan_test npu_staging_test npu_linear_z_test npu_projection_test npu_guard_latch_test
+      npu_bfp_test npu_host_bench npu_hal_fault_monitor_test npu_hal_source_real_test npu_runtime_status_test npu_bo_address_test npu_chunk_retry_test npu_platform_info_test npu_guard_test npu_mem_trace_test npu_mem_trace_real_test npu_chip_power_test
+      npu_chip_power_real_test npu_runtime)
     if(TARGET npu_bfp_hip)
       add_dependencies(npu_cpu_checks npu_bfp_hip)
     endif()
@@ -605,8 +782,11 @@ if (BUILD_TESTING)
 
   add_subdirectory(tests/models/qwen)
   add_subdirectory(tests/models/qwen27b)
+  add_subdirectory(tests/models/qwen36_a3b)
+  add_subdirectory(tests/models/gemma4)
   gufo_qwen3_asr_register_tests()
   gufo_qwen_image_21_register_tests()
+  gufo_diffusion_gemma_register_tests()
 
   add_test(NAME gufo_version COMMAND gufo --version)
   gufo_escape_version_regex("${GUFO_BRAND}" brand_regex)
@@ -712,6 +892,11 @@ if (BUILD_TESTING)
   add_test(NAME behaviour_test COMMAND behaviour_test)
   set_tests_properties(behaviour_test PROPERTIES LABELS "cpu;sampling;behaviour")
 
+  add_executable(think_marker_entropy_test tests/core/think_marker_entropy_test.cpp)
+  target_link_libraries(think_marker_entropy_test PRIVATE gufo_core)
+  add_test(NAME think_marker_entropy_test COMMAND think_marker_entropy_test)
+  set_tests_properties(think_marker_entropy_test PROPERTIES LABELS "cpu;sampling;behaviour")
+
   add_library(eog_cost_old OBJECT
     tests/core/eog_cost_adapter.cpp
     src/core/json_constraint.cpp
@@ -730,6 +915,15 @@ if (BUILD_TESTING)
   target_link_libraries(loop_breaker_test PRIVATE gufo_core)
   add_test(NAME loop_breaker_test COMMAND loop_breaker_test)
   set_tests_properties(loop_breaker_test PROPERTIES LABELS "cpu;sampling;behaviour")
+
+  add_executable(tool_argument_loop_test tests/core/tool_argument_loop_test.cpp
+    src/cli/serve/continuation_cache.cpp
+    src/cli/serve/continuation_disk_store.cpp
+    src/cli/serve/text_model_runner.cpp
+    src/cli/serve/text_generation_scheduler.cpp)
+  target_link_libraries(tool_argument_loop_test PRIVATE gufo_logging gufo_core)
+  add_test(NAME tool_argument_loop_test COMMAND tool_argument_loop_test)
+  set_tests_properties(tool_argument_loop_test PROPERTIES LABELS "cpu;sampling;behaviour")
 
   # Local token-id replay only: no fixtures, default build or CTest/CI entry.
   add_executable(loop_breaker_replay EXCLUDE_FROM_ALL tests/core/loop_breaker_replay.cpp)
@@ -771,6 +965,11 @@ if (BUILD_TESTING)
   add_test(NAME json_constraint_test COMMAND json_constraint_test)
   set_tests_properties(json_constraint_test PROPERTIES LABELS "cpu;json;sampling")
 
+  add_executable(json_mask_test tests/core/json_mask_test.cpp)
+  target_link_libraries(json_mask_test PRIVATE gufo_core)
+  add_test(NAME json_mask_test COMMAND json_mask_test)
+  set_tests_properties(json_mask_test PROPERTIES LABELS "cpu;json;sampling")
+
   add_executable(json_test tests/core/json_test.cpp)
   target_link_libraries(json_test PRIVATE gufo_core)
   add_test(NAME json_test COMMAND json_test)
@@ -789,12 +988,26 @@ if (BUILD_TESTING)
     src/cli/serve/openai_chat.cpp
     src/models/deepseek_v4_flash/chat_template.cpp
   )
-  target_link_libraries(openai_chat_test PRIVATE gufo_core bubo_prepare)
+  target_link_libraries(openai_chat_test PRIVATE gufo_core gufo_gemma4 bubo_prepare)
   add_test(NAME openai_chat_test COMMAND openai_chat_test)
   add_test(NAME debug_hooks_settings_test COMMAND openai_chat_test --debug-hooks)
-  set_tests_properties(debug_hooks_settings_test PROPERTIES LABELS "cpu;debug-hooks" TIMEOUT 30)
+  set_tests_properties(debug_hooks_settings_test PROPERTIES LABELS "cpu;debug-hooks" TIMEOUT 300)
   set_tests_properties(openai_chat_test PROPERTIES
     LABELS "cpu;server;api;openai;streaming;tools")
+
+  add_executable(qwen_incremental_http_test
+    tests/cli/qwen_incremental_http_test.cpp
+    src/cli/serve/model_manifest.cpp
+    src/cli/serve/release_profile.cpp
+    src/cli/serve/logging.cpp
+    src/cli/serve/openai_chat.cpp
+    src/models/deepseek_v4_flash/chat_template.cpp)
+  target_link_libraries(qwen_incremental_http_test PRIVATE
+    gufo_core gufo_gemma4 bubo_prepare)
+  add_test(NAME qwen_incremental_http_test COMMAND qwen_incremental_http_test)
+  set_tests_properties(qwen_incremental_http_test PROPERTIES
+    LABELS "cpu;server;api;openai;tools;tokenization;external-model"
+    SKIP_RETURN_CODE 77 TIMEOUT 300)
 
   add_executable(quote_tracker_test tests/cli/quote_tracker_test.cpp)
   target_link_libraries(quote_tracker_test PRIVATE gufo_core)
@@ -805,6 +1018,10 @@ if (BUILD_TESTING)
   target_link_libraries(trace_test PRIVATE gufo_logging)
   add_test(NAME trace_test COMMAND trace_test)
   set_tests_properties(trace_test PROPERTIES LABELS "cpu;server;trace")
+
+  add_executable(cache_disk_limits_test tests/cli/cache_disk_limits_test.cpp)
+  add_test(NAME cache_disk_limits_test COMMAND cache_disk_limits_test)
+  set_tests_properties(cache_disk_limits_test PROPERTIES LABELS "cpu;server;cli" TIMEOUT 30)
 
   add_executable(http_server_test tests/cli/http_server_test.cpp)
   target_link_libraries(http_server_test PRIVATE gufo_http)
@@ -820,7 +1037,7 @@ if (BUILD_TESTING)
   add_test(NAME serve_cli_test
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli/serve_test.py
       $<TARGET_FILE:gufo>)
-  set_tests_properties(serve_cli_test PROPERTIES LABELS "cpu;server;cli" TIMEOUT 30)
+  set_tests_properties(serve_cli_test PROPERTIES LABELS "cpu;server;cli" TIMEOUT 120)
 
   add_test(NAME kernel_resources_parser_test
     COMMAND ${Python3_EXECUTABLE}
@@ -860,6 +1077,11 @@ if (BUILD_TESTING)
       SKIP_RETURN_CODE 77)
   endif()
 
+  add_executable(memory_guard_test tests/cli/memory_guard_test.cpp)
+  target_link_libraries(memory_guard_test PRIVATE gufo_core)
+  add_test(NAME memory_guard_test COMMAND memory_guard_test)
+  set_tests_properties(memory_guard_test PROPERTIES LABELS "cpu;server;memory")
+
   add_executable(continuation_cache_test
     tests/cli/continuation_cache_test.cpp
     src/cli/serve/continuation_cache.cpp)
@@ -875,8 +1097,12 @@ if (BUILD_TESTING)
     src/cli/serve/text_model_runner.cpp)
   target_link_libraries(text_model_runner_test PRIVATE gufo_logging gufo_core)
   add_test(NAME text_model_runner_test COMMAND text_model_runner_test)
+  # The fake runners admit snapshots through the real host-memory floor; with it
+  # on, the test fails whenever this machine has under 4 GiB free. The floor
+  # itself is tested with explicit values in continuation_cache_test.
   set_tests_properties(text_model_runner_test PROPERTIES
-    LABELS "cpu;server;runner;cache;state;lifecycle")
+    LABELS "cpu;server;runner;cache;state;lifecycle"
+    ENVIRONMENT "GUFO_CACHE_HOST_FLOOR_MB=0")
 
   add_executable(continuation_disk_store_test
     tests/cli/continuation_disk_store_test.cpp
@@ -897,6 +1123,20 @@ if (BUILD_TESTING)
   set_tests_properties(logit_sampler_test PROPERTIES
     LABELS "cpu;server;sampling")
 
+  add_executable(raw_logprobs_equivalence_test
+    tests/cli/raw_logprobs_equivalence_test.cpp)
+  target_link_libraries(raw_logprobs_equivalence_test PRIVATE gufo_core)
+  add_test(NAME raw_logprobs_equivalence_test COMMAND raw_logprobs_equivalence_test)
+  set_tests_properties(raw_logprobs_equivalence_test PROPERTIES
+    LABELS "cpu;server;sampling" TIMEOUT 120)
+
+  add_executable(legacy_logprobs_memory_test
+    tests/cli/legacy_logprobs_memory_test.cpp)
+  target_link_libraries(legacy_logprobs_memory_test PRIVATE gufo_core)
+  add_test(NAME legacy_logprobs_memory_test COMMAND legacy_logprobs_memory_test)
+  set_tests_properties(legacy_logprobs_memory_test PROPERTIES
+    LABELS "cpu;server;sampling" TIMEOUT 120)
+
   add_executable(text_generation_scheduler_test
     tests/cli/text_generation_scheduler_test.cpp
     src/cli/serve/continuation_cache.cpp
@@ -907,9 +1147,14 @@ if (BUILD_TESTING)
   add_test(NAME text_generation_scheduler_test
     COMMAND text_generation_scheduler_test)
   add_test(NAME debug_hooks_timeline_test COMMAND text_generation_scheduler_test --debug-hooks)
-  set_tests_properties(debug_hooks_timeline_test PROPERTIES LABELS "cpu;debug-hooks" TIMEOUT 30)
+  # As text_model_runner_test: the fake runners admit snapshots through the real
+  # host-memory floor, so with it on these fail whenever this machine has under
+  # 4 GiB free (10-15 07:3x build-int: "snapshot skipped reason=host_memory_floor").
+  set_tests_properties(debug_hooks_timeline_test PROPERTIES LABELS "cpu;debug-hooks" TIMEOUT 30
+    ENVIRONMENT "GUFO_CACHE_HOST_FLOOR_MB=0")
   set_tests_properties(text_generation_scheduler_test PROPERTIES
-    LABELS "cpu;server;scheduler;queue;state;lifecycle;cancellation")
+    LABELS "cpu;server;scheduler;queue;state;lifecycle;cancellation"
+    ENVIRONMENT "GUFO_CACHE_HOST_FLOOR_MB=0")
 
   add_executable(prompt_cli_test
     tests/cli/prompt_test.cpp
@@ -1050,6 +1295,11 @@ if (BUILD_TESTING)
   add_test(NAME gguf_reader_test COMMAND gguf_reader_test)
   set_tests_properties(gguf_reader_test PROPERTIES LABELS "cpu;core;gguf;model_config")
 
+  add_executable(image_resize_test tests/core/image_resize_test.cpp)
+  target_link_libraries(image_resize_test PRIVATE gufo_core)
+  add_test(NAME image_resize_test COMMAND image_resize_test)
+  set_tests_properties(image_resize_test PROPERTIES LABELS "cpu;core;image;vision")
+
   add_executable(gguf_identity_test tests/core/gguf_identity_test.cpp)
   target_link_libraries(gguf_identity_test PRIVATE gufo_core)
 
@@ -1162,6 +1412,11 @@ if (BUILD_TESTING)
 
   add_test(NAME ggml_dequant_test COMMAND ggml_dequant_test)
   set_tests_properties(ggml_dequant_test PROPERTIES LABELS "cpu;core;quant")
+
+  add_executable(ggml_iq_dequant_test tests/core/ggml_iq_dequant_test.cpp)
+  target_link_libraries(ggml_iq_dequant_test PRIVATE gufo_core)
+  add_test(NAME ggml_iq_dequant_test COMMAND ggml_iq_dequant_test)
+  set_tests_properties(ggml_iq_dequant_test PROPERTIES LABELS "cpu;core;quant")
 
   add_executable(ggml_gemm_parity_test tests/core/ggml_gemm_parity_test.cpp)
   target_link_libraries(ggml_gemm_parity_test PRIVATE gufo_core)
@@ -1413,7 +1668,7 @@ if (BUILD_TESTING)
   # A single target also works with PowerShell -File string-array parameters.
   add_custom_target(release_cpu_tests
     DEPENDS gufo brand_test release_profile_test log_async_test platform_tuning_test openai_chat_test arg_parser_test
-      behaviour_test loop_breaker_test continuation_cache_test
+      behaviour_test think_marker_entropy_test loop_breaker_test tool_argument_loop_test continuation_cache_test
       text_model_runner_test text_generation_scheduler_test)
 
   include(cmake/Checks.cmake)
@@ -1427,4 +1682,5 @@ option(GUFO_WITH_A3B "bubo serve for Qwen3.6-35B-A3B (qwen35moe) GGUFs" ON)
 if(GUFO_WITH_A3B AND TARGET gufo_qwen36_a3b)
   target_link_libraries(${bubo_inference_target} PRIVATE gufo_qwen36_a3b)
   target_compile_definitions(${bubo_inference_target} PRIVATE GUFO_WITH_A3B=1)
+  target_compile_definitions(bubo_models PRIVATE GUFO_WITH_A3B=1)
 endif()

@@ -279,20 +279,28 @@ DownloadResult Download(const Entry& entry,
     if (partial.prefix) {
       result.prefix_hash_bytes = HashInto(
           path, *hasher, partial.prefix,
-          [&](auto, auto) {
+          [&](std::uint64_t done, std::uint64_t) {
             if (cancelled())
               throw std::runtime_error("cancelled while hashing saved prefix");
             if (std::chrono::steady_clock::now() - begun >= options.max_time)
               throw std::runtime_error(
                   "per-file time cap during saved-prefix hash");
+            // Hashing a long saved prefix is not silence: report the
+            // verified bytes, up to the resume offset.
+            if (options.progress)
+              options.progress(std::min(done, partial.prefix), entry.size);
           },
           writer.NativeHandle());
     }
     writer.Seek(partial.prefix);
+    // Bytes covered by the saved checkpoint. A stall or a crash in a long
+    // response keeps everything up to the last checkpoint_bytes boundary.
+    std::uint64_t checkpointed = 0;
     const auto checkpoint = [&] {
       writer.Flush();
       Save(entry, path, partial);
       result.bytes = partial.prefix;
+      checkpointed = partial.prefix;
     };
     const auto restart = [&] {
       partial = {};
@@ -561,6 +569,17 @@ DownloadResult Download(const Entry& entry,
               hasher->Update(bytes);
               partial.prefix += bytes.size();
               response_bytes += bytes.size();
+              if (options.checkpoint_bytes &&
+                  partial.prefix - std::min(checkpointed, partial.prefix) >=
+                      options.checkpoint_bytes) {
+                try {
+                  checkpoint();
+                } catch (const std::exception& storage_error) {
+                  error_code = 7;
+                  error = storage_error.what();
+                  return false;
+                }
+              }
               if (options.progress)
                 options.progress(partial.prefix, entry.size);
               return true;

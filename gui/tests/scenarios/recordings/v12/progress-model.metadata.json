@@ -1,0 +1,8 @@
+{
+  "_source": "fixture",
+  "note": "Observed complete fourth shard; screenshots arrange this observation within the real full-package plan. Rate is the measured whole-transfer average; remaining time is a projection.",
+  "observed_source": "C:/bubo/evidence/capture-10/20261026-104717-prepare-plain.stdout.log",
+  "observed_sha256": "a313d0df8a514b54f7ff6cddae282bbf3d37e340879088b348baea8eb259cbb4",
+  "copied_from": "v12/status-main.json",
+  "fixture_sha256": "14e18f0c9ca3b2ef916cf7dc1d405221bc56c5c792bfebf3a246910544d39213"
+}

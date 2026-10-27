@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "product": "bubo",
+  "channel": "stable",
+  "version": "0.1.1",
+  "tag": "v0.1.1",
+  "commit": "129f723fb238211868099255d9468b896cc6865a",
+  "released": "2026-10-25T15:34:48Z",
+  "min_updatable_from": "0.1.0",
+  "via": null,
+  "assets": [
+    {
+      "name": "bubo-v0.1.1-windows-x64-gfx1151.zip",
+      "kind": "package",
+      "url": "https://github.com/haloforge-labs/bubo/releases/download/v0.1.1/bubo-v0.1.1-windows-x64-gfx1151.zip",
+      "size": 66131579,
+      "sha256": "9a5123d701ad51488e8c2832df5c63d6ac4eaca50d05cfd74617138ec6286c96",
+      "unpacked_bytes": 236237490,
+      "top_folder": "bubo-v0.1.1-windows-x64-gfx1151"
+    }
+  ],
+  "notes": {
+    "summary": "The Bubo app. Pick a model, press Start, and watch memory and requests. Update Bubo with one click.",
+    "url": "https://github.com/haloforge-labs/bubo/releases/tag/v0.1.1"
+  },
+  "runtime": {
+    "id": "rocm-10.0.0-gfx1151",
+    "changed": false,
+    "download_bytes": 0
+  },
+  "models": {
+    "changed": false,
+    "needs_prepare": []
+  },
+  "settings": {
+    "migrate": false
+  },
+  "advisories": [],
+  "restart_required": true
+}

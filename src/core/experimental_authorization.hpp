@@ -2,14 +2,20 @@
 #ifndef GUFO_CORE_EXPERIMENTAL_AUTHORIZATION_HPP_
 #define GUFO_CORE_EXPERIMENTAL_AUTHORIZATION_HPP_
 
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
 
+namespace gufo::json {
+class Value;
+}
 namespace gufo::server {
 struct ReleaseInputs;
 struct ReleaseResolution;
 ReleaseResolution ResolveReleaseSettings(const ReleaseInputs&);
+ReleaseResolution ResolveReleaseSettings(const ReleaseInputs&,
+                                         std::span<const json::Value>);
 }  // namespace gufo::server
 
 namespace gufo::core {
@@ -39,6 +45,8 @@ public:
 private:
   friend server::ReleaseResolution server::ResolveReleaseSettings(
       const server::ReleaseInputs&);
+  friend server::ReleaseResolution server::ResolveReleaseSettings(
+      const server::ReleaseInputs&, std::span<const json::Value>);
   ExperimentalAuthorization(ExperimentalFeature feature, bool allowed,
                             std::string reason)
       : feature_(feature), allowed_(allowed), reason_(std::move(reason)) {}

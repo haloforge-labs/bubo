@@ -102,17 +102,49 @@ int main() {
           (std::filesystem::current_path() / "j3-args-missing-install")
               .string();
       assert(!std::filesystem::exists(destination));
+      const auto probe_root = destination + "-root";
+      assert(!std::filesystem::exists(probe_root));
       const std::array<const char*, 6> runtime_probe{
           "runtime",           "--offline", "--runtime-dir",
-          destination.c_str(), "--output",  destination.c_str()};
+          destination.c_str(), "--output",  probe_root.c_str()};
+#ifdef _WIN32
+      // --runtime-dir is a plain folder: no bubo.exe or engine copy is
+      // required there (the old identity check is gone). An offline run with
+      // an empty cache stops before any write, with a cache error.
+      Run(runtime_probe, test.local, out, err);
+      assert(err.str().find("identical bubo.exe") == std::string::npos);
+      assert(err.str().find("different bubo") == std::string::npos);
+      // A relative runtime folder is refused with a plain message.
+      std::ostringstream relative_out, relative_err;
+      const std::array<const char*, 7> relative_probe{
+          "runtime", "--offline", "--runtime-dir",   "relative-runtime-dir",
+          "--yes",   "--output",  probe_root.c_str()};
+      assert(Run(relative_probe, test.local, relative_out, relative_err) == 2);
+      assert(relative_err.str().find("absolute local path") !=
+             std::string::npos);
+      assert(!std::filesystem::exists("relative-runtime-dir"));
+#else
       expected_code = 2;
       assert(Run(runtime_probe, test.local, out, err) == expected_code);
-#ifdef _WIN32
-      assert(err.str().find("identical bubo.exe") != std::string::npos);
-#else
       assert(err.str().find("requires Windows") != std::string::npos);
 #endif
+      assert(!std::filesystem::exists(probe_root + "/runtime"));
       assert(!std::filesystem::exists(destination));
+    } else if (test.code == 4) {
+      // The model gate is closed in the release (notice bundle embedded), so
+      // a real Run of an accepted line reaches the free-space check and, on a
+      // large disk, the network. Execute a hermetic probe instead: --offline
+      // into a job-contained directory fails with E4 before any disk or
+      // network step. The argument grammar itself is asserted below.
+      const auto root =
+          (std::filesystem::current_path() / "args-offline-root").string();
+      std::filesystem::create_directories(root);
+      const std::array<const char*, 4> offline_probe{
+          test.step == Step::Model ? "model" : "all", "--offline", "--output",
+          root.c_str()};
+      assert(Run(offline_probe, test.local, out, err) == expected_code);
+      assert(err.str().find("offline: missing") != std::string::npos);
+      assert(out.str().empty());
     } else
       assert(Run(test.args, test.local, out, err) == expected_code);
     if (test.code != 2) {
@@ -161,6 +193,14 @@ int main() {
   const auto runtime = Parse(runtime_paths, "C:\\Local");
   assert(runtime && runtime.options.runtime_dir == "D:\\ROCm" &&
          runtime.options.cache_dir == "D:\\Cache");
+  const std::array<const char*, 3> custom_output{"runtime", "--output",
+                                                 "D:\\Bubo Data"};
+  const auto custom_runtime = Parse(custom_output, "C:\\Local");
+  assert(custom_runtime && custom_runtime.options.root == "D:\\Bubo Data" &&
+         custom_runtime.options.local_app_data == "C:\\Local" &&
+         custom_runtime.options.runtime_dir.empty());
+  std::cout << "PASS: prepare_output_preserves_process_runtime_location "
+               "(1 case)\n";
   std::cout << "PASS: prepare argument matrix (" << cases.size()
             << " cases), UTF-8 paths, defaults, production OPEN gate and exit "
                "codes\n";

@@ -6,8 +6,10 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <array>
 #include <bit>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -18,6 +20,7 @@
 #include <utility>
 #include <vector>
 
+#include "bo_address_table.hpp"
 #include "src/core/crypto/sha256.hpp"
 #include "xrt/xrt_bo.h"
 #include "xrt/xrt_device.h"
@@ -34,6 +37,26 @@ constexpr char kBinHash[] =
     "d31ceb12b0b62dcbb2e32d1ae73f2125b3fe15871b8570a1c89372f3c3fb410e";
 constexpr char kInstHash[] =
     "bfec14665c6bc0bda9c8abd2536172b9459a3e234c7890faa96b6c9ecbda8a90";
+
+// Read once per adapter (process environment only), not per dispatch.
+bool WeightGuardFromEnvironment() {
+  const char* text = std::getenv("GUFO_NPU_WEIGHT_GUARD");
+  return text != nullptr && std::string_view(text) == "1";
+}
+// FNV-1a over the first and last 4 KiB: cheap, catches reuse of an address.
+std::uint64_t Fingerprint(std::span<const std::byte> b) {
+  constexpr std::size_t kEdge = 4096;
+  std::uint64_t hash = 14695981039346656037ULL;
+  const auto mix = [&](std::span<const std::byte> part) {
+    for (const auto byte : part) {
+      hash ^= static_cast<std::uint8_t>(byte);
+      hash *= 1099511628211ULL;
+    }
+  };
+  mix(b.first(std::min(kEdge, b.size())));
+  mix(b.last(std::min(kEdge, b.size())));
+  return hash;
+}
 
 void Require(bool valid, const char* message,
              ErrorKind kind = ErrorKind::Validation) {
@@ -114,8 +137,45 @@ struct PrivateBoAdapter::Impl {
 
   struct Weight {
     std::unique_ptr<xrt::bo> bo;
+    std::uint64_t fingerprint = 0;  // GUFO_NPU_WEIGHT_GUARD only
   };
+  // Keyed by the caller's vector data pointer. The key does not say whether
+  // the bytes behind it changed: a different weight vector that reuses the
+  // address of a freed one is NOT re-sent by ExecuteBatch/SetResidentInputs
+  // (PrepareWeight on a known address does re-copy). The guard below is the
+  // optional check; default behaviour is unchanged.
   std::map<const std::byte*, Weight> weights;
+  // Device address of every BO (log-only, fail-open): published as an
+  // immutable snapshot so the HAL monitor thread can resolve a fault address.
+  std::vector<BoEntry> table;
+  unsigned weight_index = 0;
+  void Record(const char* kind, unsigned index, xrt::bo* bo,
+              std::uint64_t size) noexcept {
+    BoEntry entry;
+    entry.kind = kind;
+    entry.index = index;
+    entry.size = size;
+    try {
+      if (bo) {
+        const std::uint64_t address = bo->address();
+        entry.address = address;
+        entry.known = address != 0;  // 0 means "no device address": na
+      }
+    } catch (...) {
+    }
+    try {
+      table.push_back(entry);
+    } catch (...) {
+    }
+  }
+  void Publish() noexcept {
+    try {
+      PublishBoTable(std::make_shared<const BoTable>(BoTable{table}));
+    } catch (...) {
+    }
+  }
+  std::uint64_t stale_repairs = 0;
+  const bool weight_guard = WeightGuardFromEnvironment();
   explicit Impl(std::chrono::milliseconds timeout) : timeout(timeout) {}
   template<class F>
   auto Call(const std::string&, F&& f) {
@@ -229,6 +289,17 @@ struct PrivateBoAdapter::Impl {
         runs[i]->set_arg(slots[j], *bos[j]);
       runs[i]->set_arg(5, *outputs[i]);
     }
+    // BO address table: every fixed BO, once.
+    static constexpr const char* kinds[6] = {"instr", "a",       "b",
+                                             "c",     "scratch", "scratch"};
+    static constexpr unsigned indexes[6] = {0, 0, 0, 0, 0, 1};
+    for (std::size_t i = 0; i < bos.size(); ++i)
+      Record(kinds[i], indexes[i], bos[i].get(), sizes[i]);
+    Record("heartbeat_a", 0, heartbeat_a.get(), kABytes);
+    Record("heartbeat_b", 0, heartbeat_b.get(), kBBytes);
+    for (std::size_t i = 0; i < outputs.size(); ++i)
+      Record("output", static_cast<unsigned>(i), outputs[i].get(), kCBytes);
+    Publish();
   }
 };
 
@@ -270,6 +341,8 @@ void PrivateBoAdapter::PrepareWeight(std::span<const std::byte> b) {
   if (auto it = impl_->weights.find(b.data()); it != impl_->weights.end()) {
     std::memcpy(it->second.bo->map(), b.data(), b.size());
     it->second.bo->sync(XCL_BO_SYNC_BO_TO_DEVICE, kBBytes, 0);
+    if (impl_->weight_guard)
+      it->second.fingerprint = Fingerprint(b);
     return;
   }
   auto bo = std::make_unique<xrt::bo>(
@@ -279,7 +352,25 @@ void PrivateBoAdapter::PrepareWeight(std::span<const std::byte> b) {
   Require(host != nullptr, "weight BO map failed");
   std::memcpy(host, b.data(), b.size());
   bo->sync(XCL_BO_SYNC_BO_TO_DEVICE, kBBytes, 0);
-  impl_->weights.emplace(b.data(), Impl::Weight{std::move(bo)});
+  impl_->Record("weight", impl_->weight_index++, bo.get(), kBBytes);
+  impl_->Publish();  // also covers a weight BO created lazily after load
+  impl_->weights.emplace(
+      b.data(),
+      Impl::Weight{std::move(bo), impl_->weight_guard ? Fingerprint(b) : 0});
+}
+// Guard: a known address whose bytes changed is re-sent (PrepareWeight copies
+// into the existing buffer). Off by default.
+void PrivateBoAdapter::RefreshIfStale(std::span<const std::byte> b) {
+  if (!impl_->weight_guard)
+    return;
+  const auto it = impl_->weights.find(b.data());
+  if (it == impl_->weights.end() || it->second.fingerprint == Fingerprint(b))
+    return;
+  ++impl_->stale_repairs;
+  PrepareWeight(b);
+}
+std::uint64_t PrivateBoAdapter::StaleWeightRepairs() const noexcept {
+  return impl_->stale_repairs;
 }
 void PrivateBoAdapter::ExecuteBatch(
     std::span<const std::byte> a,
@@ -294,6 +385,8 @@ void PrivateBoAdapter::ExecuteBatch(
     Require(b.size() == kBBytes, "B byte length mismatch");
     if (!impl_->weights.contains(reinterpret_cast<const std::byte*>(b.data())))
       PrepareWeight(std::as_bytes(std::span(b)));
+    else
+      RefreshIfStale(std::as_bytes(std::span(b)));
   }
   impl_->Fill(1, a);  // once for all slices, exactly as the fork's Process()
   std::size_t launched = 0, reaped = 0;
@@ -346,6 +439,8 @@ void PrivateBoAdapter::SetResidentInputs(std::span<const std::byte> a,
           "A/B byte length mismatch");
   if (!impl_->weights.contains(b.data()))
     PrepareWeight(b);
+  else
+    RefreshIfStale(b);
   if (copy_a)
     impl_->Fill(1, a);
   impl_->run->set_arg(4, *impl_->weights.at(b.data()).bo);
@@ -382,6 +477,34 @@ bool PrivateBoAdapter::DmaPossible() const noexcept {
 }
 bool PrivateBoAdapter::Failed() const noexcept {
   return impl_->failed;
+}
+std::vector<const void*> PrivateBoAdapter::SamplePages() {
+  constexpr std::size_t kPage = 4096;
+  std::vector<const void*> pages;
+  if (impl_->weights.empty())
+    return pages;  // weights are prepared after start-up; try again later
+  const auto add = [&](const std::byte* base, std::size_t size,
+                       std::size_t where) {
+    if (base && size > kPage)
+      pages.push_back(base + ((where % size) & ~(kPage - 1)));
+  };
+  add(impl_->maps[1], kABytes, 0);
+  add(impl_->maps[1], kABytes, kABytes / 2);
+  add(impl_->output_maps[0], kCBytes, 0);
+  add(impl_->output_maps[0], kCBytes, kCBytes / 2);
+  const std::size_t count = impl_->weights.size();
+  const std::size_t picks = std::min<std::size_t>(4, count);
+  std::size_t index = 0, next = 0;
+  for (auto& entry : impl_->weights) {
+    const std::size_t wanted = picks > 1 ? next * (count - 1) / (picks - 1) : 0;
+    if (index == wanted && next < picks) {
+      add(static_cast<const std::byte*>(entry.second.bo->map()), kBBytes,
+          kBBytes / 2);
+      ++next;
+    }
+    ++index;
+  }
+  return pages;
 }
 std::string PrivateBoAdapter::PowerMode() {
   return impl_->device->get_info<xrt::info::device::platform>();

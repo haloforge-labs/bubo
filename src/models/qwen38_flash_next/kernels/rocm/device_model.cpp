@@ -525,13 +525,13 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
   const auto head = [&](const TensorRef& t) {
     return t.type == core::GgmlType::kQ6_K ? up.CopyQ6KAsQ8_0(t) : up.Copy(t);
   };
-  // Tuning::hot_first_upload: allocation order decides placement. Once most
-  // of the GPU memory is taken, later allocations get slower memory (up to
-  // ~20% lower GEMV bandwidth at the tail on gfx1151 under Windows).
-  // Everything read in full on every token goes first: the output head,
-  // then every dense projection (target and MTP). The routed experts follow
-  // (each byte is read by a few percent of tokens), and the token embedding,
-  // a row gather, comes last.
+
+
+
+
+
+
+
   const bool hot_first = platform::PlatformTuning().hot_first_upload;
   const bool tied = w.output.data == w.token_embd.data;
   if (tied || !hot_first) {

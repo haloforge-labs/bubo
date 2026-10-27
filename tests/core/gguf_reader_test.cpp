@@ -372,6 +372,62 @@ void TestSplitGgufDiscovery() {
   std::filesystem::remove_all(temp_dir);
 }
 
+void TestOverlayTensors() {
+  const auto temp_dir = std::filesystem::temp_directory_path() / ("gufo-gguf-overlay-" + std::to_string(static_cast<long>(getpid())));
+  std::filesystem::create_directories(temp_dir);
+  const auto base_path = temp_dir / "base.gguf";
+  const auto overlay_path = temp_dir / "overlay.gguf";
+  const auto partial_path = temp_dir / "partial.gguf";
+  const auto reshaped_path = temp_dir / "reshaped.gguf";
+  using gufo::core::GgmlType;
+  GgufBuilder base;
+  base.AddMetadataString("general.architecture", "qwen4exp");
+  base.AddTensor("token_embd.weight", {8, 4}, GgmlType::kBF16, 0);
+  base.AddTensor("blk.0.ffn_down_exps.weight", {64, 2, 2}, GgmlType::kQ5_1, 0);
+  base.AddTensor("blk.1.ffn_down_exps.weight", {64, 2, 2}, GgmlType::kQ5_1, 0);
+  GgufBuilder overlay;
+  overlay.AddMetadataString("general.architecture", "qwen4exp");
+  overlay.AddTensor("token_embd.weight", {8, 4}, GgmlType::kBF16, 0);
+  overlay.AddTensor("blk.0.ffn_down_exps.weight", {64, 2, 2}, GgmlType::kQ2_0, 0);
+  overlay.AddTensor("blk.1.ffn_down_exps.weight", {64, 2, 2}, GgmlType::kQ2_0, 0);
+  GgufBuilder partial;
+  partial.AddMetadataString("general.architecture", "qwen4exp");
+  partial.AddTensor("blk.0.ffn_down_exps.weight", {64, 2, 2}, GgmlType::kQ2_0, 0);
+  GgufBuilder reshaped;
+  reshaped.AddMetadataString("general.architecture", "qwen4exp");
+  reshaped.AddTensor("blk.0.ffn_down_exps.weight", {64, 4, 2}, GgmlType::kQ2_0, 0);
+  reshaped.AddTensor("blk.1.ffn_down_exps.weight", {64, 2, 2}, GgmlType::kQ2_0, 0);
+  WriteBinaryFile(base_path, base.Build(4096));
+  WriteBinaryFile(overlay_path, overlay.Build(4096));
+  WriteBinaryFile(partial_path, partial.Build(4096));
+  WriteBinaryFile(reshaped_path, reshaped.Build(4096));
+  const auto experts = [](std::string_view name) { return name.ends_with("_exps.weight"); };
+  const auto experts_but_first = [](std::string_view name) { return name.ends_with("_exps.weight") && name != "blk.0.ffn_down_exps.weight"; };
+  std::string err;
+  auto reader = gufo::core::GgufReader::OpenFile(base_path, &err);
+  Expect(reader != nullptr, "Overlay base opens: " + err);
+  // A failed overlay leaves the reader unchanged.
+  Expect(!reader->OverlayTensors(partial_path, experts, &err) && err.find("blk.1.ffn_down_exps.weight") != std::string::npos, "Overlay missing a taken tensor is rejected");
+  Expect(!reader->OverlayTensors(reshaped_path, experts, &err) && err.find("another shape") != std::string::npos, "Overlay with another shape is rejected");
+  Expect(!reader->OverlayTensors(overlay_path, [](std::string_view) { return false; }, &err), "Overlay that matches nothing is rejected");
+  Expect(reader->GetMappedRegions().size() == 1 && reader->FindTensor("blk.0.ffn_down_exps.weight")->type == GgmlType::kQ5_1, "Failed overlays change nothing");
+  Expect(reader->OverlayTensors(overlay_path, experts_but_first, &err), "Overlay applies: " + err);
+  Expect(reader->GetMappedRegions().size() == 2, "Overlay adds one mapped region");
+  Expect(reader->FindTensor("blk.0.ffn_down_exps.weight")->type == GgmlType::kQ5_1, "A tensor the rule does not take stays on the base");
+  const auto* taken = reader->FindTensor("blk.1.ffn_down_exps.weight");
+  Expect(taken->type == GgmlType::kQ2_0 && taken->size_bytes == gufo::quant::EncodedSizeBytes(GgmlType::kQ2_0, 64 * 2 * 2), "A taken tensor comes from the overlay");
+  const auto region = reader->GetMappedRegions()[1];
+  const auto address = reinterpret_cast<std::uintptr_t>(taken->data);
+  Expect(address >= reinterpret_cast<std::uintptr_t>(region.data) && address < reinterpret_cast<std::uintptr_t>(region.data) + region.size, "The taken tensor's data lies in the overlay region");
+  const auto* kept = reader->FindTensor("token_embd.weight");
+  const auto kept_address = reinterpret_cast<std::uintptr_t>(kept->data);
+  const auto base_region = reader->GetMappedRegions()[0];
+  Expect(kept_address >= reinterpret_cast<std::uintptr_t>(base_region.data) && kept_address < reinterpret_cast<std::uintptr_t>(base_region.data) + base_region.size, "An untaken tensor stays in the base region");
+  Expect(reader->GetTensorCount() == 3, "Overlay keeps the tensor count");
+  reader.reset();
+  std::filesystem::remove_all(temp_dir);
+}
+
 void TestVisionExclusionValidation() {
   GgufBuilder builder;
   builder.AddMetadataString("general.architecture", "qwen35");
@@ -681,6 +737,7 @@ int main() {
   TestBasicGgufParsing();
   TestQwen38_27BParsing();
   TestSplitGgufDiscovery();
+  TestOverlayTensors();
   TestVisionExclusionValidation();
   TestQuantizationLabel();
   TestMalformedGgufRejection();

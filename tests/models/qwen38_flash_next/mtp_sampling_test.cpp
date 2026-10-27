@@ -34,11 +34,18 @@ void CheckLengthController() {
   Require(controller.Choose(7) == 7,
           "fully accepted prefixes did not grow to the maximum length");
   Require(controller.Choose(2) == 2, "remaining output budget was ignored");
-  for (unsigned i = 0; i < 12; ++i) {
+  // After a long run of fully accepted chains the evidence window (about ten
+  // observations) needs 13 rejected cycles to back off to AR; the older 0.75
+  // weight needed 6.
+  unsigned rejected_cycles = 0;
+  while (controller.Choose(7) != 0 && rejected_cycles < 20) {
     controller.Observe(0, controller.Choose(7));
+    ++rejected_cycles;
   }
   Require(controller.Choose(7) == 0,
           "unprofitable speculation did not back off to AR");
+  Require(rejected_cycles >= 8 && rejected_cycles <= 16,
+          "back-off to AR took an unexpected number of rejected cycles");
   qfn::MtpLengthController backed_off(7);
   Require(backed_off.Restore(controller.State()), "backoff restore failed");
   for (unsigned i = 0; i < 16; ++i) {
@@ -98,6 +105,167 @@ void CheckLengthController() {
   }
   Require(early_failure.Choose(7) == 0 && late_failure.Choose(7) > 1,
           "conditional acceptance by depth was collapsed to one probability");
+}
+
+// The evidence window could stay too short; the near-tie threshold could be
+// too strict or too loose; the tie could override AR back-off or a better
+// width of three, or exceed the budget or controller limit. Rejected chains
+// could stop backing off or fail to retry. The larger evidence mass could be
+// lost in State(), copying, Restore(), or Reset(). A fully accepted chain
+// could stop probing after its delay, and open-text acceptance could still
+// favor one draft.
+void CheckDraftLengthTuning() {
+  constexpr unsigned context = 8192;
+  qfn::MtpLengthController tied(7);
+  auto state = tied.State();
+  state.successes.fill(1.0F);
+  state.failures.fill(9.0F);
+  state.successes[0] = 7.0F;
+  state.failures[0] = 3.0F;
+  state.successes[1] = 4.3F;
+  state.failures[1] = 5.7F;
+  state.explored_depth = 7;
+  state.failed_depths = 127;
+  Require(tied.Restore(state) && tied.Choose(7, context) == 2,
+          "near-tied second draft was not selected");
+  qfn::MtpLengthController below_tie(7);
+  auto below = state;
+  below.successes[1] = 4.0F;
+  below.failures[1] = 6.0F;
+  Require(below_tie.Restore(below) && tied.Choose(7, context) == 2 &&
+              below_tie.Choose(7, context) == 1,
+          "second draft crossed the near-tie threshold");
+
+  qfn::MtpLengthController unprofitable(7);
+  auto weak = state;
+  weak.successes[0] = 2.55F;
+  weak.failures[0] = 7.45F;
+  weak.successes[1] = 10.0F;
+  weak.failures[1] = 0.0F;
+  Require(unprofitable.Restore(weak), "low-acceptance state was rejected");
+  unprofitable.Observe(0, 1, context);
+  Require(tied.Choose(7, context) == 2 &&
+              unprofitable.State().retry_tokens == 16 &&
+              unprofitable.Choose(7, context) == 0,
+          "tie overrode the better AR back-off");
+
+  qfn::MtpLengthController deeper(7);
+  auto deep = state;
+  deep.successes[0] = 8.0F;
+  deep.failures[0] = 2.0F;
+  deep.successes[1] = 8.0F;
+  deep.failures[1] = 2.0F;
+  deep.successes[2] = 6.5F;
+  deep.failures[2] = 3.5F;
+  Require(deeper.Restore(deep) && tied.Choose(7, context) == 2 &&
+              deeper.Choose(7, context) == 3,
+          "tie displaced a better chain of three");
+
+  qfn::MtpLengthController limited(1);
+  auto short_state = state;
+  short_state.explored_depth = 1;
+  short_state.failed_depths = 1;
+  Require(limited.Restore(short_state) && tied.Choose(7, context) == 2 &&
+              tied.Choose(1, context) == 1 && tied.Choose(0, context) == 0 &&
+              limited.Choose(7, context) == 1,
+          "tie exceeded the budget or controller limit");
+
+  qfn::MtpLengthController rejected(7);
+  for (unsigned i = 0; i < 12; ++i)
+    rejected.Observe(0, 1, context);
+  Require(rejected.State().failures[0] > 7.0F &&
+              rejected.State().retry_tokens == 16 &&
+              rejected.Choose(7, context) == 0,
+          "rejected chains did not retain evidence and back off");
+  for (unsigned i = 0; i < 16; ++i) {
+    Require(rejected.Choose(7, context) == 0,
+            "AR interval ended before the recovery probe");
+    rejected.ObserveArToken();
+  }
+  Require(rejected.State().failures[0] > 7.0F &&
+              rejected.Choose(7, context) == 1,
+          "AR back-off did not retry after sixteen tokens");
+  rejected.Observe(0, 1, context);
+  Require(rejected.State().failures[0] > 7.0F &&
+              rejected.Choose(7, context) == 0,
+          "failed recovery probe did not restore AR back-off");
+
+  qfn::MtpLengthController evidence(7);
+  for (unsigned i = 0; i < 80; ++i)
+    evidence.Observe(i % 2, 1, context);
+  const auto saved = evidence.State();
+  const float mass = saved.successes[0] + saved.failures[0];
+  const auto same_state = [](const qfn::MtpLengthState& a,
+                             const qfn::MtpLengthState& b) {
+    return a.successes == b.successes && a.failures == b.failures &&
+           a.retry_tokens == b.retry_tokens && a.probe_depth == b.probe_depth &&
+           a.explored_depth == b.explored_depth &&
+           a.probe_delay == b.probe_delay && a.failed_depths == b.failed_depths;
+  };
+  auto copied = evidence;
+  qfn::MtpLengthController restored(7);
+  const bool restored_ok = restored.Restore(saved);
+  Require(mass > 9.99F && mass < 10.01F &&
+              same_state(saved, copied.State()) && restored_ok &&
+              same_state(saved, restored.State()),
+          "ten-observation evidence did not survive copying and Restore");
+  evidence.Reset();
+  copied.Reset();
+  const bool reset_restored_ok = restored.Restore(evidence.State());
+  Require(mass > 9.99F && same_state(evidence.State(), copied.State()) &&
+              evidence.State().successes[0] + evidence.State().failures[0] ==
+                  2.0F &&
+              reset_restored_ok &&
+              same_state(evidence.State(), restored.State()),
+          "Reset or restored reset state retained old evidence");
+
+  qfn::MtpLengthController delayed(7);
+  auto probe = state;
+  probe.successes[0] = 6.5F;
+  probe.failures[0] = 3.5F;
+  probe.successes[1] = 2.0F;
+  probe.failures[1] = 8.0F;
+  probe.probe_delay = 1;
+  Require(delayed.Restore(probe), "probe-delay state was rejected");
+  delayed.Observe(1, 1, context);
+  Require(delayed.State().probe_delay == 0 &&
+              delayed.State().probe_depth == 0,
+          "probe delay was not consumed by an accepted chain");
+  delayed.Observe(1, 1, context);
+  Require(delayed.State().successes[0] > 7.0F &&
+              delayed.State().probe_depth == 2 &&
+              delayed.State().probe_delay == 16 &&
+              delayed.Choose(7, context) == 2,
+          "accepted chains stopped probing deeper after the delay");
+
+  // Fixed acceptance stream: first/second/third conditional acceptance is
+  // about 80/60/40%, including misses; the stream is independent of width.
+  std::array<unsigned, 320> accepted_stream{};
+  constexpr std::array<unsigned, 7> accept_percent{80, 60, 40, 40, 40, 40, 40};
+  std::uint32_t seed = 8;
+  const auto next = [&seed] {
+    seed ^= seed << 13;
+    seed ^= seed >> 17;
+    seed ^= seed << 5;
+    return seed;
+  };
+  for (auto& accepted : accepted_stream)
+    while (accepted < accept_percent.size() &&
+           next() % 100 < accept_percent[accepted])
+      ++accepted;
+  qfn::MtpLengthController replay(7);
+  std::array<unsigned, 4> widths{};  // 0, 1, 2, deeper; skip warm-up.
+  for (unsigned cycle = 0; cycle < accepted_stream.size(); ++cycle) {
+    const unsigned length = replay.Choose(7, context);
+    if (cycle >= 64)
+      ++widths[std::min(length, 3U)];
+    if (length == 0)
+      replay.ObserveArToken();
+    else
+      replay.Observe(std::min(accepted_stream[cycle], length), length, context);
+  }
+  Require(widths == std::array<unsigned, 4>{0, 18, 233, 5},
+          "open-text replay did not prefer two drafts over one");
 }
 
 void CheckCompactProposals() {
@@ -471,6 +639,7 @@ int main() {
   try {
     CheckVerificationBoundaries();
     CheckLengthController();
+    CheckDraftLengthTuning();
     CheckSurvivalFloor();
     CheckDraftHeadSwitch();
     CheckCalibratedCosts();

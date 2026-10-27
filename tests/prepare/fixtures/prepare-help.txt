@@ -1,8 +1,9 @@
 Usage: bubo prepare [all|runtime|model] [OPTIONS]
 
 Prepare pinned runtime and model files. The default step is all.
-The model step downloads and verifies the eight pinned model files.
-The runtime step installs AMD ROCm 10.0.0 for gfx1151 beside bubo.exe.
+The model step downloads and verifies the files of one model:
+the default Flash Next package, or --catalogue-id ID.
+The runtime step installs AMD ROCm 10.0.0 for gfx1151 in a shared per-user folder.
 
 Options:
   --output ROOT  Parent folder (default: %LOCALAPPDATA%\Bubo)
@@ -13,12 +14,17 @@ Options:
   --no-resume    Restart partial downloads
   --mtp-model PATH  Copy a hash-matching existing MTP file
   --mmproj PATH     Copy a hash-matching existing vision projector
+  --model-set SET   Model files: huihui (default), original or lowmemory
+  --catalogue-id ID Model from the catalogue (bubo models list)
+  --plan            Model step: show files, sizes, free space and
+                    licences, then stop (no download, no write)
   --cache-dir PATH  Runtime archive cache
-  --runtime-dir PATH  Runtime destination (default: beside bubo.exe)
+  --runtime-dir PATH  Runtime destination (default: %LOCALAPPDATA%\Bubo\runtime\rocm-10.0.0-gfx1151)
   --help         Print help without writes, network or engine loading
 
 Model layout: ROOT\models\huihui-qwen38-flash-next-ud-q4-k-xl-v1\
-  Four main shards; mtp\, mmproj\, twin\, draft_head\ sidecars.
+  Four main shards; mtp\, mmproj\, twin\, draft_head\ files.
+  --model-set original uses ROOT\models\qwen38-flash-next-base-ud-q4-k-xl-v1\
 
 Exit codes: 0 success/help; 2 syntax/schema/header/profile; 3 consent/cancel;
   4 offline/missing pin; 5 transport/TLS; 6 integrity; 7 storage/access;

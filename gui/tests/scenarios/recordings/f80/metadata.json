@@ -1,0 +1,40 @@
+{
+  "source": "recorded",
+  "revision": "80a38da0",
+  "executable": "C:\\bubo\\runtimes\\pkg-80a38da0\\bubo-v0.1.1-windows-x64-gfx1151\\bin\\bubo.exe",
+  "executable_sha256": "cca93137567561643670507a70c86cf78fa01d7dbf2f2d019b5584f686641a1c",
+  "engine": "C:\\bubo\\runtimes\\pkg-80a38da0\\bubo-v0.1.1-windows-x64-gfx1151\\bin\\bubo-engine.dll",
+  "engine_sha256": "2b1938e84557fba248bb1ddda646f6bff9e493bb6845db71fca553e5a34320a9",
+  "command": [
+    "serve",
+    "--list-switches",
+    "--json"
+  ],
+  "environment": {
+    "PATH": "C:\\bubo\\runtimes\\pkg-80a38da0\\bubo-v0.1.1-windows-x64-gfx1151\\bin;C:\\Windows\\System32;C:\\Windows",
+    "LOCALAPPDATA": "C:\\bubo\\run\\app\\v8\\F80SW\\local",
+    "BUBO_*/GUFO_*": "removed"
+  },
+  "dependency_directory_dll_sha256": {
+    "C:\\bubo\\runtimes\\pkg-80a38da0\\bubo-v0.1.1-windows-x64-gfx1151\\bin\\icudt78.dll": "2e793cd9637eb7c6e068da74092eabd8e538d7c42729161e8fd4e1b88ab02c58",
+    "C:\\bubo\\runtimes\\pkg-80a38da0\\bubo-v0.1.1-windows-x64-gfx1151\\bin\\icuin78.dll": "e43fc4268561aefd3569c7910fc71a39a2cfdf2ddda0e73e89f07b270f36e52c",
+    "C:\\bubo\\runtimes\\pkg-80a38da0\\bubo-v0.1.1-windows-x64-gfx1151\\bin\\icuuc78.dll": "bb8c3f3c2bcab9b2ff735ed827378422e7c0f1b68cf24928a4199e7b6d4b3f38",
+    "C:\\bubo\\runtimes\\pkg-80a38da0\\bubo-v0.1.1-windows-x64-gfx1151\\bin\\jpeg62.dll": "4bcebb840485215a7c5ae17cd8bb4ba687dba6fd8ee6e162e7c968124c2abe19",
+    "C:\\bubo\\runtimes\\pkg-80a38da0\\bubo-v0.1.1-windows-x64-gfx1151\\bin\\libcrypto-3-x64.dll": "35bdf9d189ed8e7bacfbc6ae9a69ad48aaf79fa101307bcc44887fa2d6cbb753",
+    "C:\\bubo\\runtimes\\pkg-80a38da0\\bubo-v0.1.1-windows-x64-gfx1151\\bin\\libcurl.dll": "1b38cb0c7b6d35ca7814dace364c4b9ff7e2051b780bb951c32c20dfbe3c26bf",
+    "C:\\bubo\\runtimes\\pkg-80a38da0\\bubo-v0.1.1-windows-x64-gfx1151\\bin\\libpng16.dll": "3bcf80b5e699803a9d1dc30e08670a19970b73ff803f7fcd8f293dd6880d08e8",
+    "C:\\bubo\\runtimes\\pkg-80a38da0\\bubo-v0.1.1-windows-x64-gfx1151\\bin\\libsharpyuv.dll": "fee2648b33e3a2763ee6105efaf7053b67f22d103bf403e7e8e87dc7ec38c970",
+    "C:\\bubo\\runtimes\\pkg-80a38da0\\bubo-v0.1.1-windows-x64-gfx1151\\bin\\libwebp.dll": "969f81437eb489e6c463930f8f1e33a2bc03bdd9f3fd0ac83217f6bde2f63c9e",
+    "C:\\bubo\\runtimes\\pkg-80a38da0\\bubo-v0.1.1-windows-x64-gfx1151\\bin\\z.dll": "9361407a5b618e4818e3bbbb7d2c1c7c407692c64dd817f769b70903aa95903c"
+  },
+  "started": "2026-10-20T13:00:54.8269311-04:00",
+  "finished": "2026-10-20T13:00:54.8796328-04:00",
+  "exit_code": 0,
+  "stderr": "",
+  "record_sha256": "52f69ae22d013c35aceef985acb02e16760550a050c7f926b72e15eab9fd7589",
+  "rows": 219,
+  "rows_with_suggested": 4,
+  "secret_rows": 4,
+  "gui_control_false_rows": 23,
+  "note": "One registry-only CPU read of the final candidate package 80a38da0 (gated bytes, read in place). LOCALAPPDATA points to a scratch folder; dependency hashes are the package bin DLLs."
+}

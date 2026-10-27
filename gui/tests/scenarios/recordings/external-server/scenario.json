@@ -1,0 +1,9 @@
+{
+  "_source": "fixture",
+  "state": "Attached-external",
+  "records": {
+    "models": "../v12/models-list-gui.json",
+    "status": "../v12/status-w-idle.json",
+    "switches": "../v12/switches.json"
+  }
+}

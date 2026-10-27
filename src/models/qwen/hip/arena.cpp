@@ -10,6 +10,7 @@
 
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/hip/snapshot_transfer.hpp"
+#include "src/core/session_state_bytes.hpp"
 #include "src/models/qwen/hip/cycle_profile.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/executor.hpp"
@@ -404,26 +405,11 @@ QwenGpuMemoryUsage QwenGpuArena::EstimateMemoryUsage(
       CheckedMultiply(hidden, maximum_weight_width);
   AddAllocation(maximum_weight, sizeof(hip_bfloat16), &scratch);
 
-  auto& state = usage.request_state_bytes;
-  const std::size_t total_kv = CheckedMultiply(
-      CheckedMultiply(CheckedMultiply(config.FullAttentionLayerCount(), kv),
-                      context),
-      1);
-  AddAllocation(
-      CheckedMultiply(total_kv, 2),
+  // Shared with the CPU-side estimate (bubo models estimate).
+  usage.request_state_bytes = core::QwenDenseSessionStateBytes(
+      config, context,
       policy.UsesFp16AttentionKv() ? sizeof(std::uint16_t) : sizeof(float),
-      &state);
-
-  const std::size_t total_conv = CheckedMultiply(
-      CheckedMultiply(config.SsmLayerCount(), ssm_qkv), config.ssm_conv_kernel);
-  AddAllocation(total_conv, sizeof(float), &state);
-  const std::size_t total_deltanet = CheckedMultiply(
-      CheckedMultiply(CheckedMultiply(config.SsmLayerCount(), time_step),
-                      config.ssm_state_size),
-      config.SsmValueSize());
-  AddAllocation(total_deltanet,
-                QwenRecurrentStateElementBytes(policy.recurrent_state_storage),
-                &state);
+      QwenRecurrentStateElementBytes(policy.recurrent_state_storage));
   return usage;
 }
 

@@ -1,0 +1,135 @@
+{
+ "schema_version": 1,
+ "repository": "HaloForgeLabs/bubo-qwen3.8-flash-next",
+ "commit": "0a3c343bec2095f43f2906371c83e4faa8a47da1",
+ "tree": [
+  {
+   "type": "directory",
+   "oid": "7c9acec6f848ae41e64f98198de71aba2fc91710",
+   "size": 0,
+   "path": "draft_head",
+   "lastCommit": {
+    "id": "bb72204d4f9bdd1568c225cce3bf878673009780",
+    "title": "Add Halowin Bubo dense twin, draft head, card, LICENSE and NOTICE",
+    "date": "2026-10-12T20:27:24.000Z"
+   }
+  },
+  {
+   "type": "directory",
+   "oid": "719fb3145f6db92743d0e57223280c430b859077",
+   "size": 0,
+   "path": "twin-base",
+   "lastCommit": {
+    "id": "0a3c343bec2095f43f2906371c83e4faa8a47da1",
+    "title": "Add the dense twin for the original (non-abliterated) Qwen3.8 Flash Next shards",
+    "date": "2026-10-13T07:20:43.000Z"
+   }
+  },
+  {
+   "type": "directory",
+   "oid": "0a982ee7fdd4180f57c6c504b1b368fd235947d1",
+   "size": 0,
+   "path": "twin",
+   "lastCommit": {
+    "id": "bb72204d4f9bdd1568c225cce3bf878673009780",
+    "title": "Add Halowin Bubo dense twin, draft head, card, LICENSE and NOTICE",
+    "date": "2026-10-12T20:27:24.000Z"
+   }
+  },
+  {
+   "type": "file",
+   "oid": "33438d3b058dd13df450746e5cd31a1163c9b67c",
+   "size": 1722,
+   "path": ".gitattributes",
+   "lastCommit": {
+    "id": "0a3c343bec2095f43f2906371c83e4faa8a47da1",
+    "title": "Add the dense twin for the original (non-abliterated) Qwen3.8 Flash Next shards",
+    "date": "2026-10-13T07:20:43.000Z"
+   }
+  },
+  {
+   "type": "file",
+   "oid": "9557a8961782792814714b7488346732c043793d",
+   "size": 3235,
+   "path": "LICENSE",
+   "lastCommit": {
+    "id": "bb72204d4f9bdd1568c225cce3bf878673009780",
+    "title": "Add Halowin Bubo dense twin, draft head, card, LICENSE and NOTICE",
+    "date": "2026-10-12T20:27:24.000Z"
+   }
+  },
+  {
+   "type": "file",
+   "oid": "da834637ef826f136f3c58dd66cc228ea0499227",
+   "size": 462,
+   "path": "NOTICE",
+   "lastCommit": {
+    "id": "bb72204d4f9bdd1568c225cce3bf878673009780",
+    "title": "Add Halowin Bubo dense twin, draft head, card, LICENSE and NOTICE",
+    "date": "2026-10-12T20:27:24.000Z"
+   }
+  },
+  {
+   "type": "file",
+   "oid": "f975fd73dfa2d8f988784ec95a0cced277aeda4c",
+   "size": 6278,
+   "path": "README.md",
+   "lastCommit": {
+    "id": "0a3c343bec2095f43f2906371c83e4faa8a47da1",
+    "title": "Add the dense twin for the original (non-abliterated) Qwen3.8 Flash Next shards",
+    "date": "2026-10-13T07:20:43.000Z"
+   }
+  },
+  {
+   "type": "file",
+   "oid": "6238dd912a89f144cd8f1d27c910af2132a5ab9f",
+   "size": 357581248,
+   "lfs": {
+    "oid": "6867948dc9f5c467818daa4281c4878dc64b53cd1bba9d16970fd77cd1656777",
+    "size": 357581248,
+    "pointerSize": 134
+   },
+   "xetHash": "1386552fc3aed8b06cd43d822f2ee67d10a9dec5dd79489ba59174d86d33f489",
+   "path": "draft_head/draft-out-q4k.gguf",
+   "lastCommit": {
+    "id": "bb72204d4f9bdd1568c225cce3bf878673009780",
+    "title": "Add Halowin Bubo dense twin, draft head, card, LICENSE and NOTICE",
+    "date": "2026-10-12T20:27:24.000Z"
+   }
+  },
+  {
+   "type": "file",
+   "oid": "d92dc2371d914b78f7dbfd97bcd8963a9f59a83b",
+   "size": 1230788768,
+   "lfs": {
+    "oid": "d6aa3c0425247aca2ae37680a96a401ba09431addc552a1ee60af3a51927e13e",
+    "size": 1230788768,
+    "pointerSize": 135
+   },
+   "xetHash": "68f47526bd255e3ad40b7f1894896b91fd0ae7508fc540dd658062769c061820",
+   "path": "twin-base/iq4-nofullattn-nohc.gguf",
+   "lastCommit": {
+    "id": "0a3c343bec2095f43f2906371c83e4faa8a47da1",
+    "title": "Add the dense twin for the original (non-abliterated) Qwen3.8 Flash Next shards",
+    "date": "2026-10-13T07:20:43.000Z"
+   }
+  },
+  {
+   "type": "file",
+   "oid": "5de77e4bc8f6cfd594567518c402dba6c37c061d",
+   "size": 1230788768,
+   "lfs": {
+    "oid": "18e0831234551a4d14a0407c24598fb02fdb1fe83a20a4fcff23f410399c66c2",
+    "size": 1230788768,
+    "pointerSize": 135
+   },
+   "xetHash": "0db04fc724a424e61757b80c964157806bdf6f8115590b4f19282e9db62747c7",
+   "path": "twin/iq4-nofullattn-nohc.gguf",
+   "lastCommit": {
+    "id": "bb72204d4f9bdd1568c225cce3bf878673009780",
+    "title": "Add Halowin Bubo dense twin, draft head, card, LICENSE and NOTICE",
+    "date": "2026-10-12T20:27:24.000Z"
+   }
+  }
+ ]
+}

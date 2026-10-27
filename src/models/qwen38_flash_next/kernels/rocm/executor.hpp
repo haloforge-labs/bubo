@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <unordered_set>
 #include <mutex>
 #include <span>
 #include <string>
@@ -27,11 +28,17 @@
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
 #include "src/models/qwen38_flash_next/ngram.hpp"
+#include "src/models/qwen38_flash_next/npu_retry.hpp"
 
 namespace gufo::models::qwen38_flash_next::rocm {
 
 class Executor;
 class SnapshotAllocator;
+
+/// Test seam for the snapshot device-headroom guard: caps the free device
+/// memory its checks see (process-wide; the maximum value removes the cap).
+/// Windows cannot interpose hipMemGetInfo the way upstream's test does.
+void LimitSnapshotDeviceFreeForTest(std::uint64_t bytes);
 struct ArgmaxCandidate;
 struct SnapshotHeader;
 struct SnapshotRegistry;
@@ -48,6 +55,13 @@ class SnapshotState {
 public:
   void Materialize() const;
   [[nodiscard]] std::uint64_t DeviceBytes() const;
+  /// As DeviceBytes(), but a backing block already in `counted` adds nothing and a new one is added to it,
+  /// so the sum over several snapshots counts each shared block once.
+  [[nodiscard]] std::uint64_t DeviceBytes(std::unordered_set<const void*>& counted) const;
+  /// Executor payload bytes held in host memory: the header and image grid
+  /// while the state stays on the device; all of it once a byte reader or a
+  /// device-exhausted rewind has copied rows into the host payload.
+  [[nodiscard]] std::uint64_t HostBytes() const;
 
 private:
   friend class Executor;
@@ -72,6 +86,8 @@ private:
   void Preserve(std::uint32_t position, std::uint32_t mtp_position,
                 std::uint32_t blocks, std::uint32_t mtp_blocks,
                 bool detach = true) const;
+  /// Materialize with the registry mutex already held.
+  void MaterializeLocked() const;
   std::shared_ptr<SnapshotRegistry> registry_;
   std::shared_ptr<const SnapshotLineage> lineage_;
   std::shared_ptr<void> storage_;
@@ -92,6 +108,12 @@ private:
   mutable std::vector<Extra> extras_;
   mutable std::shared_ptr<void> extra_storage_;
   std::uint64_t extra_bytes_ = 0;
+  // Host residency for HostBytes. The sizes are set before publication; the
+  // flag is raised under the registry mutex and read without it, so a cache
+  // admission never waits on a transfer that holds the mutex.
+  std::uint64_t payload_bytes_ = 0;
+  std::uint64_t host_header_bytes_ = 0;
+  mutable std::atomic<bool> host_payload_{false};
 };
 
 /// Per-sequence state on the device: recurrent SSM state, KV and indexer
@@ -277,6 +299,30 @@ public:
       Session& session, std::span<const std::int32_t> tokens,
       std::uint32_t prefix, std::string* error_msg) const;
 
+  /// L-REL-2: before an NPU prefill chunk, copies the state the chunk adds to
+  /// (see npu_retry.hpp) into one executor-owned device buffer, allocated at
+  /// the first call. The copy is enqueued on the stream the chunk runs on; its
+  /// time is read afterwards by NpuRetryBackupMs without a new sync point.
+  /// A failure to set up the buffer is remembered: later calls fail at once
+  /// (retry stays off) and the runtime's sticky error is cleared.
+  [[nodiscard]] bool SaveNpuRetryBackup(Session& session,
+                                        std::string* error_msg) const;
+  /// Puts that state back after a failed chunk of the same session. The copy
+  /// is stream-ordered before the next Forward.
+  [[nodiscard]] bool RestoreNpuRetryBackup(Session& session,
+                                           std::string* error_msg) const;
+  /// Device time of the last SaveNpuRetryBackup copy, once the chunk that
+  /// followed it has synchronized; false if it is not available.
+  [[nodiscard]] bool NpuRetryBackupMs(double* ms) const;
+  /// Bytes of the backup buffer while allocated (0 before the first save and
+  /// after the release).
+  [[nodiscard]] std::size_t NpuRetryBackupAllocatedBytes() const noexcept {
+    return retry_backup_.bytes();
+  }
+  /// Gives the buffer and events back once the NPU is off for the process.
+  /// Drains the stream first; a no-op when nothing is allocated.
+  void ReleaseNpuRetryBackup() const;
+
   /// Appends `tokens` (at most max_batch) to the session and returns the
   /// logits of the last `n_logits` tokens in `logits` (n_logits * vocab
   /// floats, host memory). A null `logits` keeps the rows on the GPU for
@@ -418,8 +464,24 @@ public:
   };
   [[nodiscard]] std::uint64_t SnapshotBytes(const Session& session,
                                             std::uint32_t hidden_rows) const;
+  /// The sections of that payload in order, from the serializer's own walk:
+  /// "header" first, then one entry per non-empty region ("conv state" and
+  /// "recurrent state" once per linear layer, "PLE history", "K cache", ...),
+  /// and "image grid" for the trailing bytes. Tests use it to say which bytes
+  /// of two payloads differ.
+  struct SnapshotSegment {
+    std::string name;
+    std::uint64_t offset{0};
+    std::uint64_t bytes{0};
+  };
+  [[nodiscard]] std::vector<SnapshotSegment> SnapshotSegments(
+      const Session& session, std::uint32_t hidden_rows) const;
   [[nodiscard]] std::uint64_t PrefillCheckpointBytes(
       const Session& session, std::uint32_t position) const;
+  /// Whether snapshot storage of `bytes` fits the device headroom now. A
+  /// borrowed capture and its rewind copies stay on the device when it does;
+  /// otherwise they fall back to the host payload.
+  [[nodiscard]] bool SnapshotFitsDevice(std::uint64_t bytes) const;
   [[nodiscard]] bool SaveSnapshot(
       const Session& session, std::uint32_t hidden_rows,
       std::span<std::uint8_t> payload, std::string* error_msg,
@@ -479,6 +541,12 @@ private:
   };
   bool Quantize(const float* x, std::uint32_t n_tokens, std::uint32_t k,
                 Q8Input* q, std::string* error_msg) const;
+  /// Q8_1 rows of a small-batch input that its producer kernel already
+  /// wrote (byte-identical to Quantize's), or null.
+  const void* ReadyQ8(const float* x, std::uint32_t n_tokens,
+                      std::uint32_t k) const;
+  /// Forgets the producer-written Q8_1 rows (their sources are rewritten).
+  void DropReadyQ8() const;
   bool Dense(const DeviceTensor& w, const Q8Input& q, float* out,
              std::string* error_msg) const;
   bool Dense(const DeviceTensor& w, const float* x, float* out,
@@ -499,8 +567,8 @@ private:
   void RoutedHints(const DeviceTensor& w, std::uint32_t n_tokens) const;
   /// Reads the routing of the current batch back and derives the tile
   /// hints for its expert GEMMs (tiled batches only).
-  bool RouteHints(std::uint32_t n_tokens, std::string* error_msg,
-                  bool lanerow = false) const;
+  bool RouteHints(std::uint32_t n_tokens, std::string* error_msg, bool lanerow,
+                  std::uint32_t down_tile_rows, bool pair_iq) const;
   /// Routed gate/up projections followed by SwiGLU.
   bool GatedExperts(const DeviceTensor& a, const DeviceTensor& b,
                     const float* x, const std::int32_t* ids, float* out,
@@ -511,9 +579,11 @@ private:
                std::uint32_t n_tokens, std::string* error_msg) const;
   /// `normed` says the previous Combine already produced m's grouped norm
   /// of res (F32 in s_.xn, or F16 plus tiled Q8 on the wide route).
+  /// `half_only` leaves only the F16 copy of `mixed`; `no_f32` keeps its
+  /// F16 and tiled Q8 copies but skips the F32 rows nothing reads.
   bool HcMix(const DeviceMixer& m, const float* res, bool normed, float* mixed,
              float* inject, std::uint32_t n_tokens, std::string* error_msg,
-             bool half_only = false) const;
+             bool half_only = false, bool no_f32 = false) const;
   /// Share mixer projections across decode requests without selecting the
   /// prefill arithmetic. Injection rows are compact across the whole batch.
   bool HcMixBatch(const DeviceMixer& m, const float* res, bool normed,
@@ -521,8 +591,11 @@ private:
                   std::string* error, bool multi_session = false) const;
   void CombineBatch(float* res, const float* gamma, std::uint32_t rows) const;
   /// Residual update by the block output plus the grouped norm for the next
-  /// mixer (`gamma`); wide batches write it as F16 and tiled Q8.
-  void Combine(float* res, const float* gamma, std::uint32_t n_tokens) const;
+  /// mixer (`gamma`); wide batches write it as F16 and tiled Q8. With that
+  /// mixer's F32 `inject_w`, the fused MoE combine also leaves its inject
+  /// partials in s_.inject (inject_fused_).
+  void Combine(float* res, const float* gamma, std::uint32_t n_tokens,
+               const float* inject_w = nullptr) const;
   /// Hashes the batch's n-gram rows and starts reading them from disk, so
   /// the read overlaps the layers before the PLE one.
   bool PleFetch(Session& s, std::span<const std::int32_t> tokens,
@@ -571,6 +644,9 @@ private:
            bool npu_prefill = false, int layer = -1
 #endif
   ) const;
+  /// Whether MoeExperts takes the routed F16 WMMA route, whose epilogue the
+  /// following combine absorbs (see Moe).
+  bool WmmaExperts(const DeviceLayer& l, std::uint32_t n_tokens) const;
   /// Runs routed experts after the router and shared expert are ready.
   template<bool Benchmark = false>
   bool MoeExperts(const DeviceLayer& l, const float* x, float* out,
@@ -653,6 +729,12 @@ private:
   mutable std::once_flag snapshot_allocator_once_;
   mutable std::shared_ptr<SnapshotAllocator> snapshot_allocator_;
   mutable std::shared_ptr<void> checkpoint_storage_;
+  /// L-REL-2 backup of one session's accumulative state, shared like the
+  /// forward scratch (one chunk at a time). The host window and the owner
+  /// belong to the backup in the same way.
+  mutable NpuRetryBackupResources retry_backup_;
+  mutable NgramHistory retry_ngram_;
+  mutable const Session* retry_owner_{nullptr};
   /// The stream launches go to. On Windows a submission waits for the
   /// retirement of the previous submission on its own stream (~0.45 us per
   /// node: ~0.8 ms after a verify body), while another stream starts at
@@ -668,8 +750,13 @@ private:
   mutable bool unwaited_{false};
   /// Back to the primary stream, after draining the current one if needed.
   [[nodiscard]] bool UsePrimaryStream(std::string* error_msg) const;
+  /// The accumulative state of a session to or from the retry backup buffer
+  /// (npu_retry.hpp lists the regions), in a few batched launches.
+  [[nodiscard]] bool CopyNpuRetryState(Session& session, bool save,
+                                       std::string* error_msg) const;
   hipEvent_t counts_ready_{nullptr};
   bool expert_v2k_{false};  ///< startup-cached opt-in decode expert chain
+  std::uint32_t down_tile_rows_{96};  ///< wide-prefill down projection tile rows
   hipblasHandle_t blas_{nullptr};
   std::unique_ptr<BlasLt> blaslt_;
 
@@ -678,6 +765,13 @@ private:
     std::int32_t* tokens;
     void* x_half;   ///< activations narrowed to the weight's 16-bit type
     void* x_q8[2];  ///< Q8_1 activations of a decode batch, alternating
+    /// Q8_1 rows of a decode batch written by the kernel that produces
+    /// them: xn by HcCombine, lo by SiluScale, mixed by the mix epilogue.
+    void* xn_q8_1;
+    void* lo_q8_1;
+    void* mixed_q8_1;
+    void* gdn_q8_1;  ///< by the GDN epilogue (ssm_out's input)
+    void* ctx_q8_1;  ///< by the attention output gate (attn_out's input)
     void* x_q8t;    ///< tiled Q8 activations of a wide batch (W8A8 route)
     float* shadow_out{
         nullptr};  ///< DEBUG shadow check output (16384 x 8 floats)
@@ -693,6 +787,7 @@ private:
     float* mixed;
     float* inject;
     float* block_out;
+    float* hc_defer_w;  ///< [t][4] stream weights of a deferred combine
     // linear attention
     float* qkv;
     float* z;
@@ -822,13 +917,14 @@ private:
   Session::Control* control_host_{nullptr};
   std::int32_t* tokens_host_{nullptr};
   std::uint32_t* counts_host_{nullptr};
-  std::int32_t* tiles_host_{nullptr};         ///< routed tile map staging
-  mutable std::uint32_t routed_max_rows_{0};  ///< 0 = no readback yet
-  mutable std::uint32_t routed_n_tiles_{0};   ///< down projection tiles
-  mutable std::uint32_t routed_64_tiles_{0};  ///< appended 64-token tiles
+  std::int32_t* tiles_host_{nullptr};           ///< routed tile map staging
+  mutable std::uint32_t routed_max_rows_{0};    ///< 0 = no readback yet
+  mutable std::uint32_t routed_n_tiles_{0};     ///< routed_tile_rows_ tiles
+  mutable std::uint32_t routed_down_tiles_{0};  ///< wide batches' down tiles
   mutable std::uint32_t routed_pair_offset_{0};
+  mutable std::uint32_t routed_down_offset_{0};  ///< lane-row down list start
   mutable std::uint32_t routed_pair_tiles_{0};
-  mutable std::uint32_t routed_pair_rows_{64};
+  mutable std::uint32_t routed_pair_rows_{64};  ///< lane-row paired tile rows
   mutable std::uint32_t routed_tile_rows_{48};  ///< token rows per tile
   mutable int routed_tile_cols_{0};
   float* logits_host_{nullptr};
@@ -868,6 +964,13 @@ private:
   bool wide_mixer_{false};
   /// Set by Moe when its epilogue is left for the combine that follows.
   mutable bool moe_pending_{false};
+  /// Set before an attention-side combine whose FFN combine fuses the MoE
+  /// epilogue: that combine may then leave its residual update to the next
+  /// one (res_deferred_), which reads s_.block_out and s_.hc_defer_w.
+  mutable bool defer_residual_{false};
+  // Chosen once in Forward from the pass's rows, before its layer loop.
+  mutable bool iq_route_for_pass_{false};
+  mutable bool res_deferred_{false};
   /// Set by GatedDense when s_.shexp_half holds the SwiGLU rows its F16
   /// down projection reads.
   mutable bool shexp_half_ready_{false};
@@ -885,7 +988,19 @@ private:
   mutable bool xn_half_{false};
   /// Partial sums per inject logit the last HcMix left in s_.inject.
   mutable std::uint32_t inject_parts_{1};
+  /// Inject weights whose partials the last combine already wrote to
+  /// s_.inject, so the following HcMix skips its inject pass.
+  mutable const float* inject_fused_{nullptr};
   mutable unsigned q8_slot_{0};
+  /// Producer-written Q8_1 rows (see ReadyQ8): source, rows and width.
+  struct ReadyRows {
+    const float* src{nullptr};
+    const void* data{nullptr};
+    std::uint32_t n{0};
+    std::uint32_t k{0};
+  };
+  mutable ReadyRows xn_q8_ready_;
+  mutable ReadyRows mixed_q8_ready_;
 };
 
 }  // namespace gufo::models::qwen38_flash_next::rocm

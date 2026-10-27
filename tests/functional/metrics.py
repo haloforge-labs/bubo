@@ -1,5 +1,6 @@
 """Per-request measurements for functional tests; no production instrumentation."""
 
+import contextlib
 import hashlib
 import json
 import math
@@ -32,16 +33,18 @@ def canonical(value):
             return item
         protocol = item.get("type") in (
             "function", "function_call", "function_call_output",
+            "tool_use", "tool_result",
             "message", "reasoning", "item_reference") or item.get("role") in (
                 "assistant", "tool") or item.get("object") in (
                     "response", "chat.completion", "chat.completion.chunk", "text_completion")
         result = {}
         for key, child in sorted(item.items()):
-            if (protocol and key in ("id", "call_id", "tool_call_id")
+            if (protocol and key in ("id", "call_id", "tool_call_id", "tool_use_id")
                     or key == "previous_response_id") \
                     and isinstance(child, str):
                 child = identifiers.setdefault(child, f"identifier-{len(identifiers)}")
-            result[key] = child if key in payloads else visit(child)
+            opaque = key in payloads or item.get("type") == "tool_use" and key == "input"
+            result[key] = child if opaque else visit(child)
         return result
 
     return json.dumps(visit(value), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
@@ -49,6 +52,24 @@ def canonical(value):
 
 def digest(value):
     return hashlib.sha256(canonical(value).encode()).hexdigest()
+
+
+def integer_number(value):
+    """JSON integers may use exponent notation; booleans are never counts."""
+    return type(value) is int or (
+        type(value) is float and math.isfinite(value) and value.is_integer())
+
+
+TOOL_LOOP_STOP_MESSAGE = (
+    "generation stopped: the tool call repeated its arguments (loop breaker)")
+
+
+def ends_with_tool_loop_error(events):
+    """True when the stream's last event is the fixed tool-argument loop stop error."""
+    last = events[-1] if events else {}
+    error = (last.get("response", {}).get("error")
+             if last.get("type") == "response.failed" else last.get("error"))
+    return isinstance(error, dict) and error.get("message") == TOOL_LOOP_STOP_MESSAGE
 
 
 def validate_tool_events(events, output):
@@ -102,8 +123,16 @@ def validate_tool_events(events, output):
             raise ValueError("completed streamed tool call is missing from final output")
 
 
-def validate_response(events, endpoint, body, status, ended, usage, output, choices):
-    """Mandatory wire/usage checks, in addition to SDK types and scenario assertions."""
+def validate_response(events, endpoint, body, status, ended, usage, output, choices,
+                      expect_tool_loop_stop=False):
+    """Mandatory wire/usage checks, in addition to SDK types and scenario assertions.
+
+    A tool-argument loop stop that cuts a streamed call after part of its
+    arguments was sent ends the stream with an error that carries the fixed
+    TOOL_LOOP_STOP_MESSAGE (Chat error event, Responses response.failed;
+    Messages is not checked here). That error ending, with no terminal model
+    response, is accepted only when the case declares expect_tool_loop_stop
+    (default False). A partial call with a normal stop is never accepted."""
     def require(condition, message):
         if not condition:
             raise ValueError(f"{endpoint}: {message}")
@@ -144,6 +173,8 @@ def validate_response(events, endpoint, body, status, ended, usage, output, choi
                 require(message.get("role") == "assistant", "completion role must be assistant")
     complete = output is not None or any(choice.get("finish") for choice in choices.values())
     if not complete:
+        if expect_tool_loop_stop and ends_with_tool_loop_error(events):
+            return  # The documented loop-stop error ending: no usage is promised.
         require(not ended, "completed transport has no terminal model response")
         return  # Deliberate cancellation: no final usage is promised by the API.
     require(bool(usage), "completed generation is missing usage/timings")
@@ -159,9 +190,10 @@ def validate_response(events, endpoint, body, status, ended, usage, output, choi
                     "incomplete response is missing details")
     else:
         input_count, output_count = usage.get("prompt_tokens"), usage.get("completion_tokens")
-    require(type(input_count) is int and type(output_count) is int
+    require(integer_number(input_count) and integer_number(output_count)
             and input_count >= 0 and output_count >= 0, "invalid token counts")
-    require(usage.get("total_tokens") == input_count + output_count, "inconsistent usage total")
+    require(integer_number(usage.get("total_tokens"))
+            and usage["total_tokens"] == input_count + output_count, "inconsistent usage total")
     limit = body.get("max_completion_tokens", body.get("max_tokens", body.get("max_output_tokens")))
     if limit is not None:
         require(output_count <= limit, "output exceeds the request token limit")
@@ -174,14 +206,15 @@ def validate_response(events, endpoint, body, status, ended, usage, output, choi
         value = timing.get(field)
         require(type(value) in (int, float) and math.isfinite(value) and value >= 0,
                 f"missing or invalid {field}")
-    require(type(timing.get("prefill_tokens")) is int, "missing prefill token count")
+    require(integer_number(timing.get("prefill_tokens")) and timing["prefill_tokens"] >= 0,
+            "missing or invalid prefill token count")
     if output_count:
         require(timing["decode_ms"] > 0, "generated tokens have no decode time")
     if timing["prefill_tokens"]:
         require(timing["prefill_ms"] > 0, "prefilled tokens have no prefill time")
     cached = usage.get("cached_tokens", usage.get(
         "prompt_tokens_details", usage.get("input_tokens_details", {})).get("cached_tokens"))
-    require(type(cached) is int and 0 <= cached <= input_count, "invalid cached token count")
+    require(integer_number(cached) and 0 <= cached <= input_count, "invalid cached token count")
     definitions = {tool.get("function", tool).get("name"): tool.get("function", tool)
                    for tool in body.get("tools", []) if tool.get("type") == "function"}
     calls = [call for choice in choices.values() for call in choice["tools"].values()]
@@ -202,7 +235,21 @@ def validate_response(events, endpoint, body, status, ended, usage, output, choi
         require(name in definitions, "undeclared generated tool")
         if isinstance(choice, dict) and choice.get("type") == "function":
             require(name == choice.get("function", choice).get("name"), "wrong named tool")
-        arguments = json.loads(call["arguments"])
+        try:
+            arguments = json.loads(call["arguments"])
+        except json.JSONDecodeError:
+            interrupted = (
+                output is not None and output["status"] == "incomplete"
+                and call.get("status") == "incomplete"
+            ) or (
+                output is None and any(
+                    item.get("finish") == "length" or
+                    (item.get("finish") == "stop" and body.get("stop"))
+                    for item in choices.values())
+            )
+            require(body.get("stream") and interrupted and call is calls[-1],
+                    "unfinished tool arguments in a successful response")
+            continue
         require(isinstance(arguments, dict), "tool arguments must be a JSON object")
         definition = definitions[name]
         if definition.get("strict"):
@@ -238,7 +285,7 @@ def validate_response(events, endpoint, body, status, ended, usage, output, choi
             Draft202012Validator(schema, format_checker=FormatChecker()).validate(value)
 
 
-def summarize(parts, streaming, ended, contract=None):
+def summarize(parts, streaming, ended, contract=None, expect_tool_loop_stop=False):
     """Parse after timing ends, including SSE split across arbitrary byte boundaries."""
     data = b"".join(chunk for _, chunk in parts)
     events, first_output_ms = [], None
@@ -306,7 +353,16 @@ def summarize(parts, streaming, ended, contract=None):
                    "predicted_ms": "decode_ms"}
         usage["gufo"] = {aliases.get(key, key): value for key, value in timings.items()}
     if contract:
-        validate_response(events, *contract, ended, usage, output, choices)
+        validate_response(events, *contract, ended, usage, output, choices,
+                          expect_tool_loop_stop)
+        if contract[0] == "/v1/messages/count_tokens":
+            assert ended and not streaming and len(events) == 1, "incomplete count response"
+            value = events[0]
+            if contract[2] == 200:
+                assert set(value) == {"input_tokens"}, value
+                assert type(value["input_tokens"]) is int and value["input_tokens"] >= 0, value
+                return {"prompt_tokens": value["input_tokens"]}, digest(value)
+            return {}, digest(value)
         if contract[0] in DISCOVERY_ENDPOINTS:
             assert ended and not streaming and len(events) == 1, "incomplete discovery response"
             value = events[0]
@@ -330,6 +386,10 @@ def summarize(parts, streaming, ended, contract=None):
             if alternative in usage:
                 measured[key] = usage[alternative]
                 break
+    if "cache_read_input_tokens" in usage:
+        # Messages input_tokens excludes cache reads and writes; the prompt is their sum.
+        measured["prompt_tokens"] = sum(usage.get(field, 0) for field in (
+            "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
     measured["cached_tokens"] = usage.get("cached_tokens", usage.get("cache_read_input_tokens",
         usage.get("prompt_tokens_details", usage.get("input_tokens_details", {})).get("cached_tokens", 0)))
     if first_output_ms is not None:
@@ -348,8 +408,18 @@ class Recorder:
         self.path = path
         self.through_case = through_case
         self.reached_case = False
+        self.expect_tool_loop_stop = False
         self.rows = []
         self.lock = threading.RLock()
+
+    @contextlib.contextmanager
+    def tool_loop_stop_expected(self):
+        """A case that expects the tool-argument loop stop wraps its requests in this."""
+        self.expect_tool_loop_stop = True
+        try:
+            yield
+        finally:
+            self.expect_tool_loop_stop = False
 
     def save(self):
         if self.path:
@@ -365,7 +435,7 @@ class Recorder:
                    "request_sha256": digest({"endpoint": path, "body": body}),
                    "stream": bool(body.get("stream")), "status": "running"}
             self.rows.append(row)
-        return Measurement(self, row, body)
+        return Measurement(self, row, body, self.expect_tool_loop_stop)
 
     def mark(self, case):
         with self.lock:
@@ -429,22 +499,24 @@ class Recorder:
 
 
 class Measurement:
-    def __init__(self, recorder, row, body):
+    def __init__(self, recorder, row, body, expect_tool_loop_stop=False):
         self.recorder, self.row = recorder, row
         self.body = body
-        self.started = time.monotonic()
+        self.expect_tool_loop_stop = expect_tool_loop_stop
+        # perf_counter: Windows' monotonic clock ticks every 15.6 ms.
+        self.started = time.perf_counter()
         self.parts = []
         self.ended = False
         self.finished = False
 
     def feed(self, data):
-        self.parts.append(((time.monotonic() - self.started) * 1000, data))
+        self.parts.append(((time.perf_counter() - self.started) * 1000, data))
 
     def finish(self):
         if self.finished:
             return
         self.finished = True
-        elapsed = (time.monotonic() - self.started) * 1000
+        elapsed = (time.perf_counter() - self.started) * 1000
         with self.recorder.lock:
             self.row.update(status="complete" if self.ended else "disconnected",
                             wall_ms=elapsed)
@@ -452,7 +524,8 @@ class Measurement:
                 measured, output_hash = summarize(
                     self.parts, self.row["stream"] and self.row.get("http_status", 0) < 400,
                     self.ended,
-                    (self.row["endpoint"], self.body, self.row.get("http_status", 0)))
+                    (self.row["endpoint"], self.body, self.row.get("http_status", 0)),
+                    self.expect_tool_loop_stop)
                 self.row.update(metrics=measured, output_sha256=output_hash)
                 if output_hash is not None:
                     self.row["status"] = "complete"

@@ -1,0 +1,9 @@
+{
+  "name": "bubo-gui-license-tools",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "license-checker-rseidelsohn": "5.0.1"
+  }
+}

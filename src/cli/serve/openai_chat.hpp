@@ -37,7 +37,8 @@ struct GeneratedText {
   std::string text;
 };
 GeneratedText SplitGeneratedText(
-    std::string_view text, TextGenerationBackend::InitialOutputState initial);
+    std::string_view text, TextGenerationBackend::InitialOutputState initial,
+    const TextGenerationBackend::OutputMarkup& markup = {});
 
 /// Messages tools and tool_choice, mapped onto the Chat tool declarations so
 /// framing, schema constraints and replayed tool turns match Chat.

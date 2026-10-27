@@ -1,0 +1,20 @@
+<|im_start|>user
+Q1<|im_end|>
+<|im_start|>assistant
+<think>
+plan A
+</think>
+
+Answer 1<|im_end|>
+<|im_start|>user
+Q2<|im_end|>
+<|im_start|>assistant
+<think>
+plan B
+</think>
+
+Answer 2<|im_end|>
+<|im_start|>user
+Q3<|im_end|>
+<|im_start|>assistant
+<think>

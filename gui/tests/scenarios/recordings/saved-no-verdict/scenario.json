@@ -1,0 +1,17 @@
+{
+  "_source": "fixture",
+  "state": "Stopped",
+  "records": {
+    "models": "../v12/models-list-gui.json",
+    "status": "../v12/status-main.json",
+    "switches": "../v12/switches.json"
+  },
+  "saved_estimate_error": {
+    "code": "estimate_no_verdict",
+    "component": "",
+    "stage": "",
+    "retryable": false,
+    "remedy": "Bubo has no memory estimate for this model yet."
+  },
+  "saved_model_id": "gemma4-26b-a4b-uncensored-hauhaucs-qat-q4-k-m"
+}

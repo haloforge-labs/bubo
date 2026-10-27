@@ -38,6 +38,7 @@
 
 #include "src/cli/serve/logging.hpp"
 #include "src/core/crypto/sha256.hpp"
+#include "src/core/platform/memory_guard.hpp"
 
 namespace gufo::server {
 namespace {
@@ -2024,6 +2025,9 @@ std::unique_ptr<ContinuationDiskStore::CaptureReservation>
 ContinuationDiskStore::ReserveCapture(
     const TextModelRunner& runner, std::size_t token_count,
     std::size_t snapshot_bytes, std::span<const std::uint8_t> input_identity) {
+  // Memory guard: staging a capture for disk copies device state into host RAM, so it stops with the RAM snapshots.
+  if (const auto* guard = gufo::platform::ProcessMemoryGuard(); guard != nullptr && !guard->SnapshotsAllowed())
+    return {};
   const auto descriptor = DescriptorForInput(runner, input_identity);
   if (!descriptor.persistence || token_count == 0 || snapshot_bytes == 0)
     return {};

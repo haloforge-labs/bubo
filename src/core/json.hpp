@@ -1,6 +1,7 @@
 #ifndef GUFO_CORE_JSON_HPP_
 #define GUFO_CORE_JSON_HPP_
 
+#include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <cstddef>
@@ -104,6 +105,13 @@ public:
     return find(key) != nullptr;
   }
   const Object& members() const noexcept { return obj_; }
+  void erase_member(std::string_view key) {
+    const auto at = std::find_if(
+        obj_.begin(), obj_.end(),
+        [key](const Member& member) { return member.first == key; });
+    if (at != obj_.end())
+      obj_.erase(at);
+  }
   void append_member(std::string key, Value value) {
     if (type_ != Type::kObject) {
       type_ = Type::kObject;
@@ -129,6 +137,13 @@ public:
   }
 
   // ---- Array access ----
+  /// Reserve room for `count` elements (array) or members (object).
+  void reserve(std::size_t count) {
+    if (type_ == Type::kArray)
+      arr_.reserve(count);
+    else if (type_ == Type::kObject)
+      obj_.reserve(count);
+  }
   void push_back(Value v) {
     if (type_ != Type::kArray) {
       type_ = Type::kArray;

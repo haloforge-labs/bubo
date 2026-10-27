@@ -3,6 +3,11 @@
 // Implements the SAME upstream declarations, never replacement XRT layouts.
 #include "fake_xrt.hpp"
 
+// clang-format off
+#include <windows.h>
+#include <delayimp.h>  // needs windows.h first
+// clang-format on
+
 #include <cstring>
 #include <map>
 #include <memory>
@@ -13,6 +18,13 @@
 #include "xrt/xrt_device.h"
 #include "xrt/xrt_hw_context.h"
 #include "xrt/xrt_kernel.h"
+
+// The int tip links gufo_core against npu_core_support, whose
+// xrt_runtime_windows.obj is extracted for these two delay-load hook symbols
+// and then duplicates the fake EnsureXrtRuntime below. Defining them here keeps
+// the real loader out of every fake-XRT test (no XRT DLL is ever loaded).
+extern "C" const PfnDliHook __pfnDliNotifyHook2 = nullptr;
+extern "C" const PfnDliHook __pfnDliFailureHook2 = nullptr;
 
 namespace gufo::npu::fake {
 Control control;
@@ -54,6 +66,7 @@ public:
   std::vector<std::byte> data;
   bool synced = false;
   int index;
+  unsigned long long address = 0;
   bo_impl(size_t n, int index) : data(n), index(index) { ++control.live_bos; }
   ~bo_impl() { --control.live_bos; }
 };
@@ -116,6 +129,15 @@ bo::bo(const device&, size_t n, flags flags, memory_group group) {
   Check(group == (index == 0 ? 1 : 0), "BO group");
   ++control.allocations;
   handle = std::make_shared<bo_impl>(n, index);
+  if (!control.address_zero) {
+    handle->address = control.next_address;
+    control.next_address += ((n + 4095) & ~size_t{4095}) + control.address_gap;
+  }
+}
+uint64_t bo::address() const {
+  if (control.address_throw)
+    throw std::runtime_error("planted address failure");
+  return handle->address;
 }
 bo::~bo() = default;
 size_t bo::size() const {

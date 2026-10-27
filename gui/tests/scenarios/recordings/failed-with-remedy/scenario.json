@@ -1,0 +1,10 @@
+{
+  "_source": "fixture",
+  "state": "Failed",
+  "records": {
+    "failure": "../../../../../tests/cli/contract/valid/error-runtime_missing.json",
+    "models": "../v12/models-list-gui.json",
+    "status": "../v12/status-main.json",
+    "switches": "../v12/switches.json"
+  }
+}

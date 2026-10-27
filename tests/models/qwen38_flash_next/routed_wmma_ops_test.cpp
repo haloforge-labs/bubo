@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
 #include "src/models/qwen38_flash_next/prefill_diag.hpp"
@@ -268,7 +269,8 @@ struct Result {
 /// its activation quantization).
 Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
            std::size_t experts, std::size_t m, std::size_t k,
-           std::uint32_t seed, std::uint32_t tile_rows = 48) {
+           std::uint32_t seed, std::uint32_t tile_rows = 48,
+           float input_scale = 2.0F) {
   const Experts w =
       type == q::WeightType::kQ4_K   ? MakeQ4K(experts, m, k, seed)
       : type == q::WeightType::kQ5_K ? MakeQ5K(experts, m, k, seed)
@@ -292,7 +294,7 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
   }
   std::vector<float> x(n_tokens * k);
   for (float& v : x) {
-    v = Uniform(&state, 2.0F);
+    v = Uniform(&state, input_scale);
   }
   std::vector<std::uint32_t> counts(experts, 0);
   for (std::int32_t e : ids) {
@@ -367,7 +369,12 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
       tiles.push_back(static_cast<std::int32_t>(e | (j << 16)));
     }
   }
-  __half* d_x_half = Upload(x_half);
+  __half* d_x_half = nullptr;
+  CheckHip(hipMalloc(&d_x_half, x_half.size() * sizeof(__half)),
+           "exact F16 input allocation");
+  CheckHip(hipMemcpy(d_x_half, x_half.data(), x_half.size() * sizeof(__half),
+                     hipMemcpyHostToDevice),
+           "F16 input upload");
   std::int32_t* d_tiles = Upload(tiles);
   float* d_f16 = Upload(zero_out);
   if (!q::RoutedF16Gemm(d_w, type, d_x_half, d_tiles,
@@ -427,7 +434,8 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
       throw std::runtime_error("routed F16 output overwrote its guard");
   }
 
-  if (tile_rows == 48 &&
+  // Prefill pairs gate/up for buckets the separate 16- and 48-row tiles take.
+  if ((tile_rows == 16 || tile_rows == 48) &&
       (type == q::WeightType::kQ4_K || type == q::WeightType::kQ5_K)) {
     // Different gate/up weights, with the up scale small enough that these
     // deliberately large synthetic weights do not overflow the F16 output.
@@ -442,7 +450,14 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
       }
     }
     auto* d_up = Upload(up);
-    auto* d_pair = Upload(std::vector<__half>(slots * m, __float2half(0.0F)));
+    __half* d_pair = nullptr;
+    CheckHip(hipMalloc(&d_pair, (slots * m + kHalfGuard) * sizeof(__half)),
+             "paired output allocation");
+    const std::vector<__half> pair_initial(slots * m + kHalfGuard, half_guard);
+    CheckHip(
+        hipMemcpy(d_pair, pair_initial.data(),
+                  pair_initial.size() * sizeof(__half), hipMemcpyHostToDevice),
+        "paired output upload");
     if (!q::RoutedF16Gemm(d_up, type, d_x_half, d_tiles,
                           static_cast<std::uint32_t>(tiles.size()), tile_rows,
                           d_bounds, d_rows_token, d_rows_slot, d_f16, nullptr,
@@ -467,6 +482,12 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
           throw std::runtime_error("paired routed SwiGLU launch failed");
         }
       };
+      // The paired launch must write the whole output itself; stale results
+      // can hide an incomplete launch grid.
+      CheckHip(hipMemcpy(d_pair, pair_initial.data(),
+                         pair_initial.size() * sizeof(__half),
+                         hipMemcpyHostToDevice),
+               "paired output reset");
       launch_pair();
       const auto paired = Download(d_pair, slots * m);
       for (std::size_t i = 0; i < paired.size(); ++i) {
@@ -480,6 +501,10 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
               std::to_string(a) + " vs " + std::to_string(b));
         }
       }
+      const auto guard = Download(d_pair + slots * m, kHalfGuard);
+      if (std::memcmp(guard.data(), pair_initial.data() + slots * m,
+                      kHalfGuard * sizeof(__half)) != 0)
+        throw std::runtime_error("paired output overwrote its guard");
       launch_pair();
       const auto replay = Download(d_pair, slots * m);
       if (std::memcmp(paired.data(), replay.data(),
@@ -1023,7 +1048,7 @@ void CheckLanerowDispatch() {
     auto* new_down = Upload(down_dirty);
     // Isolate down dispatch using identical narrowed activations, then
     // compare the complete paired->down pipeline against CPU and old.
-    for (std::uint32_t width : {16U, 48U, 64U}) {
+    for (std::uint32_t width : {16U, 48U, 64U, 96U, 128U}) {
       const auto tiles = tiles_for(width, true);
       auto* dt = Upload(tiles);
       if (!q::RoutedLanerowF16Gemm(dw, type, old_up, dt, tiles.size(), width,
@@ -1066,10 +1091,585 @@ void CheckLanerowDispatch() {
     CheckHip(hipFree(ptr), "stage-1 free");
 }
 
+struct IqFormat {
+  q::WeightType type;
+  const char* name;
+  std::size_t block_elements;
+  std::size_t block_bytes;
+  void (*dequantize)(const void*, float*, std::size_t);
+  int (*mmq)(const void*, const float*, const std::int32_t*, float*, int, int,
+             int, int, int, hipStream_t);
+  float block_scale;
+};
+
+constexpr IqFormat kIqFormats[] = {
+    {q::WeightType::kIQ3_XXS, "IQ3_XXS", 256, 98,
+     gufo::quant::DequantizeIQ3_XXS, qfn_mmq_iq3_xxs_moe_raw, 0.0005F},
+    {q::WeightType::kIQ3_S, "IQ3_S", 256, 110, gufo::quant::DequantizeIQ3_S,
+     qfn_mmq_iq3_s_moe_raw, 0.0002F},
+    {q::WeightType::kIQ2_S, "IQ2_S", 256, 82, gufo::quant::DequantizeIQ2_S,
+     qfn_mmq_iq2_s_moe_raw, 0.0005F},
+    {q::WeightType::kIQ2_XXS, "IQ2_XXS", 256, 66,
+     gufo::quant::DequantizeIQ2_XXS, qfn_mmq_iq2_xxs_moe_raw, 0.0005F},
+    {q::WeightType::kIQ2_XS, "IQ2_XS", 256, 74, gufo::quant::DequantizeIQ2_XS,
+     qfn_mmq_iq2_xs_moe_raw, 0.0005F},
+    {q::WeightType::kIQ4_XS, "IQ4_XS", 256, 136, gufo::quant::DequantizeIQ4_XS,
+     qfn_mmq_iq4_xs_moe_raw, 0.00001F},
+    {q::WeightType::kIQ4_NL, "IQ4_NL", 32, 18, gufo::quant::DequantizeIQ4_NL,
+     qfn_mmq_iq4_nl_moe_raw, 0.00005F},
+    {q::WeightType::kQ2_0, "Q2_0", 64, 18, gufo::quant::DequantizeQ2_0,
+     qfn_mmq_q2_0_moe_raw, 0.003F},
+};
+
+Experts MakeIq(const IqFormat& format, std::size_t experts, std::size_t m,
+               std::size_t k, std::uint32_t seed) {
+  Experts w;
+  const std::size_t row_bytes = k / format.block_elements * format.block_bytes;
+  w.packed.resize(experts * m * row_bytes);
+  w.values.resize(experts * m * k);
+  w.staged.resize(experts * m * k);
+  for (std::size_t row = 0; row < experts * m; ++row) {
+    auto* packed = w.packed.data() + row * row_bytes;
+    for (std::size_t b = 0; b < k / format.block_elements; ++b) {
+      auto* block = packed + b * format.block_bytes;
+      for (std::size_t i = 0; i < format.block_bytes; ++i)
+        block[i] = static_cast<std::uint8_t>(NextRandom(&seed));
+      const __half scale = __float2half(
+          format.block_scale * (0.75F + (NextRandom(&seed) & 255U) / 512.0F));
+      std::memcpy(block, &scale, sizeof(scale));
+    }
+    format.dequantize(packed, w.values.data() + row * k, k);
+    for (std::size_t i = 0; i < k; ++i)
+      w.staged[row * k + i] = __float2half(w.values[row * k + i]);
+  }
+  return w;
+}
+
+void CheckIqError(const std::vector<__half>& actual,
+                  const std::vector<__half>& mmq,
+                  const std::vector<float>& reference,
+                  const std::vector<float>& staged_reference,
+                  const char* label) {
+  double squares = 0.0, scale = 0.0, route_error = 0.0, mmq_error = 0.0;
+  for (std::size_t i = 0; i < reference.size(); ++i) {
+    const double r = reference[i];
+    const double a = __half2float(actual[i]);
+    const double b = __half2float(mmq[i]);
+    if (!std::isfinite(r) || !std::isfinite(a) || !std::isfinite(b))
+      throw std::runtime_error(std::string(label) + " nonfinite output");
+    squares += r * r;
+    scale = std::max(scale, std::abs(r));
+    route_error = std::max(route_error, std::abs(a - r));
+    mmq_error = std::max(mmq_error, std::abs(b - r));
+  }
+  const double rms = std::sqrt(squares / reference.size());
+  std::cout << label << " F16/F64=" << route_error / rms
+            << " MMQ/F64=" << mmq_error / rms << '\n';
+  CheckRmsError(actual, reference, std::numeric_limits<double>::infinity(),
+                label);
+  CheckStagedError(actual, staged_reference, label);
+  if (route_error >= 2e-3 * scale)
+    throw std::runtime_error(std::string(label) + " Q4_K reference bound exceeded");
+  // The MMQ route is the baseline of the comparison below and the route of the switch-off arm: it must itself be right.
+  if (mmq_error >= 1e-2 * scale)
+    throw std::runtime_error(std::string(label) + " MMQ baseline exceeds the reference bound");
+  if (route_error > mmq_error)
+    throw std::runtime_error(std::string(label) + " F16 exceeds MMQ error");
+}
+
+void CheckIqExperts(const IqFormat& gate_format, const IqFormat& down_format) {
+  constexpr std::size_t tokens = 129, used = 2, experts = 4;
+  constexpr std::size_t hidden = 2560, ff = 640, slots = tokens * used;
+  constexpr std::size_t guard = 32;
+  const __half poison = __float2half(-77.0F);
+  std::uint32_t seed =
+      0x23A54000U + static_cast<std::uint32_t>(gate_format.type);
+  const Experts gate = MakeIq(gate_format, experts, ff, hidden, seed);
+  const Experts up = MakeIq(gate_format, experts, ff, hidden, seed ^ 0xABCDEFU);
+  const Experts down =
+      MakeIq(down_format, experts, hidden, ff, seed ^ 0x765432U);
+  std::vector<std::int32_t> ids(slots);
+  std::vector<std::uint32_t> counts(experts);
+  for (std::size_t t = 0; t < tokens; ++t) {
+    ids[t * used] = 0;
+    ids[t * used + 1] = t % 16 == 0 ? 1 : 2;
+    ++counts[ids[t * used]];
+    ++counts[ids[t * used + 1]];
+  }
+  if (counts[0] != 129 || counts[1] != 9 || counts[2] != 120 || counts[3] != 0)
+    throw std::runtime_error("IQ test routing histogram changed");
+  std::vector<float> x(tokens * hidden);
+  for (float& v : x)
+    v = __half2float(__float2half(Uniform(&seed, 0.04F)));
+  std::vector<__half> x_half(x.size());
+  std::transform(x.begin(), x.end(), x_half.begin(),
+                 [](float v) { return __float2half(v); });
+
+  auto* dg = Upload(gate.packed);
+  auto* du = Upload(up.packed);
+  auto* dd = Upload(down.packed);
+  auto* dx = Upload(x);
+  auto* dx_half = Upload(x_half);
+  auto* di = Upload(ids);
+  auto* dc = Upload(counts);
+  const auto compact = q::RoutedCompactRows(slots, experts);
+  auto* db = Upload(std::vector<std::int32_t>(experts + 1));
+  auto* cursors = Upload(std::vector<std::int32_t>(experts));
+  auto* rt = Upload(std::vector<std::int32_t>(compact));
+  auto* rs = Upload(std::vector<std::int32_t>(compact));
+  q::RoutedCompact(di, dc, db, cursors, rt, rs, tokens, used, experts, nullptr);
+
+  std::vector<float> gate_mmq(slots * ff), up_mmq(slots * ff);
+  auto* d_gate_mmq = Upload(gate_mmq);
+  auto* d_up_mmq = Upload(up_mmq);
+  if (gate_format.mmq(dg, dx, di, d_gate_mmq, ff, hidden, tokens, experts, used,
+                      nullptr) != 0 ||
+      gate_format.mmq(du, dx, di, d_up_mmq, ff, hidden, tokens, experts, used,
+                      nullptr) != 0)
+    throw std::runtime_error("IQ gate/up MMQ rejected production shape");
+  gate_mmq = Download(d_gate_mmq, slots * ff);
+  up_mmq = Download(d_up_mmq, slots * ff);
+  std::vector<float> ref_up(slots * ff), staged_up(slots * ff);
+  std::vector<__half> mmq_up(slots * ff);
+  for (std::size_t slot = 0; slot < slots; ++slot) {
+    const std::size_t e = ids[slot], token = slot / used;
+    for (std::size_t row = 0; row < ff; ++row) {
+      const auto offset = (e * ff + row) * hidden;
+      double g = 0.0, u = 0.0, gs = 0.0, us = 0.0;
+      for (std::size_t k = 0; k < hidden; ++k) {
+        g += static_cast<double>(gate.values[offset + k]) *
+             x[token * hidden + k];
+        u += static_cast<double>(up.values[offset + k]) * x[token * hidden + k];
+        gs += static_cast<double>(__half2float(gate.staged[offset + k])) *
+              x[token * hidden + k];
+        us += static_cast<double>(__half2float(up.staged[offset + k])) *
+              x[token * hidden + k];
+      }
+      ref_up[slot * ff + row] =
+          static_cast<float>(u * g / (1.0 + std::exp(-g)));
+      staged_up[slot * ff + row] =
+          static_cast<float>(us * gs / (1.0 + std::exp(-gs)));
+      const float mg = gate_mmq[slot * ff + row], mu = up_mmq[slot * ff + row];
+      mmq_up[slot * ff + row] = __float2half(mu * mg / (1.0F + std::exp(-mg)));
+    }
+  }
+  const auto tiles_for = [&](std::uint32_t width) {
+    std::vector<std::int32_t> tiles;
+    for (std::size_t e = 0; e < experts; ++e)
+      for (std::uint32_t j = 0; j < (counts[e] + width - 1) / width + 1; ++j)
+        tiles.push_back(static_cast<std::int32_t>(e | (j << 16)));
+    return tiles;
+  };
+  std::vector<__half> initial(slots * ff + guard, poison);
+  auto* d_pair = Upload(initial);
+  std::vector<__half> paired;
+  for (std::uint32_t width : {64U, 128U}) {
+    const auto tiles = tiles_for(width);
+    auto* dt = Upload(tiles);
+    CheckHip(hipMemcpy(d_pair, initial.data(), initial.size() * sizeof(__half),
+                       hipMemcpyHostToDevice),
+             "reset IQ paired output");
+    if (!q::RoutedGatedF16Gemm(dg, du, gate_format.type, dx_half, dt,
+                               tiles.size(), width, db, rt, rs, d_pair, ff,
+                               hidden, nullptr))
+      throw std::runtime_error("IQ paired WMMA rejected production shape");
+    paired = Download(d_pair, slots * ff);
+    CheckIqError(paired, mmq_up, ref_up, staged_up, gate_format.name);
+    if (width == 128 &&
+        (gate_format.type == q::WeightType::kIQ2_S ||
+         gate_format.type == q::WeightType::kIQ3_XXS ||
+         gate_format.type == q::WeightType::kIQ3_S)) {
+      q::RoutedIqSetProbe(0, 0);
+      CheckHip(hipMemcpy(d_pair, initial.data(), initial.size() * sizeof(__half),
+                         hipMemcpyHostToDevice), "reset IQ baseline output");
+      if (!q::RoutedGatedF16Gemm(dg, du, gate_format.type, dx_half, dt,
+                                 tiles.size(), width, db, rt, rs, d_pair, ff,
+                                 hidden, nullptr))
+        throw std::runtime_error("IQ variant 0 paired probe rejected");
+      const auto baseline = Download(d_pair, slots * ff);
+      q::RoutedIqSetProbe(-1, -1);
+      if (std::memcmp(paired.data(), baseline.data(),
+                      paired.size() * sizeof(__half)) != 0)
+        throw std::runtime_error(std::string(gate_format.name) +
+                                 " default differs from variant 0");
+    }
+    for (__half h : Download(d_pair + slots * ff, guard))
+      if (__half2float(h) != __half2float(poison))
+        throw std::runtime_error("IQ paired output overwrote guard");
+    CheckHip(hipFree(dt), "IQ pair tiles free");
+  }
+  const auto separate_tiles = tiles_for(48);
+  auto* d_separate_tiles = Upload(separate_tiles);
+  auto* d_gate_f16 = Upload(std::vector<float>(slots * ff));
+  auto* d_up_f16 = Upload(std::vector<__half>(slots * ff));
+  if (!q::RoutedF16Gemm(dg, gate_format.type, dx_half, d_separate_tiles,
+                        separate_tiles.size(), 48, db, rt, rs, nullptr,
+                        d_gate_f16, nullptr, ff, hidden, nullptr) ||
+      !q::RoutedF16Gemm(du, gate_format.type, dx_half, d_separate_tiles,
+                        separate_tiles.size(), 48, db, rt, rs, d_gate_f16,
+                        nullptr, d_up_f16, ff, hidden, nullptr))
+    throw std::runtime_error("IQ separate WMMA rejected production shape");
+  CheckIqError(Download(d_up_f16, slots * ff), mmq_up, ref_up, staged_up,
+               "IQ separate gate/up");
+  {
+    // The executor takes 16-row tiles for every prefill of fewer than ~820 tokens (RoutedTileRows): the BN=16 instantiations
+    // of the IQ kernels serve the short agent turns and need the same check as the 48-row ones.
+    const auto narrow_tiles = tiles_for(16);
+    auto* d_narrow_tiles = Upload(narrow_tiles);
+    auto* d_gate16 = Upload(std::vector<float>(slots * ff));
+    auto* d_up16 = Upload(std::vector<__half>(slots * ff));
+    if (!q::RoutedF16Gemm(dg, gate_format.type, dx_half, d_narrow_tiles,
+                          narrow_tiles.size(), 16, db, rt, rs, nullptr,
+                          d_gate16, nullptr, ff, hidden, nullptr) ||
+        !q::RoutedF16Gemm(du, gate_format.type, dx_half, d_narrow_tiles,
+                          narrow_tiles.size(), 16, db, rt, rs, d_gate16,
+                          nullptr, d_up16, ff, hidden, nullptr))
+      throw std::runtime_error("IQ 16-row gate/up WMMA rejected production shape");
+    CheckIqError(Download(d_up16, slots * ff), mmq_up, ref_up, staged_up,
+                 "IQ separate gate/up, 16-row tiles");
+    for (void* p : {static_cast<void*>(d_narrow_tiles),
+                    static_cast<void*>(d_gate16), static_cast<void*>(d_up16)})
+      CheckHip(hipFree(p), "IQ 16-row gate/up free");
+  }
+  if (q::RoutedGatedF16Gemm(dg, du, gate_format.type, dx_half, d_separate_tiles,
+                            separate_tiles.size(), 64, db, rt, rs, d_pair, ff,
+                            ff, nullptr))
+    throw std::runtime_error("256-block IQ gate admitted K=640");
+
+  std::vector<float> down_x(slots * ff);
+  std::transform(paired.begin(), paired.end(), down_x.begin(),
+                 [](__half v) { return __half2float(v); });
+  auto* d_down_x = Upload(down_x);
+  std::vector<float> down_mmq(slots * hidden);
+  auto* d_down_mmq = Upload(down_mmq);
+  if (down_format.mmq(dd, d_down_x, di, d_down_mmq, hidden, ff, slots, experts,
+                      1, nullptr) != 0)
+    throw std::runtime_error("IQ down MMQ rejected production shape");
+  down_mmq = Download(d_down_mmq, slots * hidden);
+  std::vector<float> ref_down(slots * hidden), staged_down(slots * hidden);
+  std::vector<__half> mmq_down(slots * hidden);
+  for (std::size_t slot = 0; slot < slots; ++slot) {
+    const std::size_t e = ids[slot];
+    for (std::size_t row = 0; row < hidden; ++row) {
+      const auto offset = (e * hidden + row) * ff;
+      double sum = 0.0, staged_sum = 0.0;
+      for (std::size_t k = 0; k < ff; ++k) {
+        sum += static_cast<double>(down.values[offset + k]) *
+               down_x[slot * ff + k];
+        staged_sum +=
+            static_cast<double>(__half2float(down.staged[offset + k])) *
+            down_x[slot * ff + k];
+      }
+      ref_down[slot * hidden + row] = static_cast<float>(sum);
+      staged_down[slot * hidden + row] = static_cast<float>(staged_sum);
+      mmq_down[slot * hidden + row] =
+          __float2half(down_mmq[slot * hidden + row]);
+    }
+  }
+  auto* d_down_half = Upload(paired);
+  std::vector<__half> down_initial(slots * hidden + guard, poison);
+  auto* d_down = Upload(down_initial);
+  const auto down_tiles = tiles_for(96);
+  auto* d_down_tiles = Upload(down_tiles);
+  if (!q::RoutedF16Gemm(dd, down_format.type, d_down_half, d_down_tiles,
+                        down_tiles.size(), 96, db, rs, rs, nullptr, nullptr,
+                        d_down, hidden, ff, nullptr))
+    throw std::runtime_error("IQ down WMMA rejected production shape");
+  CheckIqError(Download(d_down, slots * hidden), mmq_down, ref_down,
+               staged_down, down_format.name);
+  if (down_format.type == q::WeightType::kIQ4_NL) {
+    const auto chosen = Download(d_down, slots * hidden);
+    q::RoutedIqSetProbe(0, 0);
+    CheckHip(hipMemcpy(d_down, down_initial.data(),
+                       down_initial.size() * sizeof(__half),
+                       hipMemcpyHostToDevice), "reset IQ down baseline output");
+    if (!q::RoutedF16Gemm(dd, down_format.type, d_down_half, d_down_tiles,
+                          down_tiles.size(), 96, db, rs, rs, nullptr, nullptr,
+                          d_down, hidden, ff, nullptr))
+      throw std::runtime_error("IQ variant 0 down probe rejected");
+    const auto baseline = Download(d_down, slots * hidden);
+    q::RoutedIqSetProbe(-1, -1);
+    if (std::memcmp(chosen.data(), baseline.data(),
+                    chosen.size() * sizeof(__half)) != 0)
+      throw std::runtime_error("IQ4_NL default differs from variant 0");
+  }
+  for (__half h : Download(d_down + slots * hidden, guard))
+    if (__half2float(h) != __half2float(poison))
+      throw std::runtime_error("IQ down output overwrote guard");
+  {
+    const auto narrow_down_tiles = tiles_for(16);
+    auto* d_narrow_down_tiles = Upload(narrow_down_tiles);
+    auto* d_down16 = Upload(down_initial);
+    if (!q::RoutedF16Gemm(dd, down_format.type, d_down_half, d_narrow_down_tiles,
+                          narrow_down_tiles.size(), 16, db, rs, rs, nullptr,
+                          nullptr, d_down16, hidden, ff, nullptr))
+      throw std::runtime_error("IQ 16-row down WMMA rejected production shape");
+    CheckIqError(Download(d_down16, slots * hidden), mmq_down, ref_down,
+                 staged_down, down_format.name);
+    for (__half h : Download(d_down16 + slots * hidden, guard))
+      if (__half2float(h) != __half2float(poison))
+        throw std::runtime_error("IQ 16-row down output overwrote guard");
+    for (void* p : {static_cast<void*>(d_narrow_down_tiles),
+                    static_cast<void*>(d_down16)})
+      CheckHip(hipFree(p), "IQ 16-row down free");
+  }
+  if (q::RoutedF16Gemm(dd, down_format.type, d_down_half, d_down_tiles,
+                       down_tiles.size(), 96, db, rs, rs, nullptr, nullptr,
+                       d_down, hidden, ff - 2, nullptr))
+    throw std::runtime_error("IQ down admitted incomplete K block");
+  for (void* p : {static_cast<void*>(dg),
+                  static_cast<void*>(du),
+                  static_cast<void*>(dd),
+                  static_cast<void*>(dx),
+                  static_cast<void*>(dx_half),
+                  static_cast<void*>(di),
+                  static_cast<void*>(dc),
+                  static_cast<void*>(db),
+                  static_cast<void*>(cursors),
+                  static_cast<void*>(rt),
+                  static_cast<void*>(rs),
+                  static_cast<void*>(d_gate_mmq),
+                  static_cast<void*>(d_up_mmq),
+                  static_cast<void*>(d_pair),
+                  static_cast<void*>(d_separate_tiles),
+                  static_cast<void*>(d_gate_f16),
+                  static_cast<void*>(d_up_f16),
+                  static_cast<void*>(d_down_x),
+                  static_cast<void*>(d_down_mmq),
+                  static_cast<void*>(d_down_half),
+                  static_cast<void*>(d_down),
+                  static_cast<void*>(d_down_tiles)})
+    CheckHip(hipFree(p), "IQ routed test free");
+}
+
+void CheckIqProbeShapes(const IqFormat& format, bool pair) {
+  constexpr std::size_t max_rows = 1024, guard = 32;
+  const std::size_t m = pair ? 640 : 2560;
+  const std::size_t k = pair ? 2560 : 640;
+  const Experts weight = MakeIq(format, 1, m, k, 0xA115101U);
+  const Experts up = pair ? MakeIq(format, 1, m, k, 0xB115101U) : Experts{};
+  std::uint32_t seed = 0xC115101U;
+  std::vector<__half> x(max_rows * k);
+  std::vector<float> x_float(x.size());
+  for (std::size_t i = 0; i < x.size(); ++i) {
+    x[i] = __float2half(Uniform(&seed, 0.04F));
+    x_float[i] = __half2float(x[i]);
+  }
+  auto* dw = Upload(weight.packed);
+  auto* du = pair ? Upload(up.packed) : nullptr;
+  auto* dx = Upload(x);
+  auto* dx_float = Upload(x_float);
+  const __half poison = __float2half(-77.0F);
+  for (int rows : {9, 16, 33, 64, 128, 470, 1024}) {
+    const int padded = (rows + 15) / 16 * 16;
+    std::vector<std::int32_t> map(padded, -1);
+    for (int i = 0; i < rows; ++i)
+      map[i] = i;
+    auto* db = Upload(std::vector<std::int32_t>{0, padded});
+    auto* dmap = Upload(map);
+    auto* dids = Upload(std::vector<std::int32_t>(rows, 0));
+    std::vector<float> mmq_gate(rows * m), mmq_up(rows * m);
+    auto* d_mmq_gate = Upload(mmq_gate);
+    float* d_mmq_up = pair ? Upload(mmq_up) : nullptr;
+    if (format.mmq(dw, dx_float, dids, d_mmq_gate,
+                   static_cast<int>(m), static_cast<int>(k), rows, 1, 1,
+                   nullptr) != 0 ||
+        (pair && format.mmq(du, dx_float, dids, d_mmq_up,
+                            static_cast<int>(m), static_cast<int>(k), rows,
+                            1, 1, nullptr) != 0))
+      throw std::runtime_error("IQ shape MMQ reference rejected");
+    mmq_gate = Download(d_mmq_gate, rows * m);
+    if (pair)
+      mmq_up = Download(d_mmq_up, rows * m);
+
+    for (int width : pair ? std::vector<int>{64, 128}
+                          : std::vector<int>{16, 48, 96}) {
+      std::vector<int> variants{0, 3, 7, 11, 19, 27};
+      if (pair && width == 128)
+        variants.insert(variants.end(), {35, 43, 59});
+      std::vector<std::int32_t> tiles;
+      for (int j = 0; j < (rows + width - 1) / width; ++j)
+        tiles.push_back(j << 16);
+      auto* dt = Upload(tiles);
+      const std::vector<__half> initial(rows * m + guard, poison);
+      auto* dout = Upload(initial);
+      const auto run = [&](int variant) {
+        CheckHip(hipMemcpy(dout, initial.data(),
+                           initial.size() * sizeof(__half),
+                           hipMemcpyHostToDevice), "reset IQ shape output");
+        q::RoutedIqSetProbe(variant, variant < 0 ? -1 : 0);
+        const bool ok = pair
+            ? q::RoutedGatedF16Gemm(dw, du, format.type, dx, dt,
+                                    tiles.size(), width, db, dmap, dmap,
+                                    dout, m, k, nullptr)
+            : q::RoutedF16Gemm(dw, format.type, dx, dt, tiles.size(), width,
+                               db, dmap, dmap, nullptr, nullptr, dout,
+                               m, k, nullptr);
+        if (!ok)
+          throw std::runtime_error(std::string(format.name) +
+                                   " shape probe has no instance");
+        CheckHip(hipGetLastError(), "IQ shape launch");
+        const auto result = Download(dout, rows * m);
+        for (__half h : Download(dout + rows * m, guard))
+          if (__half2float(h) != __half2float(poison))
+            throw std::runtime_error("IQ shape output guard overwritten");
+        return result;
+      };
+      const auto baseline = run(0);
+      for (int variant : variants) {
+        if (variant == 0)
+          continue;
+        const auto actual = run(variant);
+        if (std::memcmp(baseline.data(), actual.data(),
+                        baseline.size() * sizeof(__half)) != 0)
+          throw std::runtime_error(std::string(format.name) + " v" +
+                                   std::to_string(variant) +
+                                   " differs from variant 0 at rows=" +
+                                   std::to_string(rows) + " BN=" +
+                                   std::to_string(width));
+      }
+      const auto chosen = run(-1);
+      if (std::memcmp(baseline.data(), chosen.data(),
+                      baseline.size() * sizeof(__half)) != 0)
+        throw std::runtime_error(std::string(format.name) +
+                                 " default differs from variant 0");
+      q::RoutedIqSetProbe(63, 0);
+      const bool accepted = pair
+          ? q::RoutedGatedF16Gemm(dw, du, format.type, dx, dt,
+                                  tiles.size(), width, db, dmap, dmap,
+                                  dout, m, k, nullptr)
+          : q::RoutedF16Gemm(dw, format.type, dx, dt, tiles.size(), width,
+                             db, dmap, dmap, nullptr, nullptr, dout,
+                             m, k, nullptr);
+      q::RoutedIqSetProbe(-1, -1);
+      if (accepted)
+        throw std::runtime_error("unknown IQ probe silently fell through");
+
+      double max_ref = 0.0, f16_error = 0.0, mmq_error = 0.0;
+      for (int t : {0, rows / 2, rows - 1}) {
+        for (std::size_t row : {std::size_t(0), m / 2, m - 1}) {
+          const std::size_t base = row * k;
+          double sum = 0.0, up_sum = 0.0;
+          for (std::size_t col = 0; col < k; ++col) {
+            const double xv = x_float[static_cast<std::size_t>(t) * k + col];
+            sum += static_cast<double>(weight.values[base + col]) * xv;
+            if (pair)
+              up_sum += static_cast<double>(up.values[base + col]) * xv;
+          }
+          const double ref = pair ? up_sum * sum / (1.0 + std::exp(-sum)) : sum;
+          const std::size_t index = static_cast<std::size_t>(t) * m + row;
+          const double mg = mmq_gate[index];
+          const double mq = pair ? mmq_up[index] * mg / (1.0 + std::exp(-mg))
+                                 : mg;
+          const double fv = __half2float(baseline[index]);
+          if (!std::isfinite(ref) || !std::isfinite(mq) || !std::isfinite(fv))
+            throw std::runtime_error("IQ shape reference is nonfinite");
+          max_ref = std::max(max_ref, std::abs(ref));
+          f16_error = std::max(f16_error, std::abs(fv - ref));
+          mmq_error = std::max(mmq_error, std::abs(mq - ref));
+        }
+      }
+      // This sparse sample can have a much smaller scale than the complete
+      // output checked by CheckIqExperts; its MMQ bound is correspondingly
+      // wider. Every variant still has a full-buffer bit comparison above.
+      if (f16_error > 0.03 * max_ref + 1e-5 ||
+          mmq_error > 0.15 * max_ref + 1e-5)
+        throw std::runtime_error(std::string(format.name) +
+                                 " shape F64/MMQ reference bound exceeded");
+      std::cout << "IQ SHAPE " << format.name << " rows=" << rows
+                << " BN=" << width << " variants=" << variants.size()
+                << " bit-identical"
+                << " F16/F64=" << f16_error / (max_ref + 1e-30)
+                << " MMQ/F64=" << mmq_error / (max_ref + 1e-30) << '\n';
+      for (void* p : {static_cast<void*>(dt), static_cast<void*>(dout)})
+        CheckHip(hipFree(p), "IQ shape tile free");
+    }
+    for (void* p : {static_cast<void*>(db), static_cast<void*>(dmap),
+                    static_cast<void*>(dids), static_cast<void*>(d_mmq_gate)})
+      CheckHip(hipFree(p), "IQ shape rows free");
+    if (d_mmq_up)
+      CheckHip(hipFree(d_mmq_up), "IQ shape MMQ up free");
+  }
+  q::RoutedIqSetProbe(-1, -1);
+  for (void* p : {static_cast<void*>(dw), static_cast<void*>(dx),
+                  static_cast<void*>(dx_float)})
+    CheckHip(hipFree(p), "IQ shape free");
+  if (du)
+    CheckHip(hipFree(du), "IQ shape up free");
+}
+
+void CheckIqRaggedDefault(const IqFormat& format, bool pair) {
+  constexpr int rows = 9, padded = 16, guard = 32;
+  const std::size_t m = pair ? 65 : 129;
+  const std::size_t k = pair ? 256 : 64;
+  const auto weight = MakeIq(format, 1, m, k, 0x711041U);
+  const auto up = pair ? MakeIq(format, 1, m, k, 0x711042U) : Experts{};
+  std::vector<__half> x(padded * k, __float2half(0.125F));
+  std::vector<std::int32_t> map(padded, -1);
+  for (int row = 0; row < rows; ++row)
+    map[row] = row;
+  auto* dw = Upload(weight.packed);
+  auto* du = pair ? Upload(up.packed) : nullptr;
+  auto* dx = Upload(x);
+  auto* db = Upload(std::vector<std::int32_t>{0, padded});
+  auto* dmap = Upload(map);
+  auto* dt = Upload(std::vector<std::int32_t>{0});
+  const __half poison = __float2half(-77.0F);
+  const std::vector<__half> initial(rows * m + guard, poison);
+  auto* dout = Upload(initial);
+  for (int width : pair ? std::vector<int>{64, 128}
+                        : std::vector<int>{16, 48, 96}) {
+    const auto run = [&](int variant) {
+      CheckHip(hipMemcpy(dout, initial.data(), initial.size() * sizeof(__half),
+                         hipMemcpyHostToDevice), "reset ragged IQ output");
+      q::RoutedIqSetProbe(variant, variant < 0 ? -1 : 0);
+      const bool ok = pair
+          ? q::RoutedGatedF16Gemm(dw, du, format.type, dx, dt, 1, width, db,
+                                  dmap, dmap, dout, m, k, nullptr)
+          : q::RoutedF16Gemm(dw, format.type, dx, dt, 1, width, db, dmap,
+                             dmap, nullptr, nullptr, dout, m, k, nullptr);
+      if (!ok)
+        throw std::runtime_error("ragged IQ default or v0 rejected");
+      CheckHip(hipGetLastError(), "ragged IQ launch");
+      const auto result = Download(dout, rows * m);
+      for (__half h : Download(dout + rows * m, guard))
+        if (__half2float(h) != __half2float(poison))
+          throw std::runtime_error("ragged IQ output guard overwritten");
+      return result;
+    };
+    const auto baseline = run(0);
+    const auto chosen = run(-1);
+    if (std::memcmp(baseline.data(), chosen.data(),
+                    baseline.size() * sizeof(__half)) != 0)
+      throw std::runtime_error(std::string(format.name) +
+                               " ragged default differs from v0 BN=" +
+                               std::to_string(width));
+    std::cout << "IQ RAGGED " << format.name << " m=" << m << " BN=" << width
+              << " default bit-identical to v0\n";
+  }
+  q::RoutedIqSetProbe(-1, -1);
+  for (void* p : {static_cast<void*>(dw), static_cast<void*>(dx),
+                  static_cast<void*>(db), static_cast<void*>(dmap),
+                  static_cast<void*>(dt), static_cast<void*>(dout)})
+    CheckHip(hipFree(p), "ragged IQ free");
+  if (du)
+    CheckHip(hipFree(du), "ragged IQ up free");
+}
+
 }  // namespace
 
 int main() {
   try {
+    for (std::size_t i = 0; i < 6; ++i)
+      CheckIqExperts(kIqFormats[i], kIqFormats[6 + i % 2]);
+    CheckIqProbeShapes(kIqFormats[2], true);  // IQ2_S gate/up
+    CheckIqProbeShapes(kIqFormats[0], true);  // IQ3_XXS gate/up
+    CheckIqProbeShapes(kIqFormats[1], true);  // IQ3_S gate/up
+    CheckIqProbeShapes(kIqFormats[6], false); // IQ4_NL down
+    CheckIqRaggedDefault(kIqFormats[2], true);
+    CheckIqRaggedDefault(kIqFormats[0], true);
+    CheckIqRaggedDefault(kIqFormats[1], true);
+    CheckIqRaggedDefault(kIqFormats[6], false);
     CheckLanerowCounters();
     CheckVectorGrouping();
     CheckVectorGrouping(true);
@@ -1085,6 +1685,18 @@ int main() {
          ok;
     ok = Ok(Run(q::WeightType::kQ5_1, 97, 1, 8, 129, 640, 0x51516464U, 64)) &&
          ok;
+    // C4 paired SwiGLU rounding: more tokens and seeds give the F16 rounding
+    // ties of (up*gate)*sigmoid versus up*(gate*sigmoid) many chances to show.
+    // Run() requires the paired output to equal the separate SwiGLU bit for
+    // bit (value-equal, either sign of zero).
+    for (std::uint32_t round = 0; round < 4; ++round) {
+      ok = Ok(Run(q::WeightType::kQ4_K, 1200, 10, 64, 640, 2560,
+                  0xC4510000U + round)) &&
+           ok;
+      ok = Ok(Run(q::WeightType::kQ5_K, 900, 10, 64, 640, 2560,
+                  0xC4520000U + round)) &&
+           ok;
+    }
     // Q5_K gate/up view (one layer).
     ok = Ok(Run(q::WeightType::kQ5_K, 300, 10, 64, 640, 2560, 0x5A5A0001U)) &&
          ok;
@@ -1094,6 +1706,13 @@ int main() {
          ok;
     // Ragged rows against the 128-row tile and a tiny batch.
     ok = Ok(Run(q::WeightType::kQ4_K, 40, 4, 8, 201, 512, 0xDEADBEEFU)) && ok;
+    // Paired waves must retain unsaturated SiLU arithmetic and protect the
+    // last odd output row in short and partial token groups.
+    for (auto type : {q::WeightType::kQ4_K, q::WeightType::kQ5_K}) {
+      for (std::size_t rows : {1U, 8U, 9U, 32U, 33U, 65U, 129U}) {
+        ok = Ok(Run(type, rows, 1, 1, 65, 256, 0x5A1711U, 48, 0.002F)) && ok;
+      }
+    }
     // The 16-row tile (small buckets) on every type.
     ok = Ok(Run(q::WeightType::kQ4_K, 300, 10, 64, 640, 2560, 0x16161616U,
                 16)) &&

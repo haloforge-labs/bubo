@@ -52,6 +52,7 @@ if (ENGINE_ENABLE_HIP)
 
   set(QFN_HIP_SOURCES
     ${QFN_ROCM_DIR}/kernels.hip.cpp
+    ${QFN_ROCM_DIR}/select_score.hip.cpp
     ${QFN_ROCM_DIR}/w8a8_wave64.hip
     ${QFN_ROCM_DIR}/blaslt.cpp
     ${QFN_ROCM_DIR}/device_model.cpp
@@ -60,6 +61,11 @@ if (ENGINE_ENABLE_HIP)
     engine.cpp)
   target_sources(gufo_qwen38_flash_next PRIVATE ${QFN_HIP_SOURCES})
   set_source_files_properties(${QFN_ROCM_DIR}/kernels.hip.cpp PROPERTIES LANGUAGE HIP)
+  # The indexer scorer spills 304 scalar registers when clang 24's SLP vectorizer merges its query loads;
+  # -fno-slp-vectorize on this one file removes the spills (bit-identical output, SelectBlocks 1.6-1.8x faster).
+  # The flag must stay on this file only: it is why the kernel has its own translation unit.
+  set_source_files_properties(${QFN_ROCM_DIR}/select_score.hip.cpp PROPERTIES LANGUAGE HIP
+    COMPILE_OPTIONS "-fno-slp-vectorize")
   set_source_files_properties(${QFN_ROCM_DIR}/w8a8_wave64.hip
     PROPERTIES COMPILE_OPTIONS "-mwavefrontsize64")
   target_compile_definitions(gufo_qwen38_flash_next PRIVATE QFN_ROCM_BUILD=1)

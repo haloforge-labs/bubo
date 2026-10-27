@@ -11,7 +11,11 @@
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+#include <utility>
+#include <vector>
 
+#include "src/cli/prepare/runtime_location.hpp"
+#include "src/cli/prepared_default.hpp"
 #include "src/core/prepare/hash_file.hpp"
 #include "src/core/prepare/metadata_json.hpp"
 #include "src/core/prepare/zip_reader.hpp"
@@ -43,6 +47,7 @@ struct Failure : std::runtime_error {
       : std::runtime_error(std::move(text)), code(c) {}
 };
 struct Environment {
+  RuntimeSearch runtime_search;
   std::array<WheelPin, 3> wheels;
   std::vector<RuntimeMember> members;
   std::vector<RuntimeNotice> notices;
@@ -74,24 +79,28 @@ std::string Commas(std::uint64_t n) {
     s.insert(i - 3, ",");
   return s;
 }
-fs::path ExeFolder() {
-#ifdef _WIN32
-  std::wstring path(32768, L'\0');
-  const auto n =
-      GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
-  if (!n || n == path.size())
-    throw Failure(7, "cannot locate bubo.exe");
-  path.resize(n);
-  return fs::path(path).parent_path();
-#else
-  return fs::read_symlink("/proc/self/exe").parent_path();
-#endif
-}
+// Reparse points are refused from the runtime and cache folders downwards. A
+// junction above them (a moved or redirected profile) is the user's layout.
+// Empty outside a run: every ancestor is checked.
+thread_local std::vector<fs::path> gReparseRoots;
+class ReparseRoots {
+public:
+  explicit ReparseRoots(std::vector<fs::path> roots)
+      : previous_(std::exchange(gReparseRoots, std::move(roots))) {}
+  ~ReparseRoots() { gReparseRoots = std::move(previous_); }
+  ReparseRoots(const ReparseRoots&) = delete;
+  ReparseRoots& operator=(const ReparseRoots&) = delete;
+
+private:
+  std::vector<fs::path> previous_;
+};
 void Local(const fs::path& path) {
   const auto error = CheckLocalPath(path);
   if (!error.empty())
     throw Failure(7, error);
   for (auto p = path; !p.empty();) {
+    const bool boundary = std::find(gReparseRoots.begin(), gReparseRoots.end(),
+                                    p) != gReparseRoots.end();
 #ifdef _WIN32
     const auto attr = GetFileAttributesW(p.c_str());
     if (attr != INVALID_FILE_ATTRIBUTES &&
@@ -102,7 +111,7 @@ void Local(const fs::path& path) {
       throw Failure(7, "runtime/cache symlink refused");
 #endif
     const auto parent = p.parent_path();
-    if (parent == p || p == p.root_path())
+    if (boundary || parent == p || p == p.root_path())
       break;
     p = parent;
   }
@@ -133,6 +142,7 @@ void Move(const fs::path& from, const fs::path& to) {
 }
 void Save(const fs::path& path, std::string_view text) {
   Local(path);
+  Local(fs::path(path.wstring() + L".new"));
   fs::create_directories(path.parent_path());
   std::string error;
   if (!AtomicWrite(path, text, error))
@@ -219,15 +229,17 @@ void Recover(const fs::path& root, const Environment& e) {
   metadata::Keys(data, {"phase", "files"});
   const auto& rows = metadata::Required(data, "files");
   const auto names = ManagedPaths(e);
-  if (!rows.is_array() || rows.size() != names.size())
+  if (!rows.is_array() ||
+      (rows.size() != names.size() && rows.size() != e.notices.size() + 1))
     throw Failure(7, "invalid runtime rollback journal; backups retained");
+  const auto offset = rows.size() == names.size() ? 0 : e.members.size();
   std::vector<Installed> files;
-  for (std::size_t i = 0; i < names.size(); ++i) {
+  for (std::size_t i = 0; i < rows.size(); ++i) {
     const auto& row = rows.items()[i];
     metadata::Keys(row, {"path", "existed"});
     const auto name = metadata::String(metadata::Required(row, "path"));
     const auto existed = metadata::Integer(metadata::Required(row, "existed"));
-    if (name != names[i] || existed > 1)
+    if (name != names[offset + i] || existed > 1)
       throw Failure(7, "runtime journal differs from managed paths");
     files.push_back({name, existed != 0});
   }
@@ -263,7 +275,8 @@ void Recover(const fs::path& root, const Environment& e) {
   }
   Remove(journal);
 }
-bool CheckInstalled(const fs::path& root, const Environment& e) {
+bool CheckInstalled(const fs::path& root, const Environment& e,
+                    bool* payload_ready = nullptr) {
   bool complete = true;
   for (const auto& m : e.members) {
     const auto p = root / Path(m.destination);
@@ -274,9 +287,11 @@ bool CheckInstalled(const fs::path& root, const Environment& e) {
     }
     ReadLease lease(p);
     if (lease.Snapshot().size != m.size || HashFile(p) != m.sha256)
-      throw Failure(7, "different existing runtime file '" + Utf8(p) +
+      throw Failure(6, "different existing runtime file '" + Utf8(p) +
                            "'; delete it and run bubo prepare again");
   }
+  if (payload_ready)
+    *payload_ready = complete;
   for (const auto& n : e.notices) {
     const auto p = root / "licenses" / Path(n.path);
     Local(p);
@@ -286,8 +301,7 @@ bool CheckInstalled(const fs::path& root, const Environment& e) {
     }
     ReadLease lease(p);
     if (lease.Snapshot().size != n.text.size() || HashFile(p) != n.sha256)
-      throw Failure(7, "different existing notice '" + Utf8(p) +
-                           "'; delete it and run bubo prepare again");
+      complete = false;
   }
   const auto marker = root / Path(".bubo/runtime-ready.json");
   Local(marker);
@@ -296,6 +310,78 @@ bool CheckInstalled(const fs::path& root, const Environment& e) {
   if (fs::exists(root / Path(".bubo/runtime/journal.json")))
     complete = false;
   return complete;
+}
+// Refresh only Bubo's metadata. The same durable journal and rollback used
+// for installation protect each rename; no member is staged or replaced.
+void RefreshNotices(const fs::path& root, const Environment& e) {
+  const auto control = root / Path(".bubo/runtime");
+  const auto all_names = ManagedPaths(e);
+  const std::vector<std::string> names(all_names.begin() + e.members.size(),
+                                       all_names.end());
+  Local(control / "stage");
+  Local(control / "backup");
+  if (fs::exists(control / "backup"))
+    throw Failure(7, "unowned runtime backup without journal");
+  if (fs::exists(control / "stage")) {
+    for (const auto& entry :
+         fs::recursive_directory_iterator(control / "stage"))
+      Local(entry.path());
+    fs::remove_all(control / "stage");
+  }
+  std::vector<std::shared_ptr<ReadLease>> staged;
+  try {
+    for (const auto& n : e.notices) {
+      const auto path = control / Path("stage/licenses") / Path(n.path);
+      Save(path, n.text);
+      staged.push_back(Seal(path, n.text.size(), n.sha256));
+    }
+    const auto ready = Ready(e);
+    const auto marker = control / Path("stage/.bubo/runtime-ready.json");
+    Save(marker, ready);
+    staged.push_back(Seal(marker, ready.size(), Digest(ready)));
+    // Keep matching members stable until the refreshed marker is published.
+    std::vector<ReadLease> payload_leases;
+    for (const auto& member : e.members)
+      payload_leases.emplace_back(root / Path(member.destination));
+    bool payload = false;
+    CheckInstalled(root, e, &payload);
+    if (!payload)
+      throw Failure(
+          7, "runtime changed during notice refresh; run bubo prepare again");
+    auto journal = Value::object();
+    journal["phase"] = "installing";
+    journal["files"] = Value::array();
+    for (const auto& name : names) {
+      auto row = Value::object();
+      row["path"] = name;
+      Local(root / Path(name));
+      row["existed"] = fs::exists(root / Path(name)) ? 1 : 0;
+      journal["files"].push_back(row);
+    }
+    Save(control / "journal.json", journal.dump());
+    for (std::size_t i = 0; i < names.size(); ++i) {
+      if (e.cancelled && e.cancelled())
+        throw Failure(3, "cancelled");
+      const auto final = root / Path(names[i]);
+      fs::create_directories(final.parent_path());
+      if (fs::exists(final))
+        Move(final, control / "backup" / Path(names[i]));
+      std::string error;
+      if (!staged[i]->PromoteTo(control / "stage" / Path(names[i]), final,
+                                error, false))
+        throw Failure(7, error);
+      if (e.after_install && !e.after_install(i))
+        throw Failure(7, "injected runtime transaction failure");
+    }
+    journal["phase"] = "committed";
+    Save(control / "journal.json", journal.dump());
+    staged.clear();
+    Recover(root, e);
+  } catch (...) {
+    staged.clear();
+    Recover(root, e);
+    throw;
+  }
 }
 void Holders(const Environment& e) {
   const auto processes = e.holders();
@@ -307,6 +393,41 @@ void Holders(const Environment& e) {
                   error + "Stop the server. Run bubo prepare runtime again.");
   }
 }
+Value MachinePlan(
+    const Environment& e, const fs::path& root, const fs::path& cache,
+    bool ready, bool payload_ready = false,
+    const std::map<std::string, std::pair<std::uint64_t, std::uint64_t>>&
+        budgets = {}) {
+  auto value = Value::object();
+  value["component"] = "runtime";
+  value["ready"] = ready;
+  value["sources"] = Value::array();
+  if (ready || payload_ready)
+    value["file_states"] = Value::array();
+  value["licenses"] = Value::array();
+  value["paths"] = Value::object();
+  value["paths"]["runtime"] = Utf8(root);
+  value["paths"]["cache"] = Utf8(cache);
+  value["volumes"] = Value::array();
+  for (const auto& wheel : e.wheels) {
+    value["sources"].push_back(PlanSource(
+        wheel.name, wheel.url, wheel.size, wheel.sha256, "AMD/TheRock",
+        "10.0.0", Utf8(cache / Path(wheel.file)), "AMD component terms"));
+    if (ready || payload_ready)
+      value["file_states"].push_back("reuse");
+  }
+  for (const auto& notice : e.notices) {
+    auto row = Value::object();
+    row["path"] = std::string(notice.path);
+    row["text"] = std::string(notice.text);
+    row["sha256"] = std::string(notice.sha256);
+    value["licenses"].push_back(row);
+  }
+  for (const auto& [name, budget] : budgets)
+    value["volumes"].push_back(PlanVolume(
+        {name, budget.first, budget.second + 2ULL * 1024 * 1024 * 1024}));
+  return value;
+}
 int RunImpl(const Options& options, Environment e, std::istream& input,
             std::ostream& out, std::ostream& err, PreparationPlan* preview,
             bool approved) {
@@ -316,12 +437,30 @@ int RunImpl(const Options& options, Environment e, std::istream& input,
     for (const auto& n : e.notices)
       if (!SafeZipPath(n.path) || Digest(n.text) != n.sha256)
         throw Failure(4, "runtime notice pin mismatch; no downloads started");
-    const auto root = NativePath(
-        options.runtime_dir.empty() ? ExeFolder() : Path(options.runtime_dir));
+    // Preparation and engine startup choose the same runtime. --output is
+    // the model/archive root; it cannot redirect the runtime away from the
+    // folder the server will load. Existing readiness errors are repaired by
+    // preparation, while an invalid destination still fails before writes.
+    auto search = e.runtime_search;
+    search.option = options.runtime_dir;
+    const auto runtime = ResolveRuntime(search);
+    if (const auto bad = CheckRuntimeDirOption(Utf8(runtime.dir)); !bad.empty())
+      throw Failure(2, "--runtime-dir: " + bad);
+    const auto root = NativePath(runtime.dir);
+    if (preview)
+      preview->runtime_dir = Utf8(root);
+    // --runtime-dir puts the runtime where later commands do not look. They
+    // find it through BUBO_RUNTIME_DIR; say so, with the folder.
+    const auto where = [&] {
+      if (!options.runtime_dir.empty())
+        out << "prepare runtime: set BUBO_RUNTIME_DIR=" << Utf8(root)
+            << " so other bubo commands find this runtime\n";
+    };
     const auto cache =
         NativePath(options.cache_dir.empty()
                        ? Path(options.root) / "cache/rocm-10.0.0-gfx1151"
                        : Path(options.cache_dir));
+    const ReparseRoots reparse_roots({root, cache});
     Local(root);
     Local(cache);
     auto rp = Utf8(root), cp = Utf8(cache);
@@ -338,11 +477,9 @@ int RunImpl(const Options& options, Environment e, std::istream& input,
       e.holders = [&] { return RuntimeHolders(root, e.members); };
     // A previous accepted transaction authorizes its recovery. Restore the
     // previous installation even if its wheel cache is now missing/offline.
-    if (fs::exists(root / Path(".bubo/runtime/journal.json"))) {
-      if (preview)
-        throw Failure(7,
-                      "unfinished runtime transaction; run bubo prepare "
-                      "runtime to recover before all");
+    // A preview writes nothing: it reports the runtime as not ready, and the
+    // approved run recovers under the lock before it installs.
+    if (!preview && fs::exists(root / Path(".bubo/runtime/journal.json"))) {
       Holders(e);
       PrepareLock recovery_lock;
       std::string error;
@@ -352,14 +489,20 @@ int RunImpl(const Options& options, Environment e, std::istream& input,
         throw Failure(recovery_lock.busy() ? 8 : 7, error);
       Recover(root, e);
     }
-    if (!fs::exists(root / Path(".bubo/runtime/journal.json")) &&
-        CheckInstalled(root, e)) {
+    bool payload_ready = false;
+    const bool journal_exists =
+        fs::exists(root / Path(".bubo/runtime/journal.json"));
+    const bool installed =
+        !journal_exists && CheckInstalled(root, e, &payload_ready);
+    if (installed) {
       if (preview) {
         preview->ready = true;
+        if (options.machine)
+          preview->machine = MachinePlan(e, root, cache, true);
         std::ostringstream disclosure;
         disclosure << "Runtime status: reuse; already prepared.\n";
         for (const auto& notice : e.notices)
-          disclosure << "Licence/notice: " << notice.path << '\n'
+          disclosure << "License/notice: " << notice.path << '\n'
                      << notice.text << '\n';
 #ifdef BUBO_PREPARE_TESTING
         if (e.synthetic_disclosure)
@@ -371,6 +514,30 @@ int RunImpl(const Options& options, Environment e, std::istream& input,
         return 0;
       }
       out << "prepare runtime: already prepared; nothing to do\n";
+      where();
+      return 0;
+    }
+    if (payload_ready) {
+      if (preview) {
+        preview->ready = false;
+        preview->machine = MachinePlan(e, root, cache, false, true);
+        preview->text =
+            "Runtime members verified; refresh notices and readiness.\n";
+        return 0;
+      }
+      if (options.authorize_plan &&
+          !options.authorize_plan(MachinePlan(e, root, cache, false, true)))
+        throw Failure(3, "plan changed; approval required");
+      PrepareLock lock;
+      std::string error;
+      Local(root / Path(".bubo/prepare.lock"));
+      if (!lock.Acquire(root / Path(".bubo/prepare.lock"), error))
+        throw Failure(lock.busy() ? 8 : 7, error);
+      Recover(root, e);
+      RefreshNotices(root, e);
+      out << "prepare runtime: already prepared; nothing to download\n"
+             "prepare runtime: notices refreshed\n";
+      where();
       return 0;
     }
     Holders(e);
@@ -432,13 +599,14 @@ int RunImpl(const Options& options, Environment e, std::istream& input,
       disclosure << "Runtime volume " << volume << ": free " << b.first
                  << " bytes; required " << required << " bytes\n";
       if (b.first < required)
-        throw Failure(7, "insufficient runtime/cache free space");
+        throw Failure(7, NotEnoughSpaceText({volume, b.first, required},
+                                            "--runtime-dir"));
       if (preview)
         preview->volumes.push_back({volume, b.first, required});
     }
     // Exact notice texts are available before the affirmative prompt.
     for (const auto& n : e.notices)
-      disclosure << "Licence/notice: " << n.path << '\n' << n.text << '\n';
+      disclosure << "License/notice: " << n.path << '\n' << n.text << '\n';
 #ifdef BUBO_PREPARE_TESTING
     if (e.synthetic_disclosure)
       disclosure << RuntimeDisclosure(e.wheels, root, root / "licenses");
@@ -447,9 +615,14 @@ int RunImpl(const Options& options, Environment e, std::istream& input,
       disclosure << RuntimeConsent(root, root / "licenses");
     if (preview) {
       preview->ready = false;
+      if (options.machine)
+        preview->machine = MachinePlan(e, root, cache, false, false, budgets);
       preview->text = disclosure.str();
       return 0;
     }
+    if (options.authorize_plan && !options.authorize_plan(MachinePlan(
+                                      e, root, cache, false, false, budgets)))
+      throw Failure(3, "plan changed; approval required");
     if (!approved) {
       out << disclosure.str();
       if (options.yes)
@@ -476,15 +649,31 @@ int RunImpl(const Options& options, Environment e, std::istream& input,
     Recover(root, e);
     if (CheckInstalled(root, e)) {
       out << "prepare runtime: already prepared; nothing to do\n";
+      where();
       return 0;
+    }
+    if (options.authorize_plan) {
+      PreparationPlan fresh;
+      if (const auto code = RunImpl(options, e, input, out, err, &fresh, false))
+        return code;
+      if (!options.authorize_plan(fresh.machine))
+        throw Failure(3, "plan changed; approval required");
     }
     const auto control = root / Path(".bubo/runtime");
     Local(control / "stage");
     Local(control / "backup");
-    for (const auto* name : {"stage", "backup"})
-      if (fs::exists(control / name))
-        throw Failure(7, "unowned runtime scratch without journal; remove " +
-                             Utf8(control / name));
+    // With no journal, nothing was moved yet: a stage folder is only this
+    // tool's unfinished extraction, and the lock is held. Backups exist only
+    // after a journal, so a backup without one is still refused.
+    if (fs::exists(control / "stage")) {
+      for (const auto& entry :
+           fs::recursive_directory_iterator(control / "stage"))
+        Local(entry.path());
+      fs::remove_all(control / "stage");
+    }
+    if (fs::exists(control / "backup"))
+      throw Failure(7, "unowned runtime backup without journal; remove " +
+                           Utf8(control / "backup"));
     fs::create_directories(control / "stage");
     std::vector<std::shared_ptr<ReadLease>> staged;
     const auto names = ManagedPaths(e);
@@ -496,6 +685,10 @@ int RunImpl(const Options& options, Environment e, std::istream& input,
           auto partial = final;
           partial += ".partial";
           auto d = e.download;
+          const auto resume_offset =
+              options.resume ? RetainedPrefix(entries[i], partial) : 0;
+          ReportProgress(options, "runtime", "download", w.name, resume_offset,
+                         w.size, resume_offset);
           d.resume = options.resume;
           d.cancelled = e.cancelled;
           d.check_space = [&] {
@@ -504,6 +697,8 @@ int RunImpl(const Options& options, Environment e, std::istream& input,
                    v.free_bytes >= 2ULL * 1024 * 1024 * 1024;
           };
           d.progress = [&](auto done, auto total) {
+            ReportProgress(options, "runtime", "download", w.name, done, total,
+                           resume_offset);
             if (done == total)
               out << "Runtime wheel " << w.name << ' ' << done << '/' << total
                   << " bytes\n";
@@ -515,6 +710,7 @@ int RunImpl(const Options& options, Environment e, std::istream& input,
           const auto result = Download(entries[i], partial, *e.transport, d);
           if (result.code)
             throw Failure(result.code, result.error);
+          ReportProgress(options, "runtime", "verify", w.name, w.size, w.size);
           std::string error;
           if (!result.verified_file->PromoteTo(partial, final, error))
             throw Failure(7, error);
@@ -525,6 +721,9 @@ int RunImpl(const Options& options, Environment e, std::istream& input,
         ZipReader zip(final);
         for (const auto& m : e.members)
           if (m.wheel == i) {
+            std::uint64_t extracted_bytes = 0;
+            ReportProgress(options, "runtime", "extract", m.destination, 0,
+                           m.size);
             const auto space = e.volume(root);
             if (!space.error.empty() || space.network ||
                 space.free_bytes < m.size + 2ULL * 1024 * 1024 * 1024)
@@ -548,6 +747,9 @@ int RunImpl(const Options& options, Environment e, std::istream& input,
                                static_cast<std::streamsize>(bytes.size()));
                     if (!file)
                       throw Failure(7, "runtime staging write failed");
+                    extracted_bytes += bytes.size();
+                    ReportProgress(options, "runtime", "extract", m.destination,
+                                   extracted_bytes, m.size);
                   },
                   m.sha256, e.cancelled);
             } catch (const Failure&) {
@@ -602,6 +804,8 @@ int RunImpl(const Options& options, Environment e, std::istream& input,
         std::string error;
         if (!staged[i]->PromoteTo(stage, final, error, false))
           throw Failure(7, error);
+        ReportProgress(options, "runtime", "promote", names[i],
+                       staged[i]->Snapshot().size, staged[i]->Snapshot().size);
         if (e.after_install && !e.after_install(i))
           throw Failure(7, "injected runtime transaction failure");
       }
@@ -623,6 +827,7 @@ int RunImpl(const Options& options, Environment e, std::istream& input,
       throw;
     }
     out << "prepare runtime: ready (ROCm 10.0.0 gfx1151)\n";
+    where();
     return 0;
   } catch (const Failure& f) {
     err << "prepare: E" << f.code << ' ' << f.what() << '\n';
@@ -685,14 +890,14 @@ std::string RuntimeDisclosure(std::span<const WheelPin> wheels,
       << " MiB). Bubo checks each hash before it extracts a file.\n\n"
       << "Files go to: " << Utf8(runtime)
       << ". Bubo needs no administrator access.\n\n"
-         "Licences: AMD licenses ROCm per component. Components can have "
+         "Licenses: AMD licenses ROCm per component. Components can have "
          "third-party terms.\n"
-         "  AMD licence page: "
+         "  AMD license page: "
          "https://rocm.docs.amd.com/en/docs-10.0.0/about/license.html\n"
-      << "  Licence texts that come with the packages (COMGR, hipcc) are saved "
+      << "  License texts that come with the packages (COMGR, hipcc) are saved "
          "in: "
       << Utf8(licenses) << '\n'
-      << "  Component licences (MIT, Apache-2.0 with LLVM exception, BSD): see "
+      << "  Component licenses (MIT, Apache-2.0 with LLVM exception, BSD): see "
       << Utf8(licenses)
       << "\\NOTICE-windows.md\n"
          "Other AMD terms can apply to these files. Bubo cannot confirm which. "
@@ -773,30 +978,12 @@ int RunRuntime(const Options& options, std::ostream& out, std::ostream& err,
   return 2;
 #else
   try {
-    if (!options.runtime_dir.empty()) {
-      const auto target = NativePath(Path(options.runtime_dir));
-      Local(target);
-      const auto source = ExeFolder();
-      for (const auto* name : {"bubo.exe", "bubo-engine.dll"}) {
-        const auto from = NativePath(source / name),
-                   to = NativePath(target / name);
-        Local(from);
-        Local(to);
-        if (!fs::is_regular_file(from) || !fs::is_regular_file(to))
-          throw Failure(2,
-                        "--runtime-dir must contain an identical bubo.exe and "
-                        "product payload");
-        ReadLease source_lease(from), target_lease(to);
-        if (source_lease.Snapshot().size != target_lease.Snapshot().size ||
-            HashFile(from) != HashFile(to))
-          throw Failure(
-              2, "--runtime-dir contains a different " + std::string(name));
-      }
-    }
     HostPolicy policy;
     policy.source = HostPolicy::Source::Amd;
     CurlTransport transport(policy);
     Environment e;
+    e.runtime_search = ProcessRuntimeSearch(options.local_app_data,
+                                            bubo::cli::ExecutableDirectory());
     e.wheels = RuntimeWheels();
     e.members = CompiledRuntimeTable();
     e.notices = RuntimeNotices();
@@ -835,6 +1022,7 @@ int RunRuntimeForTesting(const Options& options,
                          std::ostream& out, std::ostream& err,
                          PreparationPlan* preview, bool approved) {
   Environment e;
+  e.runtime_search = t.runtime_search;
   e.wheels = t.wheels;
   e.members = t.members;
   e.notices = t.notices;

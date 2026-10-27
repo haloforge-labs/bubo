@@ -11,6 +11,7 @@
 #include <iomanip>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -27,6 +28,7 @@
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/stop_sequences.hpp"
 #include "src/cli/serve/trace.hpp"
+#include "src/core/platform/memory_guard.hpp"
 
 namespace gufo::server {
 namespace {
@@ -105,6 +107,8 @@ struct ScheduledRequest {
   std::shared_ptr<SessionTable> sessions;
 
   std::atomic<bool> cancellation_requested{false};
+  /// Memory guard: stop this running request (finishes as memory_pressure, no cache commit).
+  std::atomic<bool> guard_cancel{false};
   std::atomic<TextRequestPhase> phase{TextRequestPhase::kQueued};
 
   // Empty unless eviction/idle persistence is enabled. Covers queued/scoring
@@ -124,6 +128,11 @@ struct ScheduledRequest {
   bool preview_stops{false};
   std::size_t generated_output_bytes{0};
   StopSequenceFilter stop_filter;
+  // The first generated end-of-reasoning tag token (L-REL-8). Only the worker
+  // writes the offset, under output_mutex and before the tag's piece is
+  // queued, so a streaming consumer sees it when it handles that piece.
+  bool reasoning_end_tracked{false};
+  std::optional<std::size_t> reasoning_end_byte;
 
   std::mutex output_mutex;
   std::condition_variable output_condition;
@@ -295,7 +304,7 @@ void LogBackpressure(const std::shared_ptr<ScheduledRequest>& request,
     return true;
   }
   // Reported after releasing output_mutex: the line names which budget refused
-  // the piece, which is the question an operator asks when a stream stalls.
+  // the piece, which is the question a user asks when a stream stalls.
   LogBackpressure(request, reason, buffered, piece_bytes);
   return false;
 }
@@ -340,7 +349,8 @@ void PublishPromptProgress(const std::shared_ptr<ScheduledRequest>& request) {
 }
 
 bool CancellationRequested(const std::shared_ptr<ScheduledRequest>& request) {
-  if (request->cancellation_requested.load(std::memory_order_acquire)) {
+  if (request->cancellation_requested.load(std::memory_order_acquire) ||
+      request->guard_cancel.load(std::memory_order_acquire)) {
     return true;
   }
   return request->external_cancellation && request->external_cancellation();
@@ -447,6 +457,57 @@ void WriteGenerationTrace(GenerationTrace trace,
   Trace::Write(record);
 }
 
+/// Optional memory ledger (GUFO_MEM_ACCOUNTING, the switch that already prints
+/// the load-time accounting): the device memory this process holds, sampled at
+/// phase boundaries (after a prefill step, after a decode batch, at request
+/// end) and logged whenever a phase reaches a new high in 32 MiB steps. It sees
+/// what is resident at a boundary (including scratch that is committed on first
+/// use, such as the deferred snapshot scratch), not a buffer that is allocated
+/// and freed inside one call, and a long prompt without a running decoder is one
+/// prefill call and one sample. The load line itemises the components.
+class MemoryLedger {
+public:
+  explicit MemoryLedger(const TextModelRunner& runner)
+      : runner_(runner), enabled_(std::getenv("GUFO_MEM_ACCOUNTING") != nullptr) {}
+
+  void Sample(std::string_view phase) {
+    if (!enabled_) return;
+    const auto sample = runner_.SampleDeviceMemory();
+    if (!sample) return;
+    const std::size_t used =
+        sample->split
+            ? sample->local_used_bytes + sample->nonlocal_used_bytes
+            : sample->total_bytes - std::min(sample->free_bytes, sample->total_bytes);
+    constexpr std::size_t kStep = std::size_t{32} << 20;
+    const std::lock_guard<std::mutex> lock(mutex_);
+    overall_peak_ = std::max(overall_peak_, used);
+    auto& phase_peak = phase_peaks_[std::string(phase)];
+    if (phase_peak != 0 && used < phase_peak + kStep) return;
+    phase_peak = std::max(phase_peak, used);
+    const auto mib = [](std::size_t bytes) { return std::to_string(bytes >> 20); };
+    Logger::Info("memory",
+                 "event=mem_ledger phase=" + std::string(phase) +
+                     " used_mib=" + mib(used) +
+                     " local_mib=" + mib(sample->local_used_bytes) +
+                     " nonlocal_mib=" + mib(sample->nonlocal_used_bytes) +
+                     " free_mib=" + mib(sample->free_bytes) +
+                     " total_mib=" + mib(sample->total_bytes) +
+                     " local_budget_mib=" + mib(sample->local_budget_bytes) +
+                     " nonlocal_budget_mib=" +
+                     mib(sample->nonlocal_budget_bytes) +
+                     " phase_peak_mib=" + mib(phase_peak) +
+                     " overall_peak_mib=" + mib(overall_peak_) + " " +
+                     Logger::MemoryStatus());
+  }
+
+private:
+  const TextModelRunner& runner_;
+  bool enabled_;
+  std::mutex mutex_;
+  std::map<std::string, std::size_t> phase_peaks_;
+  std::size_t overall_peak_{0};
+};
+
 }  // namespace
 
 struct TextGenerationScheduler::Request::Impl {
@@ -473,6 +534,8 @@ struct TextGenerationScheduler::Impl {
           "text generation scheduler runner pool must not be null");
     }
     sessions = std::make_shared<SessionTable>(runner_pool->capacity());
+    ledger.emplace(runner_pool->runner());
+    ledger->Sample("scheduler_start");
     if (prefill_policy.decode_active_tokens == 0) {
       throw std::invalid_argument(
           "active-decode prefill budget must be at least one token");
@@ -484,7 +547,8 @@ struct TextGenerationScheduler::Impl {
         scheduler_policy.max_output_bytes_per_request == 0 ||
         scheduler_policy.max_buffered_output_bytes_per_request == 0 ||
         scheduler_policy.max_buffered_output_bytes_total == 0 ||
-        scheduler_policy.request_timeout.count() < 0) {
+        scheduler_policy.request_timeout.count() < 0 ||
+        scheduler_policy.stall_timeout.count() < 0) {
       throw std::invalid_argument("invalid text scheduler limits");
     }
     incremental_prefill_supported =
@@ -496,6 +560,25 @@ struct TextGenerationScheduler::Impl {
     incremental_text_is_exact = runner_pool->runner()
                                     .Descriptor()
                                     .capabilities.incremental_text_is_exact;
+    // The HTTP adapters split reasoning at the generated tag token, so a tag
+    // the model writes as text stays reasoning (L-REL-8). Byte offsets of
+    // queued pieces match the final text only when incremental text is exact.
+    // Only a tag that is one token (a special token) is tracked: a tokenizer
+    // that spells the tag as text tokens cannot tell it from a quoted one, so
+    // it keeps the text rule.
+    if (incremental_text_is_exact) {
+      reasoning_end_ids = runner_pool->runner().Tokenize(
+          runner_pool->runner().Markup().reasoning_end);
+      if (reasoning_end_ids.size() != 1)
+        reasoning_end_ids.clear();
+    }
+    Logger::Info("scheduler",
+                 "event=reasoning_end_tracking tracked=" +
+                     std::string(reasoning_end_ids.empty() ? "0" : "1") +
+                     " token=" +
+                     (reasoning_end_ids.empty()
+                          ? std::string("none")
+                          : std::to_string(reasoning_end_ids.front())));
     multi_token_decode =
         runner_pool->runner().Descriptor().capabilities.multi_token_decode;
     batched_multi_token_decode = runner_pool->runner()
@@ -508,9 +591,25 @@ struct TextGenerationScheduler::Impl {
     device_lost_requests.reserve(runner_pool->capacity());
     worker = std::jthread(
         [this](const std::stop_token& stop_token) { Run(stop_token); });
+    if (scheduler_policy.stall_timeout.count() > 0) {
+      stall_monitor = std::jthread([this](const std::stop_token& stop_token) {
+        MonitorStalls(stop_token);
+      });
+    }
+    if (const auto* guard = gufo::platform::ProcessMemoryGuard(); guard != nullptr && guard->enabled()) {
+      guard_monitor = std::jthread([this](const std::stop_token& stop_token) { MonitorMemory(stop_token); });
+    }
   }
 
   ~Impl() {
+    guard_monitor.request_stop();
+    if (guard_monitor.joinable()) {
+      guard_monitor.join();
+    }
+    stall_monitor.request_stop();
+    if (stall_monitor.joinable()) {
+      stall_monitor.join();
+    }
     {
       const std::lock_guard<std::mutex> lock(queue_mutex);
       stopping = true;
@@ -707,6 +806,8 @@ struct TextGenerationScheduler::Impl {
   void FinalizeResult(const std::shared_ptr<ScheduledRequest>& request,
                       TextGenerationBackend::FinishReason finish_reason) {
     request->result.completion_tokens = request->result.tokens.size();
+    request->result.slot_id = request->session == kNoSession
+        ? std::nullopt : std::optional<std::size_t>(request->session);
     request->result.finish_reason = finish_reason;
     if (request->result.debug_timeline) {
       auto fields = json::Value::object();
@@ -729,6 +830,17 @@ struct TextGenerationScheduler::Impl {
     runner_pool->runner().OnRequestFinished();
   }
 
+  // Reporting only: what the retained snapshots hold now, next to the payload sum the budget charges.
+  void StampCacheFootprint(const std::shared_ptr<ScheduledRequest>& request) noexcept {
+    try {
+      const auto footprint = runner_pool->RetainedSnapshotFootprint();
+      request->result.cache_retained_bytes = footprint.logical_bytes;
+      request->result.cache_retained_device_bytes = footprint.device_bytes;
+      request->result.cache_retained_host_bytes = footprint.host_bytes;
+    } catch (...) {
+    }
+  }
+
   void CompleteCancelled(
       const std::shared_ptr<ScheduledRequest>& request) noexcept {
     if (device_lost.load(std::memory_order_acquire)) {
@@ -742,6 +854,9 @@ struct TextGenerationScheduler::Impl {
         request->result.cache_snapshot_ms = retained.snapshot_ms;
         request->result.cache_disk_queued_bytes = retained.disk_queued_bytes;
         request->result.cache_disk_enqueue_ms = retained.disk_enqueue_ms;
+        request->result.cache_snapshots_skipped = retained.snapshots_skipped;
+        request->result.cache_snapshot_skip_reason = retained.snapshot_skip_reason;
+        StampCacheFootprint(request);
       }
       request->result.cancelled = true;
       FinalizeResult(request, TextGenerationBackend::FinishReason::kCancelled);
@@ -780,10 +895,53 @@ struct TextGenerationScheduler::Impl {
       return;
     detail::DeviceLostTotal().fetch_add(1, std::memory_order_relaxed);
     try {
-      Logger::Error("scheduler", "event=device_lost remedy=restart reason=" +
-                                     std::string(reason));
+      // The process exits with kDeviceLostExitStatus (75, serve.cpp). Nothing
+      // restarts it in process: a supervisor must start a new one.
+      Logger::Error("scheduler",
+                    "event=device_lost remedy=restart_process exit_status=75 "
+                    "reason=" +
+                        std::string(reason));
     } catch (...) {
       // Loss remains observable even if logging fails.
+    }
+  }
+
+  // A device call that never returns blocks its thread, so nothing on that
+  // thread can report it. This thread only reads atomics; it never touches
+  // the device or the scheduler's queues.
+  void MonitorStalls(const std::stop_token& stop_token) noexcept {
+    const auto timeout = scheduler_policy.stall_timeout;
+    const auto interval = std::clamp<std::chrono::milliseconds>(
+        timeout / 4, std::chrono::milliseconds(1), std::chrono::minutes(1));
+    std::mutex mutex;
+    std::condition_variable_any condition;
+    std::unique_lock<std::mutex> lock(mutex);
+    std::uint64_t seen = progress.load(std::memory_order_relaxed);
+    // Stalled time is counted in wake-ups, not read from the clock, so a
+    // process paused as a whole (SIGSTOP, a cgroup freeze) is credited one
+    // interval for the pause however long it lasted.
+    std::chrono::milliseconds stalled{0};
+    while (!stop_token.stop_requested()) {
+      condition.wait_for(lock, stop_token, interval, [] { return false; });
+      if (stop_token.stop_requested() ||
+          device_lost.load(std::memory_order_acquire))
+        return;
+      const std::uint64_t now = progress.load(std::memory_order_relaxed);
+      if (now != seen || !loop_working.load(std::memory_order_relaxed)) {
+        seen = now;
+        stalled = std::chrono::milliseconds(0);
+        continue;
+      }
+      stalled += interval;
+      if (stalled < timeout)
+        continue;
+      try {
+        MarkDeviceLost("scheduler made no progress for " +
+                       std::to_string(timeout.count()) + " ms");
+      } catch (...) {
+        MarkDeviceLost("scheduler made no progress");
+      }
+      return;
     }
   }
 
@@ -839,6 +997,12 @@ struct TextGenerationScheduler::Impl {
         CompleteDeadline(request);
         return true;
       }
+      if (request->guard_cancel.load(std::memory_order_acquire)) {
+        CompleteFailure(request, std::make_exception_ptr(TextGenerationError(
+                                     TextGenerationErrorCode::kMemoryPressure,
+                                     "this request was stopped because Windows ran low on memory; free memory and retry")));
+        return true;
+      }
       if (CancellationRequested(request)) {
         CompleteCancelled(request);
         return true;
@@ -852,6 +1016,10 @@ struct TextGenerationScheduler::Impl {
 
   void CompleteSuccess(const std::shared_ptr<ScheduledRequest>& request,
                        TextGenerationBackend::FinishReason finish_reason) {
+    ledger->Sample("request_end");
+    request->result.termination_cause = request->runner_request.termination_cause();
+    if (request->result.termination_cause == TextGenerationBackend::TerminationCause::kToolArgumentLoop)
+      finish_reason = TextGenerationBackend::FinishReason::kStop;
     if (request->stop_filter.enabled()) {
       auto tail = request->stop_filter.Finish();
       request->result.text += tail;
@@ -876,12 +1044,120 @@ struct TextGenerationScheduler::Impl {
     request->result.cache_shared_prefix_bytes =
         cache_commit.shared_prefix_bytes;
     request->result.cache_shared_prefix_ms = cache_commit.shared_prefix_ms;
+    request->result.cache_snapshots_skipped = cache_commit.snapshots_skipped;
+    request->result.cache_snapshot_skip_reason = cache_commit.snapshot_skip_reason;
+    StampCacheFootprint(request);
+    ledger->Sample("snapshot_commit");
     FinalizeResult(request, finish_reason);
     LogDecodeProgress(request, true);
     // Recorded here rather than by the HTTP adapter, so a client that leaves
     // before reading the result still counts.
     RecordRequestMetrics(request->result);
     PublishTerminal(request);
+  }
+
+  /// Memory guard, once per request before its prefill: a request is refused only for MANDATORY new bytes (lazy vision buffers, a scoring
+  /// session...). Cache snapshots are optional and never cause a refusal. A request that needs no new memory costs one virtual call here.
+  void AdmitMemory(const std::shared_ptr<ScheduledRequest>& request) {
+    auto* guard = gufo::platform::ProcessMemoryGuard();
+    if (guard == nullptr || !guard->enabled())
+      return;
+    auto need = runner_pool->runner().RequestMemoryNeed(request->prompt.size(), request->prompt_context.get(), request->prompt_score);
+    need.mandatory_device_bytes += guard->debug_need();   // zero outside a --debug-hooks gate case
+    if (need.mandatory_device_bytes + need.mandatory_host_bytes == 0)
+      return;
+    const auto result = guard->Admit(need, [this](std::uint64_t shortfall) { return runner_pool->TrimSnapshots(shortfall, true); });
+    if (result.verdict == gufo::platform::AdmitVerdict::kAdmit)
+      return;
+    const bool permanent = result.verdict == gufo::platform::AdmitVerdict::kRefusePermanent;
+    const auto mib = [](std::uint64_t bytes) { return std::to_string(bytes >> 20); };
+    Logger::Warn("memory_guard",
+                 "event=memory_guard action=refuse kind=" + std::string(permanent ? "permanent" : "transient") +
+                     " needed_mib=" + mib(result.needed_bytes) + " free_mib=" + mib(result.free_bytes) +
+                     " floor_mib=" + mib(guard->floor_bytes()) + " prompt_tokens=" + std::to_string(request->prompt.size()) +
+                     " level=" + gufo::platform::GuardLevelName(guard->level()));
+    throw TextGenerationError(permanent ? TextGenerationErrorCode::kInsufficientMemoryPermanent
+                                        : TextGenerationErrorCode::kInsufficientMemory,
+                              result.message, MemoryRefusal{result.needed_bytes, result.free_bytes});
+  }
+
+  [[nodiscard]] bool GuardActionPending() const noexcept {
+    return guard_trim_bytes.load(std::memory_order_relaxed) != 0 || guard_cancels.load(std::memory_order_relaxed) != 0;
+  }
+
+  /// Memory guard, scheduler thread, between work units: performs what the monitor asked for (drop snapshots, stop the newest request).
+  void ApplyGuardActions(const std::deque<std::shared_ptr<ScheduledRequest>>& prefilling,
+                         const std::deque<std::shared_ptr<ScheduledRequest>>& decoding,
+                         const std::deque<std::shared_ptr<ScheduledRequest>>& capturing) noexcept {
+    if (!GuardActionPending())
+      return;
+    auto* guard = gufo::platform::ProcessMemoryGuard();
+    if (guard == nullptr)
+      return;
+    const auto mib = [](std::uint64_t bytes) { return std::to_string(bytes >> 20); };
+    try {
+      if (const auto bytes = guard_trim_bytes.exchange(0, std::memory_order_acq_rel); bytes != 0) {
+        const auto freed = runner_pool->TrimSnapshots(bytes);
+        guard->NoteTrimmed(freed);
+        Logger::Warn("memory_guard", "event=memory_guard action=trim_snapshots requested_mib=" + mib(bytes) + " freed_mib=" + mib(freed) +
+                                         " retained_mib=" + mib(runner_pool->RetainedSnapshotBytes()));
+      }
+      for (unsigned n = guard_cancels.exchange(0, std::memory_order_acq_rel); n != 0; --n) {
+        std::shared_ptr<ScheduledRequest> victim;
+        for (const auto* list : {&prefilling, &decoding, &capturing})
+          for (const auto& candidate : *list)
+            if (!IsTerminal(candidate) && !candidate->guard_cancel.load(std::memory_order_relaxed) && (!victim || candidate->id > victim->id))
+              victim = candidate;
+        if (!victim)
+          break;
+        victim->guard_cancel.store(true, std::memory_order_release);
+        guard->NoteCancelled();
+        Logger::Warn("memory_guard", "event=memory_guard action=cancel id=" + std::to_string(victim->id) +
+                                         " level=" + gufo::platform::GuardLevelName(guard->level()));
+      }
+    } catch (...) {
+      // The guard never takes the scheduler down.
+    }
+  }
+
+  /// Memory guard monitor thread: reads the OS numbers every 500 ms, steps the pressure machine and posts at most one trim and some cancels
+  /// for the scheduler thread. It frees nothing and cancels nothing itself. A failed reading leaves the level where it was.
+  void MonitorMemory(const std::stop_token& stop_token) noexcept {
+    auto* guard = gufo::platform::ProcessMemoryGuard();
+    if (guard == nullptr)
+      return;
+    gufo::platform::PressureMachine machine;
+    std::mutex mutex;
+    std::condition_variable_any condition;
+    std::unique_lock<std::mutex> lock(mutex);
+    const auto mib = [](std::uint64_t bytes) { return std::to_string(bytes >> 20); };
+    while (!stop_token.stop_requested()) {
+      condition.wait_for(lock, stop_token, std::chrono::milliseconds(500), [] { return false; });
+      if (stop_token.stop_requested())
+        return;
+      try {
+        const auto readings = guard->Read();
+        const auto step = machine.Step(readings, guard->floor_bytes(), runner_pool->RetainedSnapshotBytes(),
+                                       gufo::platform::PressureMachine::Clock::now());
+        guard->SetLevel(step.level);
+        if (step.level_changed) {
+          Logger::Warn("memory_guard", "event=memory_guard action=level level=" + std::string(gufo::platform::GuardLevelName(step.level)) +
+                                           " reason=" + (*step.reason != '\0' ? step.reason : "recovered") + " ram_avail_mib=" + mib(readings.ram_available) +
+                                           " gpu_free_mib=" + mib(readings.gpu_local_free + readings.gpu_nonlocal_free) +
+                                           " floor_mib=" + mib(guard->floor_bytes()) + (guard->overridden() ? " override=1" : ""));
+        }
+        if (step.action.kind == gufo::platform::PressureAction::Kind::kTrimSnapshots)
+          guard_trim_bytes.store(step.action.trim_bytes, std::memory_order_release);
+        else if (step.action.kind == gufo::platform::PressureAction::Kind::kCancelOne)
+          guard_cancels.fetch_add(1, std::memory_order_acq_rel);
+        if (step.action.kind != gufo::platform::PressureAction::Kind::kNone) {
+          const std::lock_guard<std::mutex> queue_lock(queue_mutex);
+          queue_condition.notify_all();
+        }
+      } catch (...) {
+        // Keep monitoring.
+      }
+    }
   }
 
   void ProcessQueuedCancellations() {
@@ -1057,6 +1333,7 @@ struct TextGenerationScheduler::Impl {
         if (CompleteIfStopped(request)) {
           continue;
         }
+        AdmitMemory(request);   // throws TextGenerationError when the request cannot run for lack of memory
         if (request->prompt_score) {
           if (!prefilling.empty() || !decoding.empty() || !capturing.empty()) {
             // Park visibly queued; stop admitting newcomers until residents
@@ -1109,6 +1386,8 @@ struct TextGenerationScheduler::Impl {
             std::move(request->prompt_context), request->cache_prompt,
             request->cache_prefix_tokens, request->stop_at_eos,
             request->result.debug_timeline);
+        // Each admission may restore or capture a checkpoint of its own.
+        progress.fetch_add(1, std::memory_order_relaxed);
         if (!request->runner_request) {
           CompleteCancelled(request);
           continue;
@@ -1216,6 +1495,7 @@ struct TextGenerationScheduler::Impl {
       const double step_ms =
           std::chrono::duration<double, std::milli>(Clock::now() - start)
               .count();
+      ledger->Sample("prefill");
       if (request->result.debug_timeline) {
         request->runner_request.RecordPrefill(
             start, step_ms, request->result.prefill_chunks, step.consumed_tokens,
@@ -1305,6 +1585,19 @@ struct TextGenerationScheduler::Impl {
     return PrepareDecode(request);
   }
 
+  // Records where the first generated end-of-reasoning tag token begins,
+  // before its piece is counted and queued. The tag is one token (see the
+  // constructor), so no partial match carries over between tokens.
+  void TrackReasoningEnd(const std::shared_ptr<ScheduledRequest>& request,
+                         TextRunnerToken token) {
+    if (!request->reasoning_end_tracked || request->reasoning_end_byte ||
+        reasoning_end_ids.size() != 1 || token != reasoning_end_ids.front())
+      return;
+    const std::lock_guard<std::mutex> lock(request->output_mutex);
+    request->reasoning_end_byte = request->generated_output_bytes;
+    request->result.reasoning_end.byte = request->generated_output_bytes;
+  }
+
   [[nodiscard]] bool PublishSelection(
       const std::shared_ptr<ScheduledRequest>& request,
       const TextDecodeSelection& selection) {
@@ -1332,6 +1625,7 @@ struct TextGenerationScheduler::Impl {
                           "text generation output byte limit exceeded")));
       return false;
     }
+    TrackReasoningEnd(request, selection.token);
     request->generated_output_bytes += selection.piece.size();
     request->result.tokens.push_back(selection.token);
     if (request->logprobs_requested) {
@@ -1377,7 +1671,9 @@ struct TextGenerationScheduler::Impl {
     if (CompleteIfStopped(request)) {
       return;
     }
-    if (request->result.tokens.size() >= request->token_limit) {
+    if (request->runner_request.termination_cause() == TextGenerationBackend::TerminationCause::kToolArgumentLoop) {
+      CompleteSuccess(request, TextGenerationBackend::FinishReason::kStop);
+    } else if (request->result.tokens.size() >= request->token_limit) {
       CompleteSuccess(request, TextGenerationBackend::FinishReason::kLength);
     }
   }
@@ -1394,6 +1690,7 @@ struct TextGenerationScheduler::Impl {
         return;
       }
       request->runner_request.Advance();
+      ledger->Sample("decode");
       FinishAdvanced(request, *decode_start);
     } catch (...) {
       const auto failure = std::current_exception();
@@ -1566,6 +1863,7 @@ struct TextGenerationScheduler::Impl {
     if (prepared.size() == 1) {
       try {
         prepared.front().request->runner_request.Advance();
+        ledger->Sample("decode");
         FinishAdvanced(prepared.front().request, prepared.front().decode_start);
       } catch (...) {
         CompleteFailure(prepared.front().request, std::current_exception());
@@ -1580,6 +1878,7 @@ struct TextGenerationScheduler::Impl {
           continue;
         try {
           item.request->runner_request.Advance();
+          ledger->Sample("decode");
           FinishAdvanced(item.request, item.decode_start);
         } catch (...) {
           CompleteFailure(item.request, std::current_exception());
@@ -1596,6 +1895,7 @@ struct TextGenerationScheduler::Impl {
     std::vector<std::exception_ptr> failures;
     try {
       failures = runner_pool->AdvanceBatch(runner_requests, plan);
+      ledger->Sample("decode_batch");
     } catch (...) {
       const auto failure = std::current_exception();
       for (const auto& item : prepared) {
@@ -1700,6 +2000,7 @@ struct TextGenerationScheduler::Impl {
     std::vector<TextDecodeStep> steps;
     try {
       steps = runner_pool->DecodeBatch(runner_requests, max_tokens, plan);
+      ledger->Sample(runner_requests.size() > 1 ? "decode_batch" : "decode");
     } catch (...) {
       const auto failure = std::current_exception();
       for (const auto& item : prepared) {
@@ -1874,14 +2175,19 @@ struct TextGenerationScheduler::Impl {
     while (!stop_token.stop_requested()) {
       if (device_lost.load(std::memory_order_acquire))
         break;
+      loop_working.store(true, std::memory_order_relaxed);
       ProcessQueuedCancellations();
+      ApplyGuardActions(prefilling, decoding, capturing);
 
       for (std::size_t count = capturing.size(); count != 0; --count) {
         auto request = std::move(capturing.front());
         capturing.pop_front();
         if (request->runner_request.SnapshotPending()) {
           capturing.push_back(std::move(request));
-        } else if (!CompleteIfStopped(request)) {
+          continue;
+        }
+        progress.fetch_add(1, std::memory_order_relaxed);
+        if (!CompleteIfStopped(request)) {
           if (request->runner_request.prefill_complete()) {
             // Its capture already waited through peer prefill. Resume it
             // before another bounded chunk, as for any due decoder.
@@ -1898,7 +2204,7 @@ struct TextGenerationScheduler::Impl {
       if (prefilling.empty() && decoding.empty()) {
         std::unique_lock<std::mutex> lock(queue_mutex);
         const auto wake = [&] {
-          return stop_token.stop_requested() || stopping ||
+          return stop_token.stop_requested() || stopping || GuardActionPending() ||
                  (queued_count != 0 &&
                   capturing.size() + waiting.size() < runner_pool->capacity());
         };
@@ -1906,8 +2212,12 @@ struct TextGenerationScheduler::Impl {
           // Only the idle wait has a timer. Arrival interrupts it immediately;
           // no clock checks or device polling are added to active work units.
           while (!wake()) {
-            if (queue_condition.wait_for(
-                    lock, scheduler_policy.device_probe_interval, wake))
+            loop_working.store(false, std::memory_order_relaxed);
+            const bool woken = queue_condition.wait_for(
+                lock, scheduler_policy.device_probe_interval, wake);
+            progress.fetch_add(1, std::memory_order_relaxed);
+            loop_working.store(true, std::memory_order_relaxed);
+            if (woken)
               break;
             lock.unlock();
             try {
@@ -1926,6 +2236,7 @@ struct TextGenerationScheduler::Impl {
         continue;
       }
 
+      progress.fetch_add(1, std::memory_order_relaxed);
       const bool due_decoder = HasDueDecoder(decoding);
       const std::size_t resident_count = prefilling.size() + decoding.size();
       const bool preparing_multi_token_batch =
@@ -2028,6 +2339,7 @@ struct TextGenerationScheduler::Impl {
   }
 
   std::shared_ptr<TextRunnerPool> runner_pool;
+  std::optional<MemoryLedger> ledger;
   std::once_flag debug_settings_once;
   json::Value cached_debug_settings;
   TextPrefillPolicy prefill_policy;
@@ -2037,6 +2349,8 @@ struct TextGenerationScheduler::Impl {
   bool incremental_prefill_supported{false};
   bool final_token_advance_required{true};
   bool incremental_text_is_exact{false};
+  /// Token ids of the end-of-reasoning tag; empty when not tracked.
+  std::vector<TextRunnerToken> reasoning_end_ids;
   bool multi_token_decode{false};
   bool batched_multi_token_decode{false};
   std::size_t batched_multi_token_decode_max_width{0};
@@ -2053,7 +2367,19 @@ struct TextGenerationScheduler::Impl {
   std::size_t consecutive_active_prefill_chunks{0};
   std::uint64_t last_prefill_request_id{0};
   std::atomic<std::uint64_t> next_request_id{1};
+  // Written by the scheduler thread and read by the stall monitor. `progress`
+  // advances when a request is admitted, a work unit starts, a pending
+  // capture completes or an idle wait returns; `loop_working` is false only
+  // inside that idle wait. A loop that only polls a capture which never
+  // completes makes no progress.
+  std::atomic<std::uint64_t> progress{0};
+  std::atomic<bool> loop_working{false};
+  // Memory guard: posted by the monitor thread, performed by the scheduler thread.
+  std::atomic<std::uint64_t> guard_trim_bytes{0};
+  std::atomic<unsigned> guard_cancels{0};
   std::jthread worker;
+  std::jthread stall_monitor;
+  std::jthread guard_monitor;
 };
 
 TextGenerationScheduler::Request::Request() = default;
@@ -2215,6 +2541,15 @@ TextGenerationScheduler::Result TextGenerationScheduler::Request::Wait(
   return result;
 }
 
+TextGenerationBackend::ReasoningEnd
+TextGenerationScheduler::Request::CurrentReasoningEnd() const {
+  if (!*this)
+    return {};
+  const std::lock_guard<std::mutex> lock(impl_->request->output_mutex);
+  return {.tracked = impl_->request->reasoning_end_tracked,
+          .byte = impl_->request->reasoning_end_byte};
+}
+
 void TextGenerationScheduler::Request::Cancel() noexcept {
   if (*this && !IsTerminal(impl_->request)) {
     impl_->request->cancellation_requested.store(true,
@@ -2319,6 +2654,8 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
   request->client_id =
       metadata.client_id.empty() ? "anonymous" : std::move(metadata.client_id);
   request->result.prompt_tokens = prompt.size();
+  request->reasoning_end_tracked = !impl_->reasoning_end_ids.empty();
+  request->result.reasoning_end.tracked = request->reasoning_end_tracked;
   request->result.token_metrics_recorded = true;
   request->result.client_id = request->client_id;
   request->result.configured_active_prefill_tokens =

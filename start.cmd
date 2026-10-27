@@ -1,7 +1,17 @@
 @echo off
-rem Bubo on Windows: pick a model and its features with number keys.
-rem   start.cmd          menu        start.cmd -Last     the previous choice again
-rem   start.cmd -DryRun  print the command instead of starting the server
-rem   start.cmd -CacheDisk BuboCache   keep prompt snapshots for fast restarts
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\windows\launcher.ps1" %*
+rem Bubo for Windows.
+rem   start.cmd            open the app (bin\Bubo.Control.Web.exe)
+rem   start.cmd [OPTIONS]  in a folder without the app: bin\bubo.exe serve [OPTIONS]
+setlocal
+set "BUBO_VC_CHECK=%~dp0tools\windows\vc-runtime.ps1"
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -Command ". $env:BUBO_VC_CHECK; if (-not (Confirm-BuboVcRuntime)) { exit 4 }"
+if errorlevel 1 (
+  pause
+  exit /b 4
+)
+if exist "%~dp0bin\Bubo.Control.Web.exe" (
+  start "" "%~dp0bin\Bubo.Control.Web.exe"
+  exit /b 0
+)
+"%~dp0bin\bubo.exe" serve %*
 exit /b %errorlevel%

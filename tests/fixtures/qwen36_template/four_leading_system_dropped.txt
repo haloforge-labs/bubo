@@ -1,0 +1,7 @@
+<|im_start|>system
+A
+B<|im_end|>
+<|im_start|>user
+Hi<|im_end|>
+<|im_start|>assistant
+<think>

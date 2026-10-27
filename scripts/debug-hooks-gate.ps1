@@ -9,7 +9,7 @@ param(
  [int]$MaxScoreTokens = 8192,
  [int]$StartupTimeoutSeconds = 600
 )
-# Operator-only GPU gate. Never run during a timing/build exclusion window.
+# Manual GPU gate. Never run during a timing/build exclusion window.
 $ErrorActionPreference = 'Stop'
 Get-Date
 $null = New-Item -ItemType Directory -Force -Path $OutputDirectory

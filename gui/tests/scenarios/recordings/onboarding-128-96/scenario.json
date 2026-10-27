@@ -1,0 +1,9 @@
+{
+  "_source": "fixture",
+  "state": "Stopped",
+  "records": {
+    "models": "../v12-96gb/models-128-96.json",
+    "status": "../v12-96gb/status-128-96.json",
+    "switches": "../v12/switches.json"
+  }
+}

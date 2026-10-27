@@ -300,6 +300,28 @@ public:
 private:
 };
 
+// A runner without engine settings throws the dedicated exception, so server
+// startup can leave the "engine" row out instead of failing with no message.
+void TestRunnerWithoutDebugSettingsThrowsTheDedicatedException() {
+  FakeRunner runner(std::make_shared<FakeStats>());
+  bool dedicated = false;
+  try {
+    (void)runner.DebugSettings();
+  } catch (const gufo::server::DebugSettingsUnsupported&) {
+    dedicated = true;
+  } catch (...) {
+  }
+  Expect(dedicated, "a runner without debug settings throws DebugSettingsUnsupported");
+  bool still_invalid_argument = false;
+  try {
+    (void)runner.DebugSettings();
+  } catch (const std::invalid_argument&) {
+    still_invalid_argument = true;
+  } catch (...) {
+  }
+  Expect(still_invalid_argument, "DebugSettingsUnsupported stays an invalid_argument for other callers");
+}
+
 void TestBoundedPrefillDecodeAndPrefixReuse() {
   auto stats = std::make_shared<FakeStats>();
   auto runner = std::make_shared<FakeRunner>(stats);
@@ -419,15 +441,64 @@ void TestBatchedAdvancePreservesIndependentRequests() {
 void TestResourceClaimsAreValidatedBeforeAllocation() {
   auto stats = std::make_shared<FakeStats>();
   bool rejected = false;
+  std::string message;
   try {
     auto runner = std::make_shared<FakeRunner>(stats, 64, 159);
     TextRunnerPool pool(runner, 2);
-  } catch (const std::invalid_argument&) {
+  } catch (const std::invalid_argument& error) {
     rejected = true;
+    message = error.what();
   }
   Expect(rejected, "aggregate request-state claim must fit capacity");
+  Expect(message.starts_with("2 sessions do not fit: each needs ") &&
+             message.find("GiB free after loading the model") !=
+                 std::string::npos &&
+             message.ends_with("Lower --context or --sessions."),
+         "capacity refusal names the sessions, the sizes and the remedy");
   Expect(stats->states_created == 0,
          "invalid resource claim is rejected before state allocation");
+  // The same refusal as typed numbers, for serve's exit 19 memory_insufficient (no prose matching).
+  const auto fit = gufo::server::LastSessionsFitFailure();
+  Expect(fit.has_value() && fit->sessions == 2 && fit->context == 64 && fit->available_bytes == 159 && fit->needed_bytes > 159 &&
+             fit->per_session_bytes * 2 <= fit->needed_bytes + 1,
+         "the refusal also records sessions, context, needed and available bytes");
+}
+
+void TestLoadRefusesOnlyThePhysicalImpossibility() {
+  // Admission policy: a configuration that runs, thin on RAM, must start (with the load_spill warning); only a need beyond the free carve-out
+  // plus ALL available RAM is refused (exit 19 in serve). Numbers in bytes: 2 sessions x (64 state + 16 scratch) = 160.
+  struct Source final : gufo::platform::MemoryReadingSource {
+    gufo::platform::MemoryReadings readings;
+    gufo::platform::MemoryReadings Read() noexcept override { return readings; }
+  } source;
+  source.readings.ram_ok = true;
+  source.readings.gpu_ok = true;
+  source.readings.gpu_carve_known = true;
+  source.readings.gpu_carve_free = 100;
+  source.readings.gpu_local_free = 1000;   // the reported free, which overlaps RAM
+  source.readings.ram_available = 70;
+  gufo::platform::MemoryGuard guard(&source, 20);   // keep-free floor 20: 50 above it
+  gufo::platform::SetProcessMemoryGuard(&guard);
+  const auto capacity = [&] { return static_cast<std::size_t>(gufo::platform::StateCapacityBytes(1000)); };
+  Expect(capacity() == 170, "physical capacity = free carve-out 100 + available RAM 70");
+  {   // need 160: 60 beyond the carve-out, 50 above the floor -> eats 10 into the floor: starts
+    auto stats = std::make_shared<FakeStats>();
+    TextRunnerPool pool(std::make_shared<FakeRunner>(stats, 64, capacity()), 2);
+    Expect(stats->states_created == 2, "a start that eats into the floor still creates its sessions");
+    const auto spill = gufo::platform::StateSpillFor(160);
+    Expect(spill.known && spill.spill_bytes == 60 && spill.floor_eaten_bytes == 10, "the warning's numbers: spill 60, floor eaten 10");
+  }
+  source.readings.ram_available = 40;   // capacity 140 < 160: physically impossible
+  bool refused = false;
+  try {
+    auto stats = std::make_shared<FakeStats>();
+    TextRunnerPool pool(std::make_shared<FakeRunner>(stats, 64, capacity()), 2);
+  } catch (const gufo::server::SessionsDoNotFit& error) {
+    const auto& f = error.failure();
+    refused = f.sessions == 2 && f.available_bytes == 140 && f.needed_bytes == 160 && f.floor_bytes == 20;
+  }
+  Expect(refused, "beyond the physical capacity: SessionsDoNotFit with the typed numbers");
+  gufo::platform::SetProcessMemoryGuard(nullptr);
 }
 
 class FakeSnapshot final : public TextRunnerSnapshot {
@@ -1583,6 +1654,53 @@ void TestNpuPreferredChunkKeepsCheckpointGridAligned() {
     widest = std::max(widest, span);
   Expect(widest <= 2048,
          "NPU off: the original 2048 checkpoint grid is unchanged");
+
+  // GPU alone with a 4096 forward chunk: the runner's checkpoint grid is the
+  // forward chunk, so a checkpoint never cuts a 4096 pass short.
+  class GpuGridRunner final : public SnapshotRunner {
+  public:
+    explicit GpuGridRunner(std::shared_ptr<FakeStats> stats)
+        : SnapshotRunner(std::move(stats), 64, 256, 4096) {}
+    TextRunnerDescriptor Descriptor() const override {
+      auto descriptor = SnapshotRunner::Descriptor();
+      descriptor.max_context = 32768;
+      return descriptor;
+    }
+    std::size_t PrefillCheckpointGrid() const noexcept override { return 4096; }
+    std::size_t PrefillBoundaryFallbackChunk() const noexcept override {
+      return 4096;
+    }
+  };
+  const auto gpu_spans = [](std::size_t length) {
+    auto stats = std::make_shared<FakeStats>();
+    auto runner = std::make_shared<GpuGridRunner>(stats);
+    TextRunnerPool pool(runner, 1);
+    std::vector<TextRunnerToken> prompt(length, 1);
+    auto request = pool.Acquire(prompt, {}, {}, {}, true, length - 100);
+    while (!request.prefill_complete())
+      (void)request.Prefill(32768);
+    request.Commit();
+    return stats->prefill_spans;
+  };
+  const auto gpu_15384 = gpu_spans(15384);
+  Expect(gpu_15384.size() >= 3 && gpu_15384[0] == 4096 &&
+             gpu_15384[1] == 4096 && gpu_15384[2] == 4096,
+         "GPU alone, 4096 grid: a 15,384-token cold prompt gets three 4096 "
+         "passes before the checkpoints and tail");
+  // Checkpoints at 4096, 8192 and 12288; the last two passes end at the
+  // stable boundary (15,284) and the prompt end.
+  Expect(gpu_15384 == std::vector<std::size_t>({4096, 4096, 4096, 2996, 100}),
+         "GPU alone, 4096 grid: every pass that ends on a checkpoint is a whole "
+         "4096-token chunk");
+  {
+    auto stats = std::make_shared<FakeStats>();
+    GridRunner off(stats, 0);
+    GridRunner on(stats, 4096);
+    Expect(off.PrefillCheckpointGrid() == 2048,
+           "the default checkpoint grid without a preferred chunk is 2048");
+    Expect(on.PrefillCheckpointGrid() == 4096,
+           "the default checkpoint grid follows the preferred chunk");
+  }
 }
 
 void TestHistoryEditsRestoreIntermediateCheckpoints() {
@@ -2412,6 +2530,266 @@ void TestSnapshotStartupReportsSelectedLimits() {
          "startup limits describe the claim that selected cache capacity");
 }
 
+// L-REL-5: capacity from totals, not from free memory.
+void TestSnapshotCapacityPlanIsDeterministic() {
+  using gufo::server::PlanSnapshotCapacity;
+  using gufo::server::SnapshotCapacityInputs;
+  constexpr std::uint64_t gib = std::uint64_t{1} << 30;
+  constexpr std::uint64_t mib = std::uint64_t{1} << 20;
+  constexpr std::uint64_t reserve = gufo::server::kHostSnapshotHeadroomBytes;
+  Expect(reserve == 4 * gib, "the fixed reserve is 4 GiB");
+
+  // Fixed total: the plan has no free-memory input, so a host that has
+  // 2, 10 or 30 GiB available gets the same capacity.
+  for (const std::uint64_t available : {2 * gib, 10 * gib, 30 * gib}) {
+    (void)available;
+    const auto plan = PlanSnapshotCapacity({.host_total_bytes = 128 * gib,
+                                            .model_footprint_bytes = 28 * gib});
+    Expect(plan.ceiling_bytes == 96 * gib,
+           "ceiling = total - footprint - reserve");
+    Expect(plan.automatic_bytes == 32 * gib && plan.capacity_bytes == 32 * gib,
+           "automatic = min(32 GiB, ceiling / 2)");
+    Expect(plan.clamp.empty(), "no clamp on a roomy machine");
+  }
+  {
+    const auto plan = PlanSnapshotCapacity({.host_total_bytes = 64 * gib,
+                                            .model_footprint_bytes = 30 * gib});
+    Expect(plan.ceiling_bytes == 30 * gib && plan.automatic_bytes == 15 * gib,
+           "a 64 GiB machine halves its smaller ceiling");
+  }
+  // The default profile's 6442450944 is exact whenever the machine can hold it.
+  {
+    const auto plan = PlanSnapshotCapacity({.host_total_bytes = 64 * gib,
+                                            .model_footprint_bytes = 30 * gib,
+                                            .explicit_bytes = 6442450944ull});
+    Expect(plan.capacity_bytes == 6442450944ull && plan.clamp.empty(),
+           "an explicit 6 GiB cache is exact when the total allows");
+  }
+  {
+    const auto plan = PlanSnapshotCapacity({.host_total_bytes = 37 * gib,
+                                            .model_footprint_bytes = 30 * gib,
+                                            .explicit_bytes = 6442450944ull});
+    Expect(plan.ceiling_bytes == 3 * gib && plan.capacity_bytes == 3 * gib &&
+               plan.clamp == "explicit_over_ceiling",
+           "an explicit limit above the ceiling clamps and says why");
+  }
+  // Small and negative ceilings never wrap: the cache is disabled.
+  for (const std::uint64_t footprint :
+       {34 * gib, 36 * gib, 200 * gib, ~std::uint64_t{0}}) {
+    const auto plan = PlanSnapshotCapacity({.host_total_bytes = 36 * gib,
+                                            .model_footprint_bytes = footprint,
+                                            .explicit_bytes = 1 * gib});
+    Expect(plan.ceiling_bytes == 0 && plan.capacity_bytes == 0 &&
+               plan.automatic_bytes == 0 &&
+               plan.clamp == "disabled_ceiling_below_minimum",
+           "a small or negative ceiling disables the cache without wrapping");
+  }
+  {
+    const auto plan = PlanSnapshotCapacity(
+        {.host_total_bytes = 36 * gib,
+         .model_footprint_bytes = 31 * gib + 600 * mib});
+    Expect(plan.capacity_bytes == 0,
+           "a ceiling just under the 512 MiB minimum disables the cache");
+    const auto kept = PlanSnapshotCapacity(
+        {.host_total_bytes = 36 * gib,
+         .model_footprint_bytes = 31 * gib + 400 * mib});
+    Expect(kept.ceiling_bytes > gufo::server::kMinSnapshotCacheBytes &&
+               kept.capacity_bytes == kept.automatic_bytes,
+           "a ceiling over the minimum keeps the cache");
+  }
+  {
+    // Flash-Next: the device total bounds the ceiling too.
+    const auto plan = PlanSnapshotCapacity({.host_total_bytes = 128 * gib,
+                                            .model_footprint_bytes = 28 * gib,
+                                            .device_total_bytes = 64 * gib});
+    Expect(plan.ceiling_bytes == 32 * gib && plan.limit == "device",
+           "device total - footprint - reserve");
+  }
+  {
+    // Production 2026-10-14 (Windows, 96 GiB carve): the 90 GiB model is in
+    // the carve, not in the 31.6 GiB Windows sees, so the explicit 6 GiB holds.
+    const auto plan =
+        PlanSnapshotCapacity({.host_total_bytes = 33982058496ull,
+                              .model_footprint_bytes = 96958458708ull,
+                              .device_total_bytes = 115510523904ull,
+                              .explicit_bytes = 6442450944ull});
+    Expect(plan.ceiling_bytes == 107 * gib - 96958458708ull - reserve &&
+               plan.limit == "device" && plan.capacity_bytes == 6442450944ull &&
+               plan.clamp.empty(),
+           "a carve-out APU counts its weights on the device side only");
+  }
+  {
+    // The WDDM budget moved 786432 bytes between two starts (2026-10-14
+    // capplan). Whole-GiB device totals keep the automatic plan identical.
+    const auto first =
+        PlanSnapshotCapacity({.host_total_bytes = 33982058496ull,
+                              .model_footprint_bytes = 96958458708ull,
+                              .device_total_bytes = 115510523904ull});
+    const auto second =
+        PlanSnapshotCapacity({.host_total_bytes = 33982058496ull,
+                              .model_footprint_bytes = 96958458708ull,
+                              .device_total_bytes = 115510523904ull - 786432});
+    Expect(first.ceiling_bytes == second.ceiling_bytes &&
+               first.automatic_bytes == second.automatic_bytes &&
+               first.capacity_bytes == second.capacity_bytes &&
+               first.capacity_bytes == first.automatic_bytes &&
+               first.automatic_bytes != 0,
+           "device-budget jitter does not move the automatic capacity");
+  }
+  {
+    // A3B (Cyber-Tiel): snapshots are host vectors and the weights sit in the
+    // carve, so the runner claims no device total and no footprint. The
+    // 31.6 GiB Windows sees bounds the cache alone.
+    const auto plan =
+        PlanSnapshotCapacity({.host_total_bytes = 33982058496ull});
+    Expect(plan.ceiling_bytes == 33982058496ull - reserve &&
+               plan.automatic_bytes == (33982058496ull - reserve) / 2 &&
+               plan.capacity_bytes == plan.automatic_bytes &&
+               plan.limit == "host" && plan.clamp.empty(),
+           "host-vector snapshots plan from the host total alone");
+  }
+  {
+    // Gemma 4 26B-A4B: device rows, but a small model in the 107 GiB carve,
+    // so the host side is the smaller one.
+    const auto plan =
+        PlanSnapshotCapacity({.host_total_bytes = 33982058496ull,
+                              .model_footprint_bytes = 20 * gib,
+                              .device_total_bytes = 115510523904ull});
+    Expect(plan.ceiling_bytes == 33982058496ull - reserve &&
+               plan.limit == "host",
+           "a small device-resident model is bounded by the host total");
+  }
+  {
+    const auto plan = PlanSnapshotCapacity({.host_total_bytes = 32 * gib,
+                                            .host_resident_bytes = 26 * gib,
+                                            .model_footprint_bytes = 90 * gib,
+                                            .device_total_bytes = 108 * gib,
+                                            .explicit_bytes = 6442450944ull});
+    Expect(plan.ceiling_bytes == 2 * gib && plan.limit == "host" &&
+               plan.capacity_bytes == 2 * gib &&
+               plan.clamp == "explicit_over_ceiling",
+           "host-resident model bytes count against host RAM");
+  }
+  // Shared RAM (GTT): the device total is at most the host total, so the
+  // footprint still comes out of host RAM through the device side.
+  {
+    const auto plan = PlanSnapshotCapacity({.host_total_bytes = 124 * gib,
+                                            .model_footprint_bytes = 90 * gib,
+                                            .device_total_bytes = 110 * gib});
+    Expect(plan.ceiling_bytes == 16 * gib && plan.limit == "device",
+           "a shared-RAM device keeps the min(host, device) ceiling");
+  }
+  for (const std::uint64_t footprint : {200 * gib, ~std::uint64_t{0}}) {
+    const auto plan = PlanSnapshotCapacity({.host_total_bytes = 124 * gib,
+                                            .model_footprint_bytes = footprint,
+                                            .device_total_bytes = 110 * gib});
+    Expect(plan.ceiling_bytes == 0 && plan.capacity_bytes == 0 &&
+               plan.clamp == "disabled_ceiling_below_minimum",
+           "a device footprint over the device total disables the cache");
+  }
+}
+
+void TestHostFloorDefaultAndParsing() {
+  using gufo::server::ParseHostFloorBytes;
+  constexpr std::uint64_t mib = std::uint64_t{1} << 20;
+  Expect(gufo::server::kDefaultHostFloorMiB == 4096, "floor default is 4096");
+  Expect(ParseHostFloorBytes(nullptr) == 4096 * mib, "unset selects 4096 MiB");
+  Expect(ParseHostFloorBytes("") == 4096 * mib, "empty counts as unset");
+  Expect(ParseHostFloorBytes("0") == 0, "0 disables the floor");
+  Expect(ParseHostFloorBytes("512") == 512 * mib, "an explicit value is used");
+  Expect(ParseHostFloorBytes("-1") == 0, "a negative value disables");
+  Expect(ParseHostFloorBytes("12x") == 0 && ParseHostFloorBytes("abc") == 0,
+         "a malformed value disables");
+}
+
+void TestPoolPlansSnapshotCapacityFromTotals() {
+  constexpr std::size_t gib = std::size_t{1} << 30;
+  class TotalsRunner final : public SnapshotRunner {
+  public:
+    TotalsRunner(std::shared_ptr<FakeStats> stats, std::size_t host_total,
+                 std::optional<std::size_t> device_total)
+        : SnapshotRunner(std::move(stats)),
+          host_total_(host_total),
+          device_total_(device_total) {}
+    TextRunnerResourceClaim ResourceClaim() const override {
+      auto claim = SnapshotRunner::ResourceClaim();
+      claim.resident_weights_bytes = 30 * gib;
+      // Legacy values that must be ignored.
+      claim.retained_snapshot_capacity_bytes = 1;
+      claim.retained_snapshot_ceiling_bytes = 1;
+      claim.snapshot_capacity_from_totals = true;
+      claim.device_total_bytes = device_total_;
+      claim.host_total_bytes_override = host_total_;
+      return claim;
+    }
+    std::size_t host_total_;
+    std::optional<std::size_t> device_total_;
+  };
+  struct Case {
+    std::size_t host_total, requested;
+    std::optional<std::size_t> device_total;
+    std::size_t capacity, automatic, maximum;
+    const char* limit;
+    const char* clamp;
+  };
+  // Footprint = 30 GiB weights + 1 session * (64 + 16) bytes.
+  const Case cases[] = {
+      {128 * gib, 0, std::nullopt, 32 * gib, 32 * gib, 94 * gib - 80, "host",
+       "none"},
+      {128 * gib, 6442450944ull, std::nullopt, 6442450944ull, 32 * gib,
+       94 * gib - 80, "host", "none"},
+      {40 * gib, 0, std::nullopt, 3 * gib - 40, 3 * gib - 40, 6 * gib - 80,
+       "host", "none"},
+      {40 * gib, 8 * gib, std::nullopt, 6 * gib - 80, 3 * gib - 40,
+       6 * gib - 80, "host", "explicit_over_ceiling"},
+      {20 * gib, 6442450944ull, std::nullopt, 0, 0, 0, "host",
+       "disabled_ceiling_below_minimum"},
+      {128 * gib, 0, 40 * gib, 3 * gib - 40, 3 * gib - 40, 6 * gib - 80,
+       "device", "none"},
+      // Carve-out APU: the model is larger than host RAM but sits in device
+      // memory, so the profile's 6 GiB still holds.
+      {20 * gib, 6442450944ull, 108 * gib, 6442450944ull, 8 * gib, 16 * gib,
+       "host", "none"},
+  };
+  for (const auto& c : cases) {
+    auto stats = std::make_shared<FakeStats>();
+    auto runner =
+        std::make_shared<TotalsRunner>(stats, c.host_total, c.device_total);
+    std::ostringstream startup_log;
+    gufo::server::Logger::FlushSync();
+    auto* previous = std::clog.rdbuf(startup_log.rdbuf());
+    {
+      TextRunnerPool pool(runner, 1, std::nullopt,
+                          {.capacity_bytes = c.requested});
+    }
+    gufo::server::Logger::FlushSync();
+    std::clog.rdbuf(previous);
+    const auto output = startup_log.str();
+    const std::string configured =
+        "capacity_bytes=" + std::to_string(c.capacity) +
+        " automatic_bytes=" + std::to_string(c.automatic) +
+        " max_bytes=" + std::to_string(c.maximum) + "\n";
+    Expect(output.find("event=snapshot_cache_configured") !=
+                   std::string::npos &&
+               output.find(configured) != std::string::npos,
+           "pool capacity follows the totals plan and ignores legacy values");
+    const std::string plan_line =
+        "event=snapshot_capacity_plan host_total_bytes=" +
+        std::to_string(c.host_total) +
+        " host_resident_bytes=0 model_footprint_bytes=" +
+        std::to_string(30 * gib + 80) +
+        " reserve_bytes=" + std::to_string(4 * gib) + " device_total_bytes=" +
+        (c.device_total ? std::to_string(*c.device_total) : "none") +
+        " explicit_bytes=" + std::to_string(c.requested) + " limit=" + c.limit +
+        " ceiling_bytes=" + std::to_string(c.maximum) +
+        " automatic_bytes=" + std::to_string(c.automatic) +
+        " capacity_bytes=" + std::to_string(c.capacity) + " clamp=" + c.clamp +
+        "\n";
+    Expect(output.find(plan_line) != std::string::npos,
+           "startup logs the capacity plan with its inputs");
+  }
+}
+
 void TestServerInstructionsAreFraming() {
   using namespace gufo::tokenization;
   class ConstraintRunner final : public FakeRunner {
@@ -2788,6 +3166,7 @@ int main(int argc, char** argv) {
     return 0;
   }
   TestServerCacheDisabledHasColdGeometry();
+  TestRunnerWithoutDebugSettingsThrowsTheDedicatedException();
   TestServerInstructionsAreFraming();
   // The cache warning assertion in this binary matches the plain "[WARN]
   // [cache]" text captured from a redirected sink; a TTY stderr tints it.
@@ -2819,6 +3198,7 @@ int main(int argc, char** argv) {
   TestRequestBindsAndClearsCancellation();
   TestBatchedAdvancePreservesIndependentRequests();
   TestResourceClaimsAreValidatedBeforeAllocation();
+  TestLoadRefusesOnlyThePhysicalImpossibility();
   TestSnapshotForkAndUnsupportedCapabilities();
   TestSnapshotCacheBranchesOnePrefixIntoIndependentStates();
   std::ostringstream normal_log;
@@ -2845,6 +3225,9 @@ int main(int argc, char** argv) {
   TestSnapshotCacheCapacityIsReportedAtStartup();
   TestMeminfoAvailableExcludesFreeCma();
   TestSnapshotStartupReportsSelectedLimits();
+  TestSnapshotCapacityPlanIsDeterministic();
+  TestHostFloorDefaultAndParsing();
+  TestPoolPlansSnapshotCapacityFromTotals();
   TestPersistentSnapshotRestoresAcrossPools();
   TestSharedPrefixIsLearnedAndRestoredAcrossConversations();
   TestRamLearnsDivergenceBoundaries();

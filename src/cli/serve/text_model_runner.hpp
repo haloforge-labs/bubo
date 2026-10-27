@@ -17,7 +17,9 @@
 #include <vector>
 
 #include "src/cli/serve/continuation_cache.hpp"
+#include "src/cli/serve/snapshot_capacity.hpp"
 #include "src/cli/serve/text_generation_backend.hpp"
+#include "src/core/platform/memory_guard.hpp"
 #include "src/core/sampling.hpp"
 #include "src/models/qwen38_flash_next/prefill_diag.hpp"
 
@@ -44,8 +46,16 @@ struct TextPreparedPrompt {
   std::size_t cache_prefix_tokens{0};
 };
 
+/// Thrown by a runner that reports no engine settings; server startup leaves
+/// the "engine" settings row out for it instead of failing.
+struct DebugSettingsUnsupported final : std::invalid_argument {
+  DebugSettingsUnsupported()
+      : std::invalid_argument(
+            "debug settings are not supported for this model") {}
+};
+
 struct TextRunnerRamCacheOptions {
-  static constexpr std::size_t kAutomaticMaxBytes = std::size_t{32} << 30;
+  static constexpr std::size_t kAutomaticMaxBytes = kAutomaticSnapshotMaxBytes;
   static constexpr std::size_t kMaxEntries = 128;
   /// Zero selects min(model snapshot budget, 32 GiB), after session allocation.
   /// Explicit limits may exceed that budget up to the model's ceiling, which
@@ -84,12 +94,27 @@ struct TextRunnerDiskCacheOptions {
 /// Automatic snapshot budget: half the host RAM available after loading
 /// (excluding free CMA pages), after cgroup limits.
 [[nodiscard]] std::size_t HostSnapshotBudgetBytes();
-/// RAM always left to the OS and other processes by an explicit cache limit.
-inline constexpr std::uint64_t kHostSnapshotHeadroomBytes = std::uint64_t{4}
-                                                            << 30;
+
+/// Creates the process-wide memory guard (see core/platform/memory_guard.hpp) from GUFO_CACHE_HOST_FLOOR_MB and the OS readings. Call once at
+/// server start, before any scheduler. With the floor at 0 (or malformed, or no OS source) the guard stays off and one line says so.
+void EnableProcessMemoryGuard();
 /// Most an explicit --cache-ram-bytes may claim: available host RAM minus
 /// kHostSnapshotHeadroomBytes.
 [[nodiscard]] std::size_t HostSnapshotCeilingBytes();
+
+/// Host RAM available now (MemAvailable minus free CMA, or the Windows
+/// available physical memory), after cgroup limits. A snapshot of a busy
+/// system: use it for admission checks, never to size a cache.
+[[nodiscard]] std::uint64_t HostAvailableBytes();
+/// Total physical host RAM (cgroup-limited), in bytes. Unlike
+/// HostAvailableBytes it does not move with other processes' memory use.
+[[nodiscard]] std::uint64_t HostTotalBytes();
+/// Default host-memory floor for snapshot admission (GUFO_CACHE_HOST_FLOOR_MB).
+inline constexpr std::uint64_t kDefaultHostFloorMiB = 4096;
+/// Host floor in bytes from the GUFO_CACHE_HOST_FLOOR_MB text: null or empty
+/// selects kDefaultHostFloorMiB, "0" disables, a negative or malformed value
+/// disables.
+[[nodiscard]] std::uint64_t ParseHostFloorBytes(const char* text);
 
 enum class TextExecutionPlanKind : std::uint8_t {
   kSerial,
@@ -143,6 +168,28 @@ struct TextRunnerDescriptor {
 /// A missing value is an explicit "not yet measurable" claim. When both the
 /// aggregate state capacity and per-request state are known, the common pool
 /// validates the requested concurrency before creating model-private state.
+/// The numbers of a session set that does not fit this machine (ValidateRunner at pool construction). `serve` turns it into the machine exit
+/// 19 `memory_insufficient` with these fields; the text names them for a human.
+struct SessionsFitFailure {
+  std::size_t sessions{0};
+  std::uint64_t context{0};
+  std::uint64_t per_session_bytes{0};
+  std::uint64_t needed_bytes{0};
+  std::uint64_t available_bytes{0};
+  std::uint64_t floor_bytes{0};   // the keep-free floor in force (0: the guard is off)
+};
+class SessionsDoNotFit final : public std::invalid_argument {
+public:
+  SessionsDoNotFit(const std::string& message, SessionsFitFailure failure)
+      : std::invalid_argument(message), failure_(failure) {}
+  [[nodiscard]] const SessionsFitFailure& failure() const noexcept { return failure_; }
+
+private:
+  SessionsFitFailure failure_;
+};
+/// The failure of the most recent pool construction refused for memory (set before the exception is thrown), for the caller that only sees a message.
+[[nodiscard]] std::optional<SessionsFitFailure> LastSessionsFitFailure();
+
 struct TextRunnerResourceClaim {
   std::optional<std::size_t> resident_weights_bytes;
   std::optional<std::size_t> state_capacity_bytes;
@@ -155,6 +202,19 @@ struct TextRunnerResourceClaim {
   /// Most an explicit RAM-cache limit may claim. Missing means the automatic
   /// retained_snapshot_capacity_bytes is also the ceiling.
   std::optional<std::size_t> retained_snapshot_ceiling_bytes;
+  /// When true the pool ignores the two retained_snapshot_* values and plans
+  /// the capacity with PlanSnapshotCapacity from host total, device total,
+  /// the model footprint (weights + sessions * (state + scratch)), host-
+  /// resident model bytes and the fixed reserve. No free-memory reading is
+  /// used.
+  bool snapshot_capacity_from_totals{false};
+  /// Device total for snapshot_capacity_from_totals.
+  std::optional<std::size_t> device_total_bytes;
+  /// Model bytes in host RAM for snapshot_capacity_from_totals; missing
+  /// counts as 0 (the runtime host floor still guards host RAM).
+  std::optional<std::size_t> host_resident_bytes;
+  /// Test seam: replaces HostTotalBytes() when set.
+  std::optional<std::size_t> host_total_bytes_override;
   bool requires_device_runtime_lock{false};
 };
 
@@ -274,8 +334,11 @@ public:
   /// Called once per finished request (any outcome); the default does nothing.
   virtual void OnRequestFinished() const {}
   [[nodiscard]] virtual json::Value DebugSettings() const {
-    throw std::invalid_argument(
-        "debug settings are not supported for this model");
+    throw DebugSettingsUnsupported();
+  }
+  /// Live host counters, separate from the immutable resolved-settings bundle.
+  [[nodiscard]] virtual json::Value PromptTokenizationStats() const {
+    return {};
   }
   [[nodiscard]] virtual bool SupportsLogprobs() const noexcept { return false; }
   [[nodiscard]] virtual TextRunnerResourceClaim ResourceClaim() const = 0;
@@ -290,6 +353,20 @@ public:
   [[nodiscard]] virtual sampling::JsonConstraint::ToolFormat ToolFormat()
       const {
     return sampling::JsonConstraint::ToolFormat::kJson;
+  }
+  /// The tool format of one request: the model's own, unless the request
+  /// opts into another that the model's template supports.
+  [[nodiscard]] virtual sampling::JsonConstraint::ToolFormat RequestToolFormat(
+      const ChatRequest& request) const {
+    static_cast<void>(request);
+    return ToolFormat();
+  }
+  /// The model's chat template already tells the model how to write tool
+  /// calls, so a JSON-format request adds no instruction of its own.
+  [[nodiscard]] virtual bool TemplateTeachesToolFormat() const { return false; }
+  /// Reasoning delimiters and tool-call syntax of generated text.
+  [[nodiscard]] virtual TextGenerationBackend::OutputMarkup Markup() const {
+    return {};
   }
   /// Reuse a compiled grammar bound to this runner's vocabulary.
   [[nodiscard]] std::shared_ptr<const sampling::TokenConstraint> BindConstraint(
@@ -377,6 +454,14 @@ public:
   [[nodiscard]] virtual std::size_t PrefillPreferredChunk() const noexcept {
     return 0;
   }
+  // Spacing of the intermediate checkpoints of a cold prompt. A checkpoint
+  // ends a prefill pass, so a grid finer than the runner's forward chunk cuts
+  // chunks short. The default follows the preferred chunk and is 2048 without
+  // one.
+  [[nodiscard]] virtual std::size_t PrefillCheckpointGrid() const noexcept {
+    const auto preferred = PrefillPreferredChunk();
+    return preferred ? preferred : 2048;
+  }
   [[nodiscard]] virtual TextPrefillStep Prefill(
       TextRunnerState& state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t max_input_tokens) const = 0;
@@ -414,6 +499,31 @@ public:
   [[nodiscard]] virtual DeviceProbeStatus PollDevice() const {
     return DeviceProbeStatus::kUsable;
   }
+  /// Memory guard: the bytes this request cannot run without (lazy buffers it will commit, a scoring session). Cache snapshots are optional
+  /// and are never charged here. The default is none; a request that needs none is never refused for low memory.
+  [[nodiscard]] virtual gufo::platform::MemoryNeed RequestMemoryNeed(
+      std::size_t prompt_tokens, const TextPromptContext* context, bool prompt_score) const {
+    (void)prompt_tokens;
+    (void)context;
+    (void)prompt_score;
+    return {};
+  }
+  /// Process-level device memory for the memory ledger (GUFO_MEM_ACCOUNTING).
+  /// `split` is true when the local / non-local usage of this process is known.
+  struct DeviceMemorySample {
+    std::size_t free_bytes{0};
+    std::size_t total_bytes{0};
+    bool split{false};
+    std::size_t local_used_bytes{0};
+    std::size_t nonlocal_used_bytes{0};
+    /// The WDDM budgets of the two segment groups (zero when unknown).
+    std::size_t local_budget_bytes{0};
+    std::size_t nonlocal_budget_bytes{0};
+  };
+  [[nodiscard]] virtual std::optional<DeviceMemorySample> SampleDeviceMemory()
+      const {
+    return std::nullopt;
+  }
   /// Bounded check, run only after a failed work unit, that the execution
   /// device still accepts work. False means the context is permanently lost;
   /// a probe that is still pending at its bound reports true.
@@ -425,6 +535,15 @@ public:
   /// advertise the corresponding capabilities.
   [[nodiscard]] virtual std::size_t SnapshotPayloadBytes(
       const TextRunnerState& state) const;
+  /// Host bytes a new snapshot of `payload_bytes` covering `token_count`
+  /// tokens will hold, for the host-memory floor. The default charges the
+  /// whole payload; a runner whose checkpoints stay in device memory reports
+  /// less.
+  [[nodiscard]] virtual std::uint64_t SnapshotHostBytes(
+      std::uint64_t payload_bytes, std::size_t token_count) const {
+    (void)token_count;
+    return payload_bytes;
+  }
   /// May run on a capture worker while this state is frozen. Must not mutate
   /// shared execution scratch; other sessions may execute concurrently.
   [[nodiscard]] virtual std::unique_ptr<TextRunnerSnapshot> Snapshot(
@@ -488,6 +607,9 @@ public:
       std::size_t shared_prefix_bytes{0};
       std::size_t shared_prefix_failures{0};
       double shared_prefix_ms{0.0};
+      /// Snapshot copies this request wanted and the cache refused (capacity, floor, memory guard), and the reason of the last (GitHub #9).
+      std::size_t snapshots_skipped{0};
+      std::string snapshot_skip_reason;
     };
 
     Request();
@@ -536,6 +658,7 @@ public:
                        std::size_t index, std::size_t tokens,
                        std::size_t start_depth);
     [[nodiscard]] TextDecodeSelection SelectNext();
+    [[nodiscard]] TextGenerationBackend::TerminationCause termination_cause() const noexcept;
     void Advance();
     [[nodiscard]] TextDecodeStep DecodeStep(std::size_t max_tokens);
 
@@ -602,6 +725,12 @@ public:
   [[nodiscard]] std::size_t CachedPrefixTokens(
       std::span<const TextRunnerToken> prompt,
       const TextPromptContext* context) const;
+
+  /// Memory guard: drops retained RAM snapshots (see ContinuationCache::TrimSnapshots) and reports how many bytes are still retained.
+  std::uint64_t TrimSnapshots(std::uint64_t target_bytes, bool host_only = false);
+  [[nodiscard]] std::uint64_t RetainedSnapshotBytes() const;
+  /// Logical, device and host bytes of the retained snapshots (ContinuationCache::snapshot_footprint), for the completion log line.
+  [[nodiscard]] ContinuationCache::SnapshotFootprint RetainedSnapshotFootprint() const;
 
 private:
   struct Impl;

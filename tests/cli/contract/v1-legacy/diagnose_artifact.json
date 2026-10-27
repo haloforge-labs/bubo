@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "operation_id": "11111111111111111111111111111111",
+  "seq": 1,
+  "time": "2026-10-13T18:00:00Z",
+  "product": {
+    "name": "bubo",
+    "version": "0.1.0",
+    "revision": "3ff74dce",
+    "engine_version": "0.1.0"
+  },
+  "type": "diagnose_artifact",
+  "payload": {
+    "schema_version": 1,
+    "schemaVersion": "1.0.0",
+    "isValid": true,
+    "fingerprintId": "",
+    "errors": [],
+    "warnings": []
+  }
+}

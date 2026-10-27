@@ -1,3 +1,4 @@
+#include "src/core/strix_halo.hpp"
 #include "src/core/diagnostics/system_inventory.h"
 
 #include <iomanip>
@@ -34,6 +35,19 @@ std::string EscapeJsonStr(std::string_view str) {
 
 SystemInventory CollectSystemInventory(const LinuxSysfs& sysfs) {
   SystemInventory inv;
+#ifdef _WIN32
+  if (sysfs.IsNativeHost()) {
+    inv.cpu.source = "CPUID + GetLogicalProcessorInformationEx";
+    inv.memory.source = "GlobalMemoryStatusEx (OS-visible RAM)";
+    inv.memory.memory_type = "OS-visible RAM";
+    inv.toolchain.source = "Windows + HIP runtime";
+    inv.toolchain.rocm_version = "unavailable";
+    inv.toolchain.amdgpu_status = "not applicable (Windows)";
+#ifdef __clang__
+    inv.toolchain.cxx_compiler = "Clang " __clang_version__;
+#endif
+  }
+#endif
 
   // 1. CPU
   if (const auto cpu_opt = sysfs.QueryCpuInfo()) {
@@ -83,9 +97,7 @@ SystemInventory CollectSystemInventory(const LinuxSysfs& sysfs) {
     inv.gpu.temperatures = primary_gpu.hwmon_sensors;
 
     const std::string_view pci_view = primary_gpu.pci_id;
-    if (pci_view.find("1002:1586") != std::string_view::npos ||
-        pci_view.find("1002:1587") != std::string_view::npos ||
-        pci_view.find("1002:1588") != std::string_view::npos) {
+    if (gufo::core::IsStrixHaloPciId(pci_view)) {
       inv.gpu.architecture = "gfx1151";
       inv.gpu.availability = "available";
     } else {
@@ -215,12 +227,23 @@ std::string SystemInventory::ToHuman() const {
 
   oss << "CPU Model           : " << cpu.model_name << " (" << cpu.logical_cores
       << " threads, " << cpu.architecture << ")\n";
+#ifdef _WIN32
+  oss << "System Memory       : " << std::fixed << std::setprecision(1)
+      << double(memory.total_bytes) / 1e9 << " GB ("
+      << double(memory.total_bytes) / (1024ULL * 1024 * 1024)
+      << " GiB, OS-visible RAM)\n";
+#else
   oss << "System Memory       : "
       << (memory.total_bytes / (1024ULL * 1024 * 1024)) << " GiB ("
       << memory.memory_type << ")\n";
+#endif
   oss << "GPU Model           : " << gpu.name << " [" << gpu.architecture
       << ", " << gpu.compute_units << " CUs] (" << gpu.availability << ")\n";
+#ifdef _WIN32
+  oss << "Windows Version     : " << toolchain.kernel_release << "\n";
+#else
   oss << "Linux Kernel        : " << toolchain.kernel_release << "\n";
+#endif
   oss << "ROCm Version        : " << toolchain.rocm_version << "\n";
 
   return oss.str();

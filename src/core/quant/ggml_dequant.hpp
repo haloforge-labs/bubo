@@ -60,6 +60,32 @@ struct block_q8_0 {
   std::int8_t qs[32];
 };
 
+// Q4_0: fp16 scale + 32 4-bit values (QK=32), value = d * (q - 8). Low
+// nibbles give the first 16 elements, high nibbles the second 16.
+struct block_q4_0 {
+  std::uint16_t d;
+  std::uint8_t qs[16];
+};
+
+// Q5_0: fp16 scale, 32 fifth bits, 32 low nibbles (QK=32), value =
+// d * (q - 16). Low nibbles give the first 16 elements (fifth bits 0-15),
+// high nibbles the second 16 (bits 16-31).
+struct block_q5_0 {
+  std::uint16_t d;
+  std::uint8_t qh[4];
+  std::uint8_t qs[16];
+};
+
+// Q5_1: fp16 scale and minimum, 32 fifth bits, 32 low nibbles (QK=32),
+// value = d * q + m. Low nibbles give the first 16 elements (fifth bits
+// 0-15), high nibbles the second 16 (bits 16-31).
+struct block_q5_1 {
+  std::uint16_t d;
+  std::uint16_t m;
+  std::uint8_t qh[4];
+  std::uint8_t qs[16];
+};
+
 // IQ4_NL: fp16 scale + 32 non-linear 4-bit codebook indices (QK=32). The
 // codebook is kValuesIq4Nl; the index nibble order matches Q4_0 (low nibbles
 // give the first 16 elements, high nibbles the second 16).
@@ -88,6 +114,43 @@ struct block_iq3_s {
   std::uint8_t signs[32];
   std::uint8_t scales[4];
 };
+
+// IQ2_XXS: super-block of 256; per 32 elements two uint32 words: four 8-bit grid indices, then four 7-bit sign
+// indices and a 4-bit scale (top nibble of the second word).
+struct block_iq2_xxs {
+  std::uint16_t d;
+  std::uint16_t qs[32];
+};
+
+// IQ2_XS: super-block of 256; each uint16 holds a 9-bit grid index and a 7-bit sign index; scales has two 4-bit scales per
+// 32 elements.
+struct block_iq2_xs {
+  std::uint16_t d;
+  std::uint16_t qs[32];
+  std::uint8_t scales[8];
+};
+
+// IQ2_S: super-block of 256; qs holds 32 grid-index low bytes followed by 32 sign bytes, qh the two high index bits.
+struct block_iq2_s {
+  std::uint16_t d;
+  std::uint8_t qs[64];
+  std::uint8_t qh[8];
+  std::uint8_t scales[8];
+};
+
+// IQ3_XXS: super-block of 256; 64 grid-index bytes (two per group of eight) then, per 32 elements, a uint32 with four
+// 7-bit sign indices and a 4-bit scale.
+struct block_iq3_xxs {
+  std::uint16_t d;
+  std::uint8_t qs[96];
+};
+
+// Q2_0 (ggml-org/llama.cpp GGML_TYPE_Q2_0 = 42, bec4772f): 64 values, one fp16 scale, 2 bits per value, four values per
+// byte starting at the low bits; code c decodes to (c - 1) * d, i.e. {-1, 0, +1, +2} * d.
+struct block_q2_0 {
+  std::uint16_t d;
+  std::uint8_t qs[16];
+};
 #pragma pack(pop)
 
 static_assert(sizeof(block_q4_K) == 144, "block_q4_K must be 144 bytes");
@@ -98,7 +161,15 @@ static_assert(sizeof(block_q8_K) == 292, "block_q8_K must be 292 bytes");
 static_assert(sizeof(block_q8_0) == 34, "block_q8_0 must be 34 bytes");
 static_assert(sizeof(block_iq4_nl) == 18, "block_iq4_nl must be 18 bytes");
 static_assert(sizeof(block_iq4_xs) == 136, "block_iq4_xs must be 136 bytes");
+static_assert(sizeof(block_q4_0) == 18, "block_q4_0 must be 18 bytes");
+static_assert(sizeof(block_q5_0) == 22, "block_q5_0 must be 22 bytes");
+static_assert(sizeof(block_q5_1) == 24, "block_q5_1 must be 24 bytes");
 static_assert(sizeof(block_iq3_s) == 110, "block_iq3_s must be 110 bytes");
+static_assert(sizeof(block_iq2_xxs) == 66, "block_iq2_xxs must be 66 bytes");
+static_assert(sizeof(block_iq2_xs) == 74, "block_iq2_xs must be 74 bytes");
+static_assert(sizeof(block_iq2_s) == 82, "block_iq2_s must be 82 bytes");
+static_assert(sizeof(block_iq3_xxs) == 98, "block_iq3_xxs must be 98 bytes");
+static_assert(sizeof(block_q2_0) == 18, "block_q2_0 must be 18 bytes");
 
 /// Non-linear 4-bit codebook shared by IQ4_NL and IQ4_XS.
 inline constexpr std::int8_t kValuesIq4Nl[16] = {
@@ -117,8 +188,13 @@ inline constexpr std::int8_t kValuesIq4Nl[16] = {
     case core::GgmlType::kQ8_0:
     case core::GgmlType::kIQ4_NL:
       return 32;
+    case core::GgmlType::kQ2_0:
+      return 64;
     case core::GgmlType::kQ2_K:
     case core::GgmlType::kIQ2_XXS:
+    case core::GgmlType::kIQ2_XS:
+    case core::GgmlType::kIQ2_S:
+    case core::GgmlType::kIQ3_XXS:
     case core::GgmlType::kIQ4_XS:
     case core::GgmlType::kIQ3_S:
     case core::GgmlType::kQ3_K:
@@ -185,6 +261,19 @@ void DequantizeIQ4_XS(const void* src, float* dst, std::size_t k);
 // Dequantize row of IQ3_S to float
 void DequantizeIQ3_S(const void* src, float* dst, std::size_t k);
 
+// Dequantize row of IQ2_XXS / IQ2_XS / IQ2_S / IQ3_XXS / Q2_0 to float (mirror ggml-quants.c dequantize_row_*; Q2_0 is
+// ggml-org/llama.cpp bec4772f). The dot products dequantize the row and are an oracle, not a fast path.
+void DequantizeIQ2_XXS(const void* src, float* dst, std::size_t k);
+void DequantizeIQ2_XS(const void* src, float* dst, std::size_t k);
+void DequantizeIQ2_S(const void* src, float* dst, std::size_t k);
+void DequantizeIQ3_XXS(const void* src, float* dst, std::size_t k);
+void DequantizeQ2_0(const void* src, float* dst, std::size_t k);
+float DotProductIQ2_XXS(const void* row_data, std::span<const float> vec, std::size_t k);
+float DotProductIQ2_XS(const void* row_data, std::span<const float> vec, std::size_t k);
+float DotProductIQ2_S(const void* row_data, std::span<const float> vec, std::size_t k);
+float DotProductIQ3_XXS(const void* row_data, std::span<const float> vec, std::size_t k);
+float DotProductQ2_0(const void* row_data, std::span<const float> vec, std::size_t k);
+
 // Compute dot product of IQ4_NL quantized row with FP32 vector
 float DotProductIQ4_NL(const void* row_data, std::span<const float> vec,
                        std::size_t k);
@@ -201,6 +290,24 @@ float DotProductIQ3_S(const void* row_data, std::span<const float> vec,
 
 // Compute dot product of Q8_0 quantized row with FP32 vector
 float DotProductQ8_0(const void* row_data, std::span<const float> vec,
+                     std::size_t k);
+
+// Dequantize row of Q4_0 to float
+void DequantizeQ4_0(const void* src, float* dst, std::size_t k);
+// Compute dot product of Q4_0 quantized row with FP32 vector
+float DotProductQ4_0(const void* row_data, std::span<const float> vec,
+                     std::size_t k);
+
+// Dequantize row of Q5_0 to float
+void DequantizeQ5_0(const void* src, float* dst, std::size_t k);
+// Compute dot product of Q5_0 quantized row with FP32 vector
+float DotProductQ5_0(const void* row_data, std::span<const float> vec,
+                     std::size_t k);
+
+// Dequantize row of Q5_1 to float
+void DequantizeQ5_1(const void* src, float* dst, std::size_t k);
+// Compute dot product of Q5_1 quantized row with FP32 vector
+float DotProductQ5_1(const void* row_data, std::span<const float> vec,
                      std::size_t k);
 
 }  // namespace gufo::quant

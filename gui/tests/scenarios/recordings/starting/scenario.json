@@ -1,0 +1,9 @@
+{
+  "_source": "fixture",
+  "state": "Starting",
+  "records": {
+    "models": "../v12/models-list-gui.json",
+    "status": "../v12/status-main.json",
+    "switches": "../v12/switches.json"
+  }
+}

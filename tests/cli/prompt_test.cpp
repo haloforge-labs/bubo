@@ -48,6 +48,17 @@ void TestExplicitFlags() {
   assert(sampling.temperature == 0 && sampling.top_k == 0 &&
          sampling.presence_penalty == 0 && sampling.seed == 0);
   assert(sampling.top_p == 0.8F);
+  // Gemma 4: its generation config, thinking or not; supplied values win.
+  for (const bool thinking : {false, true}) {
+    const auto gemma = gufo::sampling::ResolveTextSampling(
+        gufo::sampling::TextModelPreset::kGemma4, thinking, {}, {});
+    assert(gemma.temperature == 1.0F && gemma.top_p == 0.95F &&
+           gemma.top_k == 64 && gemma.presence_penalty == 0.0F);
+  }
+  const auto gemma_zero = gufo::sampling::ResolveTextSampling(
+      gufo::sampling::TextModelPreset::kGemma4, false, zero->sampling,
+      zero->sampling_supplied);
+  assert(gemma_zero.temperature == 0 && gemma_zero.top_k == 0);
 }
 
 void TestFlashMtpFlags() {
@@ -57,8 +68,24 @@ void TestFlashMtpFlags() {
   const auto opt = gufo::cli::ParsePromptOptions(args);
   assert(opt.has_value());
   assert(opt->speculative_backend == "mtp");
-  assert(opt->draft_tokens == 3);
+  assert(opt->draft_tokens == 3 && opt->draft_tokens_given);
   assert(opt->sampling.temperature == 0.7F && opt->sampling.seed == 1);
+  // Without --draft-tokens a model keeps its own default.
+  const char* implicit[] = {"--speculative", "mtp", "--mtp-model", "mtp.gguf",
+                            "Prompt"};
+  const auto defaulted = gufo::cli::ParsePromptOptions(implicit);
+  assert(defaulted && !defaulted->draft_tokens_given);
+  // MTP models check their own policy names; --draft-calibration is MTP-only.
+  const char* calibrated[] = {"--speculative",       "mtp",     "--mtp-model",
+                              "mtp.gguf",            "--draft-policy",
+                              "calibrated",          "--draft-calibration",
+                              "request",             "Prompt"};
+  const auto calibrated_options = gufo::cli::ParsePromptOptions(calibrated);
+  assert(calibrated_options &&
+         calibrated_options->draft_policy == "calibrated" &&
+         calibrated_options->draft_calibration == "request");
+  const char* orphan[] = {"--draft-calibration", "request", "Prompt"};
+  assert(!gufo::cli::ParsePromptOptions(orphan));
 }
 
 void TestImageFlags() {

@@ -9,6 +9,7 @@
 #include <future>
 
 #include "src/npu/bfp_hip.hpp"
+#include "src/npu/invalid_bits.hpp"
 
 namespace gufo::npu::fake_hip {
 thread_local bool in_callback = false;
@@ -132,7 +133,7 @@ hipError_t DecodeCHip(std::span<const std::uint8_t> input,
       assert(input.front() == 0x42 && input.back() == 0x42);
     output[col0] = input.front();
     if (s.invalidate_next_decode.exchange(false))
-      *invalid = 1;
+      *invalid |= gufo::npu::kInvalidDecoderExp255;
     ++s.decodes;
   });
   return hipSuccess;

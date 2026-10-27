@@ -65,9 +65,7 @@ bool ProjectionQualified(unsigned tokens, unsigned capacity, bool prefill,
                          bool speculative, bool prepared, bool last_only,
                          const ProjectionWeights* w) noexcept {
   return prefill && !speculative && !prepared && !last_only && w &&
-         ProjectionGeometry(*w) &&
-         QualifiedPrefill(tokens, capacity / kTokens) && tokens <= capacity &&
-         tokens <= 4 * kTokens;
+         ProjectionGeometry(*w) && QualifiedChunk(tokens, capacity);
 }
 ProjectionWork::ProjectionWork(std::shared_ptr<const ProjectionWeights> w,
                                std::vector<std::vector<std::uint8_t>> a,

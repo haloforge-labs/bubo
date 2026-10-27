@@ -317,7 +317,14 @@ QwenGpuModel::QwenGpuModel(
       weights_(std::move(weights)),
       tokenizer_(std::move(tokenizer)),
       weight_regions_(std::move(weight_regions)),
-      vision_(std::move(vision)) {}
+      vision_(std::move(vision)) {
+  if (reader_ != nullptr) {
+    if (const auto chat_template =
+            tokenization::QwenChatTemplate::CreateFromGguf(*reader_)) {
+      chat_dialect_ = chat_template->GetDialect();
+    }
+  }
+}
 
 QwenGpuModel::~QwenGpuModel() {
   ReleaseWeightRegions(weight_regions_);

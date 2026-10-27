@@ -1,0 +1,10 @@
+{
+  "_source": "fixture",
+  "state": "Stopped",
+  "records": {
+    "models": "../v12/models-list-gui.json",
+    "saved_estimate": "../v12/estimate-flash-default.json",
+    "status": "../v12/status-main.json",
+    "switches": "../v12/switches.json"
+  }
+}

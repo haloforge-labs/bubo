@@ -1,0 +1,253 @@
+{
+  "gpu": [
+    {
+      "source": "C:/bubo/run/app/v8/C/04-engine-ready-server.json",
+      "sha256": "fb1ed5f1cadd217e80bad2bd479c14d5d308ccd6e81cef41bbb493390358914d",
+      "gpu": {
+        "sample_time": "2026-10-16T23:03:36.0067519Z",
+        "age_seconds": 1.2310665,
+        "window_seconds": 0.0130315,
+        "use_pct": 0.6,
+        "memory_used_bytes": 3293569024,
+        "memory_total_bytes": 102892924928,
+        "shared_used_bytes": 573673472,
+        "temperature_c": 52,
+        "chip_power_w": 44.1
+      }
+    },
+    {
+      "source": "C:/bubo/run/app/v8/C/04-engine-ready-requests.json",
+      "sha256": "7764a3b2b2844e480bea4a7c27362fb18ade48dcb9dea9ecb5867d5e522d3c99",
+      "gpu": {
+        "sample_time": "2026-10-16T23:03:38.025273Z",
+        "age_seconds": 1.8071649,
+        "window_seconds": 2.019047,
+        "use_pct": 1.3,
+        "memory_used_bytes": 3311132672,
+        "memory_total_bytes": 102892924928,
+        "shared_used_bytes": 573673472,
+        "temperature_c": 53,
+        "chip_power_w": 51.6
+      }
+    },
+    {
+      "source": "C:/bubo/run/app/v8/C/04-engine-ready-settings.json",
+      "sha256": "ed6908ebaad212ea64f2a7d922f1f96090e8bd200a5680946b86d0775d52c7ce",
+      "gpu": {
+        "sample_time": "2026-10-16T23:03:40.0343909Z",
+        "age_seconds": 1.1141777,
+        "window_seconds": 2.0081245,
+        "use_pct": 1.9,
+        "memory_used_bytes": 3311919104,
+        "memory_total_bytes": 102892924928,
+        "shared_used_bytes": 574984192,
+        "temperature_c": 53,
+        "chip_power_w": 44.6
+      }
+    },
+    {
+      "source": "C:/bubo/run/app/v8/C/07-model-ready-server.json",
+      "sha256": "35251aba7be494455b95adb0847ded7587e356cf57bc19161f89d95f6777a64a",
+      "gpu": {
+        "sample_time": "2026-10-16T23:03:42.0694026Z",
+        "age_seconds": 0.7773983,
+        "window_seconds": 2.0333903,
+        "use_pct": 2.1,
+        "memory_used_bytes": 3294093312,
+        "memory_total_bytes": 102892924928,
+        "shared_used_bytes": 574984192,
+        "temperature_c": 54,
+        "chip_power_w": 46.6
+      }
+    },
+    {
+      "source": "C:/bubo/run/app/v8/C/07-model-ready-requests.json",
+      "sha256": "8fa45b9ad71ce69c439f966cbccc3ebda9cb479414d7408371cfc9e63d7c029c",
+      "gpu": {
+        "sample_time": "2026-10-16T23:03:44.0782296Z",
+        "age_seconds": 1.4872611,
+        "window_seconds": 2.0119622,
+        "use_pct": 2.8,
+        "memory_used_bytes": 3294093312,
+        "memory_total_bytes": 102892924928,
+        "shared_used_bytes": 574984192,
+        "temperature_c": 53,
+        "chip_power_w": 33.9
+      }
+    },
+    {
+      "source": "C:/bubo/run/app/v8/C/07-model-ready-settings.json",
+      "sha256": "24ee99d4491072854faf48e89177e96753c6577996c1d804a521b54e3c6f7b3c",
+      "gpu": {
+        "sample_time": "2026-10-16T23:03:46.0827206Z",
+        "age_seconds": 0.7339237,
+        "window_seconds": 2.0031267,
+        "use_pct": 2.4,
+        "memory_used_bytes": 3291996160,
+        "memory_total_bytes": 102892924928,
+        "shared_used_bytes": 573411328,
+        "temperature_c": 53,
+        "chip_power_w": 42.2
+      }
+    },
+    {
+      "source": "C:/bubo/run/app/v8/C/08-starting-server.json",
+      "sha256": "fa09c9d426c7b1338c3e3091e4dc4b9181b50da671d2b24e4d027028b2536dde",
+      "gpu": {
+        "sample_time": "2026-10-16T23:04:38.3956897Z",
+        "age_seconds": 0.855087,
+        "window_seconds": 2.0038831,
+        "use_pct": 2.7,
+        "memory_used_bytes": 3352551424,
+        "memory_total_bytes": 102892924928,
+        "shared_used_bytes": 573411328,
+        "temperature_c": 53,
+        "chip_power_w": 48.1
+      }
+    },
+    {
+      "source": "C:/bubo/run/app/v8/C/09-running-server.json",
+      "sha256": "32e10a21e8b0349307e47c97df30d347f1951a96db07f8566e41ae71593fd654",
+      "gpu": {
+        "sample_time": "2026-10-16T23:05:12.9022312Z",
+        "age_seconds": 1.9474262,
+        "window_seconds": 2.0281228,
+        "use_pct": 14.9,
+        "memory_used_bytes": 100337782784,
+        "memory_total_bytes": 102892924928,
+        "shared_used_bytes": 975196160,
+        "temperature_c": 56,
+        "chip_power_w": 38.8
+      }
+    },
+    {
+      "source": "C:/bubo/run/app/v8/C/09-running-onboarding.json",
+      "sha256": "b446bfec8b95b1c1135f8e86b4586575853e05690d3273abe31fa75c2cd5f824",
+      "gpu": {
+        "sample_time": "2026-10-16T23:05:14.929456Z",
+        "age_seconds": 1.0614909,
+        "window_seconds": 2.0279836,
+        "use_pct": 0.6,
+        "memory_used_bytes": 100337782784,
+        "memory_total_bytes": 102892924928,
+        "shared_used_bytes": 975196160,
+        "temperature_c": 54,
+        "chip_power_w": 30.4
+      }
+    },
+    {
+      "source": "C:/bubo/run/app/v8/C/09-running-connect.json",
+      "sha256": "c2fd7e3ae6f2eab1e1a18c625148210188de58545daa277c6147e53c3d8e4611",
+      "gpu": {
+        "sample_time": "2026-10-16T23:05:16.9711564Z",
+        "age_seconds": 1.0130401,
+        "window_seconds": 2.0416788,
+        "use_pct": 0.9,
+        "memory_used_bytes": 100337782784,
+        "memory_total_bytes": 102892924928,
+        "shared_used_bytes": 975196160,
+        "temperature_c": 53,
+        "chip_power_w": 32.1
+      }
+    },
+    {
+      "source": "C:/bubo/run/app/v8/C/09-running-requests.json",
+      "sha256": "f3e9e7f30f62ac10d751a0fe37b7b4aa3e2e37bc458eff0e6bea3811b85a1069",
+      "gpu": {
+        "sample_time": "2026-10-16T23:05:18.9811993Z",
+        "age_seconds": 0.1145175,
+        "window_seconds": 2.0100533,
+        "use_pct": 0.6,
+        "memory_used_bytes": 100337848320,
+        "memory_total_bytes": 102892924928,
+        "shared_used_bytes": 975196160,
+        "temperature_c": 53,
+        "chip_power_w": 37.9
+      }
+    },
+    {
+      "source": "C:/bubo/run/app/v8/C/09-running-settings.json",
+      "sha256": "c2ed1a887417a042f6d27a7a3c8bdfef5900252a5d6df1a69fc5f2eba992d969",
+      "gpu": {
+        "sample_time": "2026-10-16T23:05:20.9937198Z",
+        "age_seconds": 0.0394635,
+        "window_seconds": 2.0135756,
+        "use_pct": 0.8,
+        "memory_used_bytes": 100337324032,
+        "memory_total_bytes": 102892924928,
+        "shared_used_bytes": 975196160,
+        "temperature_c": 53,
+        "chip_power_w": 42.5
+      }
+    },
+    {
+      "source": "C:/bubo/run/app/v8/C/10-client-request-requests.json",
+      "sha256": "59918be0fe1ef4bf2802acb5badbc89f2447400aea01c36cc7f2e82d28a68c14",
+      "gpu": {
+        "sample_time": "2026-10-16T23:05:27.02625Z",
+        "age_seconds": 1.903653,
+        "window_seconds": 2.0115448,
+        "use_pct": 0.6,
+        "memory_used_bytes": 101126209536,
+        "memory_total_bytes": 102892924928,
+        "shared_used_bytes": 997003264,
+        "temperature_c": 53,
+        "chip_power_w": 30.4
+      }
+    },
+    {
+      "source": "C:/bubo/run/app/v8/C/10-client-request-server.json",
+      "sha256": "85fbe4fbcd71a0dba15b10fdcd5e88abaee785db570b4902797168689662353f",
+      "gpu": {
+        "sample_time": "2026-10-16T23:05:29.0311088Z",
+        "age_seconds": 1.7981753,
+        "window_seconds": 2.0047387,
+        "use_pct": 0.7,
+        "memory_used_bytes": 101126209536,
+        "memory_total_bytes": 102892924928,
+        "shared_used_bytes": 997003264,
+        "temperature_c": 53,
+        "chip_power_w": 31.2
+      }
+    },
+    {
+      "source": "C:/bubo/run/app/v8/C/11-stopped-server.json",
+      "sha256": "3ca340f19008eca69823d2ea8d52763b863505c858751f38ac9667263a40960e",
+      "gpu": {
+        "sample_time": "2026-10-16T23:05:33.0526722Z",
+        "age_seconds": 1.7239094000000001,
+        "window_seconds": 2.0044262,
+        "use_pct": 2.8,
+        "memory_used_bytes": 18827993088,
+        "memory_total_bytes": 102892924928,
+        "shared_used_bytes": 655572992,
+        "temperature_c": 54,
+        "chip_power_w": 51.6
+      }
+    },
+    {
+      "source": "C:/bubo/run/app/v8/C/11-stopped-requests.json",
+      "sha256": "719478b64c39549f1a473f3937b25d7ded22a8c8da01b1b9ce65bb4232dcd8eb",
+      "gpu": {
+        "sample_time": "2026-10-16T23:05:35.0660136Z",
+        "age_seconds": 0.4152146,
+        "window_seconds": 2.0126084,
+        "use_pct": 1.4,
+        "memory_used_bytes": 3320832000,
+        "memory_total_bytes": 102892924928,
+        "shared_used_bytes": 573411328,
+        "temperature_c": 54,
+        "chip_power_w": 48.4
+      }
+    }
+  ],
+  "transfer": {
+    "source": "C:/bubo/evidence/capture-10/20261026-104717-prepare-plain.stdout.log",
+    "sha256": "a313d0df8a514b54f7ff6cddae282bbf3d37e340879088b348baea8eb259cbb4",
+    "file_id": "main_4",
+    "bytes_done": 12087983680,
+    "bytes_total": 12087983680,
+    "elapsed_ms": 82365.52399999999,
+    "note": "Observed complete fourth shard; screenshots arrange this observation within the real full-package plan. Rate is the measured whole-transfer average; remaining time is a projection."
+  }
+}

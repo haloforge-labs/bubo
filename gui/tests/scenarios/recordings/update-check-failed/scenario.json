@@ -1,0 +1,27 @@
+{
+  "_source": "fixture",
+  "state": "Stopped",
+  "records": {
+    "models": "../v12/models-list-gui.json",
+    "status": "../v12/status-main.json",
+    "switches": "../v12/switches.json"
+  },
+  "update": {
+    "state": "failed",
+    "ready": false,
+    "runtime_followup_required": false,
+    "log_path": "",
+    "log_lines": null,
+    "current_version": "",
+    "size_bytes": null,
+    "progress": null,
+    "error": {
+      "code": "url_refused",
+      "component": "update",
+      "stage": "",
+      "retryable": true,
+      "remedy": "manifest must use latest or an exact stable release tag"
+    },
+    "check_failed": true
+  }
+}

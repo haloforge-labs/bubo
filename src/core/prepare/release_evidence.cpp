@@ -3,6 +3,7 @@
 #include <set>
 #include <stdexcept>
 
+#include "src/core/prepare/lowmemory_data.hpp"
 #include "src/core/prepare/metadata_json.hpp"
 
 namespace bubo::prepare {
@@ -87,5 +88,38 @@ std::string ValidateReleaseEvidence(std::span<const Entry> entries,
       return fail("HF tree lfs.oid differs from SHA-256 pin");
   }
   return {};
+}
+std::string ValidateLowMemoryLocalEvidence(std::string_view text) {
+  try {
+    using namespace metadata;
+    const auto proof = Parse(text);
+    Keys(proof, {"schema_version", "evidence_kind", "compose_manifest_sha256",
+                 "huihui_revision", "ista_revision", "files"});
+    if (Integer(Required(proof, "schema_version")) != 1 ||
+        String(Required(proof, "evidence_kind")) != "local-composed-gguf" ||
+        String(Required(proof, "compose_manifest_sha256")) !=
+            kLowMemoryComposeManifestSha256 ||
+        String(Required(proof, "huihui_revision")) != kHuihuiCommit ||
+        String(Required(proof, "ista_revision")) != kLowMemoryIstaRevision)
+      throw std::invalid_argument(
+          "local composition provenance differs from its pins");
+    const auto& files = Required(proof, "files");
+    if (!files.is_array() || files.size() != kLowMemoryShards.size())
+      throw std::invalid_argument("local composition requires four shard rows");
+    for (std::size_t i = 0; i < kLowMemoryShards.size(); ++i) {
+      const auto& row = files.items()[i];
+      const auto& pin = kLowMemoryShards[i];
+      Keys(row, {"name", "local_source_name", "size", "sha256"});
+      if (String(Required(row, "name")) != pin.file_name ||
+          String(Required(row, "local_source_name")) != pin.local_source_name ||
+          Integer(Required(row, "size")) != pin.size ||
+          String(Required(row, "sha256")) != pin.sha256)
+        throw std::invalid_argument(
+            "local composition shard identity differs from its pin");
+    }
+    return {};
+  } catch (const std::exception& error) {
+    return error.what();
+  }
 }
 }  // namespace bubo::prepare

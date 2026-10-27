@@ -1,0 +1,6 @@
+<|im_start|>system
+You are a careful coding assistant.<|im_end|>
+<|im_start|>user
+Hello<|im_end|>
+<|im_start|>assistant
+<think>

@@ -22,6 +22,14 @@ namespace gufo::models::deepseek_v4_flash {
 class Model;
 }
 
+namespace gufo::models::gemma4 {
+class Model;
+}  // namespace gufo::models::gemma4
+
+namespace gufo::models::gemma4::vision {
+class Encoder;
+}  // namespace gufo::models::gemma4::vision
+
 namespace gufo::models::qwen38_flash_next {
 class Model;
 }
@@ -49,9 +57,16 @@ struct TextSpeculativeConfig {
   TextSpeculativeBackend backend{TextSpeculativeBackend::kDisabled};
   std::string draft_model_path;
   std::uint32_t max_draft_tokens{7};
+  /// Whether --draft-tokens was given; otherwise models with their own
+  /// default (Gemma 4) use it instead of max_draft_tokens.
+  bool max_draft_tokens_given{true};
   std::uint32_t min_draft_tokens{1};
   speculative::DFlashDraftPolicy dflash_policy{
       speculative::DFlashDraftPolicy::kAdaptive};
+  /// MTP draft-length policy and calibration scope names (Gemma 4); empty
+  /// selects the model's defaults.
+  std::string mtp_draft_policy;
+  std::string mtp_draft_calibration;
   /// Qwen3.8-Flash-Next MTP opt-ins (see its ModelOptions); all off by
   /// default.
   bool mtp_survival{false};
@@ -134,6 +149,18 @@ public:
             TextSpeculativeConfig speculative_config = {},
             TextDiskCacheConfig disk_cache_config = {},
             TextRunnerRamCacheOptions ram_cache_config = {});
+
+  /// Installs a previously loaded Gemma 4 model with request-owned sessions
+  /// and host/disk continuation snapshots. `vision` (the model's mmproj BF16
+  /// sidecar) turns on image input; without it images are rejected.
+  bool load(std::shared_ptr<models::gemma4::Model> model, std::string* error,
+            std::uint32_t max_context = 0, std::size_t session_count = 1,
+            TextPrefillPolicy prefill_policy = {},
+            TextSchedulerPolicy scheduler_policy = {},
+            TextSpeculativeConfig speculative_config = {},
+            TextDiskCacheConfig disk_cache_config = {},
+            TextRunnerRamCacheOptions ram_cache_config = {},
+            std::shared_ptr<models::gemma4::vision::Encoder> vision = {});
 #endif
 
   /// Stable model identifier used in API responses.
@@ -159,6 +186,7 @@ public:
   [[nodiscard]] json::Value debug_settings() const;
   [[nodiscard]] InitialOutputState initial_output_state(
       const ChatRequest& request) const override;
+  [[nodiscard]] OutputMarkup output_markup() const override;
   void set_model_id(const std::string& model_id);
   void set_sampling_defaults(std::size_t max_tokens,
                              const sampling::SamplingConfig& sampling,
@@ -172,7 +200,8 @@ public:
                   const CancellationCheck& is_cancelled = {},
                   const TokenCallback& on_token = {},
                   std::string_view client_id = "anonymous",
-                  const std::vector<std::string>& stop_sequences = {}) override;
+                  const std::vector<std::string>& stop_sequences = {},
+                  bool cache_prompt = true) override;
 
   /// Framed chat conversation; returns the assistant reply.
   Result chat(const ChatRequest& request, std::size_t max_tokens,
@@ -192,7 +221,8 @@ public:
       const CancellationCheck& is_cancelled = {}, bool stream_output = false,
       bool ignore_eos = false, std::string_view client_id = "anonymous",
       const std::vector<std::string>& stop_sequences = {},
-      bool return_progress = false, bool debug_timeline = false) override;
+      bool return_progress = false, bool debug_timeline = false,
+      bool cache_prompt = true) override;
 
   Result chat(const std::vector<tokenization::ChatMessage>& messages,
               std::size_t max_tokens, const sampling::SamplingConfig& sampling,
@@ -200,6 +230,10 @@ public:
 
   /// Token count of raw text (no generation).
   [[nodiscard]] std::size_t count_tokens(std::string_view text) const override;
+
+  /// Prompt tokens of a chat request as generation would prepare them.
+  [[nodiscard]] std::optional<std::size_t> count_chat_tokens(
+      const ChatRequest& request) const override;
 
 private:
   struct Impl;

@@ -1,0 +1,320 @@
+{
+  "schema_version": 1,
+  "panels": [
+    {
+      "id": "main",
+      "audience": "user",
+      "collapsed": false,
+      "sections": [
+        {
+          "group": "Hardware and memory",
+          "switches": [
+            "--no-twin",
+            "--npu-prefill",
+            "--twin-model"
+          ]
+        },
+        {
+          "group": "Memory",
+          "switches": [
+            "--cache-disk",
+            "--cache-disk-bytes",
+            "--cache-disk-staging-bytes",
+            "--cache-ram-bytes",
+            "--context",
+            "--mmproj",
+            "--no-cache-disk",
+            "--no-vision",
+            "--sessions",
+            "GUFO_MAX_IMAGE_TOKENS"
+          ]
+        },
+        {
+          "group": "Behaviour",
+          "switches": [
+            "--frequency-penalty",
+            "--loop-breaker",
+            "--max-tokens",
+            "--min-keep",
+            "--min-p",
+            "--presence-penalty",
+            "--reasoning-effort",
+            "--repeat-last-n",
+            "--repeat-penalty",
+            "--seed",
+            "--temperature",
+            "--think",
+            "--think-marker-bias",
+            "--top-k",
+            "--top-p",
+            "GUFO_THINK_MARKER_BIAS_BY_EFFORT"
+          ]
+        },
+        {
+          "group": "Server",
+          "switches": [
+            "--host",
+            "--port",
+            "--served-model-name"
+          ]
+        },
+        {
+          "group": "Other",
+          "switches": [
+            "--model",
+            "--profile"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "advanced",
+      "audience": "advanced",
+      "collapsed": false,
+      "sections": [
+        {
+          "group": "Speed",
+          "switches": [
+            "--draft-head-model",
+            "--draft-tokens",
+            "--min-draft-tokens",
+            "--mtp-draft-vocab",
+            "--mtp-model",
+            "--mtp-policy",
+            "--no-draft-head",
+            "--no-mtp",
+            "--no-prompt-lookup",
+            "--prefill-chunk",
+            "--prompt-lookup",
+            "--speculative"
+          ]
+        },
+        {
+          "group": "Other",
+          "switches": [
+            "--verify-model"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "debug",
+      "audience": "debug",
+      "collapsed": true,
+      "sections": [
+        {
+          "group": "Hardware and memory",
+          "switches": [
+            "GUFO_DENSE_TWIN_BATCH",
+            "GUFO_DENSE_TWIN_MAX_N",
+            "GUFO_DENSE_TWIN_MODEL",
+            "GUFO_NPU_CHIP_POWER",
+            "GUFO_NPU_DIR",
+            "GUFO_NPU_GATE_SLICES",
+            "GUFO_NPU_GUARD",
+            "GUFO_NPU_HAL_MONITOR",
+            "GUFO_NPU_KEEPALIVE",
+            "GUFO_NPU_KEEPALIVE_MS",
+            "GUFO_NPU_MEM_TRACE",
+            "GUFO_NPU_SHEXP",
+            "GUFO_NPU_SLICES",
+            "GUFO_NPU_TIMEOUT_MS",
+            "GUFO_NPU_WEIGHT_GUARD"
+          ]
+        },
+        {
+          "group": "Memory",
+          "switches": [
+            "--allow-unmeasured-memory",
+            "--no-cache",
+            "BUBO_MMPROJ",
+            "GUFO_CACHE_HOST_FLOOR_MB",
+            "GUFO_CACHE_REMOVAL_LOG",
+            "GUFO_DISK_BOUNDARY_ALIGN",
+            "GUFO_DISK_DEFER",
+            "GUFO_DISK_DEFER_MS",
+            "GUFO_DISK_EVICT_BACKLOG_BYTES",
+            "GUFO_DISK_EVICT_DOMINATED",
+            "GUFO_DISK_EVICT_SKIP_TOKENS",
+            "GUFO_DISK_IDLE_MS",
+            "GUFO_DISK_INPASS",
+            "GUFO_DISK_PERSIST",
+            "GUFO_DISK_SLICE"
+          ]
+        },
+        {
+          "group": "Speed",
+          "switches": [
+            "--draft-policy",
+            "BUBO_MTP_MODEL",
+            "GUFO_DRAFT_OUT_MODEL",
+            "GUFO_DRAFT_VOCAB_AUTO",
+            "GUFO_EXPERT_V2K",
+            "GUFO_LENIENT",
+            "GUFO_LENIENT_LAMBDA",
+            "GUFO_LENIENT_THINK_ONLY",
+            "GUFO_MTP_TRACE",
+            "GUFO_PREFILL_FORWARD_TOKENS",
+            "GUFO_ROUTED_LANEROW",
+            "GUFO_SPEC_EOG_STOP"
+          ]
+        },
+        {
+          "group": "Behaviour",
+          "switches": [
+            "--no-behaviour",
+            "--preserve-thinking",
+            "GUFO_EOG_BOUNDARY",
+            "GUFO_EOG_DEFER_P",
+            "GUFO_EOG_MIN_PROB",
+            "GUFO_EOG_MIN_PROB_EXACT",
+            "GUFO_LOGIT_BIAS",
+            "GUFO_LOOP_BREAKER",
+            "GUFO_LOOP_BREAKER_TOOL_ARGS",
+            "GUFO_MODEL_SUPPRESS_TOKENS",
+            "GUFO_THINK_EOG_GUARD",
+            "GUFO_THINK_MARKER_BIAS",
+            "GUFO_THINK_MARKER_LIST"
+          ]
+        },
+        {
+          "group": "Server",
+          "switches": [
+            "--log-level",
+            "--log-progress",
+            "--max-buffered-output-bytes",
+            "--max-buffered-output-total",
+            "--max-connections",
+            "--max-output-bytes",
+            "--max-pending",
+            "--max-pending-per-client",
+            "--max-request-bytes",
+            "--max-score-tokens",
+            "--request-timeout-ms",
+            "GUFO_HOST",
+            "GUFO_PORT",
+            "HOST",
+            "PORT"
+          ]
+        },
+        {
+          "group": "Other",
+          "switches": [
+            "--debug-hooks",
+            "--dflash-model",
+            "--dspark-model",
+            "--exact",
+            "--manifest",
+            "--root",
+            "--trace",
+            "--ttl",
+            "--verbose",
+            "--voice",
+            "--voice-lang",
+            "--voice-text",
+            "A3B_ATTN_CHECK",
+            "A3B_ATTN_PRECISE",
+            "A3B_DECODE_ATTN",
+            "A3B_DFLASH_PROFILE",
+            "A3B_NO_RESUME",
+            "A3B_PROBE_ONLY",
+            "A3B_WIDE_ATTN_CHECK",
+            "A3B_WIDE_BF16_BLAS",
+            "A3B_WIDE_BLAS_F32",
+            "A3B_WIDE_DEBUG",
+            "A3B_WIDE_F16_MAXCOLS",
+            "A3B_WIDE_F16_MINROWS",
+            "A3B_WIDE_FN_ATTN",
+            "A3B_WIDE_NO_DOWN64",
+            "A3B_WIDE_NO_F16",
+            "A3B_WIDE_PROFILE",
+            "BUBO_MANIFEST",
+            "DS4_LOCK_FILE",
+            "GPU_MAX_HW_QUEUES",
+            "GUFO_A3B_DATA",
+            "GUFO_A3B_MODEL",
+            "GUFO_BATCH_DRAFT_HEAD",
+            "GUFO_DEBUG_HOOKS",
+            "GUFO_DEEPSEEK_DSPARK_TIMING",
+            "GUFO_DEEPSEEK_DSPARK_TRACE",
+            "GUFO_DEEPSEEK_DSPARK_WIDTH_TRACE",
+            "GUFO_DEEPSEEK_ROCM_DECODE_STAGE_PROFILE",
+            "GUFO_DEEPSEEK_ROCM_GRAPH_PREFILL_PROFILE",
+            "GUFO_DEEPSEEK_ROCM_GRAPH_TOKEN_PROFILE",
+            "GUFO_DEEPSEEK_ROCM_INDEXER_STAGE_PROFILE",
+            "GUFO_DEEPSEEK_ROCM_LAYER_STAGE_PROFILE",
+            "GUFO_DEEPSEEK_ROCM_Q_STAGE_PROFILE",
+            "GUFO_DENSE_TWIN_ALLOW_Q8",
+            "GUFO_DENSE_TWIN_SHADOW",
+            "GUFO_DENSE_TWIN_TRACE",
+            "GUFO_DISPATCH_TELEMETRY",
+            "GUFO_EVAL_ARTIFACT_ID",
+            "GUFO_EVAL_MODEL_REVISION",
+            "GUFO_EVAL_SERVER_COMMIT",
+            "GUFO_EVAL_SERVER_CONFIG",
+            "GUFO_EVAL_SERVER_LABEL",
+            "GUFO_FFMPEG",
+            "GUFO_FFPROBE",
+            "GUFO_HIPBLASLT_PLAN_CACHE",
+            "GUFO_IQ4_WIDE_VARIANT",
+            "GUFO_IQ4_WMMA_WAVES",
+            "GUFO_LOG_SYNC",
+            "GUFO_LOOP_BREAKER_TRANSITION_TEXT",
+            "GUFO_MEM_ACCOUNTING",
+            "GUFO_MOE_BENCH",
+            "GUFO_PLATFORM_TUNING",
+            "GUFO_PREFILL_DIAG",
+            "GUFO_PRODUCTION_SAMPLING",
+            "GUFO_QWEN27_DRAFTLOG",
+            "GUFO_QWEN27_FLUSH",
+            "GUFO_QWEN27_LOOKUP",
+            "GUFO_QWEN27_LOOKUP_MODE",
+            "GUFO_QWEN27_PROFILE",
+            "GUFO_REQUIRE_GFX1151",
+            "GUFO_REQUIRE_GPU",
+            "GUFO_REQUIRE_HIP",
+            "GUFO_SURVIVAL_FLOOR",
+            "GUFO_TRACE",
+            "QWEN3_ASR_ARTIFACTS",
+            "QWEN3_ASR_MODEL_ROOT",
+            "QWEN3_ASR_TEST_WAV",
+            "TEMP"
+          ]
+        }
+      ],
+      "warning": "These switches are for troubleshooting."
+    }
+  ],
+  "omitted_controls": [
+    "--api-key",
+    "--help",
+    "--print-effective-settings",
+    "--stall-timeout-ms",
+    "BUBO_API_KEY",
+    "BUBO_RUNTIME_DIR",
+    "GUFO_EVAL_API_KEY",
+    "GUFO_EXPERT_OVERLAY_KEEP",
+    "GUFO_EXPERT_OVERLAY_MODEL",
+    "GUFO_GROUPED_DOWN",
+    "GUFO_INCREMENTAL_TOKENIZE",
+    "GUFO_IQ_ROUTE_MIN_ROWS",
+    "GUFO_LOOP_BREAKER_EOG_CLOSE",
+    "GUFO_LOOP_BREAKER_TRANSITION",
+    "GUFO_MASK_THREADS",
+    "GUFO_NPU_GUARD_TEST",
+    "GUFO_NPU_TEST_FAIL_CHUNK",
+    "GUFO_PREFILL_STEP_LOG",
+    "GUFO_PREFILL_TARGET_MS",
+    "GUFO_REASONING_BUDGET",
+    "GUFO_ROUTED_WMMA_IQ",
+    "GUFO_THINK_GUARD_ESCALATE",
+    "GUFO_THINK_MARKER_ENTROPY_GATE",
+    "GUFO_WEIGHT_UPLOAD_READERS",
+    "HOME",
+    "LOCALAPPDATA",
+    "PATH",
+    "TERM",
+    "XDG_CACHE_HOME"
+  ],
+  "omission_reason": "Rows with gui_control false are excluded from GUI controls."
+}

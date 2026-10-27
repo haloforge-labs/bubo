@@ -1,0 +1,11 @@
+{
+  "_source": "fixture",
+  "state": "Stopped",
+  "records": {
+    "models": "../v12/models-list-gui.json",
+    "saved_estimate": "../v12/estimate-flash-c262144-s4.json",
+    "status": "../v12/status-main.json",
+    "switches": "../v12/switches.json"
+  },
+  "no_row_fits": true
+}

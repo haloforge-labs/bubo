@@ -1,0 +1,260 @@
+{
+  "captured_at": "2026-10-25T09:19:23.4586363-04:00",
+  "candidate_commit": "344f41aca8b004781dde594fd5270affd7f630c0",
+  "executable": "C:\\bubo\\runtimes\\c4pkg-344f41ac\\bin\\bubo.exe",
+  "executable_sha256": "35ff7246e534653d3f5de1bc91763145e6e1f468e4d841121570ff5a3eb8efb6",
+  "engine_sha256": "58547a669003879e9c51093b48d45f60f1c6d6b3638348cc78ed479b8b42c392",
+  "product_version": "0.1.1",
+  "environment": {
+    "TMP": "C:\\bubo\\evidence\\capture-05\\s24\\logs\\capture",
+    "BUBO_*/GUFO_*": "removed",
+    "PATH": "C:\\bubo\\runtimes\\c4pkg-344f41ac\\bin;C:\\Windows\\System32;C:\\Windows",
+    "LOCALAPPDATA": "C:\\bubo\\evidence\\capture-05\\s24\\logs\\capture\\local",
+    "APPDATA": "C:\\bubo\\evidence\\capture-05\\s24\\logs\\capture\\local",
+    "TEMP": "C:\\bubo\\evidence\\capture-05\\s24\\logs\\capture"
+  },
+  "commands": [
+    {
+      "file": "switches.json",
+      "command": [
+        "bubo.exe",
+        "serve",
+        "--list-switches",
+        "--json"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-05\\s24\\logs\\capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "stdout_bytes": 150812,
+      "stdout_sha256": "41c72d2e708ea83f3b8eea852beb6ce4692a7524dbc97a64d81d8988fdf0cda9"
+    },
+    {
+      "file": "status-main.json",
+      "command": [
+        "bubo.exe",
+        "status",
+        "--json"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-05\\s24\\logs\\capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "stdout_bytes": 9978,
+      "stdout_sha256": "a1c255ea42231099772571e288ebe5082728673b35e89156ddb2961102517d36"
+    },
+    {
+      "file": "status-empty.json",
+      "command": [
+        "bubo.exe",
+        "status",
+        "--json"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-05\\s24\\logs\\capture\\local-empty",
+      "exit_code": 0,
+      "stderr": "",
+      "stdout_bytes": 10260,
+      "stdout_sha256": "84b53b54654beecdf802d8e8ae12ed40ed4f9218c668fda3cf5eefc5e4fdf744"
+    },
+    {
+      "file": "models-list-gui.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "list",
+        "--json",
+        "--scan-folder",
+        "S:\\bubo-walk\\E21\\Import",
+        "--scan-folder",
+        "C:\\bubo\\run\\app\\v8\\E21\\rootA",
+        "--scan-folder",
+        "S:\\bubo-walk\\E21\\rootB"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-05\\s24\\logs\\capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "stdout_bytes": 124987,
+      "stdout_sha256": "7a13018fa5317a44ac97a6f20fee372609a832c91a8a2abbbb575ca7a000458d"
+    },
+    {
+      "file": "models-list-empty.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "list",
+        "--json"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-05\\s24\\logs\\capture\\local-empty",
+      "exit_code": 0,
+      "stderr": "",
+      "stdout_bytes": 114283,
+      "stdout_sha256": "f7da9797294a6dd01deb68a6969059c793ee437261d30484ac199a87909aa495"
+    },
+    {
+      "file": "estimate-flash-default.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "C:\\bubo\\run\\app\\v8\\E21\\rootA\\models\\huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--json"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-05\\s24\\logs\\capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "stdout_bytes": 38130,
+      "stdout_sha256": "aed4bb74ffcc150e88b7e9d51fb94c7ae54e6ea826aff0b66fa151c8b36cc085"
+    },
+    {
+      "file": "estimate-flash-c262144-s2.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "C:\\bubo\\run\\app\\v8\\E21\\rootA\\models\\huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--json",
+        "--context",
+        "262144",
+        "--sessions",
+        "2"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-05\\s24\\logs\\capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "stdout_bytes": 38143,
+      "stdout_sha256": "f44c5b1c7a164ffcd14311add9c68e30415a3491de0f45a97861405018b13379"
+    },
+    {
+      "file": "estimate-flash-c262144-s4.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "C:\\bubo\\run\\app\\v8\\E21\\rootA\\models\\huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--json",
+        "--context",
+        "262144",
+        "--sessions",
+        "4"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-05\\s24\\logs\\capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "stdout_bytes": 38398,
+      "stdout_sha256": "e97e1e59b0ba91b845bef1fc75190cac9e627d3d2cb06a48880da2c1b1c4330e"
+    },
+    {
+      "file": "estimate-flash-c262144-s8.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "C:\\bubo\\run\\app\\v8\\E21\\rootA\\models\\huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--json",
+        "--context",
+        "262144",
+        "--sessions",
+        "8"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-05\\s24\\logs\\capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "stdout_bytes": 38405,
+      "stdout_sha256": "7c6dda1d70b6a6aca883f7c1b0a36bc56efeaf982076904a57f5997e767e0a1a"
+    },
+    {
+      "file": "estimate-q27-c262144-s1.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "S:\\bubo-walk\\E21\\rootB\\models\\qwen38-27b-ud-q4-k-xl",
+        "--json",
+        "--context",
+        "262144",
+        "--sessions",
+        "1"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-05\\s24\\logs\\capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "stdout_bytes": 8289,
+      "stdout_sha256": "347b49d56c47be05143b572c595af313ab48e029af878efd6df5f5d0c10b9b9d"
+    },
+    {
+      "file": "estimate-hauhau-default.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "S:\\bubo-walk\\E21\\rootB\\models\\gemma4-26b-a4b-uncensored-hauhaucs-qat-q4-k-m",
+        "--json"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-05\\s24\\logs\\capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "stdout_bytes": 996,
+      "stdout_sha256": "58a2b01fac6814848ce84a82e28bde5da83f3dc10b6d01ae05228b584bd16c77"
+    },
+    {
+      "file": "estimate-lowmemory-default.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "huihui-qwen38-flash-next-lowmemory-v1",
+        "--json"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-05\\s24\\logs\\capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "stdout_bytes": 502,
+      "stdout_sha256": "a1ff343f7e717d7d12a27def528ab47da98c0277f0408297e639dc819801bd94"
+    },
+    {
+      "file": "plan-huihui-qwen38-flash-next-lowmemory-v1-fresh.jsonl",
+      "command": [
+        "bubo.exe",
+        "prepare",
+        "model",
+        "--catalogue-id",
+        "huihui-qwen38-flash-next-lowmemory-v1",
+        "--output",
+        "C:\\bubo\\evidence\\capture-05\\s24\\logs\\capture\\unpublished",
+        "--plan",
+        "--jsonl"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-05\\s24\\logs\\capture\\local-empty",
+      "exit_code": 4,
+      "stderr": "prepare: E4 lowmemory hosting is unpublished; place the hash-matching catalogue files in the model folder and run prepare again\n",
+      "stdout_bytes": 1498,
+      "stdout_sha256": "791a37cccaa69caa84b185712ea070d361ea70980ecc501af353de3586b788ee"
+    },
+    {
+      "file": "plan-huihui-qwen38-flash-next-ud-q4-k-xl-v1-fresh.jsonl",
+      "command": [
+        "bubo.exe",
+        "prepare",
+        "model",
+        "--catalogue-id",
+        "huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--output",
+        "S:\\bubo-walk\\S24",
+        "--plan",
+        "--jsonl"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-05\\s24\\logs\\capture\\local-empty",
+      "exit_code": 0,
+      "stderr": "",
+      "stdout_bytes": 21903,
+      "stdout_sha256": "ee629a74e34f1d46ca16af4bf56469a5ffeb69c6084e8e55c5eda2ad5ab0ec25"
+    }
+  ],
+  "note": "Candidate 4 CPU-only raw stdout. No server, engine load, GPU or network. Existing E21 model roots read only. Isolated copied saved-model pointer. Unpublished prepare uses --plan and refuses before acquisition. Running-server recordings remain historical.",
+  "publication_note": "Machine paths and provenance labels are neutral publication fixtures. Output sizes and hashes describe the scrubbed bytes; executable and source revision identities remain historical."
+}

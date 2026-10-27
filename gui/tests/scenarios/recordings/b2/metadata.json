@@ -1,0 +1,62 @@
+{
+  "executable": "C:\\bubo\\run\\app\\bin\\bubo-b2-1eca3852\\bubo.exe",
+  "sha256": "2b55652c2523107257c3d4c9974b9d6558c0559c0feec0065588284d19093e4a",
+  "environment": {
+    "LOCALAPPDATA": "C:\\bubo\\run\\app\\proof\\I1\\recording-state",
+    "BUBO_RUNTIME_DIR": "C:/bubo/src/gufo-win-060/build/deps/vcpkg/installed/x64-windows/bin"
+  },
+  "commands": [
+    {
+      "args": [
+        "status",
+        "--json"
+      ],
+      "time": "2026-10-15T00:06:16.636688-04:00",
+      "exit_code": 0,
+      "stderr": ""
+    },
+    {
+      "args": [
+        "serve",
+        "--list-switches",
+        "--json"
+      ],
+      "time": "2026-10-15T00:06:16.678701-04:00",
+      "exit_code": 0,
+      "stderr": ""
+    },
+    {
+      "args": [
+        "models",
+        "list",
+        "--json"
+      ],
+      "time": "2026-10-15T00:06:16.788068-04:00",
+      "exit_code": 0,
+      "stderr": ""
+    },
+    {
+      "args": [
+        "models",
+        "estimate",
+        "--model",
+        "huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--context",
+        "262144",
+        "--sessions",
+        "1",
+        "--json"
+      ],
+      "time": "2026-10-15T00:06:16.845799-04:00",
+      "exit_code": 0,
+      "stderr": ""
+    }
+  ],
+  "engine_sha256": "231840a4f71234178fdbc3b62f03cab9ca55fda7c16cfc7a99dff47de8ec54eb",
+  "owner_budget_source": {
+    "file": "owner-budget-status.jsonl",
+    "source": "C:\\bubo\\evidence\\capture-03\\B2\\captures\\captured-status.jsonl",
+    "sha256": "f053810bb6fa6b00a57b25284e190f498eeb3320682cc280791d92ca99459f78"
+  },
+  "publication_note": "Machine paths and provenance labels are neutral publication fixtures. Output sizes and hashes describe the scrubbed bytes; executable and source revision identities remain historical."
+}

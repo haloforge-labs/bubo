@@ -48,6 +48,10 @@ struct Format {
 constexpr Format kIQ3_S{"IQ3_S", GgmlType::kIQ3_S, 256, 110};
 constexpr Format kIQ4_XS{"IQ4_XS", GgmlType::kIQ4_XS, 256, 136};
 constexpr Format kIQ4_NL{"IQ4_NL", GgmlType::kIQ4_NL, 32, 18};
+// ISTA GSQ-RCO IQ3_S rung (memory lane): IQ3_XXS and IQ2_S gate/up, Q2_0 down.
+constexpr Format kIQ3_XXS{"IQ3_XXS", GgmlType::kIQ3_XXS, 256, 98};
+constexpr Format kIQ2_S{"IQ2_S", GgmlType::kIQ2_S, 256, 82};
+constexpr Format kQ2_0{"Q2_0", GgmlType::kQ2_0, 64, 18};
 
 /// Random but valid blocks: every IQ byte pattern decodes, so only the fp16
 /// super-block scale (the first two bytes of each block) is controlled.
@@ -79,6 +83,15 @@ Weights MakeWeights(const Format& f, std::size_t matrices, std::size_t cols,
         break;
       case GgmlType::kIQ4_XS:
         gufo::quant::DequantizeIQ4_XS(src, dst, cols);
+        break;
+      case GgmlType::kIQ3_XXS:
+        gufo::quant::DequantizeIQ3_XXS(src, dst, cols);
+        break;
+      case GgmlType::kIQ2_S:
+        gufo::quant::DequantizeIQ2_S(src, dst, cols);
+        break;
+      case GgmlType::kQ2_0:
+        gufo::quant::DequantizeQ2_0(src, dst, cols);
         break;
       default:
         gufo::quant::DequantizeIQ4_NL(src, dst, cols);
@@ -139,6 +152,12 @@ int Raw(const Format& f, const void* w, const float* x, const std::int32_t* ids,
       return qfn_mmq_iq3_s_moe_raw(w, x, ids, out, m, k, t, e, u, nullptr);
     case GgmlType::kIQ4_XS:
       return qfn_mmq_iq4_xs_moe_raw(w, x, ids, out, m, k, t, e, u, nullptr);
+    case GgmlType::kIQ3_XXS:
+      return qfn_mmq_iq3_xxs_moe_raw(w, x, ids, out, m, k, t, e, u, nullptr);
+    case GgmlType::kIQ2_S:
+      return qfn_mmq_iq2_s_moe_raw(w, x, ids, out, m, k, t, e, u, nullptr);
+    case GgmlType::kQ2_0:
+      return qfn_mmq_q2_0_moe_raw(w, x, ids, out, m, k, t, e, u, nullptr);
     default:
       return qfn_mmq_iq4_nl_moe_raw(w, x, ids, out, m, k, t, e, u, nullptr);
   }
@@ -217,7 +236,7 @@ bool Run(const Format& f, int rows, int cols, int tokens, int experts, int used,
 int main() {
   try {
     bool ok = true;
-    for (const Format* f : {&kIQ3_S, &kIQ4_XS}) {
+    for (const Format* f : {&kIQ3_S, &kIQ4_XS, &kIQ3_XXS, &kIQ2_S}) {
       // Gate/up shapes: hidden-width K, decode (1 and a draft of 4 tokens
       // with top-8), the paired decode route, and wide tiled prefill.
       ok = Run(*f, 64, 2560, 1, 16, 8, false, false, true, 0xA11CEU) && ok;
@@ -230,6 +249,11 @@ int main() {
     ok = Run(kIQ4_NL, 128, 640, 3, 16, 8, true, false, false, 0xE2U) && ok;
     ok = Run(kIQ4_NL, 128, 640, 65, 16, 8, true, true, false, 0xE3U) && ok;
     ok = Run(kIQ4_NL, 2560, 640, 40, 16, 8, true, true, false, 0xE4U) && ok;
+    // Q2_0 down: 640 = ten 64-value blocks per row.
+    ok = Run(kQ2_0, 128, 640, 1, 16, 8, true, false, false, 0xF1U) && ok;
+    ok = Run(kQ2_0, 128, 640, 3, 16, 8, true, false, false, 0xF2U) && ok;
+    ok = Run(kQ2_0, 128, 640, 65, 16, 8, true, true, false, 0xF3U) && ok;
+    ok = Run(kQ2_0, 2560, 640, 40, 16, 8, true, true, false, 0xF4U) && ok;
     return ok ? 0 : 1;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

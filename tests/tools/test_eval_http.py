@@ -283,7 +283,7 @@ class EvalHttpTest(unittest.TestCase):
         self.assertEqual(report["summary"]["completion_tokens"], 12)
         self.assertEqual(
             report["run"]["command"],
-            "gufo eval --base-url <endpoint> --questions 4 --output <output>",
+            "bubo eval --base-url <endpoint> --questions 4 --output <output>",
         )
         self.assertEqual(len(state.requests), 4)
         for index, request in enumerate(state.requests):

@@ -20,9 +20,39 @@ add_qwen_cpu_test(qwen_tokenizer_test
 add_qwen_cpu_test(qwen_chat_template_test
   tests/models/qwen/tokenization/chat_template_test.cpp
   "cpu;tokenization;chat_template")
+
+add_qwen_cpu_test(qwen_incremental_tokenize_test
+  tests/models/qwen/tokenization/incremental_tokenize_test.cpp
+  "cpu;tokenization;chat_template;external-model")
+set_tests_properties(qwen_incremental_tokenize_test PROPERTIES
+  SKIP_RETURN_CODE 77 TIMEOUT 300)
+if(EXISTS "${PROJECT_SOURCE_DIR}/src/models/qwen/incremental_tokenize.hpp")
+  target_compile_definitions(qwen_incremental_tokenize_test PRIVATE
+    GUFO_INCREMENTAL_CHECKER_IMPLEMENTED=1)
+endif()
+add_test(NAME qwen_incremental_broken_join_test
+  COMMAND qwen_incremental_tokenize_test --broken-join)
+set_tests_properties(qwen_incremental_broken_join_test PROPERTIES
+  LABELS "cpu;tokenization;chat_template;external-model"
+  WILL_FAIL TRUE SKIP_RETURN_CODE 77 TIMEOUT 300)
 target_compile_definitions(qwen_chat_template_test PRIVATE
   GUFO_QWEN38_CHAT_TEMPLATE_REFERENCE="${PROJECT_SOURCE_DIR}/src/models/qwen/reference/chat_template.jinja"
   GUFO_CHAT_TEMPLATE_HF_GOLDENS="${PROJECT_SOURCE_DIR}/tests/fixtures/chat_template_hf_goldens.json")
+
+add_qwen_cpu_test(qwen_cybertiel_template_test
+  tests/models/qwen/tokenization/cybertiel_template_test.cpp
+  "cpu;tokenization;chat_template")
+target_compile_definitions(qwen_cybertiel_template_test PRIVATE
+  GUFO_QWEN38_CHAT_TEMPLATE_REFERENCE="${PROJECT_SOURCE_DIR}/src/models/qwen/reference/chat_template.jinja"
+  GUFO_CYBERTIEL_FIXTURES="${PROJECT_SOURCE_DIR}/tests/fixtures/cybertiel_template")
+
+add_qwen_cpu_test(qwen_qwen36_template_test
+  tests/models/qwen/tokenization/qwen36_template_test.cpp
+  "cpu;tokenization;chat_template")
+target_compile_definitions(qwen_qwen36_template_test PRIVATE
+  GUFO_QWEN38_CHAT_TEMPLATE_REFERENCE="${PROJECT_SOURCE_DIR}/src/models/qwen/reference/chat_template.jinja"
+  GUFO_CYBERTIEL_FIXTURES="${PROJECT_SOURCE_DIR}/tests/fixtures/cybertiel_template"
+  GUFO_QWEN36_FIXTURES="${PROJECT_SOURCE_DIR}/tests/fixtures/qwen36_template")
 
 add_qwen_cpu_test(qwen_cpu_oracles_test
   tests/models/qwen/cpu/oracles_test.cpp
@@ -36,6 +66,9 @@ add_qwen_cpu_test(qwen_generator_test
 add_qwen_cpu_test(qwen_ssm_test
   tests/models/qwen/cpu/ssm_test.cpp
   "cpu;models;qwen;ssm;reference")
+add_qwen_cpu_test(qwen_session_state_bytes_test
+  tests/models/qwen/cpu/session_state_bytes_test.cpp
+  "cpu;models;qwen;memory;reference")
 add_qwen_cpu_test(qwen_oracle_test
   tests/models/qwen/cpu/model_oracle_test.cpp
   "cpu;models;qwen;oracles")

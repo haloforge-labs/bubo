@@ -46,3 +46,8 @@ to the development environment, not the production Gufo installation.
 NPU prefill and Strata decode components:
 - NPU GEMM kernel and design (tools/npu: final_4096x2560x1024_128x64x128.xclbin, insts_4096x2560x1024_128x64x128.txt, mm_bfp_mixed.cc, n32_core_placed.py): from mikealanni/gufo (MIT), derived from AMD mlir-aie programming examples. Copyright (C) 2026 Advanced Micro Devices, Inc. Apache-2.0 WITH LLVM-exception (licenses/mlir-aie-Apache-2.0-LLVM-exception.txt). The compiled xclbin ships as built by the fork.
 - Strata grouped decode experts (Q4_K gate/up decode kernel): adapted from Niko1221/Strata (PR #1360, measured base 82f46a8), Copyright (c) 2026 Niko1221 and the Strata contributors, MIT (licenses/strata-MIT.txt).
+
+Gemma 4 and DiffusionGemma model code:
+- Gemma 4 text models (src/models/gemma4, tests/models/gemma4): from franzmoca/gufo, branch feat/gemma, commit 22341ae7021a391c208e080087c23295db65a661, Copyright (c) 2026 gufo contributors, MIT (licenses/gufo-fork-MIT.txt).
+- DiffusionGemma (src/models/diffusion_gemma, src/cli/serve/diffusion_gemma_backend.*, tests/models/diffusion_gemma, tools/models/diffusion_gemma): from robotsbuildrobots/diffusion-gufo, commit 07fb74429f98f6c97b6d7baf1780b576096b1d8f, Copyright (c) 2026 gufo contributors, MIT (licenses/gufo-fork-MIT.txt).
+- Model weights are not included; the Gemma 4 and DiffusionGemma checkpoints are separate downloads under their publishers' terms (Apache-2.0 for the Google releases).

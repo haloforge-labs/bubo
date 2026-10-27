@@ -2,7 +2,9 @@
 
 #include <array>
 #include <hipblaslt/hipblaslt-ext.hpp>
+#include <string>
 
+#include "src/cli/serve/logging.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
 namespace gufo::models::qwen38_flash_next::rocm {
@@ -112,17 +114,21 @@ std::unique_ptr<BlasLt::Plan> BlasLt::MakePlan(hipDataType type, int m, int n,
       if (candidates[i].state == HIPBLAS_STATUS_SUCCESS &&
           candidates[i].workspaceSize == 0 && usable(candidates[i].algo)) {
         p->algorithm = candidates[i].algo;
-        // The indexer projections' MT32x32x64 kernel runs at ~5 TFLOPS;
-        // DenseBf16Gemm reproduces its K order (including the StaggerU
-        // rotation) at about 4x the speed. Only the shapes, token counts (up
-        // to one 4096-token prefill chunk) and library kernel checked bitwise
-        // by dense_gemm_bench take it.
-        p->own_bf16 =
-            type == HIP_R_16BF && k == 2560 &&
-            (m == 512 || m == 256 || m == 128 || m == 64) && n <= 4096 &&
-            hipblaslt_ext::getIndexFromAlgo(p->algorithm) == 4438 &&
-            hipblaslt_ext::getKernelNameFromAlgo(handle_, p->algorithm)
-                    .find("_MT32x32x64_MI16x16x1_") != std::string::npos;
+        // Keep the same BF16 K chain at every prefill width. Shape-dependent
+        // library selection can change indexer top-k near a rounding tie.
+        p->own_bf16 = type == HIP_R_16BF && k == 2560;
+        // One line per new shape, so launches can be diffed for a different
+        // library choice.
+        server::Logger::Info(
+            "blaslt", "plan type=" + std::to_string(static_cast<int>(type)) +
+                          " m=" + std::to_string(m) +
+                          " n=" + std::to_string(n) +
+                          " k=" + std::to_string(k) + " solution=" +
+                          std::to_string(hipblaslt_ext::getIndexFromAlgo(
+                              candidates[i].algo)) +
+                          " rank=" + std::to_string(i) + "/" +
+                          std::to_string(count) +
+                          " own_bf16=" + (p->own_bf16 ? "1" : "0"));
         return p;
       }
     }
@@ -148,7 +154,7 @@ bool BlasLt::Gemm(const void* weights, const void* input, float* out,
   if (p == nullptr)
     return false;
   if (p->own_bf16)
-    return DenseBf16Gemm(weights, input, out, n, m, k, stream_);
+    return DenseBf16Gemm(weights, input, out, n, m, k, stream_, token_offset_);
   return Run(*p, weights, input, out, error);
 }
 

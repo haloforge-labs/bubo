@@ -1,0 +1,6 @@
+<|im_start|>system
+Dev rules.<|im_end|>
+<|im_start|>user
+Hello<|im_end|>
+<|im_start|>assistant
+<think>

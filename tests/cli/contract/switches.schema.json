@@ -1,0 +1,280 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Bubo serve switch listing",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "switches"
+  ],
+  "additionalProperties": true,
+  "$defs": {
+    "switch_row": {
+      "title": "Switch row",
+      "type": "object",
+      "required": [
+        "aliases",
+        "allowed",
+        "audience",
+        "built_in",
+        "class",
+        "default_text",
+        "echo",
+        "exact_off",
+        "experimental",
+        "group",
+        "gui_control",
+        "hardware_scope",
+        "inject_with",
+        "kind",
+        "model_family",
+        "name",
+        "note",
+        "platform",
+        "purpose",
+        "requires",
+        "restart_required",
+        "secret",
+        "suppressed_by",
+        "takes_value",
+        "value_rule",
+        "values"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^(--[a-z0-9-]+|[A-Z][A-Z0-9_]+)$"
+        },
+        "kind": {
+          "enum": [
+            "flag",
+            "env"
+          ]
+        },
+        "class": {
+          "enum": [
+            "DEBUG",
+            "DEFAULT",
+            "INTERNAL",
+            "OPTION",
+            "OTHER_MODEL",
+            "REMOVED"
+          ]
+        },
+        "model_family": {
+          "enum": [
+            "any",
+            "deepseek-v4-flash",
+            "minimax-h3",
+            "qwen-image-2.1",
+            "qwen3-asr",
+            "qwen3-tts",
+            "qwen3.6-a3b",
+            "qwen3.8-27b",
+            "qwen3.8-flash-next"
+          ]
+        },
+        "platform": {
+          "enum": [
+            "any",
+            "windows"
+          ]
+        },
+        "requires": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "values": {
+          "type": "object",
+          "required": [
+            "default",
+            "subagents",
+            "exact"
+          ],
+          "additionalProperties": true,
+          "properties": {
+            "default": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "subagents": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "exact": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "exact_off": {
+          "type": "boolean"
+        },
+        "inject_with": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "suppressed_by": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "default_text": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": ".*\\S.*"
+        },
+        "hardware_scope": {
+          "enum": [
+            "generic",
+            "strix-halo-tuned"
+          ]
+        },
+        "note": {
+          "type": "string"
+        },
+        "built_in": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value_rule": {
+          "enum": [
+            "bool",
+            "effort_map",
+            "forward",
+            "int31",
+            "lambda",
+            "lenient",
+            "min_prob",
+            "number",
+            "on_off",
+            "prob",
+            "readers",
+            "text",
+            "transition",
+            "tuning",
+            "twin_width",
+            "uint"
+          ]
+        },
+        "aliases": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "takes_value": {
+          "type": "boolean"
+        },
+        "echo": {
+          "type": "boolean"
+        },
+        "secret": {
+          "type": "boolean"
+        },
+        "group": {
+          "enum": [
+            "Behaviour",
+            "Hardware and memory",
+            "Memory",
+            "Other",
+            "Server",
+            "Speed"
+          ]
+        },
+        "audience": {
+          "enum": [
+            "advanced",
+            "debug",
+            "user"
+          ]
+        },
+        "experimental": {
+          "type": "boolean"
+        },
+        "restart_required": {
+          "type": "boolean"
+        },
+        "gui_control": {
+          "type": "boolean"
+        },
+        "allowed": {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "additionalProperties": true,
+          "properties": {
+            "type": {
+              "enum": [
+                "boolean",
+                "enum",
+                "integer",
+                "number",
+                "string"
+              ]
+            },
+            "values": {
+              "type": "array",
+              "items": {
+                "type": [
+                  "boolean",
+                  "number",
+                  "string"
+                ]
+              }
+            },
+            "minimum": {
+              "type": "number"
+            },
+            "maximum": {
+              "type": "number"
+            },
+            "exclusive_minimum": {
+              "type": "number"
+            },
+            "also": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            },
+            "format": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  },
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "switches": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/switch_row"
+      }
+    }
+  }
+}

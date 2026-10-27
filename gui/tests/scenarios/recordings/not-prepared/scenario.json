@@ -1,0 +1,9 @@
+{
+  "_source": "fixture",
+  "state": "Not prepared",
+  "records": {
+    "models": "../v12/models-list-empty.json",
+    "status": "../v12/status-engine-missing.json",
+    "switches": "../v12/switches.json"
+  }
+}

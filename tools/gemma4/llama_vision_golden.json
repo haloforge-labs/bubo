@@ -1,0 +1,229 @@
+{
+ "purpose": "Pins the llama.cpp reference used to check the Bubo Gemma 4 vision encoder (multislot 2026-10-17). Reproduce with tools/gemma4/llama_vision.cpp, gemma4_vision_probe --file ... --gpu --no-reference --dump-dir, and tools/gemma4/compare_embeddings.py.",
+ "llama_cpp": {
+  "tag": "b11316",
+  "source_tree": "llama.cpp b11316 source distribution",
+  "runtime": "llama.cpp b11316, stock Windows HIP build",
+  "sha256": {
+   "mtmd.dll": "270356a2bc49b1ae01c8d9a93a1711cbfc66fdc91137d96ab9ca9ee2ea098645",
+   "llama.dll": "b9923ded266824fab2406f95cd2e67db778110f1ce16c7389266e6db22828f5a",
+   "ggml.dll": "f664f85d0476800756012b444cd6fabbdaa2ed6a615ff664bcad590f162765a9",
+   "ggml-base.dll": "bf8e592c0cf54e89176064df37f5dd11890736f8490dd74e56091569d33f4af0",
+   "ggml-hip.dll": "a786c26bd4bc742f4776e485ee5edc68e385a9dc77d485b8f3787b9ff594c9cc",
+   "llama-server.exe": "222fb40b08a80a0aede25e6c49565ae57a6dcca8675304ef1435f71b315c9e53"
+  },
+  "encoder_run": "CPU backend (use_gpu=false), flash attention on, 6 threads; text model loaded vocab-only",
+  "vision_activation": "gelu_quick: the mmproj GGUF lacks clip.use_gelu, so mtmd falls back to GELU-quick. The model's own vision config says gelu_pytorch_tanh, which Bubo uses."
+ },
+ "mmproj": {
+  "file": "mmproj-Gemma4-26B-A4B-QAT-Uncensored-HauhauCS-Balanced-BF16.gguf",
+  "bytes": 1194827776,
+  "sha256": "b5346e5bfd906f5e16878c2d0b8243e948ca7410fa28ea35be9b0c54a0ac10b7"
+ },
+ "preprocessing": {
+  "bubo": "native size: sides rounded to multiples of 48, 70..1120 soft tokens like llama.cpp; Pillow-exact bicubic resize straight to that size (no padding), as the Hugging Face Gemma 4 processor does",
+  "llama_cpp": "same target sizes, but it resizes to fit inside the target keeping the aspect ratio (ceil) and pads black (PAD_CEIL default). Identical for square images and for images whose size is already a multiple of 48; otherwise the pixels differ (640x488 -> bubo 624x480 stretched, llama 624x476 plus 2 black rows top and bottom).",
+  "comparison": "llama_vision --rgb feeds llama.cpp the exact pixels Bubo prepares (prep/<name>.rgb) so only the encoder differs"
+ },
+ "images": {
+  "cb96": {
+   "file": "cb96.png",
+   "sha256": "0c139913275db7683afc3bdfe1a2f64b82fe22f2d43ffbb27273e26d82667b5e",
+   "source": "96x96 black/white checkerboard, (x+y)%2",
+   "prepared": "432x432 (81 tokens)",
+   "prepared_rgb_sha256": "7a78057b2874a4a7374d58f87c5f23def092b6a4cc522ef622457abd96c651e3",
+   "llama_embedding_g4ve_sha256": "ce88b0ad24099a4474729696ab23e10eb941d5e88900ed6361ee270ad192b9bc"
+  },
+  "small640": {
+   "file": "small640.png (PNG copy of llama.cpp tools/mtmd/test-1.jpeg, sha256 2dff664c0c8aaea18aff8cbe7e868845b775e90cdd7a0bac98df709b131deaa3)",
+   "sha256": "8097fe64e2f9a356e2ccfe01a594f0c1122e0af847748552850cb30387993460",
+   "source": "640x488 photo",
+   "prepared": "624x480 (130 tokens)",
+   "prepared_rgb_sha256": "273b1e209f845119f8a11a7827eec1c84170c7d7f8fd6309d37a7d012f0fa7e9",
+   "llama_embedding_g4ve_sha256": "71ef682aa63c7b355e5b02f9693289f032f5aecd0b94046adfc50bd69e5ee3b3"
+  },
+  "cat3840": {
+   "file": "cat3840.png (PNG copy of Wikimedia Commons Cat_poster_1.jpg, sha256 1b7ccddb3135a890cd4db216431f9dafed33eaef67336ee8987b5ede63a0e41e)",
+   "sha256": "3bd7d80632bac6c0f5e00392f5a7cc7dbe19fc3983e1edc7f059c1e7d358f37c",
+   "source": "3840x2522 photo",
+   "prepared": "1968x1296 (1107 tokens, near the 1120 ceiling)",
+   "prepared_rgb_sha256": "bb872c1522f7f1ff382b6d11fa930334ac5ce3797aa9b1b7a2a28568c69cab20",
+   "llama_embedding_g4ve_sha256": "1732e280b9819dc4383f5ab201d2ec694f5ac2fa0099c59a58cb10cc1bbd2e36"
+  }
+ },
+ "bubo_gpu_encoder_vs_llama_cpu": {
+  "commit": "d7b1852b (ms-vision)",
+  "note": "rel RMS = sqrt(sum((bubo-llama)^2)/sum(llama^2)); layer 0 agrees to 3e-4..5e-3, the final embedding to 2.9 % (cb96), 16.3 % (small640), 7.8 % (cat3840)",
+  "cb96": {
+   "l0.ln1": {
+    "rel_rms": 0.000274,
+    "max_abs": 0.011631
+   },
+   "l0.attn": {
+    "rel_rms": 0.001495,
+    "max_abs": 0.014673
+   },
+   "l0.o": {
+    "rel_rms": 0.00073,
+    "max_abs": 0.029015
+   },
+   "l0.h1": {
+    "rel_rms": 0.000499,
+    "max_abs": 0.022832
+   },
+   "l0.act": {
+    "rel_rms": 0.003036,
+    "max_abs": 0.40889
+   },
+   "l0.down": {
+    "rel_rms": 0.001954,
+    "max_abs": 1.222931
+   },
+   "layer0": {
+    "rel_rms": 0.000801,
+    "max_abs": 0.125626
+   },
+   "layer13": {
+    "rel_rms": 0.002396,
+    "max_abs": 4.352173
+   },
+   "layer26": {
+    "rel_rms": 0.031108,
+    "max_abs": 258.738861
+   },
+   "pooled": {
+    "rel_rms": 0.016969,
+    "max_abs": 1426.890625
+   },
+   "embedding": {
+    "rel_rms": 0.029462,
+    "max_abs": 0.374167,
+    "worst_row_cosine": 0.997194,
+    "rows": 81
+   }
+  },
+  "small640": {
+   "l0.ln1": {
+    "rel_rms": 0.000348,
+    "max_abs": 0.014038
+   },
+   "l0.attn": {
+    "rel_rms": 0.001045,
+    "max_abs": 0.018559
+   },
+   "l0.o": {
+    "rel_rms": 0.000517,
+    "max_abs": 0.04827
+   },
+   "l0.h1": {
+    "rel_rms": 0.0003,
+    "max_abs": 0.023349
+   },
+   "l0.act": {
+    "rel_rms": 0.003755,
+    "max_abs": 0.462067
+   },
+   "l0.down": {
+    "rel_rms": 0.003179,
+    "max_abs": 0.914047
+   },
+   "layer0": {
+    "rel_rms": 0.002457,
+    "max_abs": 0.806641
+   },
+   "layer13": {
+    "rel_rms": 0.002268,
+    "max_abs": 6.806915
+   },
+   "layer26": {
+    "rel_rms": 0.126564,
+    "max_abs": 1153.415771
+   },
+   "pooled": {
+    "rel_rms": 0.079408,
+    "max_abs": 6913.263184
+   },
+   "embedding": {
+    "rel_rms": 0.163115,
+    "max_abs": 6.443328,
+    "worst_row_cosine": 0.43671,
+    "rows": 130
+   }
+  },
+  "cat3840": {
+   "l0.ln1": {
+    "rel_rms": 0.000531,
+    "max_abs": 0.015152
+   },
+   "l0.attn": {
+    "rel_rms": 0.000802,
+    "max_abs": 0.038336
+   },
+   "l0.o": {
+    "rel_rms": 0.00048,
+    "max_abs": 0.056734
+   },
+   "l0.h1": {
+    "rel_rms": 0.000291,
+    "max_abs": 0.034283
+   },
+   "l0.act": {
+    "rel_rms": 0.005652,
+    "max_abs": 0.82843
+   },
+   "l0.down": {
+    "rel_rms": 0.003563,
+    "max_abs": 0.59095
+   },
+   "layer0": {
+    "rel_rms": 0.003159,
+    "max_abs": 0.948059
+   },
+   "layer13": {
+    "rel_rms": 0.002798,
+    "max_abs": 22.573242
+   },
+   "layer26": {
+    "rel_rms": 0.06698,
+    "max_abs": 702.789062
+   },
+   "pooled": {
+    "rel_rms": 0.034409,
+    "max_abs": 10987.745117
+   },
+   "embedding": {
+    "rel_rms": 0.077979,
+    "max_abs": 7.261502,
+    "worst_row_cosine": 0.553452,
+    "rows": 1107
+   }
+  }
+ },
+ "noise_floor": {
+  "note": "the same pixels through llama.cpp's own CPU and GPU backends differ by 1.4 % (cb96) and 11.6 % (small640) in the final embedding; quick-GELU in Bubo's scalar reference brings cb96 to 0.58 % and small640 to 7.3 % against llama CPU, with the first 14 layers within 8e-4",
+  "llama_cpu_vs_llama_gpu_embedding_rel_rms": {
+   "cb96": 0.01366,
+   "small640": 0.1159
+  },
+  "bubo_scalar_reference_vs_llama_cpu": {
+   "tanh_gelu": {
+    "cb96": 0.0295,
+    "small640": 0.1651
+   },
+   "quick_gelu": {
+    "cb96": 0.00583,
+    "small640": 0.07289
+   }
+  },
+  "bubo_gpu_vs_bubo_scalar_reference_embedding_rel_rms": {
+   "gemma4.vision_encoder test": 0.0015,
+   "cb96 96x96 probe run (432x432 not run)": 0.0018
+  },
+  "bubo_gpu_encoder_equals_its_scalar_reference": "the GPU encoder and the scalar fp32 reference agree to 1.5e-3..1.8e-3, and each differs from llama.cpp CPU by the same amount (cb96 2.9 %, small640 16.5 % with tanh-GELU), so the gap to llama.cpp is not a GPU-encoder bug"
+ },
+ "findings": {
+  "gate": "reference equality (about 1.5e-3), layers 0-13 below 1e-3 against llama.cpp once the activation matches, and behaviour; final-embedding rel RMS is not a usable gate",
+  "preprocessing_decision": "keep stretching like the Hugging Face Gemma 4 processor; do not mimic llama.cpp's black padding",
+  "small640_description": "the page has a large black-and-white lunar photograph in the lower centre; Bubo describes it, llama.cpp b11316 says there are no photographs (checked by eye)"
+ }
+}

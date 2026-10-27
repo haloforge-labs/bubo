@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <set>
 
+#include "src/core/prepare/lowmemory_data.hpp"
+
 namespace bubo::prepare {
 namespace {
 constexpr std::string_view kHuihui =
@@ -10,9 +12,10 @@ constexpr std::string_view kHuihui =
 constexpr std::string_view kUnsloth = "unsloth/Qwen3.8-Flash-Next-GGUF";
 constexpr std::string_view kLicence = "qwen-community-1.0";
 // All eight rows copied from ADDENDUM-20261011-1750.md section 2.
-// Bytes/hashes: tools/release/prepare-evidence (HF API listings at the pinned revisions)
-// section 1 (main_1..4, twin), section 2 (draft_head), section 3 (mtp, mmproj).
-// Repos/commits/paths/destinations: addendum section 2; package ID: section 3.
+// Bytes/hashes: tools/release/prepare-evidence (HF API listings at the pinned
+// revisions) section 1 (main_1..4, twin), section 2 (draft_head), section 3
+// (mtp, mmproj). Repos/commits/paths/destinations: addendum section 2; package
+// ID: section 3.
 constexpr std::array<Entry, 8> kModels = {
     {{"main_1", "Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
       10946752ULL,
@@ -63,6 +66,78 @@ constexpr std::array<Entry, 8> kModels = {
       "6867948dc9f5c467818daa4281c4878dc64b53cd1bba9d16970fd77cd1656777",
       BUBO_HF_REPO_ID, PIN_SLOT_BUBO_COMMIT, "draft_head/draft-out-q4k.gguf",
       Kind::DraftHead, kLicence, "draft_head/draft-out-q4k.gguf"}}};
+// Original set (not abliterated). Bytes/hashes: tools/release/prepare-evidence
+// unsloth.json @ 766911a6 and bubo-0a3c343b.json @ 0a3c343b; prepare_gate
+// --release checks every row against those trees. mtp, mmproj and draft_head
+// are the same files as in the Huihui set. The twin is the base-model twin.
+constexpr std::array<Entry, 8> kOriginalModels = {
+    {{"main_1", "Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+      10946624ULL,
+      "4448186216b3af4cc558bbce2c3213f01608f8f8b2e5267a9767971dd3ec8082",
+      kUnsloth, PIN_SLOT_UNSLOTH_COMMIT,
+      "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+      Kind::MainShard, kLicence,
+      "Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+      "fingerprints/base_main_1.json"},
+     {"main_2", "Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf",
+      49859583136ULL,
+      "3f342f1c1580473f1ee94ddd5b28206e8c07a70fa1a366f59d1d6c922919a6c9",
+      kUnsloth, PIN_SLOT_UNSLOTH_COMMIT,
+      "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf",
+      Kind::MainShard, kLicence,
+      "Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf",
+      "fingerprints/base_main_2.json"},
+     {"main_3", "Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf",
+      49376141504ULL,
+      "56758f40269cad5cd9b0d3d6fbae0f40f6d5be6de49e4ab392dbe83157d9cbd3",
+      kUnsloth, PIN_SLOT_UNSLOTH_COMMIT,
+      "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf",
+      Kind::MainShard, kLicence,
+      "Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf",
+      "fingerprints/base_main_3.json"},
+     {"main_4", "Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf",
+      12087983520ULL,
+      "753bda48b98ba4f1636134a90a967de1b2d3908a236c026e464777342e53510a",
+      kUnsloth, PIN_SLOT_UNSLOTH_COMMIT,
+      "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf",
+      Kind::MainShard, kLicence,
+      "Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf",
+      "fingerprints/base_main_4.json"},
+     {"mtp", "mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf", 2786568256ULL,
+      "5ff54097406a905cf3a724c709124ceb0e3e10235ee862298969e91c96fa96e6",
+      kUnsloth, PIN_SLOT_UNSLOTH_COMMIT,
+      "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf", Kind::Mtp, kLicence,
+      "mtp/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"},
+     {"mmproj", "mmproj-BF16.gguf", 907542944ULL,
+      "2e788f8c511d8093c7b43cb87b2fd7e14228340318057f8fb20c86df2efe2355",
+      kUnsloth, PIN_SLOT_UNSLOTH_COMMIT, "mmproj-BF16.gguf", Kind::Mmproj,
+      kLicence, "mmproj/mmproj-Qwen3.8-Flash-Next-BF16.gguf"},
+     {"twin", "iq4-nofullattn-nohc.gguf", 1230788768ULL,
+      "d6aa3c0425247aca2ae37680a96a401ba09431addc552a1ee60af3a51927e13e",
+      BUBO_HF_REPO_ID, kOriginalBuboCommit,
+      "twin-base/iq4-nofullattn-nohc.gguf", Kind::Twin, kLicence,
+      "twin/iq4-nofullattn-nohc.gguf"},
+     {"draft_head", "draft-out-q4k.gguf", 357581248ULL,
+      "6867948dc9f5c467818daa4281c4878dc64b53cd1bba9d16970fd77cd1656777",
+      BUBO_HF_REPO_ID, kOriginalBuboCommit, "draft_head/draft-out-q4k.gguf",
+      Kind::DraftHead, kLicence, "draft_head/draft-out-q4k.gguf"}}};
+// Only the four main shards differ. Copy the Huihui auxiliary rows verbatim,
+// including its twin: there is no independently composed auxiliary file.
+constexpr auto kLowMemoryModels = [] {
+  auto entries = kModels;
+  for (std::size_t i = 0; i < kLowMemoryShards.size(); ++i) {
+    const auto& pin = kLowMemoryShards[i];
+    entries[i].file_name = pin.file_name;
+    entries[i].size = pin.size;
+    entries[i].sha256 = pin.sha256;
+    entries[i].source_repo = kLowMemoryRepository;
+    entries[i].commit = kLowMemoryCommit;
+    entries[i].repo_path = pin.file_name;
+    entries[i].destination = pin.file_name;
+    entries[i].fingerprint_table_slot = pin.fingerprint_slot;
+  }
+  return entries;
+}();
 }  // namespace
 bool IsLowerHex(std::string_view text, std::size_t length) {
   return text.size() == length && std::ranges::all_of(text, [](char c) {
@@ -120,6 +195,44 @@ bool Repo(std::string_view repo) {
 }  // namespace
 const std::array<Entry, 8>& ModelCatalogue() {
   return kModels;
+}
+const std::array<Entry, 8>& ModelCatalogue(ModelSet set) {
+  if (set == ModelSet::LowMemory)
+    return kLowMemoryModels;
+  return set == ModelSet::Original ? kOriginalModels : kModels;
+}
+std::string_view PackageId(ModelSet set) {
+  if (set == ModelSet::LowMemory)
+    return kLowMemoryPackageId;
+  return set == ModelSet::Original ? kOriginalPackageId : kPackageId;
+}
+std::string_view RecipeId(ModelSet set) {
+  if (set == ModelSet::LowMemory)
+    return kLowMemoryRecipeId;
+  return set == ModelSet::Original ? kOriginalRecipeId : kRecipeId;
+}
+std::string_view ModelSetName(ModelSet set) {
+  if (set == ModelSet::LowMemory)
+    return "lowmemory";
+  return set == ModelSet::Original ? "original" : "huihui";
+}
+std::optional<ModelSet> ModelSetFromName(std::string_view name) {
+  if (name == "huihui")
+    return ModelSet::Huihui;
+  if (name == "original")
+    return ModelSet::Original;
+  if (name == "lowmemory")
+    return ModelSet::LowMemory;
+  return std::nullopt;
+}
+std::optional<ModelSet> ModelSetFromPackageId(std::string_view package_id) {
+  if (package_id == kPackageId)
+    return ModelSet::Huihui;
+  if (package_id == kOriginalPackageId)
+    return ModelSet::Original;
+  if (package_id == kLowMemoryPackageId)
+    return ModelSet::LowMemory;
+  return std::nullopt;
 }
 
 std::string ValidateFields(std::span<const Entry> entries, bool release) {

@@ -9,3 +9,42 @@ tools/release/runtime-notices/** -text
 src/core/prepare/runtime_members.inc text eol=lf
 src/core/prepare/runtime_notices.inc text eol=lf
 tools/release/runtime-members.tsv text eol=lf
+# Cyber-Tiel template goldens: exact LF bytes of the jinja2 renderings.
+tests/fixtures/cybertiel_template/** -text
+# Qwen3.6 template goldens: exact LF bytes of the jinja2 renderings.
+tests/fixtures/qwen36_template/** -text
+
+# Model notice bundles are pinned as exact bytes (hashes embedded in the .inc files).
+tools/release/model-notices/** -text
+src/core/prepare/model_notices.inc text eol=lf
+src/core/prepare/model_notices_original.inc text eol=lf
+src/core/prepare/fingerprints/base_main_*.json text eol=lf
+src/core/prepare/fingerprints/embedded_tables_original.hpp text eol=lf
+docs/prepare-binding.md text eol=lf
+# Keep the new frontend compatible with Prettier on Windows checkouts.
+gui/wails/frontend/** text eol=lf
+gui/wails/frontend/**/*.ttf binary
+gui/wails/frontend/**/*.woff binary
+# Match the sidebar favicon byte for byte on Windows too.
+gui/wails/icons/owl.svg text eol=lf
+# Generators emit LF; byte guards must survive Windows branch checkouts.
+gui/supervisor/view_data_generated_windows.go text eol=lf
+gui/supervisor/contract.schema.json text eol=lf
+tests/cli/contract/event.schema.json text eol=lf
+gui/tests/scenarios/recordings/**/scenario.json text eol=lf
+# The frozen B5 capture is checked against its recorded SHA-256.
+gui/tests/scenarios/recordings/b5/switches.json text eol=lf
+
+# E21 recordings: the stdout bytes of the candidate exe, hashed in their metadata.
+gui/tests/scenarios/recordings/e21/** -text
+# E23 recordings: preserve candidate stdout and metadata hashes on Windows.
+gui/tests/scenarios/recordings/e23/** -text
+# Merged V12 CLI stdout and derived-fixture provenance are byte hashed.
+gui/tests/scenarios/recordings/v12/** -text
+
+# Other scrubbed recording sources keep LF for replay hash stability.
+gui/tests/scenarios/recordings/** text eol=lf
+# These raw captures retain their original byte-preserving policy.
+gui/tests/scenarios/recordings/e21/** -text
+gui/tests/scenarios/recordings/e23/** -text
+gui/tests/scenarios/recordings/v12/** -text

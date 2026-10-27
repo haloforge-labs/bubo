@@ -90,6 +90,8 @@ for t in "${targets[@]}"; do
         "${compile[@]}" -c src/core/quant/ggml_dequant.cpp \
           -o "$objects/quant.o" || exit 1
         native_objects+=("$objects/quant.o")
+        "${compile[@]}" -c src/core/quant/iq_grids.cpp \n          -o "$objects/iq_grids.o" || exit 1
+        native_objects+=("$objects/iq_grids.o")
       fi
       hipcc --offload-arch=gfx1151 "${lib[@]}" \
         "$objects/main.o" "${native_objects[@]}" "${extra[@]}" -o "$out"

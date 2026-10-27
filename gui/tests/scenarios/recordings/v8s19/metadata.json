@@ -1,0 +1,40 @@
+{
+  "purpose": "S19: the saved setup (4 sessions at 262144 tokens) does not fit, and the 4-session row fits at a smaller context. Raw output of the shipped int CLI, unedited.",
+  "executable": "C:\\bubo\\runtimes\\bubo-int-e73c9cd5\\bin\\bubo.exe",
+  "sha256": "0670e53ddeba7dd8c164f0c3d59c836db1375eb2cd119604c1e4b8e5d48b25dd",
+  "engine_sha256": "6302bdfac2c7fdc92088782538ddef45f156afa585f9d10a1defd2cca0e79b9b",
+  "environment": {
+    "LOCALAPPDATA": "C:\\bubo\\run\\app\\v8\\recordings\\s19\\local",
+    "PATH": "C:\\bubo\\runtimes\\bubo-int-e73c9cd5\\bin prepended"
+  },
+  "commands": [
+    {
+      "args": [
+        "models",
+        "estimate",
+        "--model",
+        "huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--context",
+        "262144",
+        "--sessions",
+        "4",
+        "--json"
+      ],
+      "time": "2026-10-16T07:16:05-04:00",
+      "exit_code": 0,
+      "stderr": "",
+      "file": "estimate-4x262144.json",
+      "file_sha256": "e08f6a0653d7916860cc9cb13c2606295145fcf6969d4cc6ce4351418f977d97"
+    }
+  ],
+  "cut_build_check": {
+    "summary": "The v0.1.1-cut CLI (bubo-int-2af4fd45) gives the same output shape: the same key set, nothing added or removed. Values differ only through the measured host RAM at the time of the run. No estimate code changed between e73c9cd5 and 2af4fd45: git diff over src/cli touches release_profile.cpp only in the profile=exact settings check.",
+    "executable": "C:\\bubo\\runtimes\\bubo-int-2af4fd45\\bin\\bubo.exe",
+    "sha256": "89cba198514a91f0c81cd91e79cf80d156a147c4093f2c5a419131a607aae2be",
+    "time": "2026-10-16T07:21:41-04:00",
+    "output": "C:\\bubo\\run\\app\\v8\\recordings\\s19\\est-int-2af4fd45.json",
+    "output_sha256": "d8c032e085f3d5b605bd1aeb9cfa6f402bf2288046789c0ac5169990e738f316",
+    "why_not_used": "Host RAM available fell from 12.9 GiB (07:16) to 5.2 GiB (07:21), so that run fits at no context (host floor) and cannot show S19."
+  },
+  "publication_note": "Machine paths and provenance labels are neutral publication fixtures. Output sizes and hashes describe the scrubbed bytes; executable and source revision identities remain historical."
+}

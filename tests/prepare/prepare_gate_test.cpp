@@ -4,6 +4,7 @@
 #include <string_view>
 #include <vector>
 
+#include "src/core/prepare/lowmemory_data.hpp"
 #include "src/core/prepare/metadata_json.hpp"
 #include "src/core/prepare/release_evidence.hpp"
 #include "tests/prepare/fixture_catalogue.hpp"
@@ -104,6 +105,43 @@ int main(int argc, char* argv[]) {
   replace("\"size\": 3", "\"size\": 9007199254740992");
   assert(!LoadSourceEvidence(malformed));
   assert(!LoadSourceEvidence(std::string(metadata::kMaxJsonBytes + 1, ' ')));
+  const auto local = metadata::Read(
+      root / "../../../tools/release/prepare-evidence/lowmemory-local.json");
+  assert(ValidateLowMemoryLocalEvidence(local).empty());
+  const auto proof = metadata::Parse(local);
+  for (std::size_t i = 0; i < kLowMemoryShards.size(); ++i) {
+    const auto& row = metadata::Required(proof, "files").items()[i];
+    assert(row.member_str("name") == kLowMemoryShards[i].file_name);
+    assert(row.member_str("local_source_name") ==
+           kLowMemoryShards[i].local_source_name);
+  }
+  for (const auto* key : {"compose_manifest_sha256", "huihui_revision",
+                          "ista_revision", "evidence_kind"}) {
+    auto changed = metadata::Parse(local);
+    changed[key] = "wrong";
+    assert(!ValidateLowMemoryLocalEvidence(changed.dump()).empty());
+  }
+  for (const auto* key : {"name", "local_source_name", "sha256", "size"}) {
+    auto changed = metadata::Parse(local);
+    auto rows = gufo::json::Value::array();
+    for (std::size_t i = 0; i < changed["files"].size(); ++i) {
+      auto row = changed["files"].items()[i];
+      if (i == 0)
+        row[key] = key == std::string_view("size") ? gufo::json::Value(1)
+                                                   : gufo::json::Value("wrong");
+      rows.push_back(std::move(row));
+    }
+    changed["files"] = std::move(rows);
+    assert(!ValidateLowMemoryLocalEvidence(changed.dump()).empty());
+  }
+  auto duplicate = metadata::Parse(local);
+  auto rows = gufo::json::Value::array();
+  for (std::size_t i = 0; i < duplicate["files"].size(); ++i)
+    rows.push_back(duplicate["files"].items()[i == 1 ? 0 : i]);
+  duplicate["files"] = std::move(rows);
+  assert(!ValidateLowMemoryLocalEvidence(duplicate.dump()).empty());
+  std::cout
+      << "PASS: lowmemory local composition evidence and nine corruptions\n";
   std::cout << "PASS: release gate fixture for all three source repos; empty "
                "slot, sentinel, oid, size, path, commit, mapping and malformed "
                "metadata rejected\n";

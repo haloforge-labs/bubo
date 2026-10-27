@@ -1,0 +1,4974 @@
+{
+ "template_sha256": "b629ec1ffdcf88bd8b547f3eb7d5dbde61002fe2a2727c5720b2f48f5b6545e7",
+ "cases": [
+  {
+   "name": "user_only_default",
+   "description": "One user turn, no system, template defaults.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello"
+    }
+   ],
+   "tools": null,
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "5c2df86e3759cad358a221074ef34dd69bd7c9befdb80c9f4be24fb8272fa8b3"
+  },
+  {
+   "name": "system_user",
+   "description": "System plus one user turn.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello"
+    }
+   ],
+   "tools": null,
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "0ce9e01fe4f3af0d50d53e8b3d1147ac28ab4ebfd32ad6cd787496317b00ee1a"
+  },
+  {
+   "name": "multi_turn_preserve_true",
+   "description": "Earlier reasoning kept.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "4.",
+     "reasoning_content": "Simple arithmetic: 2+2=4."
+    },
+    {
+     "role": "user",
+     "content": "And times three?"
+    }
+   ],
+   "tools": null,
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": true,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "5258ae509d8da13577b97d9f86397bfa3d19facdebd5af48cedb4ead2e1730a1"
+  },
+  {
+   "name": "multi_turn_preserve_false",
+   "description": "Earlier reasoning dropped.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "4.",
+     "reasoning_content": "Simple arithmetic: 2+2=4."
+    },
+    {
+     "role": "user",
+     "content": "And times three?"
+    }
+   ],
+   "tools": null,
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": false,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "cfc639d2c058efe3eaead22ec1d33db8e2edaffa3266835fd3630058c66b01fc"
+  },
+  {
+   "name": "multi_turn_preserve_default",
+   "description": "preserve_thinking undefined (template default true).",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "4.",
+     "reasoning_content": "Simple arithmetic: 2+2=4."
+    },
+    {
+     "role": "user",
+     "content": "And times three?"
+    }
+   ],
+   "tools": null,
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "5258ae509d8da13577b97d9f86397bfa3d19facdebd5af48cedb4ead2e1730a1"
+  },
+  {
+   "name": "thinking_off",
+   "description": "enable_thinking false.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "4.",
+     "reasoning_content": "Simple arithmetic: 2+2=4."
+    },
+    {
+     "role": "user",
+     "content": "And times three?"
+    }
+   ],
+   "tools": null,
+   "enable_thinking": false,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "5f626eb78cdd103969096444cc54f2a0314d96c95a820464af5ed979e2bfee71"
+  },
+  {
+   "name": "effort_low",
+   "description": "reasoning_effort low.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "4.",
+     "reasoning_content": "Simple arithmetic: 2+2=4."
+    },
+    {
+     "role": "user",
+     "content": "And times three?"
+    }
+   ],
+   "tools": null,
+   "enable_thinking": null,
+   "reasoning_effort": "low",
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "beb2aca7bdb6abfd6aa00a2a62223955a79cf199e389350abe0e08054377030f"
+  },
+  {
+   "name": "effort_minimal",
+   "description": "reasoning_effort minimal maps to low.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "4.",
+     "reasoning_content": "Simple arithmetic: 2+2=4."
+    },
+    {
+     "role": "user",
+     "content": "And times three?"
+    }
+   ],
+   "tools": null,
+   "enable_thinking": null,
+   "reasoning_effort": "minimal",
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "beb2aca7bdb6abfd6aa00a2a62223955a79cf199e389350abe0e08054377030f"
+  },
+  {
+   "name": "effort_medium",
+   "description": "reasoning_effort medium.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "4.",
+     "reasoning_content": "Simple arithmetic: 2+2=4."
+    },
+    {
+     "role": "user",
+     "content": "And times three?"
+    }
+   ],
+   "tools": null,
+   "enable_thinking": null,
+   "reasoning_effort": "medium",
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "5258ae509d8da13577b97d9f86397bfa3d19facdebd5af48cedb4ead2e1730a1"
+  },
+  {
+   "name": "effort_high",
+   "description": "reasoning_effort high maps to xhigh.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "4.",
+     "reasoning_content": "Simple arithmetic: 2+2=4."
+    },
+    {
+     "role": "user",
+     "content": "And times three?"
+    }
+   ],
+   "tools": null,
+   "enable_thinking": null,
+   "reasoning_effort": "high",
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "5e777dfb239927986fb3923202389d446ae52dbac3c66d261e04ffa00403faf7"
+  },
+  {
+   "name": "effort_max",
+   "description": "reasoning_effort max maps to xhigh.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "4.",
+     "reasoning_content": "Simple arithmetic: 2+2=4."
+    },
+    {
+     "role": "user",
+     "content": "And times three?"
+    }
+   ],
+   "tools": null,
+   "enable_thinking": null,
+   "reasoning_effort": "max",
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "5e777dfb239927986fb3923202389d446ae52dbac3c66d261e04ffa00403faf7"
+  },
+  {
+   "name": "effort_none",
+   "description": "reasoning_effort none turns thinking off.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "4.",
+     "reasoning_content": "Simple arithmetic: 2+2=4."
+    },
+    {
+     "role": "user",
+     "content": "And times three?"
+    }
+   ],
+   "tools": null,
+   "enable_thinking": null,
+   "reasoning_effort": "none",
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "5f626eb78cdd103969096444cc54f2a0314d96c95a820464af5ed979e2bfee71"
+  },
+  {
+   "name": "effort_low_thinking_off",
+   "description": "Effort low with thinking off: no instruction.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "4.",
+     "reasoning_content": "Simple arithmetic: 2+2=4."
+    },
+    {
+     "role": "user",
+     "content": "And times three?"
+    }
+   ],
+   "tools": null,
+   "enable_thinking": false,
+   "reasoning_effort": "low",
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "5f626eb78cdd103969096444cc54f2a0314d96c95a820464af5ed979e2bfee71"
+  },
+  {
+   "name": "tools_thinking_on",
+   "description": "Tools present, thinking on.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "Weather in Montreal?"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "d8320aec7d04e9c32550504322bf3ccda4f6ce48f72808bc82e1dd871f3e6cbc"
+  },
+  {
+   "name": "tools_thinking_off",
+   "description": "Tools present, thinking off.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "Weather in Montreal?"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": false,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "564ee38cecdddf80c76ae4cf3d82f3e6d921d28938f7e04c8c3c9cc22a1ee677"
+  },
+  {
+   "name": "tools_no_system_xhigh",
+   "description": "Tools present, no system, xhigh instruction.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "List files."
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": "xhigh",
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "ff18676cdf22cb4429a641beba54eaefb27d60fbada15ac8e43956bb8821a4cd"
+  },
+  {
+   "name": "tool_roundtrip_preserve_true",
+   "description": "Past call plus result.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "Weather in Montreal?"
+    },
+    {
+     "role": "assistant",
+     "content": "Let me check.",
+     "reasoning_content": "I should call get_weather for Montreal.",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": {
+         "city": "Montreal",
+         "unit": "celsius"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "{\"temp\": 11, \"sky\": \"clear\"}"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": true,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "65b6deaa245d620749b9ed3c96c5c870a0976e29275675e8ba0ac057ecfd21a0"
+  },
+  {
+   "name": "tool_roundtrip_preserve_false",
+   "description": "Past call plus result; reasoning of the current tool cycle is kept.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "Weather in Montreal?"
+    },
+    {
+     "role": "assistant",
+     "content": "Let me check.",
+     "reasoning_content": "I should call get_weather for Montreal.",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": {
+         "city": "Montreal",
+         "unit": "celsius"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "{\"temp\": 11, \"sky\": \"clear\"}"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": false,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "65b6deaa245d620749b9ed3c96c5c870a0976e29275675e8ba0ac057ecfd21a0"
+  },
+  {
+   "name": "tool_roundtrip_then_answer",
+   "description": "Completed tool cycle followed by a new user turn, preserve false.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "Weather in Montreal?"
+    },
+    {
+     "role": "assistant",
+     "content": "Let me check.",
+     "reasoning_content": "I should call get_weather for Montreal.",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": {
+         "city": "Montreal",
+         "unit": "celsius"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "{\"temp\": 11, \"sky\": \"clear\"}"
+    },
+    {
+     "role": "assistant",
+     "content": "It is 11 C and clear.",
+     "reasoning_content": "Report the result."
+    },
+    {
+     "role": "user",
+     "content": "Thanks. And in Toronto?"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": false,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "52915fe222b71c444cf41665bc57ac2a6fe7e98586789cc3ce4ca8bbfcba2099"
+  },
+  {
+   "name": "parallel_calls",
+   "description": "One assistant turn with two parallel calls.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Weather in Montreal and Toronto?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "Two independent calls.",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": {
+         "city": "Montreal"
+        }
+       }
+      },
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": {
+         "city": "Toronto",
+         "unit": "fahrenheit"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "{\"temp\": 11}"
+    },
+    {
+     "role": "tool",
+     "content": "{\"temp\": 52}"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "d6e715771ec5ddacec98747fd514532c533d6e5e3069283a5dbd6fad58f8f895"
+  },
+  {
+   "name": "parallel_calls_no_gen",
+   "description": "Parallel calls, add_generation_prompt false.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Weather in Montreal and Toronto?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "Two independent calls.",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": {
+         "city": "Montreal"
+        }
+       }
+      },
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": {
+         "city": "Toronto",
+         "unit": "fahrenheit"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "{\"temp\": 11}"
+    },
+    {
+     "role": "tool",
+     "content": "{\"temp\": 52}"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": false,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "98f5ddbd379c7ddfd5bc27dbde5c80e9ca8c5aed7e24814f1ca79129620a0e21"
+  },
+  {
+   "name": "no_generation_prompt",
+   "description": "add_generation_prompt false.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "4.",
+     "reasoning_content": "Simple arithmetic: 2+2=4."
+    },
+    {
+     "role": "user",
+     "content": "And times three?"
+    }
+   ],
+   "tools": null,
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": false,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "97ad6afa9a092b90482c1c5411d9503a9fbcf00e43213ada24ccbca919c6e625"
+  },
+  {
+   "name": "call_args_rich",
+   "description": "Nested objects, arrays, booleans, null, numbers, quotes, newlines, non-ASCII.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Run it."
+    },
+    {
+     "role": "assistant",
+     "content": "Running.",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "echo \"héllo\"\nls -la",
+         "timeout_s": 30,
+         "env": {
+          "A": "1",
+          "B": "two words"
+         },
+         "flags": [
+          true,
+          false,
+          null,
+          3,
+          "x"
+         ],
+         "empty": {}
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "exit code: 0\nok"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "02840744678ecc5d2cb16169f81cfc3c828ce7f011ef873925ec8f20c7381637"
+  },
+  {
+   "name": "call_args_empty",
+   "description": "A call with no arguments and no content.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Go."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {}
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "done"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "03687eeaf987598143bbc5a0c9944a6e58d686a857e79f3a643cac8dc047d565"
+  },
+  {
+   "name": "think_markers",
+   "description": "Think-control markers in system and user content.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "<|think_high|> You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "Fast please <|think_off|>"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "6cb9c2861f33bde0f69eccfad2160176da96a9669706fc5a1aac9cd122e19fa6"
+  },
+  {
+   "name": "think_marker_low_later_user",
+   "description": "A later user marker overrides the initial state.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "First."
+    },
+    {
+     "role": "assistant",
+     "content": "One."
+    },
+    {
+     "role": "user",
+     "content": "<|think_low|> Second."
+    }
+   ],
+   "tools": null,
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "707ee1683f66b3430f6a32679bbc41609e69a49a2451775addde0e575c87ce28"
+  },
+  {
+   "name": "multi_system_developer",
+   "description": "Several leading system/developer messages are joined.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Rule one."
+    },
+    {
+     "role": "developer",
+     "content": "Rule two."
+    },
+    {
+     "role": "user",
+     "content": "Hi"
+    }
+   ],
+   "tools": null,
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "f366389eb287a829cdec01eb2bc796d421cc621f9d3923cad40cb312e250d673"
+  },
+  {
+   "name": "mid_system",
+   "description": "A system message after the first user turn stays in place.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hi"
+    },
+    {
+     "role": "assistant",
+     "content": "Hello."
+    },
+    {
+     "role": "system",
+     "content": "Be brief."
+    },
+    {
+     "role": "user",
+     "content": "Again."
+    }
+   ],
+   "tools": null,
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "c6d4b781bc48fa70f8e22dbef6d5e24ba89229a9bc8cdf99a1696ba7e08ba801"
+  },
+  {
+   "name": "empty_system_only_terse",
+   "description": "Empty system content: only the built-in text.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "   "
+    },
+    {
+     "role": "user",
+     "content": "Hi"
+    }
+   ],
+   "tools": null,
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "a685203156768608a93d6fca606cda5d6d83b1836416316fdf3b3d84aa9ad60e"
+  },
+  {
+   "name": "tool_protocol_marker",
+   "description": "[TOOL_REQUEST] in system content suppresses the tools block.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Runtime says [TOOL_REQUEST] only."
+    },
+    {
+     "role": "user",
+     "content": "Hi"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "197df4315201ab70439803f71ab50ef41d12bf8a5d7c2bac628595b70e71f805"
+  },
+  {
+   "name": "inline_think_in_content",
+   "description": "Reasoning embedded in assistant content, no reasoning_content.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Q1"
+    },
+    {
+     "role": "assistant",
+     "content": "<think>\nplan A\n</think>\n\nAnswer 1"
+    },
+    {
+     "role": "user",
+     "content": "Q2"
+    },
+    {
+     "role": "assistant",
+     "content": "plan B\n</think>\n\nAnswer 2"
+    },
+    {
+     "role": "user",
+     "content": "Q3"
+    }
+   ],
+   "tools": null,
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": true,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "8f726e403da24d67f1d09bb89c7161b75f809f5840474dce93e6e0b10410a4bc"
+  },
+  {
+   "name": "inline_think_dropped",
+   "description": "Same, preserve false: earlier reasoning removed.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Q1"
+    },
+    {
+     "role": "assistant",
+     "content": "<think>\nplan A\n</think>\n\nAnswer 1"
+    },
+    {
+     "role": "user",
+     "content": "Q2"
+    }
+   ],
+   "tools": null,
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": false,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "5fb42d9d97e1ddf8436f06b086db873726e64447e1663b2719988b5cba416f96"
+  },
+  {
+   "name": "explicit_reasoning_with_lead_think",
+   "description": "reasoning_content plus a leading <think> block in content.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Q1"
+    },
+    {
+     "role": "assistant",
+     "content": "<think>\nold\n</think>\nFinal",
+     "reasoning_content": "  kept reasoning \n"
+    },
+    {
+     "role": "user",
+     "content": "Q2"
+    }
+   ],
+   "tools": null,
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "c82c756e180d911bcaf49f63d714cd76fadb8c348fe41ada563ea6fe33c0c36b"
+  },
+  {
+   "name": "tool_errors_consecutive",
+   "description": "Two failing tool results then a success.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Run tests."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "pytest"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "Traceback (most recent call last):\n  File x"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c2",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "pytest -x"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "fatal: not a git repository"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c3",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "ls"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "exit code: 0\nfile.txt"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "50c0b9e8d101579585281e9c7008d75947477f02357454eaaa056c46484b152b"
+  },
+  {
+   "name": "tool_error_weak_and_json",
+   "description": "Weak error text, JSON error field, code-like output.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Go."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": {
+         "path": "a.py"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "Error: file not found"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c2",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": {
+         "path": "b.py"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "{\"error\": \"denied\"}"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c3",
+       "type": "function",
+       "function": {
+        "name": "read_file",
+        "arguments": {
+         "path": "c.py"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "import os\nraise Error: nope"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "453ad1f28cd3352e2f62be9edda99fe07aac2ef0a001cda25994010ec0548775"
+  },
+  {
+   "name": "no_user_query_preserve_false",
+   "description": "No ordinary user turn: last_query_index falls back to 0.",
+   "messages": [
+    {
+     "role": "assistant",
+     "content": "Start.",
+     "reasoning_content": "r0",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "ls"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "a b c"
+    },
+    {
+     "role": "assistant",
+     "content": "Done.",
+     "reasoning_content": "r1"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": false,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "927c00a22e0f04c8fb21ec4b440756d1aac977a0d7b2dc4b3ab359eff04866c3"
+  },
+  {
+   "name": "tool_response_wrapped_user",
+   "description": "A user message that is a <tool_response> wrapper is not the last query.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Do it."
+    },
+    {
+     "role": "assistant",
+     "content": "Calling.",
+     "reasoning_content": "r",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "ls"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": "<tool_response>\nx\n</tool_response>"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": false,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "97c90899a50e52734670390a7947d0ec1f61df184753c4a081f6d6f0e957d326"
+  },
+  {
+   "name": "unicode_content",
+   "description": "Non-ASCII text everywhere.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Réponds en français — 日本語 OK."
+    },
+    {
+     "role": "user",
+     "content": "Café à Montréal? 😀"
+    },
+    {
+     "role": "assistant",
+     "content": "Oui, à l'ouest.",
+     "reasoning_content": "Pensée brève."
+    },
+    {
+     "role": "user",
+     "content": "Merci."
+    }
+   ],
+   "tools": null,
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "54ea3fc83685d3686dcf03c797a45bbd81d65d35cb1cd6d21d3a159c7afce84b"
+  },
+  {
+   "name": "content_parts_text",
+   "description": "Content given as a list of text parts.",
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Part one. "
+      },
+      {
+       "type": "text",
+       "text": "Part two."
+      }
+     ]
+    }
+   ],
+   "tools": null,
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "617e7efb054bfe790aff238811d3efec7cf7870d60ce9c98b0ad41b2f2cc5914"
+  },
+  {
+   "name": "image_user",
+   "description": "A user turn with one image and text.",
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Describe "
+      },
+      {
+       "type": "image"
+      },
+      {
+       "type": "text",
+       "text": " please."
+      }
+     ]
+    }
+   ],
+   "tools": null,
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": false,
+   "tool_call_format": null,
+   "output_sha256": "e81d5c2f4f7f7037dabf0b43f08954e758927cad0546e6a0a1b79c3ca5e20289"
+  },
+  {
+   "name": "image_user_vision_id",
+   "description": "Two images with add_vision_id true.",
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "image"
+      },
+      {
+       "type": "text",
+       "text": "vs"
+      },
+      {
+       "type": "image"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": "Different."
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "image"
+      },
+      {
+       "type": "text",
+       "text": "and this?"
+      }
+     ]
+    }
+   ],
+   "tools": null,
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": true,
+   "tool_call_format": null,
+   "output_sha256": "d4604147d325ec6f4fd13bf95bf6df92eeeeba0a67fc34bc2127a2fb65af718c"
+  },
+  {
+   "name": "tool_result_with_image",
+   "description": "A tool result carrying an image.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Screenshot?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "shot"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": [
+      {
+       "type": "image"
+      },
+      {
+       "type": "text",
+       "text": "captured"
+      }
+     ]
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "20fc31128bbf637ca6da9e6486304e3bc0063bdd3095694f4eac85ce6ce31d82"
+  },
+  {
+   "name": "long_chat_no_user_query_gt50",
+   "description": "More than 51 messages and no user query: last_query_index = last index.",
+   "messages": [
+    {
+     "role": "assistant",
+     "content": "a0",
+     "reasoning_content": "r0",
+     "tool_calls": [
+      {
+       "id": "k0",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "c0"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "out0"
+    },
+    {
+     "role": "assistant",
+     "content": "a1",
+     "reasoning_content": "r1",
+     "tool_calls": [
+      {
+       "id": "k1",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "c1"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "out1"
+    },
+    {
+     "role": "assistant",
+     "content": "a2",
+     "reasoning_content": "r2",
+     "tool_calls": [
+      {
+       "id": "k2",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "c2"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "out2"
+    },
+    {
+     "role": "assistant",
+     "content": "a3",
+     "reasoning_content": "r3",
+     "tool_calls": [
+      {
+       "id": "k3",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "c3"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "out3"
+    },
+    {
+     "role": "assistant",
+     "content": "a4",
+     "reasoning_content": "r4",
+     "tool_calls": [
+      {
+       "id": "k4",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "c4"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "out4"
+    },
+    {
+     "role": "assistant",
+     "content": "a5",
+     "reasoning_content": "r5",
+     "tool_calls": [
+      {
+       "id": "k5",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "c5"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "out5"
+    },
+    {
+     "role": "assistant",
+     "content": "a6",
+     "reasoning_content": "r6",
+     "tool_calls": [
+      {
+       "id": "k6",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "c6"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "out6"
+    },
+    {
+     "role": "assistant",
+     "content": "a7",
+     "reasoning_content": "r7",
+     "tool_calls": [
+      {
+       "id": "k7",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "c7"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "out7"
+    },
+    {
+     "role": "assistant",
+     "content": "a8",
+     "reasoning_content": "r8",
+     "tool_calls": [
+      {
+       "id": "k8",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "c8"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "out8"
+    },
+    {
+     "role": "assistant",
+     "content": "a9",
+     "reasoning_content": "r9",
+     "tool_calls": [
+      {
+       "id": "k9",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "c9"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "out9"
+    },
+    {
+     "role": "assistant",
+     "content": "a10",
+     "reasoning_content": "r10",
+     "tool_calls": [
+      {
+       "id": "k10",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "c10"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "out10"
+    },
+    {
+     "role": "assistant",
+     "content": "a11",
+     "reasoning_content": "r11",
+     "tool_calls": [
+      {
+       "id": "k11",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "c11"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "out11"
+    },
+    {
+     "role": "assistant",
+     "content": "a12",
+     "reasoning_content": "r12",
+     "tool_calls": [
+      {
+       "id": "k12",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "c12"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "out12"
+    },
+    {
+     "role": "assistant",
+     "content": "a13",
+     "reasoning_content": "r13",
+     "tool_calls": [
+      {
+       "id": "k13",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "c13"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "out13"
+    },
+    {
+     "role": "assistant",
+     "content": "a14",
+     "reasoning_content": "r14",
+     "tool_calls": [
+      {
+       "id": "k14",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "c14"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "out14"
+    },
+    {
+     "role": "assistant",
+     "content": "a15",
+     "reasoning_content": "r15",
+     "tool_calls": [
+      {
+       "id": "k15",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "c15"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "out15"
+    },
+    {
+     "role": "assistant",
+     "content": "a16",
+     "reasoning_content": "r16",
+     "tool_calls": [
+      {
+       "id": "k16",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "c16"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "out16"
+    },
+    {
+     "role": "assistant",
+     "content": "a17",
+     "reasoning_content": "r17",
+     "tool_calls": [
+      {
+       "id": "k17",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "c17"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "out17"
+    },
+    {
+     "role": "assistant",
+     "content": "a18",
+     "reasoning_content": "r18",
+     "tool_calls": [
+      {
+       "id": "k18",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "c18"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "out18"
+    },
+    {
+     "role": "assistant",
+     "content": "a19",
+     "reasoning_content": "r19",
+     "tool_calls": [
+      {
+       "id": "k19",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "c19"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "out19"
+    },
+    {
+     "role": "assistant",
+     "content": "a20",
+     "reasoning_content": "r20",
+     "tool_calls": [
+      {
+       "id": "k20",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "c20"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "out20"
+    },
+    {
+     "role": "assistant",
+     "content": "a21",
+     "reasoning_content": "r21",
+     "tool_calls": [
+      {
+       "id": "k21",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "c21"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "out21"
+    },
+    {
+     "role": "assistant",
+     "content": "a22",
+     "reasoning_content": "r22",
+     "tool_calls": [
+      {
+       "id": "k22",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "c22"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "out22"
+    },
+    {
+     "role": "assistant",
+     "content": "a23",
+     "reasoning_content": "r23",
+     "tool_calls": [
+      {
+       "id": "k23",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "c23"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "out23"
+    },
+    {
+     "role": "assistant",
+     "content": "a24",
+     "reasoning_content": "r24",
+     "tool_calls": [
+      {
+       "id": "k24",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "c24"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "out24"
+    },
+    {
+     "role": "assistant",
+     "content": "a25",
+     "reasoning_content": "r25",
+     "tool_calls": [
+      {
+       "id": "k25",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "c25"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "out25"
+    },
+    {
+     "role": "assistant",
+     "content": "end",
+     "reasoning_content": "rE"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": false,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": null,
+   "output_sha256": "0de504c2359a965d51a66208e181ecf56cd064cb3e8697c4603574c5f281e3d9"
+  },
+  {
+   "name": "json_tools_thinking_on",
+   "description": "Tools present, thinking on.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "Weather in Montreal?"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": "json",
+   "output_sha256": "b09245a8bc9b4f4fa7a0a5c136852a835cc74d151c26b1be79bc3a274f9b3d2f"
+  },
+  {
+   "name": "json_tools_thinking_off",
+   "description": "Tools present, thinking off.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "Weather in Montreal?"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": false,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": "json",
+   "output_sha256": "de6541ab71c3a6eec6c236fd1c34a8b7f96de6121694a82e5bef62927bfc3813"
+  },
+  {
+   "name": "json_tool_roundtrip_preserve_true",
+   "description": "Past call plus result.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "Weather in Montreal?"
+    },
+    {
+     "role": "assistant",
+     "content": "Let me check.",
+     "reasoning_content": "I should call get_weather for Montreal.",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": {
+         "city": "Montreal",
+         "unit": "celsius"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "{\"temp\": 11, \"sky\": \"clear\"}"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": true,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": "json",
+   "output_sha256": "33fc8c86654da121018589b6cead7c6568d87e39f1598e6d7a744cb830abe1a0"
+  },
+  {
+   "name": "json_tool_roundtrip_then_answer",
+   "description": "Completed tool cycle followed by a new user turn, preserve false.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a careful coding assistant."
+    },
+    {
+     "role": "user",
+     "content": "Weather in Montreal?"
+    },
+    {
+     "role": "assistant",
+     "content": "Let me check.",
+     "reasoning_content": "I should call get_weather for Montreal.",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": {
+         "city": "Montreal",
+         "unit": "celsius"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "{\"temp\": 11, \"sky\": \"clear\"}"
+    },
+    {
+     "role": "assistant",
+     "content": "It is 11 C and clear.",
+     "reasoning_content": "Report the result."
+    },
+    {
+     "role": "user",
+     "content": "Thanks. And in Toronto?"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": false,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": "json",
+   "output_sha256": "c1e8469957534011d691572b9d79b6fe76b7e929038150a548b917b0b95b9070"
+  },
+  {
+   "name": "json_parallel_calls",
+   "description": "One assistant turn with two parallel calls.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Weather in Montreal and Toronto?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "Two independent calls.",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": {
+         "city": "Montreal"
+        }
+       }
+      },
+      {
+       "id": "call_2",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": {
+         "city": "Toronto",
+         "unit": "fahrenheit"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "{\"temp\": 11}"
+    },
+    {
+     "role": "tool",
+     "content": "{\"temp\": 52}"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": "json",
+   "output_sha256": "f9f6f5fb07ba63eca273a369d8445ede4b7b7b76d19cc672a1832c1589181679"
+  },
+  {
+   "name": "json_call_args_rich",
+   "description": "Nested objects, arrays, booleans, null, numbers, quotes, newlines, non-ASCII.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Run it."
+    },
+    {
+     "role": "assistant",
+     "content": "Running.",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "echo \"héllo\"\nls -la",
+         "timeout_s": 30,
+         "env": {
+          "A": "1",
+          "B": "two words"
+         },
+         "flags": [
+          true,
+          false,
+          null,
+          3,
+          "x"
+         ],
+         "empty": {}
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "exit code: 0\nok"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": "json",
+   "output_sha256": "3c2007532a1155dc34b8b5e52b3b9fbfc070e5e8dffe4dbc8c49233b78d50dde"
+  },
+  {
+   "name": "json_call_args_empty",
+   "description": "A call with no arguments and no content.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Go."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {}
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "done"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": "json",
+   "output_sha256": "0e4fc7c63b216dcd833de5b90c75312106aafd822fc36c46e420a5241f97a939"
+  },
+  {
+   "name": "json_tool_protocol_marker",
+   "description": "[TOOL_REQUEST] in system content suppresses the tools block.",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Runtime says [TOOL_REQUEST] only."
+    },
+    {
+     "role": "user",
+     "content": "Hi"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": "json",
+   "output_sha256": "197df4315201ab70439803f71ab50ef41d12bf8a5d7c2bac628595b70e71f805"
+  },
+  {
+   "name": "json_tool_errors_consecutive",
+   "description": "Two failing tool results then a success.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Run tests."
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "pytest"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "Traceback (most recent call last):\n  File x"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c2",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "pytest -x"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "fatal: not a git repository"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "c3",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "ls"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "exit code: 0\nfile.txt"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": "json",
+   "output_sha256": "4346d09f3cbd9c7d0dbee56b3d75c4312066559b500d7d815ed38ce888f0ec03"
+  },
+  {
+   "name": "json_no_user_query_preserve_false",
+   "description": "No ordinary user turn: last_query_index falls back to 0.",
+   "messages": [
+    {
+     "role": "assistant",
+     "content": "Start.",
+     "reasoning_content": "r0",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "ls"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "a b c"
+    },
+    {
+     "role": "assistant",
+     "content": "Done.",
+     "reasoning_content": "r1"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": false,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": "json",
+   "output_sha256": "090afdf415e3089be0577d48c5757935418b79ee5e805fa9e56e73acc589c014"
+  },
+  {
+   "name": "json_tool_response_wrapped_user",
+   "description": "A user message that is a <tool_response> wrapper is not the last query.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Do it."
+    },
+    {
+     "role": "assistant",
+     "content": "Calling.",
+     "reasoning_content": "r",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "ls"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": "<tool_response>\nx\n</tool_response>"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": false,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": "json",
+   "output_sha256": "ae2259851c27fac5d6074d1a424e2c21cc102f651ad3fef95ac7b78a7fe674a2"
+  },
+  {
+   "name": "json_tool_result_with_image",
+   "description": "A tool result carrying an image.",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Screenshot?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_1",
+       "type": "function",
+       "function": {
+        "name": "run_shell",
+        "arguments": {
+         "command": "shot"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": [
+      {
+       "type": "image"
+      },
+      {
+       "type": "text",
+       "text": "captured"
+      }
+     ]
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Montreal"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout and stderr.\nUse short commands.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string"
+        },
+        "timeout_s": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 600
+        },
+        "env": {
+         "type": "object",
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "required": [
+        "command"
+       ],
+       "additionalProperties": false
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string"
+        },
+        "lines": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        }
+       },
+       "required": [
+        "path"
+       ]
+      }
+     }
+    }
+   ],
+   "enable_thinking": null,
+   "reasoning_effort": null,
+   "preserve_thinking": null,
+   "add_generation_prompt": true,
+   "add_vision_id": null,
+   "tool_call_format": "json",
+   "output_sha256": "6e9f6899b831fb4e2d52f2547be96a5ef60e98dceb98888624ca35a8b1f8ec99"
+  }
+ ]
+}

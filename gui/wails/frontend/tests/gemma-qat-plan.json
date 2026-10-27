@@ -1,0 +1,79 @@
+{
+  "plan": {
+    "id": "gemma4-26b-a4b-huihui-abliterated-qat-q4-k",
+    "kind": "download",
+    "plan_digest": "c41a3e50900610c958dee89284e2acdbf2d557aef19c5e36d3b65819fbd4ab9a",
+    "ready": false,
+    "files": [
+      {
+        "file_id": "Huihui-gemma-4-26B-A4B-it-qat-q4_0-unquantized-abliterated-Q4_K.gguf",
+        "url": "https://huggingface.co/huihui-ai/Huihui-gemma-4-26B-A4B-it-qat-q4_0-unquantized-abliterated-GGUF/resolve/6cd6fd4d423acb18e05f1f808958d14db5226ac1/Huihui-gemma-4-26B-A4B-it-qat-q4_0-unquantized-abliterated-Q4_K.gguf",
+        "size": 16796015648,
+        "sha256": "4b4f9d4b448fca16230f08d50c18a95c81ecfaefede95d3bdfcf1880b4b620f5",
+        "repository": "huihui-ai/Huihui-gemma-4-26B-A4B-it-qat-q4_0-unquantized-abliterated-GGUF",
+        "revision": "6cd6fd4d423acb18e05f1f808958d14db5226ac1",
+        "path": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty\\Bubo\\models\\gemma4-26b-a4b-huihui-abliterated-qat-q4-k\\Huihui-gemma-4-26B-A4B-it-qat-q4_0-unquantized-abliterated-Q4_K.gguf",
+        "license_id": "Apache-2.0",
+        "state": "download",
+        "replaces": ""
+      },
+      {
+        "file_id": "mmproj-model-bf16.gguf",
+        "url": "https://huggingface.co/huihui-ai/Huihui-gemma-4-26B-A4B-it-qat-q4_0-unquantized-abliterated-GGUF/resolve/6cd6fd4d423acb18e05f1f808958d14db5226ac1/mmproj-model-bf16.gguf",
+        "size": 1194827872,
+        "sha256": "966dbada52d2dd1ab1e3a6faa393ca6242df881bb404286a3c4619fd9c760212",
+        "repository": "huihui-ai/Huihui-gemma-4-26B-A4B-it-qat-q4_0-unquantized-abliterated-GGUF",
+        "revision": "6cd6fd4d423acb18e05f1f808958d14db5226ac1",
+        "path": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty\\Bubo\\models\\gemma4-26b-a4b-huihui-abliterated-qat-q4-k\\mmproj-model-bf16.gguf",
+        "license_id": "Apache-2.0",
+        "state": "download",
+        "replaces": ""
+      },
+      {
+        "file_id": "mtp-ggml-model-bf16.gguf",
+        "url": "https://huggingface.co/huihui-ai/Huihui-gemma-4-26B-A4B-it-qat-q4_0-unquantized-abliterated-GGUF/resolve/6cd6fd4d423acb18e05f1f808958d14db5226ac1/mtp-ggml-model-bf16.gguf",
+        "size": 855246336,
+        "sha256": "9c2424cef7469d01035a906e84f606d13fc44a5b48d54e4a8d1d30c2b19d2cb3",
+        "repository": "huihui-ai/Huihui-gemma-4-26B-A4B-it-qat-q4_0-unquantized-abliterated-GGUF",
+        "revision": "6cd6fd4d423acb18e05f1f808958d14db5226ac1",
+        "path": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty\\Bubo\\models\\gemma4-26b-a4b-huihui-abliterated-qat-q4-k\\mtp-ggml-model-bf16.gguf",
+        "license_id": "Apache-2.0",
+        "state": "download",
+        "replaces": ""
+      }
+    ],
+    "licences": [
+      {
+        "path": "LICENSE-INFO.txt",
+        "text": "License: Apache-2.0. Google Gemma 4 26B-A4B, abliterated QAT build by Huihui.\nLicence: Apache License 2.0 (Apache-2.0)\nLicence link: https://ai.google.dev/gemma/docs/gemma_4_license\nModel: Gemma 4 26B-A4B · Huihui abliterated QAT · Q4_K\n",
+        "sha256": "ea3ed967bd4754c76a9b2030fd5ed8ae8a209297ead85e17aafd055d0757f716"
+      }
+    ],
+    "paths": {
+      "model": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty\\Bubo\\models\\gemma4-26b-a4b-huihui-abliterated-qat-q4-k"
+    },
+    "volumes": [
+      {
+        "name": "\\\\?\\Volume{326d5ea2-f5ef-4687-94b8-470d25581188}\\",
+        "free_bytes": 57621422080,
+        "required_bytes": 20995670895,
+        "bytes_to_write": 18848187247,
+        "safety_margin_bytes": 2147483648,
+        "free_after_download_bytes": 38773234833
+      }
+    ],
+    "required_bytes": 20995670895,
+    "free_bytes": 57621422080,
+    "drive": "\\\\?\\Volume{326d5ea2-f5ef-4687-94b8-470d25581188}\\",
+    "enough_space": true,
+    "licence": {
+      "id": "Apache-2.0",
+      "name": "Apache License 2.0",
+      "url": "https://ai.google.dev/gemma/docs/gemma_4_license",
+      "prompt_line": "License: Apache-2.0. Google Gemma 4 26B-A4B, abliterated QAT build by Huihui.",
+      "note": null,
+      "verified_upstream": true
+    }
+  },
+  "approval": null
+}

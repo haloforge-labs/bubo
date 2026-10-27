@@ -1,0 +1,178 @@
+{
+  "instance_id": "909a087a619f046d302c6fec4732fd53",
+  "pid": 8664,
+  "process_creation_time": "134364230690208012",
+  "exe_path": "C:\\bubo\\run\\gui-build\\j2a-contract\\contract-serve-driver\\bubo.exe",
+  "schema_version": 1,
+  "type": "ready",
+  "operation_id": "ee48490bc8b01e2074eb5c38cef36ee9",
+  "seq": 3,
+  "time": "2026-10-14T03:44:29Z",
+  "product": {
+    "name": "bubo",
+    "version": "0.1.0",
+    "revision": "7670503d",
+    "engine_version": "0.10.0"
+  },
+  "payload": {
+    "identity": {
+      "instance_id": "909a087a619f046d302c6fec4732fd53",
+      "pid": 8664,
+      "process_creation_time": "134364230690208012",
+      "exe_path": "C:\\bubo\\run\\gui-build\\j2a-contract\\contract-serve-driver\\bubo.exe"
+    },
+    "prepared": true,
+    "phase": "ready",
+    "versions": {
+      "name": "bubo",
+      "version": "0.1.0",
+      "revision": "7670503d",
+      "engine_version": "0.10.0"
+    },
+    "endpoint": "http://127.0.0.1:58861/v1",
+    "served_model": "bubo-test-only-fake",
+    "effective_settings": {
+      "profile": {
+        "requested": "test-only",
+        "effective": "test-only",
+        "source": "test_fixture",
+        "reason": "Isolated CPU fake backend."
+      },
+      "context": {
+        "requested": 4096,
+        "effective": 4096,
+        "source": "test_fixture",
+        "reason": "Isolated CPU fake backend."
+      },
+      "sessions": {
+        "requested": 1,
+        "effective": 1,
+        "source": "test_fixture",
+        "reason": "Isolated CPU fake backend."
+      }
+    },
+    "memory_estimate": null,
+    "memory_estimate_reason": "No coefficient table for this service.",
+    "inference_defaults": null,
+    "pi_snippet": null,
+    "effective_switches": null,
+    "prepared_models": null,
+    "requests": [],
+    "capabilities": {
+      "schema_version": 1,
+      "prepare_jsonl": true,
+      "diagnose_json": true,
+      "status_json": true,
+      "instance_control": true,
+      "status_watch": true,
+      "settings": true,
+      "profiles": [
+        {
+          "name": "default",
+          "label": "Default",
+          "gui": true
+        },
+        {
+          "name": "exact",
+          "label": "Exact",
+          "gui": true
+        },
+        {
+          "name": "stock",
+          "label": "Stock",
+          "gui": true
+        },
+        {
+          "name": "subagents",
+          "label": "Subagents",
+          "gui": false
+        }
+      ],
+      "memory_estimate": true,
+      "connection_helpers": true,
+      "support_bundle": true,
+      "switch_registry": true,
+      "request_history": true,
+      "per_slot_context": false
+    },
+    "connection": {
+      "endpoint": "http://127.0.0.1:58861/v1",
+      "model_id": "bubo-test-only-fake",
+      "context_tokens": 4096,
+      "authenticated": false
+    },
+    "log_path": null,
+    "readiness": {
+      "runtime": true,
+      "model": true,
+      "server": true
+    },
+    "last_error": null,
+    "last_transition": "2026-10-14T03:44:29Z",
+    "state_history": [
+      {
+        "type": "starting",
+        "phase": "starting",
+        "time": "2026-10-14T03:44:29Z"
+      },
+      {
+        "type": "loading",
+        "phase": "loading",
+        "time": "2026-10-14T03:44:29Z"
+      },
+      {
+        "type": "ready",
+        "phase": "ready",
+        "time": "2026-10-14T03:44:29Z"
+      }
+    ],
+    "counters": {
+      "prefill_tokens_total": 0,
+      "decode_tokens_total": 0,
+      "cached_tokens_total": 0,
+      "prefill_seconds_total": 0,
+      "decode_seconds_total": 0,
+      "max_sequence_tokens": 0,
+      "draft_rounds_total": 0,
+      "draft_tokens_total": 0,
+      "draft_accepted_tokens_total": 0,
+      "device_lost_total": 0,
+      "cache_disk_hits_total": 0,
+      "cache_memory_hits_total": 0,
+      "cache_misses_total": 0,
+      "completed_successful_requests_total": 0
+    },
+    "last_completed_request": {
+      "prefill_tokens_per_second": null,
+      "decode_tokens_per_second": null,
+      "age_ms": null,
+      "rate_unit": "tokens_per_second",
+      "age_unit": "milliseconds"
+    },
+    "sessions": 0,
+    "queue": 0,
+    "slots": [
+      {
+        "id": 0,
+        "processing": false,
+        "state": "invented",
+        "tokens_used": 0,
+        "speculative": false,
+        "request_id": null,
+        "context_tokens": 4096,
+        "prompt_tokens": 0,
+        "cached_prompt_tokens": 0,
+        "prefilled_tokens": 0,
+        "generated_tokens": 0,
+        "remaining_tokens": null
+      }
+    ],
+    "memory": {
+      "rss_bytes": 10358784,
+      "host_available_bytes": 14076944384,
+      "unit": "bytes",
+      "evidence": "measured"
+    },
+    "cache_hit_ratio": null
+  }
+}

@@ -1,0 +1,2 @@
+# Preserve exact Wails generator output; it emits tab-only blank lines in models.
+wails/frontend/wailsjs/go/models.ts whitespace=-blank-at-eol

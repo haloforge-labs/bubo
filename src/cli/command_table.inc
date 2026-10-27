@@ -1,0 +1,16 @@
+// Canonical top-level commands: name, summary, engine needed, machine output,
+// existing help-topic support, runner. Included with BUBO_COMMAND defined.
+BUBO_COMMAND("prepare", "Prepare pinned runtime and model files", false, true, true, Prepare)
+BUBO_COMMAND("status", "Report preparation and running instance status", false, true, true, Status)
+BUBO_COMMAND("stop", "Stop a verified running instance", false, true, true, Stop)
+BUBO_COMMAND("models", "List models and estimate memory requirements", true, true, true, Models)
+BUBO_COMMAND("serve", "Start the OpenAI-compatible HTTP server", true, true, true, Serve)
+BUBO_COMMAND("prompt", "Execute one prompt request and exit", true, false, true, Prompt)
+BUBO_COMMAND("chat", "Start an interactive terminal conversation", true, false, true, Chat)
+BUBO_COMMAND("bench", "Benchmark prompt processing and token generation", true, false, true, Bench)
+BUBO_COMMAND("eval", "Evaluate an OpenAI-compatible text server", true, false, true, Eval)
+BUBO_COMMAND("video", "Generate MiniMax H3 text-to-video", true, false, true, Video)
+BUBO_COMMAND("transcribe", "Transcribe WAV audio with Qwen3-ASR-1.7B", true, false, true, Transcribe)
+BUBO_COMMAND("diagnose", "Inspect system hardware, memory, and drivers", true, true, true, Diagnose)
+BUBO_COMMAND("probe", "Probe GPU runtime availability", true, false, true, Probe)
+BUBO_COMMAND("help", "Print help for a specific command", false, false, false, Help)

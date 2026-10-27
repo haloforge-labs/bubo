@@ -1,0 +1,16 @@
+{
+  "_source": "fixture",
+  "state": "Stopped",
+  "records": {
+    "models": "../v12/models-list-gui.json",
+    "status": "../v12/status-main.json",
+    "switches": "../v12/switches.json"
+  },
+  "saved_estimate_error": {
+    "code": "estimate_needs_restart",
+    "component": "",
+    "stage": "",
+    "retryable": false,
+    "remedy": "The saved setup cannot be estimated before the next start."
+  }
+}

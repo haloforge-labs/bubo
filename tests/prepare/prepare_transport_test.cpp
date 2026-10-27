@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cassert>
 #include <filesystem>
 #include <fstream>
@@ -266,6 +267,76 @@ int main() {
     assert(!ParseContentRange("bytes 0-3/3", range));
     std::cout << "PASS: streaming volume rejection before bytes; Content-Range "
                  "uint64 offsets beyond4GiB and overflow rejection\n";
+  }
+  {
+    // A stall or crash in the middle of one long response must not lose the
+    // bytes already written: the resume checkpoint is saved while streaming,
+    // every checkpoint_bytes (256 MiB in production; 1 MiB here).
+    Clean(path);
+    auto big = entry;
+    big.size = 12ULL << 20;
+    struct Streaming final : Transport {
+      std::filesystem::path path;
+      Entry entry;
+      std::uint64_t saved_while_streaming = 0;
+      TransferResult Perform(const Request&, const HeaderSink& head,
+                             const BodySink& body,
+                             const std::function<bool()>&) override {
+        if (!head({200,
+                   {{"content-length", std::to_string(entry.size)},
+                    {"etag", "\"payload\""}}}))
+          return {"header rejected"};
+        const std::vector<std::uint8_t> chunk(64 * 1024, 'x');
+        for (std::uint64_t sent = 0; sent < (9ULL << 20); sent += chunk.size())
+          if (!body(chunk))
+            return {"body rejected"};
+        // The process "dies" here: what a restart would resume from.
+        saved_while_streaming = RetainedPrefix(entry, path);
+        return {"fixture interruption"};
+      }
+    } streaming;
+    streaming.path = path;
+    streaming.entry = big;
+    auto options = Options();
+    options.max_attempts = 1;
+    options.checkpoint_bytes = 1ULL << 20;
+    Download(big, path, streaming, options);
+    if (streaming.saved_while_streaming < (8ULL << 20)) {
+      std::cerr << "FAIL: resume checkpoint while streaming: "
+                << streaming.saved_while_streaming << " bytes saved of "
+                << (9ULL << 20) << " written\n";
+      return 1;
+    }
+    std::cout << "PASS: the resume checkpoint is saved while streaming ("
+              << streaming.saved_while_streaming << " bytes)\n";
+    // A resume first hashes the saved prefix (9 MiB here; up to a whole
+    // 50 GB shard in production). It reports progress while it does, so a
+    // watcher does not see silence.
+    struct Resuming final : Transport {
+      std::uint64_t progress_before_request = 0;
+      const std::uint64_t* progress_calls = nullptr;
+      TransferResult Perform(const Request&, const HeaderSink&, const BodySink&,
+                             const std::function<bool()>&) override {
+        progress_before_request = *progress_calls;
+        return {"fixture interruption"};
+      }
+    } resuming;
+    std::uint64_t progress_calls = 0, largest = 0;
+    resuming.progress_calls = &progress_calls;
+    auto resume_options = Options();
+    resume_options.max_attempts = 1;
+    resume_options.progress = [&](std::uint64_t done, std::uint64_t) {
+      ++progress_calls;
+      largest = std::max(largest, done);
+    };
+    Download(big, path, resuming, resume_options);
+    if (resuming.progress_before_request == 0 || largest > (9ULL << 20)) {
+      std::cerr << "FAIL: saved-prefix hash reports no progress ("
+                << resuming.progress_before_request << " calls)\n";
+      return 1;
+    }
+    std::cout << "PASS: the saved-prefix hash reports progress ("
+              << resuming.progress_before_request << " calls)\n";
   }
   Clean(path);
   std::filesystem::remove(root);

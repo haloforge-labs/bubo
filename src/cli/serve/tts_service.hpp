@@ -16,7 +16,7 @@
 
 namespace gufo::server {
 
-/// An operator-registered named voice: reference audio the server holds on
+/// An user-registered named voice: reference audio the server holds on
 /// behalf of clients, so a Base checkpoint can be driven by voice name alone
 /// instead of a base64 WAV on every request.
 struct TtsVoicePreset {

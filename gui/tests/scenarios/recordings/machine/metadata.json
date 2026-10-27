@@ -1,0 +1,46 @@
+{
+  "_source": "recorded",
+  "recorded_at": "2026-10-14T22:28:03.856433-04:00",
+  "exe": "C:\\bubo\\run\\gui-build\\k1cpu\\bubo.exe",
+  "commands": [
+    {
+      "args": [
+        "status",
+        "--json"
+      ],
+      "exit_code": 0,
+      "stderr": ""
+    },
+    {
+      "args": [
+        "serve",
+        "--list-switches",
+        "--json"
+      ],
+      "exit_code": 0,
+      "stderr": ""
+    },
+    {
+      "args": [
+        "models",
+        "list",
+        "--json"
+      ],
+      "exit_code": 0,
+      "stderr": ""
+    },
+    {
+      "args": [
+        "prepare",
+        "model",
+        "--catalogue-id",
+        "huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--plan",
+        "--jsonl"
+      ],
+      "exit_code": 0,
+      "stderr": ""
+    }
+  ],
+  "publication_note": "Machine paths and provenance labels are neutral publication fixtures. Output sizes and hashes describe the scrubbed bytes; executable and source revision identities remain historical."
+}

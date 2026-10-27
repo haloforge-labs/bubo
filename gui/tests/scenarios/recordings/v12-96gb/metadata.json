@@ -1,0 +1,753 @@
+{
+  "source": "Real production CLI command implementations linked to an arranged test-only probe; derived 96 GB values, no 96 GB hardware ran this code.",
+  "created_at": "2026-10-26T15:25:51.3023761-04:00",
+  "source_commit": "1a0cd4305a87a527c6bac453910349d754e5944b",
+  "merge_parent": null,
+  "source_diff": " docs/FLAGS.md                                      |    1 +\r\n docs/SWITCH-AUDIENCE.md                            |    3 +-\r\n docs/switch-evidence.json                          |   23 +-\r\n gui/supervisor/fit_numbers_windows_test.go         |    4 +-\r\n gui/supervisor/native_wording.go                   |    2 +-\r\n gui/supervisor/saved_no_verdict_windows_test.go    |    2 +-\r\n gui/tests/scenarios/README.md                      |   19 +-\r\n gui/tests/scenarios/capture-v12.ps1                |    9 +-\r\n gui/tests/scenarios/derive-v12.ps1                 |   38 +-\r\n gui/tests/scenarios/main_windows.go                |   32 +-\r\n .../models-download-in-progress/scenario.json      |    2 +-\r\n .../scenarios/recordings/preparing/scenario.json   |    2 +-\r\n .../release-update/legacy-model-plan.jsonl         |   64 +-\r\n .../release-update/legacy-model-refreshed.jsonl    |  154 +-\r\n .../release-update/legacy-runtime-preview.jsonl    |  160 +-\r\n .../release-update/legacy-runtime-refreshed.jsonl  |  158 +-\r\n .../recordings/release-update/legacy-status.json   |    2 +-\r\n .../release-update/legacy-update.metadata.json     |   46 +-\r\n .../v12-96gb/estimate-128-96-s1-c200000.json       |    2 +-\r\n .../recordings/v12-96gb/estimate-128-96-s1.json    |    2 +-\r\n .../v12-96gb/estimate-128-96-s2-c200000.json       |    2 +-\r\n .../recordings/v12-96gb/estimate-128-96-s2.json    |    2 +-\r\n .../v12-96gb/estimate-96-64-s1-c200000.json        |    2 +-\r\n .../recordings/v12-96gb/estimate-96-64-s1.json     |    2 +-\r\n .../v12-96gb/estimate-96-64-s2-c200000.json        |    2 +-\r\n .../recordings/v12-96gb/estimate-96-64-s2.json     |    2 +-\r\n .../v12-96gb/estimate-96-72-s1-c200000.json        |    2 +-\r\n .../recordings/v12-96gb/estimate-96-72-s1.json     |    2 +-\r\n .../v12-96gb/estimate-96-72-s2-c200000.json        |    2 +-\r\n .../recordings/v12-96gb/estimate-96-72-s2.json     |    2 +-\r\n .../v12-96gb/estimate-standard-128-c200000.json    |    2 +-\r\n .../scenarios/recordings/v12-96gb/metadata.json    |  602 ++-----\r\n .../recordings/v12-96gb/models-128-96.json         |    2 +-\r\n .../recordings/v12-96gb/models-96-64.json          |    2 +-\r\n .../recordings/v12-96gb/models-96-72.json          |    2 +-\r\n .../recordings/v12-96gb/prepare-128-96-plan.jsonl  |   34 +-\r\n .../recordings/v12-96gb/prepare-96-64-plan.jsonl   |   34 +-\r\n .../recordings/v12-96gb/prepare-96-72-plan.jsonl   |   34 +-\r\n .../v12-96gb/real-cli-lowmemory-estimate.json      |    2 +-\r\n .../recordings/v12-96gb/real-cli-models-128.json   |    2 +-\r\n .../recordings/v12-96gb/status-128-96.json         |    2 +-\r\n .../recordings/v12-96gb/status-96-64.json          |    2 +-\r\n .../recordings/v12-96gb/status-96-72.json          |    2 +-\r\n .../recordings/v12/derived-statuses.metadata.json  |  302 +++-\r\n ...iongemma-26b-e38-abliterated-nvfp4-default.json |    2 +-\r\n .../recordings/v12/estimate-flash-c200000-s1.json  |    2 +-\r\n .../recordings/v12/estimate-flash-c200000-s12.json |    2 +-\r\n .../recordings/v12/estimate-flash-c200000-s2.json  |    2 +-\r\n .../recordings/v12/estimate-flash-c200000-s4.json  |    2 +-\r\n .../recordings/v12/estimate-flash-c200000-s8.json  |    2 +-\r\n .../recordings/v12/estimate-flash-c262144-s1.json  |    2 +-\r\n .../recordings/v12/estimate-flash-c262144-s12.json |    2 +-\r\n .../recordings/v12/estimate-flash-c262144-s2.json  |    2 +-\r\n .../recordings/v12/estimate-flash-c262144-s4.json  |    2 +-\r\n .../recordings/v12/estimate-flash-c262144-s8.json  |    2 +-\r\n .../recordings/v12/estimate-flash-c65536-s1.json   |    2 +-\r\n .../recordings/v12/estimate-flash-c65536-s8.json   |    2 +-\r\n .../v12/estimate-flash-catalogue-id.json           |    2 +-\r\n .../recordings/v12/estimate-flash-default.json     |    2 +-\r\n ...6b-a4b-huihui-abliterated-qat-q4-k-default.json |    2 +-\r\n ...ma4-26b-a4b-unsloth-qat-ud-q4-k-xl-default.json |    2 +-\r\n ...a4-31b-huihui-abliterated-qat-q4-k-default.json |    2 +-\r\n ...-gemma4-31b-unsloth-qat-ud-q4-k-xl-default.json |    2 +-\r\n .../recordings/v12/estimate-hauhau-c200000-s1.json |    2 +-\r\n .../recordings/v12/estimate-hauhau-c200000-s4.json |    2 +-\r\n .../recordings/v12/estimate-hauhau-c262144-s1.json |    2 +-\r\n .../recordings/v12/estimate-hauhau-c262144-s4.json |    2 +-\r\n .../recordings/v12/estimate-hauhau-c65536-s1.json  |    2 +-\r\n .../recordings/v12/estimate-hauhau-default.json    |    2 +-\r\n .../v12/estimate-importpkg-c200000-s1.json         |    2 +-\r\n .../v12/estimate-importpkg-c262144-s1.json         |    2 +-\r\n .../recordings/v12/estimate-importpkg-default.json |    2 +-\r\n .../recordings/v12/estimate-loose-c200000-s1.json  |    2 +-\r\n .../recordings/v12/estimate-loose-c262144-s1.json  |    2 +-\r\n .../recordings/v12/estimate-loose-default.json     |    2 +-\r\n .../recordings/v12/estimate-lowmemory-default.json |    2 +-\r\n .../recordings/v12/estimate-missing-folder.json    |    2 +-\r\n .../recordings/v12/estimate-partial-default.json   |    2 +-\r\n .../recordings/v12/estimate-q27-c200000-s1.json    |    2 +-\r\n .../recordings/v12/estimate-q27-c200000-s4.json    |    2 +-\r\n .../recordings/v12/estimate-q27-c262144-s1.json    |    2 +-\r\n .../recordings/v12/estimate-q27-c262144-s4.json    |    2 +-\r\n .../recordings/v12/estimate-q27-c65536-s1.json     |    2 +-\r\n .../recordings/v12/estimate-q27-default.json       |    2 +-\r\n gui/tests/scenarios/recordings/v12/metadata.json   |  690 ++++----\r\n .../recordings/v12/models-list-default-root.json   |    2 +-\r\n .../recordings/v12/models-list-empty.json          |    2 +-\r\n .../scenarios/recordings/v12/models-list-gui.json  |    2 +-\r\n .../recordings/v12/models-list-rootB.json          |    2 +-\r\n .../recordings/v12/models-list-table.json          |    2 +-\r\n .../recordings/v12/models-with-warnings.json       |    2 +-\r\n .../v12/models-with-warnings.metadata.json         |    4 +-\r\n ...cyber-tiel-coder-35b-a3b-mtp-q4-k-m-fresh.jsonl |   18 +-\r\n ...siongemma-26b-e38-abliterated-nvfp4-fresh.jsonl |   36 +-\r\n .../recordings/v12/plan-disabled-or-unknown.jsonl  |    2 +-\r\n .../v12/plan-flash-rootA-present-text.txt          |    2 +-\r\n .../recordings/v12/plan-flash-rootA-present.jsonl  |   64 +-\r\n .../recordings/v12/plan-flash-rootB-fresh.jsonl    |   34 +-\r\n .../recordings/v12/plan-flash-rootC-fresh.jsonl    |   34 +-\r\n ...26b-a4b-huihui-abliterated-qat-q4-k-fresh.jsonl |   20 +-\r\n ...mma4-26b-a4b-unsloth-qat-ud-q4-k-xl-fresh.jsonl |   20 +-\r\n ...ma4-31b-huihui-abliterated-qat-q4-k-fresh.jsonl |   20 +-\r\n ...n-gemma4-31b-unsloth-qat-ud-q4-k-xl-fresh.jsonl |   20 +-\r\n ...ihui-qwen38-flash-next-lowmemory-v1-fresh.jsonl |   34 +-\r\n ...hui-qwen38-flash-next-ud-q4-k-xl-v1-fresh.jsonl |   34 +-\r\n .../recordings/v12/plan-lowmemory-short.jsonl      |   34 +-\r\n .../recordings/v12/plan-q27-rootB-present.jsonl    |   24 +-\r\n .../v12/plan-qwen36-27b-ud-q4-k-xl-fresh.jsonl     |   18 +-\r\n .../recordings/v12/plan-qwen36-rootB-partial.jsonl |   18 +-\r\n .../v12/plan-qwen38-27b-ud-q4-k-xl-fresh.jsonl     |   18 +-\r\n ...wen38-flash-next-base-ud-q4-k-xl-v1-fresh.jsonl |   34 +-\r\n .../recordings/v12/plan-runtime-fresh.jsonl        |  162 +-\r\n .../recordings/v12/plan-runtime-ready.jsonl        |  158 +-\r\n .../recordings/v12/plan-runtime-refresh.jsonl      |  160 +-\r\n .../scenarios/recordings/v12/status-empty.json     |    2 +-\r\n .../recordings/v12/status-engine-missing.json      |    2 +-\r\n .../scenarios/recordings/v12/status-gate-busy.json |    2 +-\r\n .../scenarios/recordings/v12/status-gate-idle.json |    2 +-\r\n .../recordings/v12/status-lrel8-busy.json          |    2 +-\r\n .../scenarios/recordings/v12/status-main.json      |    2 +-\r\n .../recordings/v12/status-page-facts-false.json    |    2 +-\r\n .../recordings/v12/status-page-facts-true.json     |    2 +-\r\n .../scenarios/recordings/v12/status-w-idle.json    |    2 +-\r\n gui/tests/scenarios/recordings/v12/switches.json   |    2 +-\r\n gui/tests/scenarios/replay/replay_windows.go       |    7 -\r\n .../scenarios/replay/s24_capture_windows_test.go   |    2 +-\r\n .../scenarios/replay/v12_capture_windows_test.go   |   42 +-\r\n gui/tests/smoke/smoke_test.go                      |   18 +-\r\n gui/tests/test.ps1                                 |   20 +-\r\n .../src/components/core-page-test-support.tsx      |    5 +-\r\n .../src/components/download-folder.shots.tsx       |   53 +-\r\n gui/wails/frontend/src/components/f2a.shots.tsx    |   23 +-\r\n gui/wails/frontend/src/components/f2b.shots.tsx    |   21 +-\r\n gui/wails/frontend/src/components/f4.shots.tsx     |   39 +-\r\n gui/wails/frontend/src/components/f5a.shots.tsx    |   33 +-\r\n .../frontend/src/components/gui-error.test.tsx     |    2 +-\r\n .../frontend/src/components/ux-fixes.shots.tsx     |   33 +-\r\n .../frontend/src/features/connect/writes.shots.tsx |    2 +-\r\n gui/wails/frontend/src/features/logs/v12.shots.tsx |   23 +-\r\n .../frontend/src/features/models/e21.shots.tsx     |    4 +-\r\n .../src/features/models/e22-installed.test.tsx     |    8 +-\r\n .../frontend/src/features/models/flow.test.ts      |   11 +-\r\n .../src/features/requests/progress-cli-facts.json  |    2 +-\r\n .../src/features/server/components/memory-fit.tsx  |    2 +-\r\n .../frontend/src/features/server/e14.shots.tsx     |   16 +-\r\n .../frontend/src/features/server/e15.shots.tsx     |   18 +-\r\n .../frontend/src/features/server/ux8.shots.tsx     |   18 +-\r\n .../frontend/src/features/server/v12.test.tsx      |    7 +-\r\n .../frontend/src/features/settings/f5b.shots.tsx   |    2 +-\r\n .../src/features/settings/settings.shots.tsx       |   16 +-\r\n .../src/features/settings/writes.shots.tsx         |    6 +-\r\n .../src/generated/memory96-estimate-reply.json     |    2 +-\r\n gui/wails/frontend/src/lib/gui-errors.ts           |    2 +-\r\n .../scenarios/cli-page-facts-authenticated.json    | 1158 ++++++------\r\n .../src/scenarios/cli-page-facts-loopback.json     | 1156 ++++++------\r\n .../frontend/src/scenarios/external-server.json    | 1128 ++++++------\r\n .../frontend/src/scenarios/failed-with-remedy.json | 1134 ++++++------\r\n .../frontend/src/scenarios/gpu-lost-stopped.json   | 1488 ++++++++--------\r\n .../frontend/src/scenarios/gpu-restarted.json      | 1126 ++++++------\r\n gui/wails/frontend/src/scenarios/lan-on.json       | 1126 ++++++------\r\n .../src/scenarios/memory-default-setup.json        | 1834 ++++++++++----------\r\n .../src/scenarios/memory-gpu-headroom.json         | 1486 ++++++++--------\r\n .../src/scenarios/memory-smaller-context.json      | 1834 ++++++++++----------\r\n .../src/scenarios/models-download-in-progress.json | 1146 ++++++------\r\n .../frontend/src/scenarios/models-warnings.json    | 1516 ++++++++--------\r\n gui/wails/frontend/src/scenarios/no-fit.json       | 1476 ++++++++--------\r\n gui/wails/frontend/src/scenarios/not-prepared.json | 1100 ++++++------\r\n .../src/scenarios/npu-prefill-faulted.json         | 1126 ++++++------\r\n .../frontend/src/scenarios/npu-prefill-off.json    | 1126 ++++++------\r\n .../frontend/src/scenarios/npu-prefill-on.json     | 1126 ++++++------\r\n .../frontend/src/scenarios/onboarding-128-96.json  |   44 +-\r\n .../frontend/src/scenarios/onboarding-96-64.json   |   44 +-\r\n .../frontend/src/scenarios/onboarding-96-72.json   |   44 +-\r\n .../frontend/src/scenarios/owner-memory-fit.json   | 1234 +++++++------\r\n gui/wails/frontend/src/scenarios/preparing.json    | 1122 ++++++------\r\n gui/wails/frontend/src/scenarios/ready-busy.json   | 1130 ++++++------\r\n gui/wails/frontend/src/scenarios/ready-idle.json   | 1126 ++++++------\r\n .../src/scenarios/runtime-ready-model-missing.json | 1112 ++++++------\r\n .../src/scenarios/saved-fit-unchecked.json         | 1134 ++++++------\r\n .../frontend/src/scenarios/saved-no-verdict.json   | 1134 ++++++------\r\n gui/wails/frontend/src/scenarios/stalled.json      | 1130 ++++++------\r\n gui/wails/frontend/src/scenarios/starting.json     | 1134 ++++++------\r\n .../src/scenarios/stopped-saved-estimate.json      | 1486 ++++++++--------\r\n gui/wails/frontend/src/scenarios/stopped.json      | 1134 ++++++------\r\n .../src/scenarios/switch-override-rejected.json    | 1136 ++++++------\r\n .../src/scenarios/switch-overrides-pending.json    | 1130 ++++++------\r\n .../frontend/src/scenarios/update-available.json   | 1132 ++++++------\r\n .../src/scenarios/update-check-failed.json         | 1134 ++++++------\r\n .../frontend/src/scenarios/update-current.json     | 1134 ++++++------\r\n .../frontend/src/scenarios/update-failed.json      | 1132 ++++++------\r\n gui/wails/frontend/src/scenarios/update-none.json  | 1134 ++++++------\r\n .../frontend/src/scenarios/update-progress.json    | 1132 ++++++------\r\n gui/wails/frontend/src/scenarios/update-ready.json | 1484 ++++++++--------\r\n .../src/scenarios/update-rollback_pending.json     | 1486 ++++++++--------\r\n gui/wails/frontend/src/styles/app.css              |    2 +-\r\n gui/wails/frontend/tests/flash-short-plan.json     |    4 +-\r\n gui/wails/frontend/tests/gemma-qat-plan.json       |   16 +-\r\n .../frontend/tests/lower-memory-short-plan.json    |   24 +-\r\n gui/wails/frontend/tests/original-plan.json        |   24 +-\r\n gui/wails/frontend/tests/runtime-plan.json         |   20 +-\r\n src/cli/models_support.cpp                         |    7 +-\r\n src/cli/serve/release_switches.inc                 |    2 +\r\n src/cli/serve/release_switches.json                |   34 +\r\n tests/cache/boundary_test.py                       |    4 +\r\n tests/cli/contract/data/memory96-derived.json      |    2 +-\r\n tests/cli/contract/engine-panels.json              |    1 +\r\n tests/cli/contract/switches.golden.json            |   35 +\r\n tests/cli/contract/switches_registry_test.py       |    4 +-\r\n .../contract/valid/models-shipped-catalogue.json   |    2 +-\r\n tests/cli/contract/valid/switches.json             |   35 +\r\n tests/cli/serve_test.py                            |   11 +-\r\n tests/fixtures/release_flags_golden.md             |    1 +\r\n tests/models/gemma4/CMakeLists.txt                 |   10 +\r\n tests/prepare/model_mutations.cmake                |    2 +\r\n tests/serve/model_manifest_test.cpp                |    5 +-\r\n tests/tools/h3_profile_test.py                     |    2 +-\r\n tools/cli/gen_offline_help.py                      |    4 +-\r\n tools/gufo/h3_profile.py                           |    5 +-\r\n 218 files changed, 25491 insertions(+), 25869 deletions(-)\r\n",
+  "source_snapshot": [
+    {
+      "file": "docs/FLAGS.md",
+      "sha256": "c3d64e4bc08a98e8a65b9ea0ab8ed522b73a0dae2b10daa3a689d1d1328325c6"
+    },
+    {
+      "file": "docs/SWITCH-AUDIENCE.md",
+      "sha256": "014f16ff2e69ca556f8610d59b755c6747e2be013ef5f33ce8f25be58fc96569"
+    },
+    {
+      "file": "docs/switch-evidence.json",
+      "sha256": "3c16c56eef17fa790af813c06064174df1d6a6b6f52aef73381c020fc5331b67"
+    },
+    {
+      "file": "gui/supervisor/fit_numbers_windows_test.go",
+      "sha256": "e24428b646f8ce7791fd014edc7958468147c96af81111d35159caa3aced53b8"
+    },
+    {
+      "file": "gui/supervisor/native_wording.go",
+      "sha256": "e458f0e1b0cedd6ec0622391b560747daaa0161bd9c17c7605bf13faf6898ef6"
+    },
+    {
+      "file": "gui/supervisor/saved_no_verdict_windows_test.go",
+      "sha256": "006cbe7030c91773253234dbd88943026e1974398e2e6275f7de91f8e514a972"
+    },
+    {
+      "file": "gui/tests/scenarios/capture-v12.ps1",
+      "sha256": "20bf78c0766f606e6169f279e2631114d0730d2bbe67dec290d44acef9e16eee"
+    },
+    {
+      "file": "gui/tests/scenarios/derive-v12.ps1",
+      "sha256": "cbc4648b581e382f7f7be681274e5278379e534aa69e7baf7e649a9854351715"
+    },
+    {
+      "file": "gui/tests/scenarios/main_windows.go",
+      "sha256": "5382255d41199dead936d0bca5b2e04710a18e07472e40a87004cfe773109910"
+    },
+    {
+      "file": "gui/tests/scenarios/README.md",
+      "sha256": "a7ddde9ac11c611836e5aeb4b86a3936e735e0ae15deb493aea607916af89405"
+    },
+    {
+      "file": "gui/tests/scenarios/replay/replay_windows.go",
+      "sha256": "9ad52d909ad4d75354ff68a3e15b001d71cb7bbe5aa87ca01bc8936c48e0c001"
+    },
+    {
+      "file": "gui/tests/scenarios/replay/s24_capture_windows_test.go",
+      "sha256": "586071aadd8fe60212f5a28afbf6e0e33deaf0661f1bcb37dd632ef70e5cc9b5"
+    },
+    {
+      "file": "gui/tests/scenarios/replay/v12_capture_windows_test.go",
+      "sha256": "daae661056293e83d93ca44a1b312ec537e2af4049574761f2304f275b721870"
+    },
+    {
+      "file": "gui/tests/smoke/smoke_test.go",
+      "sha256": "34b2ef1d3e7d7d085c9b72234f46d1fbff41b742657e461b61fa7f907c960d7b"
+    },
+    {
+      "file": "gui/tests/test.ps1",
+      "sha256": "f1082c36f72a47aee3dfa01a57aa85f626643079af69fb964c34a6638299661a"
+    },
+    {
+      "file": "gui/wails/frontend/src/components/core-page-test-support.tsx",
+      "sha256": "7594cefa7b2546693ad7d984395d351be278d5723401b906806d12e28221b339"
+    },
+    {
+      "file": "gui/wails/frontend/src/components/download-folder.shots.tsx",
+      "sha256": "e01238cb7d5985fdf77994e60f6390195e425da39fe8717aa262237c5e3aa91a"
+    },
+    {
+      "file": "gui/wails/frontend/src/components/f2a.shots.tsx",
+      "sha256": "ed0b06b09fd6aa00f1bed8dfaa8f3fc8261aa2e30fb7faf0f7bf6bf543a1ae2f"
+    },
+    {
+      "file": "gui/wails/frontend/src/components/f2b.shots.tsx",
+      "sha256": "56b0101c9caacc31412dca65b49eb7367ffc9bc894c2789c1b8385ae0eb1e847"
+    },
+    {
+      "file": "gui/wails/frontend/src/components/f4.shots.tsx",
+      "sha256": "3610e9b8fd38b23e6d6236506810a627a5c302d22d09ef89b2ee95282362cc26"
+    },
+    {
+      "file": "gui/wails/frontend/src/components/f5a.shots.tsx",
+      "sha256": "9c96dbd9ef798acaca66cea04fd6a446923d059ab1a05964cc5299ad08707ad2"
+    },
+    {
+      "file": "gui/wails/frontend/src/components/gui-error.test.tsx",
+      "sha256": "4f555629f31208c5d20cd828e6040f6bea4daf100bcf9b78247135ffd342a5f1"
+    },
+    {
+      "file": "gui/wails/frontend/src/components/recorded-observations.ts",
+      "sha256": "29d9e47547b9d8a3c77eeb09f925dfea4e1713ef521ed8ff54c593dc99ca4a44"
+    },
+    {
+      "file": "gui/wails/frontend/src/components/ux-fixes.shots.tsx",
+      "sha256": "f16e361670e0c7eb0af914a7e2becd1659c4b62ae3cb8f23bf5d38a68e2f4639"
+    },
+    {
+      "file": "gui/wails/frontend/src/features/connect/writes.shots.tsx",
+      "sha256": "543882493948980380113015ab1fc89353035be7210b3196aee35d877a7afa11"
+    },
+    {
+      "file": "gui/wails/frontend/src/features/logs/v12.shots.tsx",
+      "sha256": "822c6193e386bfc3fb26269eccb498b1d514e414e336f3ea44652c0bd5ad99ee"
+    },
+    {
+      "file": "gui/wails/frontend/src/features/models/e21.shots.tsx",
+      "sha256": "4e7ce299aa4dcfe80df77d3f35e1bd9706d79e2acfe023189f39579c403a1205"
+    },
+    {
+      "file": "gui/wails/frontend/src/features/models/e22-installed.test.tsx",
+      "sha256": "73deac7398b199e410ce61218ad16b2614f7712445a1d6e8ad3b8df500dc5456"
+    },
+    {
+      "file": "gui/wails/frontend/src/features/models/flow.test.ts",
+      "sha256": "45d106cd25ecd9281898db085d8c6d28621e68465eaf0b780822e4f26eba8b29"
+    },
+    {
+      "file": "gui/wails/frontend/src/features/requests/progress-cli-facts.json",
+      "sha256": "f52172a35173430a943c688443541fa1b425fc22f8197cd8917d51c46961d911"
+    },
+    {
+      "file": "gui/wails/frontend/src/features/server/components/memory-fit.tsx",
+      "sha256": "cd3608d3d0aed7a77bdd956e8e5328c35b6c754c0bbca2962965204f5b9fc43e"
+    },
+    {
+      "file": "gui/wails/frontend/src/features/server/e14.shots.tsx",
+      "sha256": "b964dce6d2c77295fa1021f7b2c0b33dc457d6cbc5db87cd07554252e5a7e83c"
+    },
+    {
+      "file": "gui/wails/frontend/src/features/server/e15.shots.tsx",
+      "sha256": "e913b31c18aeed3b89484b36c12642f8f7988a598d973f5bdf92f32a788be52a"
+    },
+    {
+      "file": "gui/wails/frontend/src/features/server/ux8.shots.tsx",
+      "sha256": "d7458c561573d14d8ab486c688da97827ca551e3b8215e2a9fd128160b4d6768"
+    },
+    {
+      "file": "gui/wails/frontend/src/features/server/v12.test.tsx",
+      "sha256": "fa9eb916b4560c2bbad61618c7fe6626ceb1a5807813687cdad2a8ce06a97050"
+    },
+    {
+      "file": "gui/wails/frontend/src/features/settings/f5b.shots.tsx",
+      "sha256": "2ed656c097e936594d1e31124c9f95c3ceef991de0f559ef70279d1995e28b24"
+    },
+    {
+      "file": "gui/wails/frontend/src/features/settings/settings.shots.tsx",
+      "sha256": "a37d3a3e0d681f21ce6a68a0dc1baa43657d7975f6313fbf02c39fbc97e09909"
+    },
+    {
+      "file": "gui/wails/frontend/src/features/settings/writes.shots.tsx",
+      "sha256": "4d85212c9b88abd0b9e5645d9351b74d8662bf8b3693f0c30a0228de97165f27"
+    },
+    {
+      "file": "gui/wails/frontend/src/generated/memory96-estimate-reply.json",
+      "sha256": "1e5507b37afcbd3016e8c8e2fe7281a311a453274ad3a611e27d4edbe7a7235b"
+    },
+    {
+      "file": "gui/wails/frontend/src/lib/gui-errors.ts",
+      "sha256": "dc5222fc420a6c53e6683a60bbc7be70dfb4f469eff7fce15f2c84fc2144f585"
+    },
+    {
+      "file": "gui/wails/frontend/src/lib/model-plan-test-data.ts",
+      "sha256": "9d851907a069565f4916778d3fcc34b8a1c08cc2b5496f69dd22261f83f945b9"
+    },
+    {
+      "file": "gui/wails/frontend/src/styles/app.css",
+      "sha256": "0b76807dd35a84a55b2f97a8c95dc36d307a2c2042a7d569dda9bebd4b53515b"
+    },
+    {
+      "file": "gui/wails/frontend/tests/flash-short-plan.json",
+      "sha256": "a9af66dad20428c3837868cb71080474b00fac577781e78e09810caf8f42c502"
+    },
+    {
+      "file": "gui/wails/frontend/tests/gemma-qat-plan.json",
+      "sha256": "1b6c4900ea82c0997c9102e48b175fb405b27e448de26ff274294fb7b424c34e"
+    },
+    {
+      "file": "gui/wails/frontend/tests/lower-memory-short-plan.json",
+      "sha256": "ac3726befe6a880c7160595ce976f675142dfd7d0730c5f526ac98e77ec1cacc"
+    },
+    {
+      "file": "gui/wails/frontend/tests/original-plan.json",
+      "sha256": "6279e003a43f15d7b9c6dfa9f667a62d1d6e958109b77e4509aeb102a10f5265"
+    },
+    {
+      "file": "gui/wails/frontend/tests/recorded-observations.json",
+      "sha256": "ea861e8b5eed37334f033ae984e37b65ba24f8c2aa44b24bd2472e5d7e7a2c71"
+    },
+    {
+      "file": "gui/wails/frontend/tests/runtime-plan.json",
+      "sha256": "3d9f0afdace18035870fc198af87b73f2d378982b099df67fa28e88461ae0920"
+    },
+    {
+      "file": "src/cli/models_support.cpp",
+      "sha256": "be5e9f0c0cdb886f48d273b570ff651430334304e1356fd2aba75b48c1f7ad17"
+    },
+    {
+      "file": "src/cli/serve/release_switches.inc",
+      "sha256": "63e64c2e7978dff5b067c24d87e8bc6d7257917b2a1b3186e277df68fc4b741e"
+    },
+    {
+      "file": "src/cli/serve/release_switches.json",
+      "sha256": "51bfff8bc26645610ae45b5ad8a7e020c052b6f67098f8a5905258c9bb6c8fae"
+    },
+    {
+      "file": "tests/cache/boundary_test.py",
+      "sha256": "6ba454eb48011754e220a8a3c69893afba6ee4a2877c67a4cfa607a79f259681"
+    },
+    {
+      "file": "tests/cli/contract/data/memory96-derived.json",
+      "sha256": "8b3ae3f0ea4469cf0e4cb9837cc81cc2165ccb82ccc2141bef1a23a7c298bb1c"
+    },
+    {
+      "file": "tests/cli/contract/data/memory96-source-128.json",
+      "sha256": "2a23c20578042ad8e4b76513cf0258e1d07c6df02966f87388f9a0d63cef0eb0"
+    },
+    {
+      "file": "tests/cli/contract/engine-panels.json",
+      "sha256": "b5e9711aee2293d31ea661873bd1ec2d892077a14c04797bb1aebbfb92e8dc6b"
+    },
+    {
+      "file": "tests/cli/contract/switches_registry_test.py",
+      "sha256": "19ec3721435bd90c2042f57002e4e3d5aa6575a399b7d9ca8de5d096ea130a5c"
+    },
+    {
+      "file": "tests/cli/contract/switches.golden.json",
+      "sha256": "ae4ed2c769b76cc49dbe7801e06d0a60c69082ea28c87d72938365657842b85a"
+    },
+    {
+      "file": "tests/cli/contract/valid/models-shipped-catalogue.json",
+      "sha256": "9703cb22f70354696543f2aa5301ac1828aacc19cb589d75d0f50707760ec9b4"
+    },
+    {
+      "file": "tests/cli/contract/valid/switches.json",
+      "sha256": "628e5f6ff2a2f96fdc509ab9a5e73a470774f718b7ed2152ea872da177d39737"
+    },
+    {
+      "file": "tests/cli/serve_test.py",
+      "sha256": "0a8b2d34ebafefe53138534550eee86b58cd3ba1bdd1b6b004348bb34f7d78be"
+    },
+    {
+      "file": "tests/fixtures/release_flags_golden.md",
+      "sha256": "c3d64e4bc08a98e8a65b9ea0ab8ed522b73a0dae2b10daa3a689d1d1328325c6"
+    },
+    {
+      "file": "tests/models/gemma4/CMakeLists.txt",
+      "sha256": "a63f50e60853db4e8f4e980b4eb1e8bd1940103293d3e74c7237e71c5cd0e54c"
+    },
+    {
+      "file": "tests/prepare/model_mutations.cmake",
+      "sha256": "a0dac51e53d490cc3fef02d367a6b589cf1925de22585a969d4881d698e76fa5"
+    },
+    {
+      "file": "tests/serve/model_manifest_test.cpp",
+      "sha256": "d09d80c41a550bc7c47a002a67253afb8092918e68f03f5e838166c18b02f081"
+    },
+    {
+      "file": "tests/tools/h3_profile_test.py",
+      "sha256": "af72af99e9c59b92ec8491232baefff91a02926e3afd40996bf2e381a6039896"
+    },
+    {
+      "file": "tools/cli/gen_offline_help.py",
+      "sha256": "59de6042f3171e6631321fdedaf1ee2e74f53083d1c82af3107f5cd1cf46fd6f"
+    },
+    {
+      "file": "tools/gufo/h3_profile.py",
+      "sha256": "02e7770e0710fcb1962ec966c8bd25386f94d19ddb04d09bce9989c5bf58aa81"
+    }
+  ],
+  "build_preload_sha256": "4d3353819ab3aa3272c50527a7dd3772feb46fd35c814e33c0ccec6bd368dadc",
+  "fixture_source": "tests/cli/contract/data/memory96-derived.json",
+  "fixture_sha256": "8b3ae3f0ea4469cf0e4cb9837cc81cc2165ccb82ccc2141bef1a23a7c298bb1c",
+  "executable": "C:\\bubo\\build\\v12final\\tests\\prepare\\memory96_probe_driver.exe",
+  "executable_sha256": "daad0bcd6c7ef993c8818a23e21a5cdd689cf0bf3ee601d4f2473016a893383a",
+  "product_executable_sha256": "36393435c2db5ca9ae54c1434f74a8f62c0ea0de2718de46b5a7f399ed647ad2",
+  "product_engine_sha256": "1811a4ec36f71d882e291bb44ea34b20be8e4ece8f11705b57d36f5bc223011d",
+  "commands": [
+    {
+      "file": "status-96-64.json",
+      "exe": "C:\\bubo\\build\\v12final\\tests\\prepare\\memory96_probe_driver.exe",
+      "args": [
+        "96-64",
+        "status",
+        "--json"
+      ],
+      "expected_exit": 0,
+      "exit_code": 0,
+      "started_at": "2026-10-26T15:25:52.5636276-04:00",
+      "bytes": 9006,
+      "sha256": "b2180eac954d33d48148d83d076e009df456696d54bad2ff707061ff3dae7e42"
+    },
+    {
+      "file": "models-96-64.json",
+      "exe": "C:\\bubo\\build\\v12final\\tests\\prepare\\memory96_probe_driver.exe",
+      "args": [
+        "96-64",
+        "models",
+        "list",
+        "--models-root",
+        "C:\\bubo\\evidence\\capture-09\\capture-models",
+        "--json"
+      ],
+      "expected_exit": 0,
+      "exit_code": 0,
+      "started_at": "2026-10-26T15:25:53.035928-04:00",
+      "bytes": 168608,
+      "sha256": "1f55c0c7136aff26a0127f595f3ebe1e302d409399efd85a757e644306722fb2"
+    },
+    {
+      "file": "estimate-96-64-s1.json",
+      "exe": "C:\\bubo\\build\\v12final\\tests\\prepare\\memory96_probe_driver.exe",
+      "args": [
+        "96-64",
+        "models",
+        "estimate",
+        "--model",
+        "huihui-qwen38-flash-next-lowmemory-v1",
+        "--sessions",
+        "1",
+        "--models-root",
+        "C:\\bubo\\evidence\\capture-09\\capture-models",
+        "--json"
+      ],
+      "expected_exit": 0,
+      "exit_code": 0,
+      "started_at": "2026-10-26T15:25:53.4229786-04:00",
+      "bytes": 40769,
+      "sha256": "d49cbade56d6802ca46ae4d4fe99e8b7f9edcc6206b2d07462ec48963cd684c5"
+    },
+    {
+      "file": "estimate-96-64-s1-c200000.json",
+      "exe": "C:\\bubo\\build\\v12final\\tests\\prepare\\memory96_probe_driver.exe",
+      "args": [
+        "96-64",
+        "models",
+        "estimate",
+        "--model",
+        "huihui-qwen38-flash-next-lowmemory-v1",
+        "--context",
+        "200000",
+        "--sessions",
+        "1",
+        "--models-root",
+        "C:\\bubo\\evidence\\capture-09\\capture-models",
+        "--json"
+      ],
+      "expected_exit": 0,
+      "exit_code": 0,
+      "started_at": "2026-10-26T15:25:53.7732082-04:00",
+      "bytes": 40798,
+      "sha256": "8b3b45501154861f21af3a07ca56154e1251c226db61bcfec1591664d459b712"
+    },
+    {
+      "file": "estimate-96-64-s2.json",
+      "exe": "C:\\bubo\\build\\v12final\\tests\\prepare\\memory96_probe_driver.exe",
+      "args": [
+        "96-64",
+        "models",
+        "estimate",
+        "--model",
+        "huihui-qwen38-flash-next-lowmemory-v1",
+        "--sessions",
+        "2",
+        "--models-root",
+        "C:\\bubo\\evidence\\capture-09\\capture-models",
+        "--json"
+      ],
+      "expected_exit": 0,
+      "exit_code": 0,
+      "started_at": "2026-10-26T15:25:54.1129998-04:00",
+      "bytes": 40770,
+      "sha256": "f6c7fa18062e9741dfa12124f9e924fdce660299c8182938c5bcfe58e616eac1"
+    },
+    {
+      "file": "estimate-96-64-s2-c200000.json",
+      "exe": "C:\\bubo\\build\\v12final\\tests\\prepare\\memory96_probe_driver.exe",
+      "args": [
+        "96-64",
+        "models",
+        "estimate",
+        "--model",
+        "huihui-qwen38-flash-next-lowmemory-v1",
+        "--context",
+        "200000",
+        "--sessions",
+        "2",
+        "--models-root",
+        "C:\\bubo\\evidence\\capture-09\\capture-models",
+        "--json"
+      ],
+      "expected_exit": 0,
+      "exit_code": 0,
+      "started_at": "2026-10-26T15:25:54.473865-04:00",
+      "bytes": 41001,
+      "sha256": "9fd1258b2cb5ac65747db333eb9c6f53c8a9c55481778a41750896a95affe5a7"
+    },
+    {
+      "file": "status-96-72.json",
+      "exe": "C:\\bubo\\build\\v12final\\tests\\prepare\\memory96_probe_driver.exe",
+      "args": [
+        "96-72",
+        "status",
+        "--json"
+      ],
+      "expected_exit": 0,
+      "exit_code": 0,
+      "started_at": "2026-10-26T15:25:54.8257663-04:00",
+      "bytes": 9006,
+      "sha256": "ac4998653912f77392c7e261c035a130e9a71fc5e18ba949cfa068754dc095ac"
+    },
+    {
+      "file": "models-96-72.json",
+      "exe": "C:\\bubo\\build\\v12final\\tests\\prepare\\memory96_probe_driver.exe",
+      "args": [
+        "96-72",
+        "models",
+        "list",
+        "--models-root",
+        "C:\\bubo\\evidence\\capture-09\\capture-models",
+        "--json"
+      ],
+      "expected_exit": 0,
+      "exit_code": 0,
+      "started_at": "2026-10-26T15:25:55.1990221-04:00",
+      "bytes": 165719,
+      "sha256": "228045474cf5055769ff5461d5a904daeaed42059ac321978aae7183ce5cbffc"
+    },
+    {
+      "file": "estimate-96-72-s1.json",
+      "exe": "C:\\bubo\\build\\v12final\\tests\\prepare\\memory96_probe_driver.exe",
+      "args": [
+        "96-72",
+        "models",
+        "estimate",
+        "--model",
+        "huihui-qwen38-flash-next-lowmemory-v1",
+        "--sessions",
+        "1",
+        "--models-root",
+        "C:\\bubo\\evidence\\capture-09\\capture-models",
+        "--json"
+      ],
+      "expected_exit": 0,
+      "exit_code": 0,
+      "started_at": "2026-10-26T15:25:55.5678461-04:00",
+      "bytes": 37978,
+      "sha256": "40793c8ca1c5fbaefd7e34707b7b3ac7bb60f3b392ca2e0971bd5ea2341ab980"
+    },
+    {
+      "file": "estimate-96-72-s1-c200000.json",
+      "exe": "C:\\bubo\\build\\v12final\\tests\\prepare\\memory96_probe_driver.exe",
+      "args": [
+        "96-72",
+        "models",
+        "estimate",
+        "--model",
+        "huihui-qwen38-flash-next-lowmemory-v1",
+        "--context",
+        "200000",
+        "--sessions",
+        "1",
+        "--models-root",
+        "C:\\bubo\\evidence\\capture-09\\capture-models",
+        "--json"
+      ],
+      "expected_exit": 0,
+      "exit_code": 0,
+      "started_at": "2026-10-26T15:25:55.924957-04:00",
+      "bytes": 37978,
+      "sha256": "aa335e8681e9614043ded046e87d4618650e1ae8e9b47cf8bae7ca5dd4a3d0c4"
+    },
+    {
+      "file": "estimate-96-72-s2.json",
+      "exe": "C:\\bubo\\build\\v12final\\tests\\prepare\\memory96_probe_driver.exe",
+      "args": [
+        "96-72",
+        "models",
+        "estimate",
+        "--model",
+        "huihui-qwen38-flash-next-lowmemory-v1",
+        "--sessions",
+        "2",
+        "--models-root",
+        "C:\\bubo\\evidence\\capture-09\\capture-models",
+        "--json"
+      ],
+      "expected_exit": 0,
+      "exit_code": 0,
+      "started_at": "2026-10-26T15:25:56.2707247-04:00",
+      "bytes": 37976,
+      "sha256": "6bbd5239a5b48492b64ad3a7d33522c2e9ecad217f5cc2493f06135392c4f14d"
+    },
+    {
+      "file": "estimate-96-72-s2-c200000.json",
+      "exe": "C:\\bubo\\build\\v12final\\tests\\prepare\\memory96_probe_driver.exe",
+      "args": [
+        "96-72",
+        "models",
+        "estimate",
+        "--model",
+        "huihui-qwen38-flash-next-lowmemory-v1",
+        "--context",
+        "200000",
+        "--sessions",
+        "2",
+        "--models-root",
+        "C:\\bubo\\evidence\\capture-09\\capture-models",
+        "--json"
+      ],
+      "expected_exit": 0,
+      "exit_code": 0,
+      "started_at": "2026-10-26T15:25:56.6214785-04:00",
+      "bytes": 38008,
+      "sha256": "3bb5e5757a9e2f04d4bf669fff876eeed0b3e1fd7363225d226078e57f13e8a4"
+    },
+    {
+      "file": "status-128-96.json",
+      "exe": "C:\\bubo\\build\\v12final\\tests\\prepare\\memory96_probe_driver.exe",
+      "args": [
+        "128-96",
+        "status",
+        "--json"
+      ],
+      "expected_exit": 0,
+      "exit_code": 0,
+      "started_at": "2026-10-26T15:25:56.9570587-04:00",
+      "bytes": 9009,
+      "sha256": "220b904bebaada2c5f96eaf4d5aa04f035fe5bfbe8f3127aeb9561f1a8af1734"
+    },
+    {
+      "file": "models-128-96.json",
+      "exe": "C:\\bubo\\build\\v12final\\tests\\prepare\\memory96_probe_driver.exe",
+      "args": [
+        "128-96",
+        "models",
+        "list",
+        "--models-root",
+        "C:\\bubo\\evidence\\capture-09\\capture-models",
+        "--json"
+      ],
+      "expected_exit": 0,
+      "exit_code": 0,
+      "started_at": "2026-10-26T15:25:57.3198603-04:00",
+      "bytes": 147985,
+      "sha256": "b78818796ed42466d120550473fa02f790639e0d35dd782289f9089d1f311a52"
+    },
+    {
+      "file": "estimate-128-96-s1.json",
+      "exe": "C:\\bubo\\build\\v12final\\tests\\prepare\\memory96_probe_driver.exe",
+      "args": [
+        "128-96",
+        "models",
+        "estimate",
+        "--model",
+        "huihui-qwen38-flash-next-lowmemory-v1",
+        "--sessions",
+        "1",
+        "--models-root",
+        "C:\\bubo\\evidence\\capture-09\\capture-models",
+        "--json"
+      ],
+      "expected_exit": 0,
+      "exit_code": 0,
+      "started_at": "2026-10-26T15:25:57.6711815-04:00",
+      "bytes": 34465,
+      "sha256": "680eed9d748a8dc95c63f0bcfd9c5d60545f62b2e33156d35a05f78686604d51"
+    },
+    {
+      "file": "estimate-128-96-s1-c200000.json",
+      "exe": "C:\\bubo\\build\\v12final\\tests\\prepare\\memory96_probe_driver.exe",
+      "args": [
+        "128-96",
+        "models",
+        "estimate",
+        "--model",
+        "huihui-qwen38-flash-next-lowmemory-v1",
+        "--context",
+        "200000",
+        "--sessions",
+        "1",
+        "--models-root",
+        "C:\\bubo\\evidence\\capture-09\\capture-models",
+        "--json"
+      ],
+      "expected_exit": 0,
+      "exit_code": 0,
+      "started_at": "2026-10-26T15:25:58.0277204-04:00",
+      "bytes": 34465,
+      "sha256": "e9c3f16fd125391fcd53eda4fbfe5badfb190f2d4179f57c078bf88d15c7c48e"
+    },
+    {
+      "file": "estimate-128-96-s2.json",
+      "exe": "C:\\bubo\\build\\v12final\\tests\\prepare\\memory96_probe_driver.exe",
+      "args": [
+        "128-96",
+        "models",
+        "estimate",
+        "--model",
+        "huihui-qwen38-flash-next-lowmemory-v1",
+        "--sessions",
+        "2",
+        "--models-root",
+        "C:\\bubo\\evidence\\capture-09\\capture-models",
+        "--json"
+      ],
+      "expected_exit": 0,
+      "exit_code": 0,
+      "started_at": "2026-10-26T15:25:58.362529-04:00",
+      "bytes": 34457,
+      "sha256": "92329a5d2066ad546050c241f8a4a83e5a90e499490ecae07c21bffd0ae602e9"
+    },
+    {
+      "file": "estimate-128-96-s2-c200000.json",
+      "exe": "C:\\bubo\\build\\v12final\\tests\\prepare\\memory96_probe_driver.exe",
+      "args": [
+        "128-96",
+        "models",
+        "estimate",
+        "--model",
+        "huihui-qwen38-flash-next-lowmemory-v1",
+        "--context",
+        "200000",
+        "--sessions",
+        "2",
+        "--models-root",
+        "C:\\bubo\\evidence\\capture-09\\capture-models",
+        "--json"
+      ],
+      "expected_exit": 0,
+      "exit_code": 0,
+      "started_at": "2026-10-26T15:25:58.7174096-04:00",
+      "bytes": 34469,
+      "sha256": "2020f936aeff26638e336c6e5036637e76ec6b172c7d92297bebfa43abc8b9b9"
+    },
+    {
+      "file": "real-cli-models-128.json",
+      "exe": "C:\\bubo\\build\\v12final\\bubo.exe",
+      "args": [
+        "models",
+        "list",
+        "--models-root",
+        "C:\\bubo\\evidence\\capture-09\\capture-models",
+        "--json"
+      ],
+      "expected_exit": 0,
+      "exit_code": 0,
+      "started_at": "2026-10-26T15:25:59.0542738-04:00",
+      "bytes": 147614,
+      "sha256": "aa57b535c77aa5248853df542956d215a7d9d627758e4857042396090ef72698"
+    },
+    {
+      "file": "real-cli-lowmemory-estimate.json",
+      "exe": "C:\\bubo\\build\\v12final\\bubo.exe",
+      "args": [
+        "models",
+        "estimate",
+        "--model",
+        "huihui-qwen38-flash-next-lowmemory-v1",
+        "--models-root",
+        "C:\\bubo\\evidence\\capture-09\\capture-models",
+        "--json"
+      ],
+      "expected_exit": 0,
+      "exit_code": 0,
+      "started_at": "2026-10-26T15:25:59.4516686-04:00",
+      "bytes": 34525,
+      "sha256": "104ffdcfc60874d52f616e672bf4e2a87a2a89dd8857f5fd030a07b6079629de"
+    },
+    {
+      "file": "prepare-96-64-plan.jsonl",
+      "exe": "C:\\bubo\\build\\v12final\\tests\\prepare\\memory96_probe_driver.exe",
+      "args": [
+        "96-64",
+        "prepare",
+        "model",
+        "--plan",
+        "--jsonl",
+        "--output",
+        "C:\\bubo\\evidence\\capture-09\\capture-prepare"
+      ],
+      "expected_exit": 0,
+      "exit_code": 0,
+      "started_at": "2026-10-26T15:26:01.3944709-04:00",
+      "bytes": 21363,
+      "sha256": "3e3f543f7e074a4a89f68cf39d30c6faee821eeb412fae90e1df7ec9bc1ec4c7"
+    },
+    {
+      "file": "prepare-96-72-plan.jsonl",
+      "exe": "C:\\bubo\\build\\v12final\\tests\\prepare\\memory96_probe_driver.exe",
+      "args": [
+        "96-72",
+        "prepare",
+        "model",
+        "--plan",
+        "--jsonl",
+        "--output",
+        "C:\\bubo\\evidence\\capture-09\\capture-prepare"
+      ],
+      "expected_exit": 0,
+      "exit_code": 0,
+      "started_at": "2026-10-26T15:26:01.7608251-04:00",
+      "bytes": 21363,
+      "sha256": "ef381b0f503d78cd35d099b373468d5f61cc559fae37e7f9ea5f3430ae4312ef"
+    },
+    {
+      "file": "prepare-128-96-plan.jsonl",
+      "exe": "C:\\bubo\\build\\v12final\\tests\\prepare\\memory96_probe_driver.exe",
+      "args": [
+        "128-96",
+        "prepare",
+        "model",
+        "--plan",
+        "--jsonl",
+        "--output",
+        "C:\\bubo\\evidence\\capture-09\\capture-prepare"
+      ],
+      "expected_exit": 0,
+      "exit_code": 0,
+      "started_at": "2026-10-26T15:26:02.2671033-04:00",
+      "bytes": 22173,
+      "sha256": "60d0cb541caa465a0f414bca756f2556af386cff2b291ddb4ca6572c78f5eae8"
+    },
+    {
+      "file": "estimate-standard-128-c200000.json",
+      "exe": "C:\\bubo\\build\\v12final\\tests\\prepare\\memory96_probe_driver.exe",
+      "args": [
+        "128-96",
+        "models",
+        "estimate",
+        "--model",
+        "huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--context",
+        "200000",
+        "--models-root",
+        "C:\\bubo\\evidence\\capture-09\\capture-models",
+        "--json"
+      ],
+      "expected_exit": 0,
+      "exit_code": 0,
+      "started_at": "2026-10-26T15:26:02.5986010-04:00",
+      "bytes": 38060,
+      "sha256": "d92811a016c495846e3f014b5b2d77f4d3a6079309d1a6e3528c6c274e8c9b80"
+    }
+  ],
+  "publication_note": "Machine paths and provenance labels are neutral publication fixtures. Output sizes and hashes describe the scrubbed bytes; executable and source revision identities remain historical."
+}

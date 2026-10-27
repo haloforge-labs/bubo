@@ -27,7 +27,17 @@ namespace fs = std::filesystem;
 #ifdef _WIN32
 std::wstring Wide(const fs::path& path);
 #endif
+std::string Display(const fs::path& path) {
+  const auto utf8 = path.u8string();
+  std::string text(utf8.begin(), utf8.end());
+  if (text.starts_with("\\\\?\\"))
+    text.erase(0, 4);
+  while (text.size() > 1 && (text.back() == '\\' || text.back() == '/'))
+    text.pop_back();
+  return text;
+}
 fs::path Ancestor(fs::path path) {
+  const auto requested = path;
 #ifdef _WIN32
   path = fs::path(Wide(path));
 #else
@@ -43,7 +53,8 @@ fs::path Ancestor(fs::path path) {
     const auto parent = path.parent_path();
 #endif
     if (parent == path || parent.empty())
-      throw std::runtime_error("no existing ancestor");
+      throw std::runtime_error("cannot use " + Display(requested) + ": drive " +
+                               Display(path) + " does not exist");
     path = parent;
   }
   return path;

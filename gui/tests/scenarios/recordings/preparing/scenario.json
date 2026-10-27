@@ -1,0 +1,11 @@
+{
+  "_source": "fixture",
+  "state": "Preparing",
+  "records": {
+    "models": "../v12/models-list-empty.json",
+    "prepare": "../v12/plan-huihui-qwen38-flash-next-ud-q4-k-xl-v1-fresh.jsonl",
+    "progress": "../v12/progress-model.json",
+    "status": "../v12/status-empty.json",
+    "switches": "../v12/switches.json"
+  }
+}

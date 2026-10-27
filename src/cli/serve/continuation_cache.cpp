@@ -1,6 +1,7 @@
 #include "src/cli/serve/continuation_cache.hpp"
 
 #include <algorithm>
+#include <deque>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
@@ -18,6 +19,10 @@ namespace gufo::server {
 namespace {
 
 constexpr auto kCancellationPollInterval = std::chrono::milliseconds{10};
+// Host-memory floor exemption: a snapshot holding at most this much host memory (a device checkpoint's header, tokens and logits) is
+// admitted below the floor, while all retained snapshots together hold at most the second figure.
+constexpr std::uint64_t kFloorExemptHostBytes = std::uint64_t{16} << 20;
+constexpr std::uint64_t kFloorExemptRetainedHostBytes = std::uint64_t{256} << 20;
 
 bool IsPrefix(std::span<const ContinuationToken> prefix,
               std::span<const ContinuationToken> tokens) {
@@ -71,6 +76,32 @@ void EmitSnapshotEvents(const ContinuationCache::SnapshotEventSink& sink,
 
 }  // namespace
 
+namespace {
+/// Why a checkpoint the cache once had (or was offered) is gone, as a later miss reports it (GitHub #9).
+const char* EvictedReason(SnapshotEventReason reason) {
+  switch (reason) {
+    case SnapshotEventReason::kEntryCapacity:
+      return "evicted_entry_capacity";
+    case SnapshotEventReason::kMemoryPressure:
+      return "evicted_guard";
+    default:
+      return "evicted_byte_capacity";
+  }
+}
+const char* SkippedReason(SnapshotEventReason reason) {
+  switch (reason) {
+    case SnapshotEventReason::kEntryCapacity:
+      return "skipped_entry_capacity";
+    case SnapshotEventReason::kHostMemoryFloor:
+      return "skipped_host_floor";
+    case SnapshotEventReason::kMemoryPressure:
+      return "skipped_guard";
+    default:
+      return "skipped_capacity";
+  }
+}
+}  // namespace
+
 struct ContinuationCache::Entry {
   explicit Entry(std::unique_ptr<ContinuationState> model_state)
       : state(std::move(model_state)) {}
@@ -101,6 +132,26 @@ struct ContinuationCache::Impl {
   std::size_t snapshot_capacity_bytes{0};
   std::size_t retained_snapshot_bytes{0};
   std::size_t reserved_snapshot_bytes{0};
+
+  /// The newest checkpoints the cache dropped or refused, with the reason. A lookup that misses over one of these prefixes reports that reason
+  /// instead of prefix_changed / no_checkpoint. Touched only under `mutex`, on eviction, skip and miss paths.
+  struct Tombstone {
+    std::vector<ContinuationToken> tokens;
+    std::vector<std::uint8_t> input_identity;
+    const char* reason;
+  };
+  static constexpr std::size_t kTombstones = 8;
+  std::deque<Tombstone> tombstones;
+  void AddTombstone(std::span<const ContinuationToken> tokens, std::span<const std::uint8_t> identity, const char* reason) {
+    if (tokens.empty())
+      return;
+    std::erase_if(tombstones, [&](const Tombstone& old) {
+      return old.tokens.size() <= tokens.size() && std::ranges::equal(old.input_identity, identity) && IsPrefix(old.tokens, tokens);
+    });
+    tombstones.push_back({std::vector<ContinuationToken>(tokens.begin(), tokens.end()), std::vector<std::uint8_t>(identity.begin(), identity.end()), reason});
+    while (tombstones.size() > kTombstones)
+      tombstones.pop_front();
+  }
 
   [[nodiscard]] bool snapshot_mode() const noexcept {
     return static_cast<bool>(snapshot_support.restore);
@@ -240,7 +291,8 @@ ContinuationCache::Lease::Lease(Lease&& other) noexcept
       stable_prefix_tokens_(std::exchange(other.stable_prefix_tokens_, 0)),
       input_identity_(std::move(other.input_identity_)),
       input_prefixes_(std::move(other.input_prefixes_)),
-      lookup_(std::exchange(other.lookup_, {})) {}
+      lookup_(std::exchange(other.lookup_, {})),
+      skips_(std::exchange(other.skips_, {})) {}
 
 ContinuationCache::Lease& ContinuationCache::Lease::operator=(
     Lease&& other) noexcept {
@@ -303,9 +355,12 @@ bool ContinuationCache::Lease::TryReserveSnapshot(
     throw std::logic_error(
         "continuation cache lease already has a snapshot reservation");
   }
+  SnapshotEventReason why = SnapshotEventReason::kByteCapacity;
   if (!cache_->ReserveSnapshot(source_index_, snapshot_bytes, token_count,
                                preserve_source, purpose, replacement_prefix,
-                               InputIdentity(token_count), superseded_)) {
+                               InputIdentity(token_count), superseded_, &why)) {
+    ++skips_.count;
+    skips_.reason = why;
     cache_->ResolveRemoved(superseded_);
     return false;
   }
@@ -320,6 +375,8 @@ void ContinuationCache::Lease::SkipSnapshot(SnapshotEventReason reason,
   if (cache_ == nullptr) {
     return;
   }
+  ++skips_.count;
+  skips_.reason = reason;
   cache_->SkipSnapshot(reserved_snapshot_bytes_, reason, snapshot_bytes,
                        token_count);
   reserved_snapshot_bytes_ = 0;
@@ -580,6 +637,14 @@ ContinuationCache::Lease ContinuationCache::Acquire(
             inspect(entry->tokens, entry->input_identity);
           inspect(entry->live_tokens, entry->live_identity);
         }
+        // A checkpoint this cache dropped or refused for capacity or by the memory guard: say so instead of prefix_changed.
+        std::size_t longest = 0;
+        for (const auto& tomb : impl_->tombstones) {
+          if (tomb.tokens.size() > longest && matches_input(tomb.input_identity, tomb.tokens.size()) && IsPrefix(tomb.tokens, prompt)) {
+            longest = tomb.tokens.size();
+            lookup = {tomb.reason, longest, longest};
+          }
+        }
       }
     }
     std::size_t selected = live_hit ? live_source : source;
@@ -802,6 +867,25 @@ std::size_t ContinuationCache::reserved_snapshot_bytes() const noexcept {
   return impl_->reserved_snapshot_bytes;
 }
 
+ContinuationCache::SnapshotFootprint ContinuationCache::snapshot_footprint() const {
+  SnapshotFootprint footprint;
+  std::vector<std::shared_ptr<const ContinuationSnapshot>> snapshots;
+  {
+    const std::lock_guard<std::mutex> lock(impl_->mutex);
+    footprint.logical_bytes = impl_->retained_snapshot_bytes;
+    for (std::size_t i = impl_->state_count; i < impl_->entries.size(); ++i)
+      if (impl_->entries[i]->valid && impl_->entries[i]->snapshot)
+        snapshots.push_back(impl_->entries[i]->snapshot);
+  }
+  // Outside the cache lock: a runner may wait for a device transfer to ask where its rows live.
+  std::unordered_set<const void*> counted;
+  for (const auto& snapshot : snapshots) {
+    footprint.host_bytes += snapshot->HostBytes();
+    footprint.device_bytes += snapshot->DeviceBytes(counted);
+  }
+  return footprint;
+}
+
 ContinuationState& ContinuationCache::StateAt(std::size_t index) {
   return *impl_->entries.at(index)->state;
 }
@@ -822,12 +906,30 @@ bool ContinuationCache::ReserveSnapshot(
     std::size_t token_count, bool preserve_source, SnapshotPurpose& purpose,
     std::span<const ContinuationToken> replacement_prefix,
     std::span<const std::uint8_t> input_identity,
-    std::vector<std::shared_ptr<const ContinuationSnapshot>>& superseded) {
+    std::vector<std::shared_ptr<const ContinuationSnapshot>>& superseded,
+    SnapshotEventReason* skip_reason) {
   std::vector<std::shared_ptr<const ContinuationSnapshot>> removed_snapshots;
   // (evicted snapshot, retained longer entry that extends it): see EvictDominatedEnabled.
   std::vector<std::pair<std::shared_ptr<const ContinuationSnapshot>,
                         std::shared_ptr<const ContinuationSnapshot>>>
       dominated_snapshots;
+  if (impl_->snapshot_support.allow_new && !impl_->snapshot_support.allow_new()) {
+    SnapshotEvent event{.action = SnapshotEventAction::kSkipped,
+                        .reason = SnapshotEventReason::kMemoryPressure,
+                        .snapshot_bytes = snapshot_bytes,
+                        .token_count = token_count};
+    {
+      const std::lock_guard<std::mutex> lock(impl_->mutex);
+      event.retained_snapshot_bytes = impl_->retained_snapshot_bytes;
+      event.reserved_snapshot_bytes = impl_->reserved_snapshot_bytes;
+      event.capacity_bytes = impl_->snapshot_capacity_bytes;
+      impl_->AddTombstone(replacement_prefix, input_identity, "skipped_guard");
+    }
+    if (skip_reason != nullptr)
+      *skip_reason = SnapshotEventReason::kMemoryPressure;
+    EmitSnapshotEvents(impl_->snapshot_support.on_event, std::span<const SnapshotEvent>(&event, 1));
+    return false;
+  }
   std::vector<SnapshotEvent> events;
   bool admitted = false;
   const int max_priority = MaxRemovalPriority(purpose);
@@ -858,15 +960,38 @@ bool ContinuationCache::ReserveSnapshot(
       return snapshot_bytes != 0 && used <= impl_->snapshot_capacity_bytes &&
              snapshot_bytes <= impl_->snapshot_capacity_bytes - used;
     };
-    // Host-memory floor (GUFO_CACHE_HOST_FLOOR_MB): the admission needs host available bytes >= floor + this snapshot. The shortfall is evicted
-    // first, lowest removal priority first (the same victims a byte-capacity shortage would pick); the snapshot is refused (skipped /
-    // host_memory_floor) only if eviction cannot cover the shortfall. Freed bytes are counted from the removed entries, because the memory only
-    // returns to the host after the removed snapshots are released outside this lock.
+    // Host-memory floor (GUFO_CACHE_HOST_FLOOR_MB): the admission needs host available bytes >= floor + this snapshot's host bytes. The
+    // shortfall is evicted first, lowest removal priority first (the same victims a byte-capacity shortage would pick); the snapshot is refused
+    // (skipped / host_memory_floor) only if eviction cannot cover the shortfall. Freed bytes are counted from the host bytes of the removed
+    // entries, because the memory only returns to the host after the removed snapshots are released outside this lock.
+    // The floor charges host bytes, not the payload: a checkpoint that keeps its state in device memory holds only a small session part on
+    // the host, and evicting it frees no host memory. Before 10-14 the whole payload was charged, so on a busy host every device checkpoint
+    // was refused and a hybrid model re-read each agent turn. A snapshot whose host part is negligible is admitted below the floor while all
+    // retained snapshots together hold little host memory.
+    const std::uint64_t host_bytes = [&]() -> std::uint64_t {
+      const auto& support = impl_->snapshot_support;
+      if (!support.host_bytes) return snapshot_bytes;
+      return std::min<std::uint64_t>(snapshot_bytes, support.host_bytes(snapshot_bytes, token_count));
+    }();
+    const auto entry_host_bytes = [](const Entry& entry) -> std::uint64_t {
+      return entry.snapshot ? entry.snapshot->HostBytes() : entry.snapshot_bytes;
+    };
+    const auto device_resident = [&](const Entry& entry) {
+      return entry_host_bytes(entry) < entry.snapshot_bytes;
+    };
     const std::uint64_t floor_shortfall = [&]() -> std::uint64_t {
       const auto& support = impl_->snapshot_support;
       if (support.host_floor_bytes == 0 || !support.host_available_bytes) return 0;
+      // Only a checkpoint the runner reports as device-resident (host part below its payload) can be exempt; a host-resident payload of any
+      // size keeps the floor it was made for.
+      if (host_bytes < snapshot_bytes && host_bytes <= kFloorExemptHostBytes) {
+        std::uint64_t retained_host = 0;
+        for (std::size_t i = impl_->state_count; i < impl_->entries.size(); ++i)
+          if (impl_->entries[i]->valid) retained_host += entry_host_bytes(*impl_->entries[i]);
+        if (retained_host + host_bytes <= kFloorExemptRetainedHostBytes) return 0;
+      }
       const std::uint64_t available = support.host_available_bytes();
-      const std::uint64_t needed = support.host_floor_bytes + snapshot_bytes;
+      const std::uint64_t needed = support.host_floor_bytes + host_bytes;
       return available < needed ? needed - available : 0;
     }();
     std::uint64_t floor_evicted = 0;
@@ -884,8 +1009,10 @@ bool ContinuationCache::ReserveSnapshot(
       events.push_back(make_event(SnapshotEventAction::kSkipped,
                                   SnapshotEventReason::kEntryCapacity,
                                   snapshot_bytes, token_count));
+      impl_->AddTombstone(replacement_prefix, input_identity, SkippedReason(SnapshotEventReason::kEntryCapacity));
     } else {
-      const auto oldest_snapshot = [&](bool allow_source) {
+      // host_only: only the floor is short, so only an entry that holds its payload in host memory is worth evicting.
+      const auto oldest_snapshot = [&](bool allow_source, bool host_only = false) {
         std::size_t selected = impl_->entries.size();
         std::uint64_t oldest = std::numeric_limits<std::uint64_t>::max();
         int priority = 4;
@@ -893,7 +1020,8 @@ bool ContinuationCache::ReserveSnapshot(
              candidate < impl_->entries.size(); ++candidate) {
           const auto& entry = *impl_->entries[candidate];
           if (!entry.valid || entry.snapshot == nullptr ||
-              (!allow_source && candidate == source_index)) {
+              (!allow_source && candidate == source_index) ||
+              (host_only && device_resident(entry))) {
             continue;
           }
           const int rank = priority_for(candidate);
@@ -946,7 +1074,7 @@ bool ContinuationCache::ReserveSnapshot(
         auto& entry = *impl_->entries[target];
         const std::size_t removed_bytes = entry.snapshot_bytes;
         const std::size_t removed_tokens = entry.tokens.size();
-        floor_evicted += removed_bytes;
+        floor_evicted += entry_host_bytes(entry);
         auto removal_event = make_event(SnapshotEventAction::kRemoved, reason,
                                         removed_bytes, removed_tokens);
         removal_event.purpose = static_cast<int>(entry.purpose);
@@ -982,7 +1110,7 @@ bool ContinuationCache::ReserveSnapshot(
                     SnapshotPersistence::kFailed ||
                 peer.snapshot->persistence->state.load() ==
                     SnapshotPersistence::kAbandoned ||
-                // Pre-data amendment (operator 16:1x, multi-slot's L1 finding): agent clients re-render the previous assistant turn, so a
+                // Continuation compatibility: agent clients re-render the previous assistant turn, so a
                 // whole-prompt (live-frontier) entry ends past the next prompt's divergence and cannot stand in for the shorter stable-prefix record.
                 // Whole-prompt entries carry stable_prefix_tokens != 0 (continuation_cache.cpp: only tokens.size() == prompt_tokens_ gets it); the
                 // covering peer must be a boundary entry (stable_prefix_tokens == 0).
@@ -1005,28 +1133,47 @@ bool ContinuationCache::ReserveSnapshot(
           superseded.push_back(std::move(entry.snapshot));
         else
           removed_snapshots.push_back(std::move(entry.snapshot));
+        // A prefix lost for capacity is remembered for the miss reason; a replacement by the incoming checkpoint (it covers this prefix) is not a loss.
+        if (reason != SnapshotEventReason::kExactReplacement &&
+            !(IsPrefix(entry.tokens, replacement_prefix) && std::ranges::equal(entry.input_identity, input_identity)))
+          impl_->AddTombstone(entry.tokens, entry.input_identity, EvictedReason(reason));
         entry.tokens.clear();
         entry.snapshot_bytes = 0;
         entry.valid = false;
         impl_->retained_snapshot_bytes -= removed_bytes;
         events.push_back(removal_event);
       };
-      while (can_fit_after_eviction && (!fits() || floor_evicted < floor_shortfall)) {
+      // Evicting for the floor helps only when the evictable entries hold enough host memory; device checkpoints hold almost none. When the
+      // shortfall cannot be covered, keep every entry and refuse this one.
+      std::uint64_t evictable_host = 0;
+      if (floor_shortfall != 0)
+        for (std::size_t i = impl_->state_count; i < impl_->entries.size(); ++i) {
+          const auto& entry = *impl_->entries[i];
+          // A preserved source is never evicted below, so it cannot cover the shortfall.
+          if (preserve_source && i == source_index) continue;
+          if (entry.valid && entry.snapshot != nullptr && priority_for(i) <= max_priority && !device_resident(entry))
+            evictable_host += entry_host_bytes(entry);
+        }
+      const bool floor_reachable = evictable_host >= floor_shortfall;
+      while (floor_reachable && can_fit_after_eviction && (!fits() || floor_evicted < floor_shortfall)) {
         if (exact < impl_->entries.size() && impl_->entries[exact]->valid) {
           if (impl_->entries[exact]->purpose == SnapshotPurpose::kBranchPoint)
             purpose = SnapshotPurpose::kBranchPoint;
           remove(exact, SnapshotEventReason::kExactReplacement);
           continue;
         }
-        std::size_t target = oldest_snapshot(false);
+        // Capacity met and only the floor short: evict host-resident entries only.
+        const bool host_only = fits();
+        std::size_t target = oldest_snapshot(false, host_only);
         // Advance this family before sacrificing another family's last copy,
         // unless the source is a branch point other prompts still diverge at.
         // Verify the source: another lease may have replaced its record.
         if (can_replace_source() &&
+            (!host_only || !device_resident(*impl_->entries[source_index])) &&
             (target == impl_->entries.size() || priority_for(target) == 3))
           target = source_index;
         if (target == impl_->entries.size() && !preserve_source) {
-          target = oldest_snapshot(true);
+          target = oldest_snapshot(true, host_only);
         }
         if (target == impl_->entries.size()) {
           break;
@@ -1054,6 +1201,7 @@ bool ContinuationCache::ReserveSnapshot(
           if (impl_->entries[i]->valid && impl_->entries[i]->snapshot != nullptr && priority_for(i) <= max_priority) ++evictable;
         skipped_event.stable_prefix_tokens = evictable;
         events.push_back(skipped_event);
+        impl_->AddTombstone(replacement_prefix, input_identity, SkippedReason(skipped_event.reason));
       }
     }
   }
@@ -1063,6 +1211,10 @@ bool ContinuationCache::ReserveSnapshot(
     ResolveRemoved(one, survivor);
   }
   ResolveRemoved(removed_snapshots);
+  if (!admitted && skip_reason != nullptr)
+    for (const auto& event : events)
+      if (event.action == SnapshotEventAction::kSkipped)
+        *skip_reason = event.reason;
   EmitSnapshotEvents(impl_->snapshot_support.on_event, events);
   return admitted;
 }
@@ -1262,6 +1414,8 @@ std::size_t ContinuationCache::Commit(
             const std::size_t removed_tokens = snapshot_entry.tokens.size();
             removed_snapshots.push_back(std::move(snapshot_entry.snapshot));
             impl_->retained_snapshot_bytes -= removed_bytes;
+            if (!exact_replacement && !(IsPrefix(snapshot_entry.tokens, tokens) && std::ranges::equal(snapshot_entry.input_identity, input_identity)))
+              impl_->AddTombstone(snapshot_entry.tokens, snapshot_entry.input_identity, "evicted_entry_capacity");
             snapshot_entry.tokens.clear();
             snapshot_entry.snapshot_bytes = 0;
             snapshot_entry.valid = false;
@@ -1322,6 +1476,58 @@ std::size_t ContinuationCache::Commit(
   EmitSnapshotEvents(impl_->snapshot_support.on_event, events);
   impl_->condition.notify_all();
   return retained_bytes;
+}
+
+std::uint64_t ContinuationCache::TrimSnapshots(std::uint64_t target_bytes, bool host_only) {
+  std::vector<std::shared_ptr<const ContinuationSnapshot>> removed_snapshots;
+  std::vector<SnapshotEvent> events;
+  std::uint64_t freed = 0;
+  {
+    const std::lock_guard<std::mutex> lock(impl_->mutex);
+    while (freed < target_bytes) {
+      std::size_t target = impl_->entries.size();
+      int priority = std::numeric_limits<int>::max();
+      std::uint64_t oldest = std::numeric_limits<std::uint64_t>::max();
+      for (std::size_t candidate = impl_->state_count; candidate < impl_->entries.size(); ++candidate) {
+        const auto& entry = *impl_->entries[candidate];
+        if (!entry.valid || entry.snapshot == nullptr) continue;
+        if (host_only && entry.snapshot->HostBytes() == 0) continue;  // frees no system RAM
+        const int rank = impl_->RemovalPriority(candidate);
+        if (rank < priority || (rank == priority && entry.snapshot_last_used < oldest)) {
+          target = candidate;
+          priority = rank;
+          oldest = entry.snapshot_last_used;
+        }
+      }
+      if (target == impl_->entries.size()) break;
+      auto& entry = *impl_->entries[target];
+      const std::size_t removed_bytes = entry.snapshot_bytes;
+      freed += host_only ? static_cast<std::uint64_t>(entry.snapshot->HostBytes()) : static_cast<std::uint64_t>(removed_bytes);
+      SnapshotEvent event{.action = SnapshotEventAction::kRemoved,
+                          .reason = SnapshotEventReason::kMemoryPressure,
+                          .snapshot_bytes = removed_bytes,
+                          .token_count = entry.tokens.size(),
+                          .retained_snapshot_bytes = impl_->retained_snapshot_bytes - removed_bytes,
+                          .reserved_snapshot_bytes = impl_->reserved_snapshot_bytes,
+                          .capacity_bytes = impl_->snapshot_capacity_bytes};
+      event.purpose = static_cast<int>(entry.purpose);
+      event.rank = priority;
+      event.stable_prefix_tokens = entry.stable_prefix_tokens;
+      event.family = FamilyHash(entry.tokens);
+      event.last_used = entry.snapshot_last_used;
+      removed_snapshots.push_back(std::move(entry.snapshot));
+      impl_->AddTombstone(entry.tokens, entry.input_identity, "evicted_guard");
+      entry.tokens.clear();
+      entry.snapshot_bytes = 0;
+      entry.valid = false;
+      impl_->retained_snapshot_bytes -= removed_bytes;
+      events.push_back(event);
+    }
+  }
+  ResolveRemoved(removed_snapshots);
+  EmitSnapshotEvents(impl_->snapshot_support.on_event, events);
+  impl_->condition.notify_all();
+  return freed;
 }
 
 void ContinuationCache::ResolveRemoved(

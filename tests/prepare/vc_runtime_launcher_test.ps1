@@ -79,82 +79,66 @@ foreach ($kind in @('registry', 'missing', 'files', 'partial')) {
 if ($Case -ne 'all' -and $Case -ne 'launchers') { exit 0 }
 $scratch = Join-Path (Get-Location) ('crt-start-' + [Guid]::NewGuid().ToString('N'))
 $windows = Join-Path $scratch 'tools\windows'
+$bin = Join-Path $scratch 'bin'
 [IO.Directory]::CreateDirectory($windows) | Out-Null
+[IO.Directory]::CreateDirectory($bin) | Out-Null
+$powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 try {
+  # The package's start.cmd: the VC++ check, then the app if it is there,
+  # else bin\bubo.exe serve with the same arguments.
   Copy-Item -LiteralPath (Join-Path $Root 'start.cmd') -Destination $scratch
-  # An executable returns to its caller; a batch mock needs CALL to do so.
-  # Adapt only the isolated dispatch, leaving the production status line intact.
-  $cmdPath = Join-Path $scratch 'start.cmd'
-  $cmdSource = [IO.File]::ReadAllText($cmdPath)
-  if (!$cmdSource.Contains('powershell -NoProfile')) { throw 'start.cmd dispatch missing' }
-  [IO.File]::WriteAllText($cmdPath, $cmdSource.Replace('powershell -NoProfile', 'call powershell -NoProfile'))
+  # Mock executables write their arguments to <name>.ran next to themselves
+  # and exit 7. The app mock is a window program, so no console opens.
+  $mock = 'public static class P { public static int Main(string[] a) { System.IO.File.WriteAllText(System.IO.Path.Combine(System.AppDomain.CurrentDomain.BaseDirectory, System.IO.Path.GetFileNameWithoutExtension(System.Environment.GetCommandLineArgs()[0]) + ".ran"), string.Join("|", a)); return 7; } }'
+  foreach ($target in @(@((Join-Path $bin 'bubo.exe'), 'ConsoleApplication'),
+                        @((Join-Path $scratch 'app-mock\Bubo.Control.Web.exe'), 'WindowsApplication'))) {
+    [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($target[0])) | Out-Null
+    & $powershell -NoProfile -Command "Add-Type -TypeDefinition '$mock' -OutputAssembly '$($target[0])' -OutputType $($target[1])"
+    if ($LASTEXITCODE -or -not (Test-Path -LiteralPath $target[0])) { throw "mock executable $($target[0])" }
+  }
+  $ran = Join-Path $bin 'bubo.ran'
+  $appRan = Join-Path $bin 'Bubo.Control.Web.ran'
+  $run = {
+    Push-Location -LiteralPath $scratch
+    # .\ because NoDefaultCurrentDirectoryInExePath stops cmd searching here.
+    try { $script:output = '' | & cmd.exe /d /c .\start.cmd --port 1 'a b' 2>&1; $script:rc = $LASTEXITCODE }
+    finally { Pop-Location }
+    Write-Output "start.cmd rc=$script:rc"
+    $script:output | Write-Output
+  }
+  # 1. VC++ missing: the link, exit 4, and nothing starts.
+  $mockRuntime = [IO.File]::ReadAllText($Runtime) + "`nfunction Test-BuboVcRuntime { return `$false }`n"
+  [IO.File]::WriteAllText((Join-Path $windows 'vc-runtime.ps1'), $mockRuntime)
+  & $run
+  if ($rc -ne 4 -or "$output" -notmatch 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -or
+      (Test-Path -LiteralPath $ran)) { throw 'start.cmd missing-runtime refusal' }
+  # 2. VC++ present, no app: bin\bubo.exe serve with the same arguments, and
+  #    its exit code.
+  [IO.File]::WriteAllText((Join-Path $windows 'vc-runtime.ps1'), $mockRuntime.Replace('{ return $false }', '{ return $true }'))
+  & $run
+  if ($rc -ne 7 -or -not (Test-Path -LiteralPath $ran) -or
+      [IO.File]::ReadAllText($ran) -ne 'serve|--port|1|a b') { throw 'start.cmd without the app must run bubo serve with the arguments' }
+  Remove-Item -LiteralPath $ran
+  # 3. VC++ present, the app is there: the app starts detached, start.cmd
+  #    exits 0 and bubo.exe does not run.
+  Copy-Item -LiteralPath (Join-Path $scratch 'app-mock\Bubo.Control.Web.exe') -Destination $bin
+  & $run
+  $deadline = (Get-Date).AddSeconds(15)
+  while (-not (Test-Path -LiteralPath $appRan) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
+  if ($rc -ne 0 -or -not (Test-Path -LiteralPath $appRan) -or (Test-Path -LiteralPath $ran)) { throw 'start.cmd must open the app when it is there' }
+  # The package no longer carries the old console launcher.
+  $package = [IO.File]::ReadAllText((Join-Path $Root 'tools\windows\package.ps1'))
+  if ($package -match 'launcher\.ps1|inventory\.ps1') { throw 'package.ps1 still ships launcher.ps1 or inventory.ps1' }
+  # start.ps1 (repository tool, not in the package) keeps its own check.
   foreach ($launcher in @('launcher.ps1', 'start.ps1')) {
     Copy-Item -LiteralPath (Join-Path $Root "tools\windows\$launcher") -Destination $windows
   }
-  # The native registry/file probes are replaced only in this isolated mock.
-  $mockRuntime = [IO.File]::ReadAllText($Runtime) + "`nfunction Test-BuboVcRuntime { return `$false }`n"
   [IO.File]::WriteAllText((Join-Path $windows 'vc-runtime.ps1'), $mockRuntime)
   Set-Content -LiteralPath (Join-Path $windows 'inventory.ps1') -Value "throw 'launcher reached inventory without prerequisite'"
-  $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-  # start.cmd resolves this mock command first; it invokes the actual launcher
-  # under Windows PowerShell with fake probes and cannot reach an engine.
-  Set-Content -LiteralPath (Join-Path $scratch 'powershell.cmd') -Value "@echo off`r`n`"$powershell`" %*`r`nexit /b %errorlevel%"
-  $oldPath = $env:PATH
-  $env:PATH = "$scratch;$oldPath"
-  Push-Location -LiteralPath $scratch
-  try {
-    $output = & cmd.exe /d /c start.cmd -DryRun 2>&1
-    $rc = $LASTEXITCODE
-  } finally { Pop-Location; $env:PATH = $oldPath }
-  Write-Output "start.cmd mock rc=$rc"
-  $output | Write-Output
-  if ($rc -ne 4 -or "$output" -notmatch 'https://aka.ms/vs/17/release/vc_redist.x64.exe') { throw 'start.cmd missing-runtime refusal' }
   $output = & $powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $windows 'start.ps1') -DryRun 2>&1
   $rc = $LASTEXITCODE
   Write-Output "start.ps1 mock rc=$rc"
   $output | Write-Output
   if ($rc -ne 4 -or "$output" -notmatch 'https://aka.ms/vs/17/release/vc_redist.x64.exe') { throw 'start.ps1 missing-runtime refusal' }
-  # Exercise the real start.cmd forwarding and launcher with a remembered plan.
-  # An empty placeholder executable is never invoked under -DryRun.
-  [IO.File]::WriteAllText((Join-Path $windows 'vc-runtime.ps1'),
-    'function Confirm-BuboVcRuntime { return $true }')
-  [IO.File]::WriteAllText((Join-Path $windows 'inventory.ps1'),
-    '$GufoRoot = Split-Path (Split-Path $PSScriptRoot); function Get-GufoEnvSwitches { return @() }')
-  [IO.File]::WriteAllText((Join-Path $scratch 'bubo.exe'), '')
-  $savedLocal = $env:LOCALAPPDATA
-  $env:LOCALAPPDATA = Join-Path $scratch 'settings'
-  $settingsDirectory = Join-Path $env:LOCALAPPDATA 'gufo'
-  [IO.Directory]::CreateDirectory($settingsDirectory) | Out-Null
-  $plan = @{ Title = 'Fixture model'; Args = @('serve', '--port', '8080', 'llm', '--model', 'fixture.gguf')
-    Env = @{}; Port = 8080; Host = '127.0.0.1'; ServedName = 'fixture' }
-  @{ Last = $plan; Features = @{} } | ConvertTo-Json -Depth 6 |
-    Set-Content -LiteralPath (Join-Path $settingsDirectory 'launcher.json') -Encoding UTF8
-  $cacheFolder = Join-Path $scratch 'cache folder'
-  $env:PATH = "$scratch;$oldPath"
-  Push-Location -LiteralPath $scratch
-  try {
-    $output = & cmd.exe /d /c start.cmd -Last -DryRun -Bin $scratch -CacheDisk $cacheFolder 2>&1
-    if ($LASTEXITCODE -ne 0 -or
-        "$output" -notmatch ('--cache-disk "' + [regex]::Escape($cacheFolder) + '"') -or
-        "$output" -notmatch 'disk cache') { throw 'start.cmd disk cache forwarding/quoting/summary' }
-    $trailingFolder = $cacheFolder + '\'
-    $output = & cmd.exe /d /c start.cmd -Last -DryRun -Bin $scratch -CacheDisk $trailingFolder 2>&1
-    if ($LASTEXITCODE -ne 0 -or
-        "$output" -notmatch ('--cache-disk "' + [regex]::Escape($trailingFolder + '\') + '"')) { throw 'trailing separator quoting' }
-    $output = & cmd.exe /d /c start.cmd -Last -DryRun -Bin $scratch 2>&1
-    if ($LASTEXITCODE -ne 0 -or "$output" -match '--cache-disk') { throw 'disk cache must default off' }
-    $output = & cmd.exe /d /c start.cmd -Last -DryRun -Bin $scratch -CacheDisk '   ' 2>&1
-    if ($LASTEXITCODE -eq 0 -or "$output" -notmatch 'non-empty valid folder path') { throw 'blank cache folder accepted' }
-    $output = & cmd.exe /d /c start.cmd -Last -DryRun -Bin $scratch -CacheDisk $cacheFolder 2>&1
-    if ($LASTEXITCODE -ne 0 -or "$output" -notmatch '--cache-disk-staging-bytes 5368709120') { throw 'disk cache staging default' }
-    $output = & cmd.exe /d /c start.cmd -Last -DryRun -Bin $scratch -CacheDisk $cacheFolder -CacheDiskStagingBytes 2147483648 2>&1
-    if ($LASTEXITCODE -ne 0 -or "$output" -notmatch '--cache-disk-staging-bytes 2147483648') { throw 'disk cache staging override' }
-    $output = & cmd.exe /d /c start.cmd -Last -DryRun -Bin $scratch -CacheDisk $cacheFolder -CacheDiskStagingBytes 0 2>&1
-    if ($LASTEXITCODE -eq 0 -or "$output" -notmatch 'positive whole number') { throw 'bad staging bytes accepted' }
-  } finally {
-    Pop-Location
-    $env:PATH = $oldPath
-    $env:LOCALAPPDATA = $savedLocal
-  }
-  Write-Output 'PASS: start.cmd and start.ps1 use prerequisite detector before inventory/engine'
+  Write-Output 'PASS: start.cmd checks VC++ first, then opens the app or runs bubo serve; start.ps1 checks VC++'
 } finally { Remove-Item -LiteralPath $scratch -Recurse -Force }

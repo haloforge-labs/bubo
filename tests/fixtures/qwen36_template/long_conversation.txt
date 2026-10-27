@@ -1,0 +1,30 @@
+<|im_start|>system
+You are a careful coding assistant.<|im_end|>
+<|im_start|>user
+question 0<|im_end|>
+<|im_start|>assistant
+answer 0<|im_end|>
+<|im_start|>user
+question 1<|im_end|>
+<|im_start|>assistant
+answer 1<|im_end|>
+<|im_start|>user
+question 2<|im_end|>
+<|im_start|>assistant
+answer 2<|im_end|>
+<|im_start|>user
+question 3<|im_end|>
+<|im_start|>assistant
+answer 3<|im_end|>
+<|im_start|>user
+question 4<|im_end|>
+<|im_start|>assistant
+answer 4<|im_end|>
+<|im_start|>user
+question 5<|im_end|>
+<|im_start|>assistant
+answer 5<|im_end|>
+<|im_start|>user
+last<|im_end|>
+<|im_start|>assistant
+<think>

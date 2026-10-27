@@ -9,6 +9,7 @@
 #include <mutex>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "src/core/json.hpp"
@@ -22,7 +23,7 @@ namespace gufo::sampling {
 // verification.
 class JsonConstraint {
 public:
-  enum class ToolFormat { kJson, kQwen, kDeepSeek };
+  enum class ToolFormat { kJson, kQwen, kDeepSeek, kGemma4 };
   struct Stack {
     std::vector<std::uint32_t> symbols;
     std::string lexeme;
@@ -32,8 +33,13 @@ public:
   using Sequence = std::vector<std::uint32_t>;
   using Rule = std::vector<Sequence>;
 
+  // Response formats pass open_objects: as in llama.cpp, an object then admits
+  // extra keys after its declared properties when additionalProperties is
+  // true or a schema, or when it declares no properties. Omitting
+  // additionalProperties beside properties still closes the object. Tool
+  // admission and argument recovery keep closed objects.
   static std::shared_ptr<const JsonConstraint> Compile(
-      const json::Value& schema, bool strict);
+      const json::Value& schema, bool strict, bool open_objects = false);
   static std::shared_ptr<const JsonConstraint> Object();
   // Resolve a local JSON pointer using the same rules as schema compilation.
   // Throws invalid_argument for malformed or missing references.
@@ -48,8 +54,12 @@ public:
   // types. It preserves the model's native string/DSML typed-value semantics.
   static std::shared_ptr<const JsonConstraint> OpenToolParameters(
       ToolFormat format);
+  /// Any text up to and including `end` (the model's reasoning close), then
+  /// `answer`. A nonempty `start` makes the reasoning optional: `answer`
+  /// directly, or `start` followed by the reasoning above.
   static std::shared_ptr<const JsonConstraint> WithReasoning(
-      std::shared_ptr<const JsonConstraint> answer);
+      std::shared_ptr<const JsonConstraint> answer,
+      std::string_view end = "</think>", std::string_view start = {});
   using Tool = std::pair<std::string, std::shared_ptr<const JsonConstraint>>;
   static std::shared_ptr<const JsonConstraint> WithTools(
       std::shared_ptr<const JsonConstraint> answer, std::vector<Tool> tools,
@@ -59,12 +69,15 @@ public:
   [[nodiscard]] State Start() const;
   [[nodiscard]] State Advance(const State& state, unsigned char byte) const;
   [[nodiscard]] bool Complete(const State& state) const;
+  // Read-only native-call ownership, distinct from a restrictive JSON answer.
+  [[nodiscard]] bool InsideToolCall(const State& state) const;
   [[nodiscard]] const std::string& prompt() const { return prompt_; }
 
 private:
   JsonConstraint() = default;
   friend class JsonConstraintCompiler;
   friend class ConstraintVocabulary;
+  friend class ConstraintVocabularyTestAccess;
   friend class SamplerState;
   friend struct TokenConstraint;
   State CanonicalMaskState(const State& state, std::size_t token_bytes) const;
@@ -78,6 +91,7 @@ private:
   bool automatic_tools_{false};
   std::string reasoning_tool_prefix_;
   std::uint32_t reasoning_tool_root_{0};
+  std::uint32_t tool_call_end_rule_{UINT32_MAX};
 };
 
 class ConstraintVocabulary {
@@ -101,31 +115,47 @@ public:
 
 private:
   friend struct TokenConstraint;
+  friend class ConstraintVocabularyTestAccess;
   struct Node {
     std::uint32_t child{UINT32_MAX};
     std::uint32_t sibling{UINT32_MAX};
     std::uint32_t token{UINT32_MAX};
     unsigned char byte{0};
   };
+  struct RootChild {
+    std::uint32_t node;
+    std::uint32_t nodes;
+  };
   std::vector<Node> trie_{1};
+  std::vector<RootChild> root_children_;
   std::vector<Piece> pieces_;
   std::vector<std::uint32_t> next_token_;
   std::vector<std::uint32_t> reasoning_boundary_tokens_;
   std::size_t max_token_bytes_{0};
+  const unsigned mask_threads_;
 };
 
 struct TokenConstraint {
+  // Finished masks kept per binding: about 0.25 MB each for a 248K-token
+  // vocabulary, so at most ~16 MB. A tool-using agent session visits a few
+  // dozen distinct grammar states; the least recently used one is evicted.
+  static constexpr std::size_t kMaskCacheEntries = 64;
+
   std::shared_ptr<const JsonConstraint> grammar;
   std::shared_ptr<const ConstraintVocabulary> vocabulary;
   [[nodiscard]] std::shared_ptr<const std::vector<std::uint8_t>> Allowed(
       const JsonConstraint::State& state) const;
+  [[nodiscard]] std::size_t CachedMaskCount() const;
 
 private:
+  struct CachedMask {
+    std::shared_ptr<const std::vector<std::uint8_t>> mask;
+    std::uint64_t last_used{0};
+  };
   mutable std::mutex mutex_;
   mutable JsonConstraint::State initial_state_;
-  mutable std::map<JsonConstraint::State,
-                   std::shared_ptr<const std::vector<std::uint8_t>>>
-      masks_;
+  mutable std::map<JsonConstraint::State, CachedMask> masks_;
+  mutable std::uint64_t use_clock_{0};
 };
 
 }  // namespace gufo::sampling

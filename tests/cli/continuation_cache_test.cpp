@@ -41,6 +41,15 @@ struct FakeSnapshot final : gufo::server::ContinuationSnapshot {
   [[nodiscard]] std::size_t PayloadBytes() const noexcept override {
     return payload_bytes;
   }
+  [[nodiscard]] std::size_t HostBytes() const noexcept override {
+    return host_bytes != 0 ? host_bytes : payload_bytes;
+  }
+  [[nodiscard]] std::size_t DeviceBytes(std::unordered_set<const void*>& counted) const noexcept override {
+    std::size_t bytes = 0;
+    for (const auto& [block, size] : device_blocks)
+      if (counted.insert(block).second) bytes += size;
+    return bytes;
+  }
   [[nodiscard]] bool PrefersState(
       const gufo::server::ContinuationState& state) const noexcept override {
     return owner == &state;
@@ -49,6 +58,8 @@ struct FakeSnapshot final : gufo::server::ContinuationSnapshot {
   std::size_t value;
   std::size_t payload_bytes;
   const gufo::server::ContinuationState* owner;
+  std::size_t host_bytes{0};   // 0: the whole payload is in host memory
+  std::vector<std::pair<const void*, std::size_t>> device_blocks;   // backing blocks (identity, size) the checkpoint references
 };
 
 void TestBorrowedSnapshotPrefersAvailableOwner() {
@@ -1546,12 +1557,213 @@ void TestHostMemoryFloorEvictsThenRefuses() {
   Expect(!save({10, 11, 12}), "a shortfall that eviction cannot cover refuses the snapshot");
   Expect(removed >= removed_before && skipped.size() == 1 && skipped[0] == SnapshotEventReason::kHostMemoryFloor,
          "the refusal is reported as skipped / host_memory_floor");
+  // L-REL-5: the floor acts per admission and never resizes the cache.
+  Expect(cache.snapshot_capacity_bytes() == 64,
+         "host-floor pressure leaves the snapshot capacity unchanged");
+}
+
+void TestHostMemoryFloorChargesHostBytes() {
+  // 10-14: the floor charges the host bytes a snapshot holds. A device-resident checkpoint (host part below its payload) is admitted below
+  // the floor; a host-resident payload keeps the floor, and evicting device checkpoints (which free no host memory) never covers its
+  // shortfall, so they are kept and the payload is refused. Evicting a host-resident entry credits its host bytes.
+  using gufo::server::ContinuationToken;
+  using gufo::server::SnapshotEventAction;
+  using gufo::server::SnapshotEventReason;
+  using gufo::server::SnapshotPurpose;
+  constexpr std::size_t kPayload = 1000;
+  constexpr std::size_t kDeviceHost = 10;
+  std::vector<std::size_t> invalidations(1);
+  std::uint64_t available = 1000;   // below the floor of 4096
+  bool device = true;               // what the runner reports for the next snapshot
+  std::size_t removed = 0;
+  std::vector<SnapshotEventReason> skipped;
+  gufo::server::ContinuationCache cache(
+      1, [&] { return std::make_unique<FakeState>(0, &invalidations); },
+      {.restore = [](auto&, const auto&) {},
+       .capacity_bytes = [] { return 100000; },
+       .on_event = [&](const gufo::server::SnapshotEvent& event) {
+         if (event.action == SnapshotEventAction::kRemoved) ++removed;
+         if (event.action == SnapshotEventAction::kSkipped) skipped.push_back(event.reason);
+       },
+       .host_available_bytes = [&] { return available; },
+       .host_floor_bytes = 4096,
+       .host_bytes = [&](std::uint64_t payload, std::size_t) -> std::uint64_t {
+         return device ? kDeviceHost : payload;
+       }},
+      16);
+  const auto save = [&](const std::vector<ContinuationToken>& tokens) {
+    auto lease = cache.Acquire(tokens);
+    const bool admitted = lease.TryReserveSnapshot(kPayload, tokens.size(), false, SnapshotPurpose::kContinuation, tokens);
+    if (admitted) {
+      auto snapshot = std::make_unique<FakeSnapshot>(tokens.size(), kPayload);
+      snapshot->host_bytes = device ? kDeviceHost : 0;
+      lease.Commit(tokens, std::move(snapshot));
+    }
+    return admitted;
+  };
+  Expect(save({1, 2, 3}) && save({4, 5, 6}) && save({7, 8, 9}),
+         "device checkpoints are admitted with host available 1000 below the floor 4096");
+  Expect(removed == 0 && skipped.empty(), "no eviction and no refusal for device checkpoints");
+  device = false;
+  Expect(!save({10, 11, 12}), "a host-resident payload below the floor is refused");
+  Expect(removed == 0 && skipped.size() == 1 && skipped[0] == SnapshotEventReason::kHostMemoryFloor,
+         "the device checkpoints are kept: evicting them frees no host memory");
+  available = 100000;
+  Expect(save({13, 14, 15}), "a host-resident payload with headroom is admitted");
+  available = 5000;   // needs 4096 + 1000: short by 96; only the host-resident entry can cover it
+  Expect(save({16, 17, 18}), "a shortfall covered by a host-resident entry admits the payload");
+  Expect(removed == 1 && skipped.size() == 1,
+         "the shortfall was met by evicting the host-resident entry alone; the device checkpoints are kept");
+}
+
+void TestSnapshotFootprintCountsSharedBlocksOnce() {
+  // The byte budget charges every checkpoint its whole payload; the footprint reports what the checkpoints occupy: host bytes as
+  // reported, and a device block that several checkpoints reference once.
+  using gufo::server::ContinuationToken;
+  using gufo::server::SnapshotPurpose;
+  std::vector<std::size_t> invalidations(1);
+  gufo::server::ContinuationCache cache(
+      1, [&] { return std::make_unique<FakeState>(0, &invalidations); },
+      {.restore = [](auto&, const auto&) {}, .capacity_bytes = [] { return 100000; }}, 16);
+  const char shared = 0, own_b = 0, own_c = 0;
+  const auto save = [&](const std::vector<ContinuationToken>& tokens, std::vector<std::pair<const void*, std::size_t>> blocks) {
+    auto lease = cache.Acquire(tokens);
+    Expect(lease.TryReserveSnapshot(1000, tokens.size(), false, SnapshotPurpose::kContinuation, tokens), "snapshot admitted");
+    auto snapshot = std::make_unique<FakeSnapshot>(tokens.size(), 1000);
+    snapshot->host_bytes = 10;
+    snapshot->device_blocks = std::move(blocks);
+    lease.Commit(tokens, std::move(snapshot));
+  };
+  auto empty = cache.snapshot_footprint();
+  Expect(empty.logical_bytes == 0 && empty.device_bytes == 0 && empty.host_bytes == 0, "an empty cache holds nothing");
+  save({1, 2, 3}, {{&shared, 600}});
+  save({4, 5, 6}, {{&shared, 600}, {&own_b, 200}});
+  save({7, 8, 9}, {{&shared, 600}, {&own_c, 300}});
+  const auto footprint = cache.snapshot_footprint();
+  Expect(footprint.logical_bytes == 3000 && footprint.logical_bytes == cache.retained_snapshot_bytes(),
+         "the logical figure is the byte budget's charge");
+  Expect(footprint.device_bytes == 600 + 200 + 300, "a block three checkpoints reference counts once");
+  Expect(footprint.host_bytes == 30, "host bytes add up as each checkpoint reports them");
+}
+
+void TestMemoryGuardTrimAndSkip() {
+  // Memory guard: TrimSnapshots drops retained snapshots (lowest removal priority, oldest first) until the target is freed; allow_new == false
+  // skips every new snapshot as memory_pressure without evicting anything; the host-only count credits only the host part of each snapshot.
+  using gufo::server::ContinuationToken;
+  using gufo::server::SnapshotEventAction;
+  using gufo::server::SnapshotEventReason;
+  using gufo::server::SnapshotPurpose;
+  std::vector<std::size_t> invalidations(1);
+  bool allow = true;
+  std::size_t pressure_removed = 0;
+  std::vector<SnapshotEventReason> skipped;
+  std::size_t host_part = 0;   // 0: the whole payload is in host memory
+  gufo::server::ContinuationCache cache(
+      1, [&] { return std::make_unique<FakeState>(0, &invalidations); },
+      {.restore = [](auto&, const auto&) {},
+       .capacity_bytes = [] { return 1000; },
+       .on_event = [&](const gufo::server::SnapshotEvent& event) {
+         if (event.action == SnapshotEventAction::kRemoved && event.reason == SnapshotEventReason::kMemoryPressure) ++pressure_removed;
+         if (event.action == SnapshotEventAction::kSkipped) skipped.push_back(event.reason);
+       },
+       .allow_new = [&] { return allow; }},
+      8);
+  const auto save = [&](const std::vector<ContinuationToken>& tokens) {
+    auto lease = cache.Acquire(tokens);
+    const bool admitted = lease.TryReserveSnapshot(100, tokens.size(), false, SnapshotPurpose::kContinuation, tokens);
+    if (admitted) {
+      auto snapshot = std::make_unique<FakeSnapshot>(tokens.size(), 100);
+      snapshot->host_bytes = host_part;
+      lease.Commit(tokens, std::move(snapshot));
+    }
+    return admitted;
+  };
+  Expect(cache.TrimSnapshots(100) == 0, "trimming an empty cache frees nothing");
+  Expect(save({1, 2, 3}) && save({4, 5, 6}) && save({7, 8, 9}), "three snapshots retained");
+  Expect(cache.retained_snapshot_bytes() == 300, "300 bytes retained");
+  const auto freed = cache.TrimSnapshots(150);
+  Expect(freed == 200 && cache.retained_snapshot_bytes() == 100, "a 150-byte target removes two 100-byte snapshots");
+  Expect(pressure_removed == 2, "each removal is reported with reason memory_pressure");
+
+  allow = false;
+  Expect(!save({10, 11, 12}), "the guard level refuses a new snapshot");
+  Expect(skipped.size() == 1 && skipped[0] == SnapshotEventReason::kMemoryPressure, "reported as skipped / memory_pressure");
+  Expect(cache.retained_snapshot_bytes() == 100, "a skip evicts nothing");
+  allow = true;
+  Expect(save({10, 11, 12}), "snapshots resume when the guard allows them");
+
+  host_part = 10;   // device-resident checkpoints: 10 host bytes each
+  Expect(save({13, 14, 15}) && save({16, 17, 18}), "two device-resident snapshots");
+  // The two oldest retained snapshots are host-resident ({7, 8, 9} and {10, 11, 12}, 100 host bytes each): one alone meets a 15-byte host target.
+  Expect(cache.TrimSnapshots(15, true) == 100, "host-only counting credits the host bytes of the removed snapshot");
+  Expect(cache.TrimSnapshots(15, true) == 100, "the next host-resident snapshot goes before the device-resident ones");
+  // The two device-resident ones credit 10 host bytes each, so a 15-byte target takes both.
+  Expect(cache.TrimSnapshots(15, true) == 20 && cache.retained_snapshot_bytes() == 0, "device-resident snapshots credit only their host part");
+  Expect(cache.TrimSnapshots(1000) == 0, "nothing left to trim");
+}
+
+void TestMissReasonNamesTheDroppedCheckpoint() {
+  // GitHub #9: a miss over a checkpoint the cache dropped or refused names why (evicted_*, skipped_*), the request counts the copies it was refused,
+  // and a prompt never seen keeps no_checkpoint / prefix_changed.
+  using gufo::server::ContinuationToken;
+  using gufo::server::SnapshotEventReason;
+  using gufo::server::SnapshotPurpose;
+  std::vector<std::size_t> invalidations(1);
+  bool allow = true;
+  gufo::server::ContinuationCache cache(
+      1, [&] { return std::make_unique<FakeState>(0, &invalidations); },
+      {.restore = [](auto&, const auto&) {},
+       .capacity_bytes = [] { return 150; },
+       .allow_new = [&] { return allow; }},
+      8);
+  std::size_t last_skipped = 0;
+  SnapshotEventReason last_reason = SnapshotEventReason::kByteCapacity;
+  const auto save = [&](const std::vector<ContinuationToken>& tokens, std::size_t bytes) {
+    auto lease = cache.Acquire(tokens);
+    const bool admitted = lease.TryReserveSnapshot(bytes, tokens.size(), false, SnapshotPurpose::kContinuation, tokens);
+    last_skipped = lease.skipped_snapshots();
+    last_reason = lease.skip_reason();
+    if (admitted)
+      lease.Commit(tokens, std::make_unique<FakeSnapshot>(tokens.size(), bytes));
+    return admitted;
+  };
+  const auto miss_reason = [&](const std::vector<ContinuationToken>& tokens) {
+    auto lease = cache.Acquire(tokens);
+    return std::pair<std::string, std::size_t>(std::string(lease.lookup().miss_reason), lease.lookup().checkpoint_tokens);
+  };
+  const std::vector<ContinuationToken> a{1, 2, 3}, b{4, 5, 6}, c{7, 8, 9, 10}, d{11, 12}, e{13, 14, 15};
+
+  Expect(save(a, 100) && last_skipped == 0, "A retained, nothing skipped");
+  Expect(miss_reason({77, 78}).first == "no_checkpoint" || miss_reason({77, 78}).first == "prefix_changed", "a prompt never seen keeps its old reason");
+  Expect(save(b, 100) && last_skipped == 0, "B retained: A is evicted for byte capacity (100 + 100 > 150)");
+  auto lost = miss_reason(a);
+  Expect(lost.first == "evicted_byte_capacity" && lost.second == 3, "a miss over the evicted checkpoint says evicted_byte_capacity with its length");
+
+  Expect(!save(c, 200) && last_skipped == 1 && last_reason == SnapshotEventReason::kByteCapacity, "C is larger than the whole budget: refused, and the request counts it");
+  Expect(miss_reason(c).first == "skipped_capacity", "a miss over the refused copy says skipped_capacity");
+
+  Expect(cache.TrimSnapshots(1) >= 100, "the memory guard drops a snapshot");
+  Expect(miss_reason(b).first == "evicted_guard", "a miss over the trimmed checkpoint says evicted_guard");
+
+  allow = false;
+  Expect(!save(d, 50) && last_skipped == 1 && last_reason == SnapshotEventReason::kMemoryPressure, "the guard refuses a new snapshot: counted with its reason");
+  Expect(miss_reason(d).first == "skipped_guard", "a miss over the guard-refused copy says skipped_guard");
+  allow = true;
+
+  Expect(save(a, 100), "A is stored again once there is room");
+  auto lease = cache.Acquire(a);
+  Expect(lease.cache_hit() && lease.lookup().miss_reason.empty(), "a stored checkpoint is a hit again; the old tombstone does not matter");
+  (void)e;
 }
 
 int main() {
   ::setenv("GUFO_DISK_EVICT_DOMINATED", "1", 1);
   TestEvictedEntryCoveredByRetainedLongerEntryIsNotOffered();
   TestHostMemoryFloorEvictsThenRefuses();
+  TestHostMemoryFloorChargesHostBytes();
+  TestMemoryGuardTrimAndSkip();
+  TestSnapshotFootprintCountsSharedBlocksOnce();
+  TestMissReasonNamesTheDroppedCheckpoint();
   TestAppendedImagesReuseOnlyCompatiblePrefixes();
   TestImageIdentityIsolation();
   TestColdMissThenExactExtensionHit();

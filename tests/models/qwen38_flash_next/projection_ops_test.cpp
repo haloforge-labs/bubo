@@ -197,7 +197,7 @@ void CheckSsmProjection(const void* w, const __half* x, float* projected,
   }
   // A rejected geometry must not touch any pointer.
   if (q::DenseF16SsmGemm(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                         1023, m, k, channels, 4, nullptr) ||
+                         0, m, k, channels, 4, nullptr) ||
       q::DenseF16SsmGemm(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                          batch, m, k, channels, 3, nullptr)) {
     throw std::runtime_error("SSM projection accepted an unsupported shape");
@@ -289,9 +289,9 @@ void CheckAttentionProjection(const void* weights, const __half* input,
                           static_cast<float*>(actual[0]) + 8,
                           static_cast<float*>(actual[1]) + 8,
                           static_cast<__half*>(actual[2]) + 8,
-                          static_cast<__half*>(actual[3]) + 8, 1023, position,
+                          static_cast<__half*>(actual[3]) + 8, 0, position,
                           1e7F, 1e-6F, nullptr))
-    throw std::runtime_error("attention fusion accepted a short batch");
+    throw std::runtime_error("attention fusion accepted an empty batch");
   CheckHip(hipGraphExecDestroy(replay), "attention graph free");
   CheckHip(hipGraphDestroy(graph), "attention graph definition free");
   CheckHip(hipStreamDestroy(stream), "attention stream free");
@@ -352,6 +352,80 @@ void CheckHcDownProjection(const void* w, const void* tiled,
   CheckHip(hipFree(output), "HC output free");
   CheckHip(hipFree(reference), "HC reference free");
   CheckHip(hipFree(activated), "HC activation free");
+}
+
+/// A batch a few tokens past a full 128-token tile computes its tail with
+/// W8A8TailKernel; every row must equal the tiled kernel's row from a batch
+/// whose tail is too wide to split.
+void CheckW8A8Tail(std::size_t m, std::size_t k, std::uint32_t seed) {
+  constexpr std::size_t kShort = 2051;  // three tokens past 16 tiles
+  constexpr std::size_t kLong = 2091;   // a 43-token tail stays tiled
+  const Q8Weights w = MakeWeights(m, k, seed, false);
+  std::vector<float> x(kLong * k);
+  std::uint32_t state = seed ^ 0x7A11U;
+  for (float& v : x) {
+    v = Uniform(&state, 2.0F);
+  }
+  void* d_w = nullptr;
+  float* d_x = nullptr;
+  void* d_tiled = nullptr;
+  float* d_long = nullptr;
+  float* d_short = nullptr;
+  CheckHip(hipMalloc(&d_w, w.blocks.size() + 4096), "tail weights");
+  CheckHip(hipMalloc(&d_x, x.size() * 4), "tail input");
+  CheckHip(hipMalloc(&d_tiled, q::Q8TiledBytes(kLong, k)), "tail tiles");
+  CheckHip(hipMalloc(&d_long, kLong * m * 4), "tail long output");
+  CheckHip(hipMalloc(&d_short, kLong * m * 4), "tail short output");
+  CheckHip(
+      hipMemcpy(d_w, w.blocks.data(), w.blocks.size(), hipMemcpyHostToDevice),
+      "tail weight upload");
+  CheckHip(hipMemcpy(d_x, x.data(), x.size() * 4, hipMemcpyHostToDevice),
+           "tail input upload");
+  CheckHip(hipMemset(d_short, 0x7F, kLong * m * 4), "tail guards");
+  q::QuantizeQ8Tiled(d_x, d_tiled, kLong, k, nullptr);
+  if (!q::W8A8Gemm(d_w, d_tiled, d_long, kLong, m, k, nullptr) ||
+      !q::W8A8Gemm(d_w, d_tiled, d_short, kShort, m, k, nullptr))
+    throw std::runtime_error("W8A8 tail shapes rejected");
+  std::vector<float> a(kLong * m);
+  std::vector<float> b(kLong * m);
+  CheckHip(hipMemcpy(a.data(), d_long, a.size() * 4, hipMemcpyDeviceToHost),
+           "tail long download");
+  CheckHip(hipMemcpy(b.data(), d_short, b.size() * 4, hipMemcpyDeviceToHost),
+           "tail short download");
+  if (std::memcmp(a.data(), b.data(), kShort * m * 4) != 0)
+    throw std::runtime_error("W8A8 tail rows differ from the tiled rows");
+  for (std::size_t i = kShort * m; i < b.size(); ++i) {
+    std::uint32_t bits;
+    std::memcpy(&bits, &b[i], sizeof(bits));
+    if (bits != 0x7F7F7F7FU)
+      throw std::runtime_error("W8A8 tail wrote past its batch");
+  }
+  if (m == 320 && k == 10240) {
+    __half* h_long = nullptr;
+    __half* h_short = nullptr;
+    CheckHip(hipMalloc(&h_long, kLong * m * 2), "HC tail long");
+    CheckHip(hipMalloc(&h_short, kLong * m * 2), "HC tail short");
+    if (!q::HcDownF16Gemm(d_w, d_tiled, h_long, kLong, nullptr) ||
+        !q::HcDownF16Gemm(d_w, d_tiled, h_short, kShort, nullptr))
+      throw std::runtime_error("HC down tail shapes rejected");
+    std::vector<__half> ha(kShort * m);
+    std::vector<__half> hb(kShort * m);
+    CheckHip(hipMemcpy(ha.data(), h_long, ha.size() * 2, hipMemcpyDeviceToHost),
+             "HC tail long download");
+    CheckHip(
+        hipMemcpy(hb.data(), h_short, hb.size() * 2, hipMemcpyDeviceToHost),
+        "HC tail short download");
+    if (std::memcmp(ha.data(), hb.data(), ha.size() * 2) != 0)
+      throw std::runtime_error("HC down tail rows differ from the tiled rows");
+    (void)hipFree(h_long);
+    (void)hipFree(h_short);
+  }
+  std::cout << "W8A8 tail m=" << m << " k=" << k << ": exact\n";
+  (void)hipFree(d_w);
+  (void)hipFree(d_x);
+  (void)hipFree(d_tiled);
+  (void)hipFree(d_long);
+  (void)hipFree(d_short);
 }
 
 void CheckRoutedQ8Placement() {
@@ -571,7 +645,7 @@ double Run(std::size_t batch, std::size_t m, std::size_t k, std::uint32_t seed,
             << worst_f16_vs_mmq << ", worst |W8A8 - F64| " << worst_vs_ref
             << ", worst |F16 - F64| " << worst_f16 << " (reference scale "
             << ref_scale << ")\n";
-  if (m == 16384 && k == 2560 && batch >= 1024) {
+  if (m == 16384 && k == 2560 && batch > 8) {
     CheckSsmProjection(d_w, d_x_half, d_f16, f16,
                        static_cast<std::uint32_t>(batch));
   }
@@ -579,7 +653,7 @@ double Run(std::size_t batch, std::size_t m, std::size_t k, std::uint32_t seed,
     CheckHcDownProjection(d_w, d_tiled, d_w8,
                           static_cast<std::uint32_t>(batch));
   }
-  if (m == 13312 && k == 2560 && batch >= 1024) {
+  if (m == 13312 && k == 2560 && batch > 8) {
     CheckAttentionProjection(d_w, d_x_half, d_f16,
                              static_cast<std::uint32_t>(batch));
   }
@@ -870,6 +944,8 @@ int main() {
     CheckMtpOutputHead(1.0F);
     // Small activations must retain products below F16's normal range.
     CheckMtpOutputHead(0.0001F);
+    CheckW8A8Tail(320, 10240, 0x7A1320U);
+    CheckW8A8Tail(640, 2560, 0x7A1640U);
     bool ok = true;
     // Ragged batch and rows against the 128-wide macro tiles, the 64-token
     // tile below 96, and the model's ssm_out / shexp_down widths.
@@ -881,6 +957,13 @@ int main() {
     // Wide SSM projection: two K blocks per stage, with a partial token tile.
     ok = Run(2049, 16384, 2560, 0x16384256U, 2) < 1e-2 && ok;
     ok = Run(2049, 13312, 2560, 0x13312256U, 2) < 1e-2 && ok;
+    // Every prefill pass wider than a vector batch fuses these projections:
+    // one partial 32-token tile, a ragged 128-token tile and a mid-size pass.
+    for (const std::size_t batch : {9U, 33U, 470U}) {
+      const auto seed = static_cast<std::uint32_t>(batch);
+      ok = Run(batch, 16384, 2560, 0x16384000U + seed, 2) < 1e-2 && ok;
+      ok = Run(batch, 13312, 2560, 0x13312000U + seed, 2) < 1e-2 && ok;
+    }
     // HC up: the grouped grid, including the last partial token tile.
     ok = Run(2049, 10240, 320, 0x8A8A320U, 2) < 1e-2 && ok;
     // HC down fusion: its first supported batch and a partial final tile.

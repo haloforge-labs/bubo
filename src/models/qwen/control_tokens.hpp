@@ -12,6 +12,8 @@ namespace gufo::tokenization {
 inline constexpr std::string_view kEndOfText = "<|endoftext|>";
 inline constexpr std::string_view kImStart = "<|im_start|>";
 inline constexpr std::string_view kImEnd = "<|im_end|>";
+inline constexpr std::string_view kToolCallStart = "<tool_call>";
+inline constexpr std::string_view kToolCallEnd = "</tool_call>";
 inline constexpr std::string_view kObjectRefStart = "<|object_ref_start|>";
 inline constexpr std::string_view kObjectRefEnd = "<|object_ref_end|>";
 inline constexpr std::string_view kBoxStart = "<|box_start|>";

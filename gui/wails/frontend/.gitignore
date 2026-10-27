@@ -1,0 +1,7 @@
+node_modules/
+dist/*
+!dist/.gitkeep
+*.tsbuildinfo
+.tanstack/
+.vite/
+package.json.md5

@@ -2,6 +2,7 @@ target_sources(gufo_core PRIVATE
   ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/prompt.cpp
   ${PROJECT_SOURCE_DIR}/src/models/qwen/tokenizer.cpp
   ${PROJECT_SOURCE_DIR}/src/models/qwen/chat_template.cpp
+  ${PROJECT_SOURCE_DIR}/src/models/qwen/incremental_tokenize.cpp
   ${PROJECT_SOURCE_DIR}/src/models/qwen/oracles.cpp
   ${PROJECT_SOURCE_DIR}/src/models/qwen/state.cpp
   ${PROJECT_SOURCE_DIR}/src/models/qwen/weights.cpp

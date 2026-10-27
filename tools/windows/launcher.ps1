@@ -49,10 +49,20 @@ if (-not $exe) {
 
 # hipBLASLt's kernel files have long names; past Windows' 260-character path
 # limit it crashes on the first matrix multiply, so say so up front.
-$longest = Get-ChildItem (Join-Path (Split-Path $exe) "hipblaslt"), (Join-Path (Split-Path $exe) "rocblas") -Recurse -File -ErrorAction SilentlyContinue |
+# The AMD runtime is BUBO_RUNTIME_DIR, else the shared per-user folder when it is
+# installed, else the folder beside bubo.exe (the v0.1.0 layout).
+$runtimeDir = Split-Path $exe
+$sharedRuntime = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA "Bubo\runtime\rocm-10.0.0-gfx1151" } else { $null }
+if ($env:BUBO_RUNTIME_DIR) { $runtimeDir = $env:BUBO_RUNTIME_DIR }
+elseif ($sharedRuntime -and (Test-Path (Join-Path $sharedRuntime ".bubo\runtime-ready.json"))) { $runtimeDir = $sharedRuntime }
+$longest = Get-ChildItem (Join-Path $runtimeDir "hipblaslt"), (Join-Path $runtimeDir "rocblas") -Recurse -File -ErrorAction SilentlyContinue |
   Sort-Object { $_.FullName.Length } -Descending | Select-Object -First 1
 if ($longest -and $longest.FullName.Length -ge 260) {
   Write-Host ("This folder is too deep: GPU kernel files reach {0} characters, past Windows' 260 limit, and bubo would crash." -f $longest.FullName.Length) -ForegroundColor Red
+  if ($runtimeDir -ne (Split-Path $exe)) {
+    Write-Host ("Use a shorter runtime folder (BUBO_RUNTIME_DIR, or bubo prepare runtime --runtime-dir). Now: {0}" -f $runtimeDir) -ForegroundColor Red
+    exit 1
+  }
   Write-Host ("Move it to a shorter path, e.g. C:\gufo (at most {0} characters for the folder)." -f (259 - ($longest.FullName.Length - (Split-Path $exe).Length))) -ForegroundColor Red
   exit 1
 }

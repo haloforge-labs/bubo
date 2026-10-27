@@ -62,6 +62,7 @@ The following credits apply to adapted source and retained notices in the review
 | Component / relationship | Revision / version declared by gufo | Licence | Licence file | Source URL | Fetched/copied | Delivery |
 |---|---|---|---|---|---|---|
 | llama.cpp / ggml; quantization, attention and HIP kernels | 5c0e9468378eba6bf3cc1989ff5d62fbbe4d9e3a; attention e9fa0781f1c25fc4fe8c86be1edc6970661ad6f0 | MIT | [llama.cpp-MIT.txt](licenses/llama.cpp-MIT.txt) | [upstream](https://github.com/ggml-org/llama.cpp) | 2026-10-10 | shipped by us |
+| GSQHalo.cpp / ggml; adapted routed IQ/Q2 slice decoders and WMMA staging | 16f0929d1da1001fd856c2443cdd31de8d470b73 | MIT, Copyright (c) 2023-2026 The ggml authors | [llama.cpp-MIT.txt](licenses/llama.cpp-MIT.txt) | [upstream](https://github.com/Aristo94/GSQHalo.cpp/tree/16f0929d1da1001fd856c2443cdd31de8d470b73) | 2026-10-20 | shipped by us |
 | DS4; loader/tokenizer/sessions/HIP kernels | 84cc882352757baf628a1776badf7cc54d584e28 | MIT | [ds4-MIT.txt](licenses/ds4-MIT.txt) | [upstream](https://github.com/antirez/ds4) | 2026-10-10 | shipped by us |
 | DS4 GB10/GX10 changes; Marco Palaferri | 910501e | MIT | [ds4-gb10-MIT.txt](licenses/ds4-gb10-MIT.txt) | [upstream](https://github.com/xangel82/DS4-GB10-GX10-DSpark-CUDA) | 2026-10-10 | shipped by us |
 | h3.c; Salvatore Sanfilippo | 8974cc055ea9c02fcd14cc27dfda3e1027c05153 | MIT | [h3.c-MIT.txt](licenses/h3.c-MIT.txt) | [upstream](https://github.com/antirez/h3.c) | 2026-10-10 | shipped by us |

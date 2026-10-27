@@ -1,0 +1,23 @@
+[
+  {
+    "name": "shadcn-admin",
+    "version": "e16c87f2",
+    "file": "src/vendor/shadcn-admin-LICENSE.txt",
+    "source": "https://github.com/satnaing/shadcn-admin/tree/e16c87f2"
+  },
+  {
+    "name": "ET Book",
+    "file": "src/fonts/et-book-LICENSE.txt",
+    "source": "https://github.com/edwardtufte/et-book"
+  },
+  {
+    "name": "Go Mono",
+    "file": "src/fonts/Go-Mono-LICENSE.txt",
+    "source": "https://go.googlesource.com/image/+/refs/heads/master/font/gofont"
+  },
+  {
+    "name": "shadcn/ui primitives",
+    "file": "src/vendor/shadcn-LICENSE.txt",
+    "source": "https://github.com/shadcn-ui/ui"
+  }
+]

@@ -2,15 +2,39 @@
 
 import os
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
 
 
+def stub_gguf(directory):
+    """A valid GGUF header (architecture only, no tensors) that the engine
+    cannot load: the release profile now reads the header before the engine
+    loads, so a missing file stops earlier (exit 2) than these cases test."""
+    def string(text):
+        data = text.encode()
+        return struct.pack("<Q", len(data)) + data
+    path = os.path.join(directory, "stub.gguf")
+    with open(path, "wb") as handle:
+        header = (b"GGUF" + struct.pack("<IQQ", 3, 0, 1) +
+                  string("general.architecture") + struct.pack("<I", 8) +
+                  string("llama"))
+        handle.write(header.ljust(128, bytes(1)))  # data section is aligned
+    return path
+
+
 def main():
     binary = sys.argv[1]
+    global STUB
+    temporary = tempfile.TemporaryDirectory(prefix="serve-cli-")
+    STUB = stub_gguf(temporary.name)
     env = {key: value for key, value in os.environ.items()
-           if key not in {"HOST", "PORT", "GUFO_HOST", "GUFO_PORT"}}
+           if key not in {"HOST", "PORT"} and not key.startswith(("GUFO_", "BUBO_"))}
+    env["LOCALAPPDATA"] = os.path.join(temporary.name, "local")
+    os.makedirs(env["LOCALAPPDATA"], exist_ok=True)
+    env["APPDATA"] = env["LOCALAPPDATA"]
+    env["XDG_CACHE_HOME"] = os.path.join(temporary.name, "cache")
 
     def check(args, status, message):
         result = subprocess.run([binary, *args], env=env, text=True,
@@ -34,6 +58,9 @@ def main():
             assert "--sessions" not in help_text
             check(["serve", modality, "--sessions", "2"], 2, "Unknown option")
             check(["serve", "--sessions", "2", modality], 2, "Unknown option")
+        elif modality == "llm":
+            check(["serve", modality, "--sessions", "0"], 2,
+                  "--sessions: invalid value '0'")
         else:
             check(["serve", modality, "--sessions", "0"], 2,
                   "server limits must be positive")
@@ -54,17 +81,24 @@ def main():
 
 
     # Values must stay attached to their options, including before a modality
-    # was selected. All these deliberately fail at the named file lookup.
+    # was selected. All these deliberately fail at the named file lookup. Since
+    # 65ae7ed5 the release profile reads the GGUF header before the engine
+    # loads, so a missing file is a usage error (exit 2), not a load error.
     for args in (["--model", "audio"], ["llm", "--model", "audio"],
                  ["--served-model-name", "-v", "--model", "audio"],
                  ["--port", "0", "llm", "--served-model-name", "-v", "--model", "audio"],
                  ["--api-key", "test-key", "llm", "--model", "audio"],
                  ["llm", "--served-model-name", "--verbose", "--model", "audio"]):
-        check(["serve", *args], 1, "Error loading model 'audio'")
+        check(["serve", *args], 2,
+              "cannot read model header: Failed to open file: audio")
     check(["serve", "help", "unknown"], 2, "unknown serve command")
     help_text = check(["serve", "llm", "--help"], 0, "model native context")
     assert "-1 = until EOS or context full" in help_text
-    assert "Path to GGUF model file (required)" in help_text
+    # --model is optional (the prepared default) and also takes a DiffusionGemma
+    # checkpoint directory; the help column may wrap, so compare words.
+    help_words = " ".join(help_text.split())
+    assert ("GGUF model file or DiffusionGemma checkpoint directory (default: "
+            "the model that 'bubo prepare' installed)") in help_words
     assert "8589934592" in help_text
     assert "0 = auto, at most the disk budget and 1/8 available RAM" in help_text
     assert "--log-progress" in help_text
@@ -73,7 +107,7 @@ def main():
     # emitted at the debug tier before the model file is opened, so these all
     # fail at the named file and differ only in what they logged.
     check(["serve", "--help"], 0, "--log-level")
-    load = ["serve", "llm", "--model", "missing.gguf"]
+    load = ["serve", "llm", "--model", STUB]
     assert "event=options" not in run(load).stderr
     for spelling in (["-v"], ["--verbose"], ["--log-level", "debug"]):
         result = run(load + spelling)
@@ -103,22 +137,42 @@ def main():
     keyed = run(load + ["-v", "--api-key", "super-secret-value"])
     assert "api_key=set" in keyed.stderr
     assert "super-secret-value" not in keyed.stderr
+    # BUBO_API_KEY keeps the key off the command line. The flag wins on a
+    # conflict, a notice names the variable only, and no value is printed.
+    def run_with(args, extra):
+        return subprocess.run([binary, *args], env={**env, **extra}, text=True,
+                              capture_output=True, timeout=10)
+    planted = "env-key-planted-5531"
+    from_env = run_with(load + ["-v"], {"BUBO_API_KEY": planted})
+    assert "api_key=set" in from_env.stderr, from_env.stderr
+    both = run_with(load + ["-v", "--api-key", "flag-key-planted-5531"],
+                    {"BUBO_API_KEY": planted})
+    assert "api_key=set" in both.stderr
+    assert "event=api_key_conflict used=flag ignored=BUBO_API_KEY" in both.stderr
+    same = run_with(load + ["-v", "--api-key", planted], {"BUBO_API_KEY": planted})
+    assert "api_key_conflict" not in same.stderr
+    for result in (from_env, both, same):
+        assert planted not in result.stdout + result.stderr
+        assert "flag-key-planted-5531" not in result.stdout + result.stderr
+    empty = run_with(load + ["-v"], {"BUBO_API_KEY": ""})
+    assert "api_key=unset" in empty.stderr, empty.stderr
+    assert "--api-key" in check(["serve", "llm", "--help"], 0, "BUBO_API_KEY")
     for bad in ("trace", "Debug", "", "info,debug"):
-        check(["serve", "llm", "--log-level", bad, "--model", "missing.gguf"],
+        check(["serve", "llm", "--log-level", bad, "--model", STUB],
               2, "--log-level must be error, warn, info or debug")
     # --log-progress asks for INFO-tier lines. A quieter threshold would accept
     # the flag and discard every line it produces, so that pairing fails.
     for quiet in ("warn", "error"):
-        check(["serve", "llm", "--model", "missing.gguf", "--log-progress",
+        check(["serve", "llm", "--model", STUB, "--log-progress",
                "--log-level", quiet], 2, "--log-progress needs --log-level=info")
     # The default tier and the debug shorthand both carry progress lines.
-    check(["serve", "llm", "--model", "missing.gguf", "--log-progress"], 1,
+    check(["serve", "llm", "--model", STUB, "--log-progress"], 1,
           "Error loading model")
-    check(["serve", "llm", "--model", "missing.gguf", "--log-progress",
+    check(["serve", "llm", "--model", STUB, "--log-progress",
            "--log-level=debug"], 1, "Error loading model")
-    check(["serve", "llm", "--model", "missing.gguf", "--log-progress",
+    check(["serve", "llm", "--model", STUB, "--log-progress",
            "--log-level=info"], 1, "Error loading model")
-    check(["serve", "llm", "--model", "missing.gguf", "--log-progress", "-v"],
+    check(["serve", "llm", "--model", STUB, "--log-progress", "-v"],
           1, "Error loading model")
     # --trace records client content, so it belongs to the text server only,
     # fails before the model opens when the file cannot be written, and the
@@ -132,7 +186,8 @@ def main():
         result = run(load + ["--trace", trace])
         assert result.returncode == 1, result.stderr
         assert "[WARN] [trace] event=trace_enabled" in result.stderr
-        assert stat.S_IMODE(os.stat(trace).st_mode) == 0o600
+        if os.name != "nt":  # Windows has no POSIX mode bits
+            assert stat.S_IMODE(os.stat(trace).st_mode) == 0o600
     # Every help variant groups verbosity the same way: a "Logging:" section,
     # with no hand-written "Server Options:" list to drift from the parser.
     for args in (["serve", "--help"], ["serve", "llm", "--help"],
@@ -140,16 +195,18 @@ def main():
         text = check(args, 0, "Logging:")
         assert "Server Options:" not in text, args
         assert "--log-level" in text and "-v, --verbose" in text, args
-    check(["serve", "llm", "--log-level=debug", "--model", "missing.gguf"], 1,
+    check(["serve", "llm", "--log-level=debug", "--model", STUB], 1,
           "Error loading model")
     check(["bench", "--help"], 0, "Path to GGUF model file (required)")
     for args in (["serve"], ["serve", "llm"], ["bench"],
-                 ["serve", "llm", "--model", ""], ["bench", "--model", ""]):
+                 ["bench", "--model", ""]):
         check(args, 2, "--model <PATH> is required")
+    # An explicit empty serve --model is its own error (release profile).
+    check(["serve", "llm", "--model", ""], 2, "--model requires a nonempty path")
     check(["bench", "--model", "missing.gguf"], 1,
           "Error loading GGUF model 'missing.gguf'")
     for limit in ("-1", "1", "16384"):
-        check(["serve", "llm", "--model", "missing.gguf",
+        check(["serve", "llm", "--model", STUB,
                "--context", "0", "--max-tokens", limit],
               1, "Error loading model")
     for limit in ("0", "-2", "4294967296"):
@@ -162,26 +219,35 @@ def main():
     for args in (["--max-pending", "2"], ["--max-pending", "1"],
                  ["--max-pending", "2", "--max-pending-per-client", "2"],
                  ["--max-pending-per-client", "16"]):
-        check(["serve", "llm", "--model", "missing.gguf", *args], 1,
+        check(["serve", "llm", "--model", STUB, *args], 1,
               "Error loading model")
     for args in (["--max-pending", "2", "--max-pending-per-client", "3"],
                  ["--max-pending-per-client", "17"],
                  ["--max-pending-per-client", "0"], ["--max-pending", "0"]):
         check(["serve", "llm", *args], 2,
               "sampling and scheduling limits are invalid")
+    for value in ("0", "60000"):
+        check(["serve", "llm", "--model", STUB,
+               "--stall-timeout-ms", value], 1, "Error loading model")
+    for value in ("1", "59999"):
+        check(["serve", "llm", "--stall-timeout-ms", value], 2,
+              "sampling and scheduling limits are invalid")
     for flag, value in (("--temperature", "2.01"), ("--presence-penalty", "2.01"),
                         ("--frequency-penalty", "-2.01")):
         check(["serve", "llm", flag, value], 2,
               "sampling and scheduling limits are invalid")
     for staging in (None, "0", "8589934592"):
-        args = ["serve", "llm", "--model", "missing.gguf",
+        args = ["serve", "llm", "--model", STUB,
                 "--cache-disk", "/unused-cache"]
         if staging is not None:
             args += ["--cache-disk-staging-bytes", staging]
-        check(args, 1, "Error loading model")
+        # A disk cache now needs a prepared package, which a stub header is
+        # not, so the staging value is no longer reached on this path.
+        check(args, 2, "--cache-disk requires a prepared model package")
+    # The package gate for --cache-disk runs before the limit check.
     check(["serve", "llm", "--cache-disk", "/unused-cache",
            "--cache-disk-bytes", "0"], 2,
-          "sampling and scheduling limits are invalid")
+          "--cache-disk requires a prepared model package")
 
     for command in ("prompt", "chat", "bench"):
         check([command, "--help"], 0, "--draft-policy")

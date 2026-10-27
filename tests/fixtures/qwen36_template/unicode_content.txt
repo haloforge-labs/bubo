@@ -1,0 +1,14 @@
+<|im_start|>system
+Réponds en français — 日本語 OK.<|im_end|>
+<|im_start|>user
+Café à Montréal? 😀<|im_end|>
+<|im_start|>assistant
+<think>
+Pensée brève.
+</think>
+
+Oui, à l'ouest.<|im_end|>
+<|im_start|>user
+Merci.<|im_end|>
+<|im_start|>assistant
+<think>

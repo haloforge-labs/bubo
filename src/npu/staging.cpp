@@ -10,6 +10,7 @@
 #include <limits>
 #include <stdexcept>
 
+#include "chunk_retry.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
 
 namespace gufo::npu {
@@ -62,8 +63,11 @@ void SliceCount(unsigned slices, bool zero) {
 bool IsKnob(std::string_view name) noexcept {
   return name == "GUFO_NPU_DIR" || name == "GUFO_NPU_SLICES" ||
          name == "GUFO_NPU_GATE_SLICES" || name == "GUFO_NPU_SHEXP" ||
-         name == "GUFO_NPU_TIMEOUT_MS" ||
-         name == "GUFO_NPU_KEEPALIVE" || name == "GUFO_NPU_KEEPALIVE_MS";
+         name == "GUFO_NPU_TIMEOUT_MS" || name == "GUFO_NPU_KEEPALIVE" ||
+         name == "GUFO_NPU_KEEPALIVE_MS" || name == "GUFO_NPU_HAL_MONITOR" ||
+         name == "GUFO_NPU_CHIP_POWER" || name == "GUFO_NPU_MEM_TRACE" ||
+         name == "GUFO_NPU_GUARD" || name == "GUFO_NPU_GUARD_TEST" ||
+         name == "GUFO_NPU_TEST_FAIL_CHUNK";
 }
 
 Knobs ParseKnobs(const core::ExperimentalAuthorization& authorization,
@@ -90,6 +94,29 @@ Knobs ParseKnobs(const core::ExperimentalAuthorization& authorization,
   knobs.slices = Number(values, "GUFO_NPU_SLICES", 6, 1, 12);
   knobs.gate_slices = Number(values, "GUFO_NPU_GATE_SLICES", 0, 0, 12);
   knobs.shared_expert = Switch(values, "GUFO_NPU_SHEXP", true);
+  knobs.hal_monitor = Switch(values, "GUFO_NPU_HAL_MONITOR", true);
+  knobs.chip_power = Switch(values, "GUFO_NPU_CHIP_POWER", true);
+  knobs.mem_trace = Switch(values, "GUFO_NPU_MEM_TRACE", true);
+  if (const auto text = Value(values, "GUFO_NPU_GUARD"); !text.empty()) {
+    if (!ParseGuardMode(std::string(text), &knobs.guard))
+      throw std::invalid_argument(
+          "GUFO_NPU_GUARD: expected literal on|off|log");
+  } else if (values.contains("GUFO_NPU_GUARD")) {
+    throw std::invalid_argument("GUFO_NPU_GUARD: expected literal on|off|log");
+  }
+  if (const auto text = Value(values, "GUFO_NPU_GUARD_TEST"); !text.empty()) {
+    std::string error;
+    if (!ParseGuardOverrides(std::string(text), &knobs.guard_test, &error))
+      throw std::invalid_argument("GUFO_NPU_GUARD_TEST: " + error);
+  }
+  if (const auto text = Value(values, "GUFO_NPU_TEST_FAIL_CHUNK");
+      !text.empty()) {
+    std::uint64_t chunk = 0;
+    std::string error;
+    if (!ParseTestFailChunk(text, &chunk, &error))
+      throw std::invalid_argument("GUFO_NPU_TEST_FAIL_CHUNK: " + error);
+    knobs.test_fail_chunk = chunk;
+  }
   (void)Switch(values, "GUFO_NPU_KEEPALIVE", true);
   knobs.timing = ParseTiming(Value(values, "GUFO_NPU_TIMEOUT_MS"),
                              Value(values, "GUFO_NPU_KEEPALIVE"),
@@ -176,5 +203,10 @@ bool QualifiedPrefill(std::uint64_t tokens,
                       std::uint64_t registered_groups) noexcept {
   return tokens >= kTokens && tokens % kTokens == 0 &&
          tokens / kTokens <= registered_groups;
+}
+
+bool QualifiedChunk(unsigned tokens, unsigned capacity) noexcept {
+  return QualifiedPrefill(tokens, capacity / kTokens) && tokens <= capacity &&
+         tokens <= 4 * kTokens;
 }
 }  // namespace gufo::npu

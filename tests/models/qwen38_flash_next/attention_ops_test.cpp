@@ -602,12 +602,95 @@ void CheckChunks(std::uint32_t n, std::uint32_t split) {
     throw std::runtime_error("attention depends on prefill chunk boundary");
 }
 
+// C4 sparse-operator split invariance. Row t selects blocks that interleave
+// with its neighbours' inside the same 16-key tiles, so a launch-relative
+// four-query group compacts a different union (and different 16-key tiles)
+// for each split. Every row must produce the same bits however the rows are
+// split over launches, and match the FP64 masked reference.
+void CheckSparseSplit(std::uint32_t start_pos, std::uint32_t n_tokens,
+                      std::uint32_t split) {
+  const std::uint32_t n_kv = start_pos + n_tokens;
+  const std::uint32_t max_blocks = (n_kv + kRatio - 1) / kRatio;
+  const std::uint32_t mask_words = (max_blocks + 31) / 32;
+  const std::size_t q_count = static_cast<std::size_t>(n_tokens) * kQWidth;
+  const std::size_t kv_count = static_cast<std::size_t>(n_kv) * kKvWidth;
+  const auto qv = MakeValues(q_count, 0xC4000001U + n_tokens, 4.0F);
+  const auto gate = MakeValues(q_count, 0xC4000002U + n_tokens, 3.0F);
+  std::vector<__half> kh(kv_count), vh(kv_count);
+  {
+    const auto kf = MakeValues(kv_count, 0xC4000003U, 1.0F);
+    const auto vf = MakeValues(kv_count, 0xC4000004U, 1.0F);
+    for (std::size_t i = 0; i < kv_count; ++i) {
+      kh[i] = __float2half(kf[i]);
+      vh[i] = __float2half(vf[i]);
+    }
+  }
+  std::vector<std::uint32_t> mask(static_cast<std::size_t>(n_tokens) *
+                                  mask_words);
+  for (std::uint32_t t = 0; t < n_tokens; ++t) {
+    const std::uint32_t complete = (start_pos + t + 1) / kRatio;
+    for (std::uint32_t j = 0; j < 128; ++j) {
+      const std::uint32_t b = j * 4 + ((start_pos + t) % 4);
+      if (b < complete)
+        mask[static_cast<std::size_t>(t) * mask_words + b / 32] |= 1U << (b % 32);
+    }
+  }
+  HipBuffer<float> d_q(q_count), d_gate(q_count), d_full(q_count),
+      d_split(q_count);
+  HipBuffer<__half> d_k(kv_count), d_v(kv_count);
+  HipBuffer<std::uint32_t> d_mask(mask.size());
+  Upload(&d_q, qv);
+  Upload(&d_gate, gate);
+  Upload(&d_k, kh);
+  Upload(&d_v, vh);
+  Upload(&d_mask, mask);
+  const auto run = [&](std::uint32_t row0, std::uint32_t rows, float* out) {
+    const std::size_t offset = static_cast<std::size_t>(row0) * kQWidth;
+    if (!q::WmmaCausalAttention(
+            d_q.get() + offset, d_gate.get() + offset, d_k.get(), d_v.get(),
+            d_mask.get() + static_cast<std::size_t>(row0) * mask_words,
+            mask_words, out + offset, rows, start_pos + row0, kHeads, kKvHeads,
+            kDim, kRatio, nullptr)) {
+      throw std::runtime_error("sparse split attention rejected geometry");
+    }
+  };
+  run(0, n_tokens, d_full.get());
+  run(0, split, d_split.get());
+  run(split, n_tokens - split, d_split.get());
+  CheckHip(hipDeviceSynchronize(), "sparse split attention");
+  const auto a = Download(&d_full, q_count);
+  const auto b = Download(&d_split, q_count);
+  std::size_t differing = 0;
+  for (std::size_t i = 0; i < q_count; ++i)
+    differing += std::memcmp(&a[i], &b[i], sizeof(float)) != 0 ? 1 : 0;
+  const auto exact = Fp64Attention(qv, gate, kh, vh, mask.data(), mask_words,
+                                   n_tokens, start_pos, kRatio);
+  double worst = 0.0;
+  for (std::size_t i = 0; i < q_count; ++i)
+    worst = std::max(worst, std::abs(static_cast<double>(a[i]) - exact[i]));
+  std::cout << "sparse split n=" << n_tokens << " start=" << start_pos
+            << " split=" << split << " differing=" << differing
+            << " FP64 worst " << worst << '\n';
+  if (differing != 0)
+    throw std::runtime_error("sparse attention depends on its launch split");
+  if (!(worst < 2e-2))
+    throw std::runtime_error("sparse attention exceeds the FP64 envelope");
+}
+
 }  // namespace
 
 int main() {
   try {
     CheckChunks(136, 94);
     CheckChunks(2048, 1025);
+    // The compact union list groups four launch-relative queries, so sparse
+    // results are split-invariant only for starts and splits that are
+    // multiples of 4 (the exact profile's fixed 4096 forward size).
+    for (const std::uint32_t start : {2048U, 2052U}) {
+      for (const std::uint32_t split : {4U, 8U})
+        CheckSparseSplit(start, 12, split);
+      CheckSparseSplit(start, 24, 8);
+    }
     CheckPreparation(1, 0, 64);
     CheckPreparation(8, 4096, 64);
     CheckPreparation(65, 131069, 64);

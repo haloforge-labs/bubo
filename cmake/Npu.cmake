@@ -51,7 +51,9 @@ add_library(npu_runtime OBJECT
   src/npu/xrt_runtime_windows.cpp src/npu/xrt_runtime_policy.cpp
   src/npu/private_bo_adapter.cpp src/npu/session.cpp
   src/npu/server_prefill.cpp src/npu/staging.cpp
-  src/npu/bfp.cpp src/npu/linear_z.cpp src/npu/projection.cpp)
+  src/npu/bfp.cpp src/npu/linear_z.cpp src/npu/projection.cpp
+  src/npu/fault_telemetry.cpp src/npu/hal_fault_monitor.cpp src/npu/chip_power.cpp
+  src/npu/runtime_status.cpp src/npu/mem_trace.cpp src/npu/guard.cpp src/npu/platform_info.cpp)
 target_include_directories(npu_runtime PRIVATE "${CMAKE_SOURCE_DIR}")
 target_include_directories(npu_runtime SYSTEM PRIVATE
   "${GUFO_XRT_GENERATED_INCLUDE_DIR}" "${GUFO_XRT_INCLUDE_DIR}")

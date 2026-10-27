@@ -96,6 +96,25 @@ enum class QwenReasoningEffort : std::uint8_t {
   kXHigh,
 };
 
+/// Which compiled template writes the prompt. kCyberTiel is the template
+/// inside the Cyber-Tiel GGUFs, with its own system text and thinking rules.
+/// kQwen36 is the template inside the Qwen3.6-27B GGUFs: no effort line, at
+/// most two leading system messages, reasoning dropped unless preserve_thinking
+/// is true. Both are selected by the template hash
+/// (QwenChatTemplate::Profile), never by name.
+enum class QwenTemplateDialect : std::uint8_t {
+  kQwen,
+  kCyberTiel,
+  kQwen36,
+};
+
+/// How kCyberTiel writes tool calls. The template defaults to XML (what stock
+/// llama.cpp serves); its tool_call_format kwarg "json" selects JSON objects.
+enum class QwenToolFormat : std::uint8_t {
+  kXml,
+  kJson,
+};
+
 /// Formatting options for rendering a conversation into a text prompt.
 struct ChatTemplateOptions {
   bool add_generation_prompt{true};
@@ -104,6 +123,8 @@ struct ChatTemplateOptions {
   bool preserve_thinking{true};
   bool add_vision_id{false};
   bool require_tool_call{false};
+  QwenTemplateDialect dialect{QwenTemplateDialect::kQwen};
+  QwenToolFormat tool_format{QwenToolFormat::kXml};  ///< kCyberTiel only
   /// Upper bound on the rendered prompt. 8 MiB matches the default HTTP body
   /// limit: 1 MiB rejected full-context prompts (262144 tokens of prose is
   /// about 1 MB of text).
@@ -132,8 +153,12 @@ inline constexpr std::size_t kMaxRenderedBytesPerToken = 128;
 
 /// Resolve CLI/API controls against the official Qwen3.8 template defaults.
 /// Provider-neutral minimal/high/max map to native low/xhigh/xhigh.
+///
+/// kQwen36 follows that template's own defaults instead: preserve_thinking is
+/// off unless the request asks for it, and the effort has no effect.
 [[nodiscard]] ChatTemplateOptions ResolveQwenChatOptions(
-    const ReasoningOptions& reasoning, bool add_vision_id = false);
+    const ReasoningOptions& reasoning, bool add_vision_id = false,
+    QwenTemplateDialect dialect = QwenTemplateDialect::kQwen);
 
 /// Deterministic, bounded Qwen ChatML formatter.
 class QwenChatTemplate {
@@ -141,6 +166,8 @@ public:
   enum class Profile : std::uint8_t {
     kLegacyChatMl,
     kQwen38Reasoning,
+    kCyberTiel,
+    kQwen36,
   };
 
   ~QwenChatTemplate() = default;
@@ -183,6 +210,36 @@ public:
     return "12827f24b742ea4e80cdc12dbcf9622227056b9f797252a3149263d4f9aaadce";
   }
 
+  /// SHA-256 of the chat template in the Cyber-Tiel-Coder GGUFs (template
+  /// version qwen3.8-froggeric-v22.5.0). Only an exact match selects the
+  /// kCyberTiel dialect.
+  [[nodiscard]] static constexpr std::string_view
+  CyberTielTemplateSha256() noexcept {
+    return "b629ec1ffdcf88bd8b547f3eb7d5dbde61002fe2a2727c5720b2f48f5b6545e7";
+  }
+
+  /// SHA-256 of the chat template in the Qwen3.6-27B GGUFs
+  /// (unsloth/Qwen3.6-27B-GGUF). Only an exact match selects the kQwen36
+  /// dialect.
+  [[nodiscard]] static constexpr std::string_view
+  Qwen36TemplateSha256() noexcept {
+    return "55d4931433fe502b794226ee7f4d206a6bdd436ac9f80eb7d8ebb4c639f9ea0c";
+  }
+
+  /// The dialect that renders this template's prompts.
+  [[nodiscard]] QwenTemplateDialect GetDialect() const noexcept {
+    switch (profile_) {
+      case Profile::kCyberTiel:
+        return QwenTemplateDialect::kCyberTiel;
+      case Profile::kQwen36:
+        return QwenTemplateDialect::kQwen36;
+      case Profile::kLegacyChatMl:
+      case Profile::kQwen38Reasoning:
+        break;
+    }
+    return QwenTemplateDialect::kQwen;
+  }
+
   /// Formats a list of messages into a deterministic UTF-8 prompt string.
   [[nodiscard]] static std::optional<std::string> Render(
       std::span<const ChatMessage> messages,
@@ -207,6 +264,12 @@ public:
       const QwenTokenizer& tokenizer, std::span<const ChatMessage> messages,
       std::span<const ChatTool> tools, const ChatTemplateOptions& options = {},
       std::string* error_msg = nullptr);
+
+  /// Append-only Qwen text turns with preserved reasoning. The caller owns the
+  /// unchanged system/tool prefix and rejects extensions of a tool group.
+  [[nodiscard]] static std::optional<std::string> RenderTail(
+      std::span<const ChatMessage> messages, const ChatTemplateOptions& options,
+      std::string* error_msg, std::vector<ContentSpan>* content_spans);
 
   /// The rendered prompt's bytes from `begin` to `end` as tokens: message
   /// content is read as text and everything else as framing (#383), so a

@@ -1,4 +1,5 @@
 #include <chrono>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -6,7 +7,9 @@
 #include <stdexcept>
 #include <thread>
 
+#include "src/cli/prepare/runtime_location.hpp"
 #include "src/cli/prepare/runtime_prepare.hpp"
+#include "src/core/crypto/sha256.hpp"
 #include "src/core/prepare/hash_file.hpp"
 #include "src/core/prepare/metadata_json.hpp"
 #include "tests/prepare/loopback_stub.hpp"
@@ -19,7 +22,9 @@ namespace {
 namespace fs = std::filesystem;
 using namespace bubo::prepare;
 using namespace bubo::prepare::test;
+std::size_t checks = 0;
 void Check(bool ok, std::string text) {
+  ++checks;
   if (!ok)
     throw std::runtime_error(std::move(text));
 }
@@ -67,20 +72,70 @@ RunResult Run(const Options& options, const RuntimeTestEnvironment& env,
 }
 std::map<std::string, fs::file_time_type> Times(const fs::path& root) {
   std::map<std::string, fs::file_time_type> times;
-  for (const auto& f : fs::recursive_directory_iterator(root))
-    times[f.path().generic_string()] = fs::last_write_time(f.path());
-  times[root.generic_string()] = fs::last_write_time(root);
+  const auto remember = [&](const fs::path& path) {
+    const auto utf8 = path.generic_u8string();
+    times.emplace(std::string(utf8.begin(), utf8.end()),
+                  fs::last_write_time(path));
+  };
+  // The fixture includes Unicode destinations beyond MAX_PATH. Native paths
+  // keep traversal valid; UTF-8 keys avoid the Windows ANSI code page.
+  const auto native_root = NativePath(root);
+  for (const auto& f : fs::recursive_directory_iterator(native_root))
+    remember(f.path());
+  remember(native_root);
   return times;
+}
+void PublishedRuntimeMetadata(const fs::path& root) {
+  const auto fixture = metadata::Parse(
+      Read(fs::path(BUBO_PREPARE_FIXTURES) / "published-v0.1.0.json"));
+  const auto& archive = *fixture.find("archive");
+  constexpr std::string_view archive_sha =
+      "d1c92dacf68e8e379b8e02c8d68ba18ba102b2fd22784e25cb06b0757fac1306";
+  Check(archive.member_str("sha256") == archive_sha &&
+            archive.member_str("revision") ==
+                "3ff74dce9a67182e572dbddbd8279c058e60fe31" &&
+            archive.member_str("version") == "0.1.0",
+        "fixture identifies the verified published 0.1.0 archive");
+  RuntimeTestEnvironment published{};
+  const auto table = fixture.member_str("runtime_members");
+  published.members = LoadRuntimeTable(table);
+  Check(published.members.size() == 263 &&
+            SerializeRuntimeTable(CompiledRuntimeTable()) == table,
+        "all published runtime member paths, sizes and hashes still match");
+  for (const auto& row : fixture.find("runtime_notices")->items()) {
+    const auto& text = row.find("text")->str();
+    Check(gufo::crypto::Sha256Hex(
+              std::span(reinterpret_cast<const std::uint8_t*>(text.data()),
+                        text.size())) == row.member_str("sha256"),
+          "published notice text matches its embedded hash");
+    published.notices.push_back(
+        {row.find("path")->str(), row.find("sha256")->str(), text});
+  }
+  Check(published.notices.size() == 70,
+        "all published runtime notices are retained independently");
+  const auto dir = root / "published-metadata";
+  WriteFixture(dir / ".bubo/runtime-ready.json",
+               fixture.find("runtime_ready")->dump() + "\n");
+  const auto error = RuntimeReadyErrorForTesting(dir, published);
+  Check(error.find("missing runtime file or size mismatch") != error.npos &&
+            error.find("readiness entry mismatch") == error.npos,
+        "published readiness shape and digest pass before payload checks");
 }
 }  // namespace
 int main(int argc, char** argv) {
   try {
 #ifdef _WIN32
-    if (argc == 3 && std::string_view(argv[1]) == "--crash") {
+    if (argc == 3 && (std::string_view(argv[1]) == "--crash" ||
+                      std::string_view(argv[1]) == "--refresh-crash")) {
       const auto run_root = fs::u8path(argv[2]);
       RuntimeTestEnvironment crash;
       crash.wheels = RuntimeWheels();
       crash.notices = RuntimeNotices();
+      if (std::string_view(argv[1]) == "--refresh-crash")
+        for (auto& notice : crash.notices) {
+          notice.text = "abc";
+          notice.sha256 = kAbcHash;
+        }
       std::array<fs::path, 3> paths;
       std::array<std::string, 3> hashes;
       for (unsigned i = 0; i < 3; ++i) {
@@ -110,6 +165,7 @@ int main(int argc, char** argv) {
                                             : fs::path("j3-runtime-fixture"));
     Check(!fs::exists(root), "fresh runtime fixture root required");
     fs::create_directories(root);
+    PublishedRuntimeMetadata(root);
     const auto consent_path = argc > 2 ? fs::u8path(argv[2])
                                        : fs::path(BUBO_PREPARE_FIXTURES) /
                                              "runtime-consent-source.md";
@@ -132,14 +188,14 @@ int main(int argc, char** argv) {
           "binding additional AMD terms sentence");
     for (const auto& n : RuntimeNotices()) {
       Check(Read(fs::path(BUBO_NOTICE_SOURCE) / fs::u8path(n.path)) == n.text,
-            "exact release-thread notice bytes: " + std::string(n.path));
+            "exact release notice bytes: " + std::string(n.path));
       Check(HashFile(fs::path(BUBO_NOTICE_SOURCE) / fs::u8path(n.path)) ==
                 n.sha256,
             "notice source digest");
     }
     std::cout << "PASS: printed consent equals " << consent_path.string()
               << " after code-filled placeholders; compiled pins; 70 exact "
-                 "release-thread notice bytes\n";
+                 "release notice bytes\n";
     const std::array<fs::path, 3> wheel_paths{root / "source/core.whl",
                                               root / "source/libraries.whl",
                                               root / "source/device.whl"};
@@ -201,10 +257,38 @@ int main(int argc, char** argv) {
       return o;
     };
     auto first = options("success");
+    {
+      auto preview = first;
+      preview.plan_only = true;
+      preview.machine = true;
+      PreparationPlan plan;
+      std::istringstream input;
+      std::ostringstream output, errors;
+      Check(RunRuntimeForTesting(preview, env, input, output, errors, &plan) ==
+                    0 &&
+                !plan.machine["volumes"].items().empty(),
+            "runtime_remaining_space_plan_without_download");
+      for (const auto& volume : plan.machine["volumes"].items())
+        Check(volume.member_size("safety_margin_bytes") == 2147483648ULL &&
+                  volume.member_size("bytes_to_write") > 0 &&
+                  volume.member_size("free_after_download_bytes") ==
+                      20ULL * 1024 * 1024 * 1024 -
+                          volume.member_size("bytes_to_write"),
+              "runtime_remaining_space_uses_planned_writes_only");
+      Check(stub.records().empty(), "runtime_plan_has_zero_network_requests");
+    }
     drop = true;
     const auto result = Run(first, env);
     drop = false;
     Check(result.code == 0, "runtime acquisition: " + result.err);
+    // --runtime-dir puts the runtime where later commands do not look: the
+    // output names the variable that makes them find it, with the folder.
+    const auto note = "prepare runtime: set BUBO_RUNTIME_DIR=" +
+                      first.runtime_dir +
+                      " so other bubo commands find this runtime\n";
+    Check(result.out.find(note) != result.out.npos,
+          "runtime output names BUBO_RUNTIME_DIR and the folder: " +
+              result.out);
     bool ranged = false;
     for (const auto& r : stub.records())
       ranged |= r.headers.contains("range");
@@ -225,8 +309,9 @@ int main(int argc, char** argv) {
       const auto noop = Run(first, env);
       Check(
           noop.code == 0 &&
-              noop.out == "prepare runtime: already prepared; nothing to do\n",
-          "read-only no-op");
+              noop.out ==
+                  "prepare runtime: already prepared; nothing to do\n" + note,
+          "read-only no-op still names BUBO_RUNTIME_DIR");
     }
     first.verify = true;
     first.offline = true;
@@ -238,6 +323,139 @@ int main(int argc, char** argv) {
     std::cout << "PASS: native stub wheel drop/Range resume; archive/member "
                  "pins; exact selection; notices and ready-last; --yes log; "
                  "no-op/offline/verify zero network/writes\n";
+    // Update failure cases (written first): build B's notices/marker must
+    // refresh without wheel access or member replacement; interruption must
+    // roll back and allow an offline retry; payload mismatch still refuses.
+    {
+      auto updated = env;
+      for (auto& notice : updated.notices) {
+        notice.text = "abc";
+        notice.sha256 = kAbcHash;
+      }
+      const auto install = fs::path(first.runtime_dir);
+      auto previous = Snap(install, env);
+      auto refresh = first;
+      refresh.machine = true;
+      refresh.offline = true;
+      refresh.cache_dir = (root / "absent-wheel-cache").string();
+      {
+        const auto unchanged = Times(root);
+        PreparationPlan plan;
+        std::istringstream input;
+        std::ostringstream out, err;
+        Check(RunRuntimeForTesting(refresh, updated, input, out, err, &plan) ==
+                      0 &&
+                  !plan.ready && Times(root) == unchanged &&
+                  stub.records().size() == requests,
+              "notice refresh preview is read-only and needs no wheel cache");
+        const auto* states = plan.machine.find("file_states");
+        Check(states && states->is_array() &&
+                  states->size() == updated.wheels.size(),
+              "refresh plan has one file state per wheel source");
+        for (const auto& state : states->items())
+          Check(state.str() == "reuse", "refresh plan reuses every source");
+        auto refused = refresh;
+        refused.authorize_plan = [&](const auto& authorized) {
+          Check(authorized.dump() == plan.machine.dump(),
+                "refresh authorization matches the preview including reuse");
+          return false;
+        };
+        Check(Run(refused, updated).code == 3 && Times(root) == unchanged,
+              "unapproved runtime refresh changes nothing");
+      }
+#ifdef _WIN32
+      bool payload_protected = false;
+      updated.after_install = [&](std::size_t i) {
+        if (i == 0) {
+          const auto member = install / fs::u8path(env.members[0].destination);
+          const auto handle = CreateFileW(
+              member.c_str(), GENERIC_WRITE,
+              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+          payload_protected = handle == INVALID_HANDLE_VALUE &&
+                              GetLastError() == ERROR_SHARING_VIOLATION;
+          if (handle != INVALID_HANDLE_VALUE)
+            CloseHandle(handle);
+        }
+        return true;
+      };
+#endif
+      Check(
+          Run(refresh, updated).code == 0 && stub.records().size() == requests,
+          "first build B runtime prepare refreshes offline");
+#ifdef _WIN32
+      Check(payload_protected,
+            "payload stays protected through metadata publication");
+#endif
+      updated.after_install = {};
+      Check(Run(refresh, env).code == 0,
+            "restore build A before interrupted refresh");
+      previous = Snap(install, env);
+      updated.after_install = [](std::size_t) { return false; };
+      const auto interrupted = Run(refresh, updated);
+      Check(interrupted.code == 7 && Snap(install, env) == previous,
+            "interrupted notice refresh rolls back: " + interrupted.err);
+      updated.after_install = {};
+      fs::remove(install / "licenses" / fs::u8path(updated.notices[0].path));
+      const auto upgraded = Run(refresh, updated);
+      Check(upgraded.code == 0 && stub.records().size() == requests &&
+                upgraded.out.find("already prepared") != upgraded.out.npos &&
+                upgraded.out.find("notices refreshed") != upgraded.out.npos,
+            "build B refresh offline without wheel cache: " + upgraded.err);
+      const auto current = Snap(install, updated);
+      for (const auto& member : env.members)
+        Check(current.at(member.destination) == previous.at(member.destination),
+              "refresh preserves member hash, identity and timestamp");
+      for (const auto& notice : updated.notices)
+        Check(
+            Read(install / "licenses" / fs::u8path(notice.path)) == notice.text,
+            "build B exact runtime notice bytes");
+      Check(RuntimeReadyErrorForTesting(install, updated).empty(),
+            "build B runtime marker is ready");
+      fs::remove(install / ".bubo/runtime-ready.json");
+      Check(Run(refresh, updated).code == 0 &&
+                RuntimeReadyErrorForTesting(install, updated).empty() &&
+                stub.records().size() == requests,
+            "missing runtime marker refreshes offline without wheel cache");
+      // Restore A for the remaining transaction tests.
+      Check(Run(refresh, env).code == 0, "refresh back to build A");
+#ifdef _WIN32
+      std::wstring executable(32768, L'\0');
+      const auto length = GetModuleFileNameW(
+          nullptr, executable.data(), static_cast<DWORD>(executable.size()));
+      executable.resize(length);
+      auto command = L"\"" + executable + L"\" --refresh-crash \"" +
+                     (root / "success").wstring() + L"\"";
+      STARTUPINFOW startup{};
+      startup.cb = sizeof(startup);
+      PROCESS_INFORMATION process{};
+      Check(
+          CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr,
+                         FALSE, CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS,
+                         nullptr, nullptr, &startup, &process) != 0,
+          "launch native notice-refresh crash helper");
+      const auto wait = WaitForSingleObject(process.hProcess, 30000);
+      DWORD exit = 0;
+      GetExitCodeProcess(process.hProcess, &exit);
+      CloseHandle(process.hThread);
+      CloseHandle(process.hProcess);
+      Check(wait == WAIT_OBJECT_0 && exit == 42 &&
+                fs::exists(install / ".bubo/runtime/journal.json"),
+            "process death during metadata refresh retains recovery journal");
+      Check(
+          Run(refresh, updated).code == 0 &&
+              RuntimeReadyErrorForTesting(install, updated).empty() &&
+              stub.records().size() == requests,
+          "metadata journal recovers after process death without wheel cache");
+      const auto recovered = Snap(install, updated);
+      for (const auto& member : env.members)
+        Check(
+            recovered.at(member.destination) == previous.at(member.destination),
+            "crash recovery preserves member bytes, identity and timestamp");
+      Check(Run(refresh, env).code == 0,
+            "restore A after process death recovery");
+#endif
+    }
     auto offline = options("offline");
     offline.offline = true;
     Check(Run(offline, env).code == 4 && !fs::exists(root / "offline") &&
@@ -277,10 +495,11 @@ int main(int argc, char** argv) {
             !fs::exists(fs::path(bad.runtime_dir) / ".bubo/runtime-ready.json"),
         "traversal archive refusal");
     WriteFixture(wheel_paths[0], original);
-    // Restore an older marker to force a repair with a complete prior payload.
+    // A missing member forces installation; marker-only changes now refresh.
     const auto install = fs::path(first.runtime_dir);
     WriteFixture(install / ".bubo/runtime-ready.json",
                  "previous-runtime-marker\n");
+    fs::remove(install / fs::u8path(env.members.back().destination));
     const auto previous = Snap(install, env);
     for (const auto index : {std::size_t(0), env.members.size(),
                              env.members.size() + env.notices.size()}) {
@@ -344,6 +563,7 @@ int main(int argc, char** argv) {
     std::cout << "PASS: native sharing retry; Restart Manager loaded CPU "
                  "fixture DLL PID detection; running-runtime refusal\n";
     WriteFixture(install / ".bubo/runtime-ready.json", "before-crash-marker\n");
+    fs::remove(install / fs::u8path(env.members.back().destination));
     const auto before_crash = Snap(install, env);
     std::wstring executable(32768, L'\0');
     const auto exe_len = GetModuleFileNameW(
@@ -366,6 +586,23 @@ int main(int argc, char** argv) {
     Check(wait == WAIT_OBJECT_0 && exit == 42 &&
               fs::exists(install / ".bubo/runtime/journal.json"),
           "process death leaves recovery journal");
+    WriteFixture(install / fs::u8path(env.members.front().destination),
+                 "interrupted partial runtime member");
+    {
+      // Machine mode (the GUI) always previews first. A leftover journal is a
+      // not-ready plan that the approved run recovers, not a preview failure.
+      auto machine_preview = first;
+      machine_preview.machine = true;
+      PreparationPlan plan;
+      std::istringstream input;
+      std::ostringstream output, errors;
+      const auto code = RunRuntimeForTesting(machine_preview, env, input,
+                                             output, errors, &plan);
+      Check(code == 0 && !plan.ready &&
+                fs::exists(install / ".bubo/runtime/journal.json"),
+            "unfinished_transaction_preview_is_not_ready: exit=" +
+                std::to_string(code) + " " + errors.str());
+    }
     const auto cache_core =
         fs::path(first.cache_dir) / fs::u8path(env.wheels[0].file);
     fs::remove(cache_core);
@@ -376,9 +613,53 @@ int main(int argc, char** argv) {
               !fs::exists(install / ".bubo/runtime/journal.json"),
           "crash rollback precedes offline cache prerequisite");
     fs::copy_file(wheel_paths[0], cache_core);
+    {
+      // A process killed before it wrote its journal leaves only the tool's
+      // own staging folder. The next run removes it under the lock.
+      WriteFixture(install / ".bubo/runtime/stage/amdhip64_7.dll", "partial");
+      const auto leftover = Run(first, env);
+      Check(leftover.code == 0 &&
+                !fs::exists(install / ".bubo/runtime/stage") &&
+                RuntimeReadyErrorForTesting(install, env).empty(),
+            "scratch_without_journal_is_removed: exit=" +
+                std::to_string(leftover.code) + " " + leftover.err);
+    }
+    {
+      // A junction above the runtime and cache folders (a moved or redirected
+      // profile) is the user's layout. Only the runtime and cache folders and
+      // what is below them must be plain folders.
+      const auto target = root / "junction-target";
+      const auto profile = root / "junction-profile";
+      fs::create_directories(target);
+      const auto command = L"cmd /d /c mklink /J \"" + profile.wstring() +
+                           L"\" \"" + target.wstring() + L"\" >nul";
+      Check(_wsystem(command.c_str()) == 0 &&
+                (GetFileAttributesW(profile.c_str()) &
+                 FILE_ATTRIBUTE_REPARSE_POINT),
+            "junction fixture");
+      auto moved = options("junction-unused");
+      moved.root = (profile / "data").string();
+      moved.runtime_dir = (profile / "runtime").string();
+      moved.cache_dir = (profile / "cache").string();
+      const auto moved_result = Run(moved, env);
+      Check(moved_result.code == 0 &&
+                RuntimeReadyErrorForTesting(target / "runtime", env).empty(),
+            "junctioned_profile_installs_runtime: exit=" +
+                std::to_string(moved_result.code) + " " + moved_result.err);
+      auto linked = moved;
+      linked.runtime_dir = profile.string();
+      linked.cache_dir = (root / "junction-cache").string();
+      const auto linked_result = Run(linked, env);
+      Check(linked_result.code == 7 &&
+                linked_result.err.find("reparse point refused") !=
+                    linked_result.err.npos,
+            "a junction as the runtime folder itself is refused");
+    }
     std::cout
         << "PASS: native process death after first promotion; journal restores "
-           "previous runtime even with missing offline wheel cache\n";
+           "previous runtime even with missing offline wheel cache; a "
+           "leftover journal previews as not ready; scratch without a journal "
+           "is removed; a junction above the runtime folder is accepted\n";
 #endif
     auto cached_offline = options("cached-offline");
     cached_offline.offline = true;
@@ -404,11 +685,122 @@ int main(int argc, char** argv) {
           "native Unicode extended-path offline runtime installation");
     std::cout << "PASS: native Unicode runtime destination beyond MAX_PATH; "
                  "offline cache; zero requests\n";
+    {
+      // --output selects model/archive storage. Runtime selection is the
+      // same process search that the server uses, independent of that root.
+      auto shared = options("shared-default");
+      shared.runtime_dir.clear();
+      auto shared_env = env;
+      const auto local = root / "shared-process" / "Local";
+      const auto local_text = local.string();
+      const auto output = shared.root;
+      const std::array<const char*, 4> args{"runtime", "--yes", "--output",
+                                            output.c_str()};
+      const auto parsed = Parse(args, local_text);
+      Check(parsed && parsed.options.root == output &&
+                parsed.options.runtime_dir.empty(),
+            "prepare_output_root_keeps_runtime_selection_separate");
+      shared.root = parsed.options.root;
+      shared_env.runtime_search.local_app_data = local_text;
+      shared_env.runtime_search.exe_dir = root / "shared-process" / "package";
+      shared_env.runtime_search.check = [&](const fs::path& dir) {
+        return fs::exists(dir / "amdhip64_7.dll")
+                   ? RuntimeReadyErrorForTesting(dir, env)
+                   : std::string("missing fixture runtime");
+      };
+      const auto shared_dir = SharedRuntimeDir(local / "Bubo");
+      const auto shared_result = Run(shared, shared_env);
+      Check(shared_result.code == 0,
+            "default runtime install: " + shared_result.err);
+      Check(fs::exists(shared_dir / "amdhip64_7.dll") &&
+                fs::exists(shared_dir / ".bubo" / "runtime-ready.json") &&
+                !fs::exists(shared_dir / "bubo.exe") &&
+                !fs::exists(shared_dir / "bubo-engine.dll") &&
+                !fs::exists(fs::path(output) / "runtime"),
+            "prepare_output_root_does_not_redirect_runtime");
+      Check(shared_result.out.find(RuntimeConsent(
+                shared_dir, shared_dir / "licenses")) != shared_result.out.npos,
+            "plan names the resolved runtime folder");
+      Check(RuntimeReadyErrorForTesting(shared_dir, env).empty(),
+            "installed shared runtime has a valid marker");
+      const auto server_runtime = ResolveRuntime(shared_env.runtime_search);
+      Check(server_runtime.dir == shared_dir && server_runtime.error.empty(),
+            "prepare_output_runtime_matches_server_resolution");
+      std::cout
+          << "PASS: prepare_output_root_keeps_runtime_selection_separate; "
+             "prepare_output_root_does_not_redirect_runtime; "
+             "prepare_output_runtime_matches_server_resolution "
+             "(3 cases)\n";
+
+      // Read-only previews prove precedence without extra extraction/writes.
+      const auto request_count = stub.records().size();
+      const auto before_preview = Times(root);
+      auto preview_options = shared;
+      preview_options.machine = true;
+      preview_options.cache_dir = cached_offline.cache_dir;
+      // The crash-recovery proof deliberately leaves first.runtime_dir with
+      // an older marker. Use the complete offline install for reuse previews.
+      shared_env.runtime_search.environment = cached_offline.runtime_dir;
+      const auto preview_runtime = [&](const Options& requested,
+                                       const RuntimeTestEnvironment& test_env,
+                                       const fs::path& expected,
+                                       const std::string& name) {
+        std::istringstream input;
+        std::ostringstream out, err;
+        PreparationPlan plan;
+        const auto code =
+            RunRuntimeForTesting(requested, test_env, input, out, err, &plan);
+        Check(code == 0 && plan.ready &&
+                  fs::u8path(plan.machine["paths"].member_str("runtime")) ==
+                      expected,
+              name + ": exit=" + std::to_string(code) +
+                  " plan=" + plan.machine.dump() + " " + err.str());
+      };
+      preview_runtime(preview_options, shared_env,
+                      fs::path(cached_offline.runtime_dir),
+                      "prepare_runtime_environment_precedes_shared");
+      const auto shared_utf8 = shared_dir.u8string();
+      preview_options.runtime_dir =
+          std::string(shared_utf8.begin(), shared_utf8.end());
+      preview_runtime(preview_options, shared_env, shared_dir,
+                      "prepare_runtime_option_precedes_environment");
+      preview_options.runtime_dir.clear();
+      shared_env.runtime_search.environment.clear();
+      shared_env.runtime_search.local_app_data =
+          (root / "legacy-process" / "Local").string();
+      shared_env.runtime_search.exe_dir = fs::path(cached_offline.runtime_dir);
+      const auto legacy_runtime = ResolveRuntime(shared_env.runtime_search);
+      Check(legacy_runtime.dir == fs::path(cached_offline.runtime_dir) &&
+                legacy_runtime.kind == RuntimeKind::Legacy &&
+                legacy_runtime.error.empty(),
+            "server_resolves_existing_legacy_runtime");
+      preview_runtime(preview_options, shared_env,
+                      fs::path(cached_offline.runtime_dir),
+                      "prepare_runtime_legacy_matches_server");
+      shared_env.runtime_search.environment = "relative-runtime-dir";
+      const auto invalid = Run(preview_options, shared_env);
+      Check(invalid.code == 2 &&
+                invalid.err.find("absolute local path") != invalid.err.npos,
+            "prepare_runtime_invalid_environment_refused");
+      Check(stub.records().size() == request_count &&
+                Times(root) == before_preview,
+            "runtime_precedence_previews_have_zero_requests_or_writes");
+      std::cout << "PASS: prepare_runtime_environment_precedes_shared; "
+                   "prepare_runtime_option_precedes_environment; "
+                   "server_resolves_existing_legacy_runtime; "
+                   "prepare_runtime_legacy_matches_server; "
+                   "prepare_runtime_invalid_environment_refused; "
+                   "runtime_precedence_previews_have_zero_requests_or_writes "
+                   "(6 cases)\n";
+    }
     auto conflict = options("conflict");
     WriteFixture(fs::path(conflict.runtime_dir) / "amdhip64_7.dll", "bad");
     const auto conflict_count = stub.records().size();
     const auto refusal = Run(conflict, env);
-    Check(refusal.code == 7 &&
+    // A different existing file is an integrity failure (6), not storage (7):
+    // the contract's code for "a file does not match its pin".
+    Check(refusal.code == 6 &&
+              refusal.err.find("amdhip64_7.dll") != refusal.err.npos &&
               refusal.err.find("delete it and run bubo prepare again") !=
                   refusal.err.npos &&
               stub.records().size() == conflict_count,
@@ -431,7 +823,8 @@ int main(int argc, char** argv) {
     std::cout << "PASS: offline cached extraction; canonical conflict; free "
                  "space/FAT32; notice integrity preflight\n";
     fs::remove_all(NativePath(root));
-    std::cout << "prepare_runtime_test: PASS (CPU only)\n";
+    std::cout << "prepare_runtime_test: PASS (" << checks
+              << " checks, CPU only)\n";
   } catch (const std::exception& e) {
     std::cerr << "prepare_runtime_test: FAIL " << e.what() << '\n';
     return 1;

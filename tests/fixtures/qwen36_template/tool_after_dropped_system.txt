@@ -1,0 +1,58 @@
+<|im_start|>system
+# Tools
+
+You have access to the following functions:
+
+<tools>
+{"type": "function", "function": {"name": "get_weather", "description": "Get the current weather for a city.", "parameters": {"type": "object", "properties": {"city": {"type": "string", "description": "City name, e.g. Montreal"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["city"]}}}
+{"type": "function", "function": {"name": "run_shell", "description": "Run a shell command and return stdout and stderr.\nUse short commands.", "parameters": {"type": "object", "properties": {"command": {"type": "string"}, "timeout_s": {"type": "integer", "minimum": 1, "maximum": 600}, "env": {"type": "object", "additionalProperties": {"type": "string"}}}, "required": ["command"], "additionalProperties": false}}}
+{"type": "function", "function": {"name": "read_file", "description": "Read a UTF-8 text file (café notes, logs). Paths use \"/\".", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "lines": {"type": "array", "items": {"type": "integer"}}}, "required": ["path"]}}}
+</tools>
+
+If you choose to call a function ONLY reply in the following format with NO suffix:
+
+<tool_call>
+<function=example_function_name>
+<parameter=example_parameter_1>
+value_1
+</parameter>
+<parameter=example_parameter_2>
+This is the value for the second parameter
+that can span
+multiple lines
+</parameter>
+</function>
+</tool_call>
+
+<IMPORTANT>
+Reminder:
+- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags
+- Required parameters MUST be specified
+- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after
+- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls
+</IMPORTANT><|im_end|>
+<|im_start|>user
+Hi<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
+A
+
+<tool_call>
+<function=run_shell>
+<parameter=command>
+ls
+</parameter>
+</function>
+</tool_call><|im_end|>
+<|im_start|>user
+<tool_response>
+out
+</tool_response>
+<tool_response>
+out2
+</tool_response><|im_end|>
+<|im_start|>assistant
+<think>

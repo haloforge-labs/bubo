@@ -1,0 +1,253 @@
+{
+  "schema_version": 1,
+  "type": "status",
+  "operation_id": "2d56a0b554f457d35fdeb472da05fec0",
+  "seq": 1,
+  "time": "2026-10-14T03:44:29Z",
+  "product": {
+    "name": "bubo",
+    "version": "0.1.0",
+    "revision": "7670503d",
+    "engine_version": "0.10.0"
+  },
+  "payload": {
+    "model_selection": {
+      "model": null,
+      "manifest": "C:\\bubo\\run\\gui-build\\j2a-contract\\contract-serve-control\\lifecycle\\Bubo/models\\huihui-qwen38-flash-next-ud-q4-k-xl-v1\\bubo-package.json",
+      "pointer": "C:\\bubo\\run\\gui-build\\j2a-contract\\contract-serve-control\\lifecycle\\Bubo/prepared-default.json",
+      "source": "standard_location"
+    },
+    "prepared": true,
+    "phase": "ready",
+    "versions": {
+      "name": "bubo",
+      "version": "0.1.0",
+      "revision": "7670503d",
+      "engine_version": "0.10.0"
+    },
+    "capabilities": {
+      "schema_version": 1,
+      "prepare_jsonl": true,
+      "diagnose_json": true,
+      "status_json": true,
+      "instance_control": true,
+      "status_watch": true,
+      "settings": true,
+      "profiles": [
+        {
+          "name": "default",
+          "label": "Default",
+          "gui": true
+        },
+        {
+          "name": "exact",
+          "label": "Exact",
+          "gui": true
+        },
+        {
+          "name": "stock",
+          "label": "Stock",
+          "gui": true
+        },
+        {
+          "name": "subagents",
+          "label": "Subagents",
+          "gui": false
+        }
+      ],
+      "memory_estimate": true,
+      "connection_helpers": true,
+      "support_bundle": true,
+      "switch_registry": true,
+      "request_history": true,
+      "per_slot_context": false
+    },
+    "paths": {
+      "runtime": "",
+      "local_app_data": "C:\\bubo\\run\\gui-build\\j2a-contract\\contract-serve-control\\lifecycle",
+      "prepared_default_pointer": "C:\\bubo\\run\\gui-build\\j2a-contract\\contract-serve-control\\lifecycle\\Bubo/prepared-default.json",
+      "manifest": "C:\\bubo\\run\\gui-build\\j2a-contract\\contract-serve-control\\lifecycle\\Bubo/models\\huihui-qwen38-flash-next-ud-q4-k-xl-v1\\bubo-package.json"
+    },
+    "prepared_default": "C:\\bubo\\run\\gui-build\\j2a-contract\\contract-serve-control\\lifecycle\\Bubo/models\\huihui-qwen38-flash-next-ud-q4-k-xl-v1\\bubo-package.json",
+    "instances": [
+      {
+        "schema_version": 1,
+        "control_version": 1,
+        "identity": {
+          "instance_id": "909a087a619f046d302c6fec4732fd53",
+          "pid": 8664,
+          "process_creation_time": "134364230690208012",
+          "exe_path": "C:\\bubo\\run\\gui-build\\j2a-contract\\contract-serve-driver\\bubo.exe"
+        },
+        "endpoint": "http://127.0.0.1:58861/v1",
+        "phase": "ready",
+        "log_path": null,
+        "last_error": null,
+        "instance_id": "909a087a619f046d302c6fec4732fd53",
+        "pid": 8664,
+        "process_creation_time": "134364230690208012",
+        "exe_path": "C:\\bubo\\run\\gui-build\\j2a-contract\\contract-serve-driver\\bubo.exe",
+        "ready": true,
+        "effective_settings": {
+          "profile": {
+            "requested": "test-only",
+            "effective": "test-only",
+            "source": "test_fixture",
+            "reason": "Isolated CPU fake backend."
+          },
+          "context": {
+            "requested": 4096,
+            "effective": 4096,
+            "source": "test_fixture",
+            "reason": "Isolated CPU fake backend."
+          },
+          "sessions": {
+            "requested": 1,
+            "effective": 1,
+            "source": "test_fixture",
+            "reason": "Isolated CPU fake backend."
+          }
+        },
+        "served_model": "bubo-test-only-fake"
+      }
+    ],
+    "selection_required": false,
+    "identity": {
+      "instance_id": "909a087a619f046d302c6fec4732fd53",
+      "pid": 8664,
+      "process_creation_time": "134364230690208012",
+      "exe_path": "C:\\bubo\\run\\gui-build\\j2a-contract\\contract-serve-driver\\bubo.exe"
+    },
+    "endpoint": "http://127.0.0.1:58861/v1",
+    "log_path": null,
+    "effective_settings": {
+      "profile": {
+        "requested": "test-only",
+        "effective": "test-only",
+        "source": "test_fixture",
+        "reason": "Isolated CPU fake backend."
+      },
+      "context": {
+        "requested": 4096,
+        "effective": 4096,
+        "source": "test_fixture",
+        "reason": "Isolated CPU fake backend."
+      },
+      "sessions": {
+        "requested": 1,
+        "effective": 1,
+        "source": "test_fixture",
+        "reason": "Isolated CPU fake backend."
+      }
+    },
+    "inference_defaults": null,
+    "effective_switches": null,
+    "memory_estimate": null,
+    "memory_estimate_reason": "No coefficient table for this service.",
+    "pi_snippet": null,
+    "connection": {
+      "endpoint": "http://127.0.0.1:58861/v1",
+      "model_id": "bubo-test-only-fake",
+      "context_tokens": 4096,
+      "authenticated": false
+    },
+    "requests": [
+      {
+        "slot": null,
+        "prompt_tokens": 8,
+        "completion_tokens": 2,
+        "cached_tokens": 0,
+        "ttft_ms": null,
+        "prefill_tps": 4000,
+        "decode_tps": 500,
+        "cache_kind": "miss",
+        "finish_reason": "stop",
+        "id": "r2",
+        "time": "2026-10-14T03:44:29Z",
+        "outcome": "completed"
+      }
+    ],
+    "prepared_models": null,
+    "memory": {
+      "rss_bytes": 10661888,
+      "host_available_bytes": 13970321408,
+      "unit": "bytes",
+      "evidence": "measured"
+    },
+    "counters": {
+      "prefill_tokens_total": 8,
+      "decode_tokens_total": 2,
+      "cached_tokens_total": 0,
+      "prefill_seconds_total": 0.002,
+      "decode_seconds_total": 0.004,
+      "max_sequence_tokens": 10,
+      "draft_rounds_total": 0,
+      "draft_tokens_total": 0,
+      "draft_accepted_tokens_total": 0,
+      "device_lost_total": 0,
+      "cache_disk_hits_total": 0,
+      "cache_memory_hits_total": 0,
+      "cache_misses_total": 1,
+      "completed_successful_requests_total": 1
+    },
+    "last_completed_request": {
+      "prefill_tokens_per_second": 4000,
+      "decode_tokens_per_second": 500,
+      "age_ms": 122.2699,
+      "rate_unit": "tokens_per_second",
+      "age_unit": "milliseconds"
+    },
+    "sessions": 0,
+    "queue": 0,
+    "slots": [
+      {
+        "id": 0,
+        "processing": false,
+        "state": "idle",
+        "tokens_used": 0,
+        "speculative": false,
+        "request_id": null,
+        "context_tokens": 4096,
+        "prompt_tokens": 0,
+        "cached_prompt_tokens": 0,
+        "prefilled_tokens": 0,
+        "generated_tokens": 0,
+        "remaining_tokens": null
+      }
+    ],
+    "last_transition": "2026-10-14T03:44:29Z",
+    "sample_time": "2026-10-14T03:44:29Z",
+    "readiness": {
+      "runtime": true,
+      "model": true,
+      "server": true
+    },
+    "last_error": null,
+    "served_model": "bubo-test-only-fake",
+    "state_history": [
+      {
+        "type": "starting",
+        "phase": "starting",
+        "time": "2026-10-14T03:44:29Z"
+      },
+      {
+        "type": "loading",
+        "phase": "loading",
+        "time": "2026-10-14T03:44:29Z"
+      },
+      {
+        "type": "ready",
+        "phase": "ready",
+        "time": "2026-10-14T03:44:29Z"
+      }
+    ],
+    "cache_hit_ratio": 0,
+    "live_throughput": {
+      "label": "aggregate wall throughput",
+      "unit": "tokens_per_second",
+      "interval_ms": null,
+      "prefill_tokens_per_second": null,
+      "decode_tokens_per_second": null
+    }
+  }
+}

@@ -119,8 +119,13 @@ if (Test-Path $exe) {
   }
   # build.ps1 copies these next to bubo.exe; without them it fails to start.
   $runtime = @("amdhip64_7.dll", "libhipblaslt.dll", "rocblas.dll", "hipblas.dll", "libcurl.dll", "libssl-3-x64.dll", "icuuc78.dll")
-  $missingRuntime = @($runtime | Where-Object { -not (Test-Path (Join-Path $Bin $_)) })
-  $missingKernels = @("hipblaslt\library", "rocblas\library") | Where-Object { -not (Test-Path (Join-Path $Bin $_)) }
+  # The AMD files may be in the shared per-user folder instead of beside bubo.exe.
+  $rtDir = $Bin
+  $sharedRt = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA "Bubo\runtime\rocm-10.0.0-gfx1151" } else { $null }
+  if ($env:BUBO_RUNTIME_DIR) { $rtDir = $env:BUBO_RUNTIME_DIR }
+  elseif (-not (Test-Path (Join-Path $Bin "amdhip64_7.dll")) -and $sharedRt -and (Test-Path (Join-Path $sharedRt "amdhip64_7.dll"))) { $rtDir = $sharedRt }
+  $missingRuntime = @($runtime | Where-Object { -not (Test-Path (Join-Path $rtDir $_)) -and -not (Test-Path (Join-Path $Bin $_)) })
+  $missingKernels = @("hipblaslt\library", "rocblas\library") | Where-Object { -not (Test-Path (Join-Path $rtDir $_)) }
   Report "runtime files" ($missingRuntime.Count -eq 0 -and @($missingKernels).Count -eq 0) `
     ($(if ($missingRuntime.Count -or @($missingKernels).Count) { "missing: $((@($missingRuntime) + @($missingKernels)) -join ', ')" } else { "ROCm, hipBLASLt/rocBLAS kernels and vcpkg DLLs beside bubo.exe" })) `
     "rerun tools\windows\build.ps1 (it copies them)"

@@ -1,0 +1,9 @@
+{
+  "_source": "recorded",
+  "state": "Stopped",
+  "records": {
+    "models": "../v12/models-list-empty.json",
+    "status": "../v12/status-empty.json",
+    "switches": "../v12/switches.json"
+  }
+}

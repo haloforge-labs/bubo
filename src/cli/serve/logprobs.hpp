@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/cli/serve/prompt_scoring.hpp"
 #include "src/core/json.hpp"
 #include "src/core/sampling.hpp"
 #include "src/core/utf8.hpp"
@@ -58,10 +59,14 @@ inline json::Value LegacyLogprobs(
     const LogprobTokenText& token_text) {
   if (tokens.size() != scores.size())
     throw std::invalid_argument("token and logprob counts differ");
+  // Backstop for the response cap that start_score also enforces.
+  CheckPromptScoreResponseSize(tokens.size());
   auto result = json::Value::object();
   for (const auto* field : {"tokens", "token_logprobs", "top_logprobs",
-                            "text_offset"})
+                            "text_offset"}) {
     result[field] = json::Value::array();
+    result[field].reserve(tokens.size());
+  }
   std::size_t offset = 0;
   for (std::size_t i = 0; i < tokens.size(); ++i) {
     const auto text = token_text(tokens[i]);
@@ -79,6 +84,7 @@ inline json::Value LegacyLogprobs(
       throw std::invalid_argument("token and logprob IDs differ");
     result["token_logprobs"].push_back(JsonLogprob(scores[i]->logprob));
     auto top_tokens = json::Value::object();
+    top_tokens.reserve(scores[i]->top_logprobs.size());
     for (const auto& top : scores[i]->top_logprobs)
       top_tokens[core::Utf8Decoder{}.Push(token_text(top.token), true)] =
           JsonLogprob(top.value);

@@ -1,0 +1,13 @@
+{
+  "_source": "fixture",
+  "state": "Ready",
+  "records": {
+    "models": "../v12/models-list-gui.json",
+    "status": "../v12/status-gate-idle.json",
+    "switches": "../v12/switches.json"
+  },
+  "saved_overrides": {
+    "GUFO_CACHE_HOST_FLOOR_MB": "4321",
+    "GUFO_LOOP_BREAKER": "0"
+  }
+}

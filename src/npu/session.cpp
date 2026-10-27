@@ -9,6 +9,8 @@
 #include <mutex>
 #include <thread>
 
+#include "fault_state.hpp"
+#include "runtime_status.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/core/json.hpp"
 namespace gufo::npu {
@@ -41,6 +43,7 @@ void FailProcess(std::string_view message) noexcept {
         "npu", error + "; NPU disabled for process; GPU path");
   } catch (...) {
   }
+  NoteNpuFaulted();  // status: faulted, reason "fault" (no-op before start-up)
 }
 Timing ParseTiming(std::string_view timeout, std::string_view keepalive,
                    std::string_view interval) {
@@ -61,7 +64,7 @@ struct NpuSession::State {
   std::condition_variable wake;
   std::thread keepalive;
   std::unique_ptr<PrivateBoAdapter> adapter;
-  std::atomic<bool> healthy{false}, stop{false};
+  std::atomic<bool> healthy{false}, stop{false}, paused{false};
   bool attempted = false;
   std::uint64_t beats = 0, dispatches = 0;
   std::chrono::steady_clock::time_point last_dispatch;
@@ -91,6 +94,7 @@ struct NpuSession::State {
         r.output.resize(kCBytes);
         adapter->CopyOutput(r.output);
         ++dispatches;
+        NoteRealDispatch();
       }
       r.healthy = r.result_valid = true;
       last_dispatch = std::chrono::steady_clock::now();
@@ -140,7 +144,8 @@ NpuResult NpuSession::Start() {
           lock.unlock();
           {
             std::lock_guard serial(state->mutex);
-            if (state->healthy && !process_failed &&
+            if (!state->paused.load(std::memory_order_relaxed) &&
+                state->healthy && !process_failed &&
                 std::chrono::steady_clock::now() - state->last_dispatch >=
                     std::chrono::milliseconds(2000)) {
               DispatchInfo beat;
@@ -167,6 +172,35 @@ NpuResult NpuSession::Start() {
     return s.Fail("unknown startup failure");
   }
 }
+void NpuSession::SetKeepalivePaused(bool paused) noexcept {
+  state_->paused.store(paused, std::memory_order_relaxed);
+}
+bool NpuSession::WarmUpBeat(std::string* error) {
+  std::lock_guard lock(state_->mutex);
+  if (!Healthy() || !state_->adapter) {
+    *error = "NPU session not healthy";
+    return false;
+  }
+  DispatchInfo beat;
+  beat.heartbeat = true;
+  const auto result =
+      state_->Run(state_->heartbeat_a, state_->heartbeat_b, beat);
+  if (!result.healthy) {
+    *error = result.error;
+    return false;
+  }
+  return true;
+}
+std::vector<const void*> NpuSession::SamplePages() {
+  std::lock_guard lock(state_->mutex);
+  if (!state_->adapter)
+    return {};
+  try {
+    return state_->adapter->SamplePages();
+  } catch (...) {
+    return {};
+  }
+}
 void NpuSession::PrepareWeight(std::span<const std::byte> b) {
   std::lock_guard lock(state_->mutex);
   if (Healthy()) {
@@ -186,9 +220,18 @@ bool NpuSession::DispatchBatch(
   if (!Healthy())
     return false;
   try {
+    const auto repairs_before = state_->adapter->StaleWeightRepairs();
     state_->adapter->ExecuteBatch(a, weights, consume);
     state_->dispatches += weights.size();
     state_->last_dispatch = std::chrono::steady_clock::now();
+    NoteRealDispatch();
+    if (const auto repairs = state_->adapter->StaleWeightRepairs();
+        repairs != repairs_before)
+      server::Logger::Warn(
+          "npu",
+          "weight guard: " + std::to_string(repairs - repairs_before) +
+              " weight buffer(s) changed under a reused address and were "
+              "re-sent (GUFO_NPU_WEIGHT_GUARD=1)");
     return true;
   } catch (const std::exception& e) {
     state_->Fail(e.what());

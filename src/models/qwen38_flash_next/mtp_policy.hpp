@@ -67,9 +67,11 @@ public:
     const auto observed = accepted + (accepted < drafted ? 1 : 0);
     for (std::size_t depth = 0; depth < observed; ++depth) {
       state_.successes[depth] =
-          0.75F * state_.successes[depth] + (depth < accepted ? 1.0F : 0.0F);
+          kEvidenceWeight * state_.successes[depth] +
+          (depth < accepted ? 1.0F : 0.0F);
       state_.failures[depth] =
-          0.75F * state_.failures[depth] + (depth == accepted ? 1.0F : 0.0F);
+          kEvidenceWeight * state_.failures[depth] +
+          (depth == accepted ? 1.0F : 0.0F);
     }
     // A fully accepted chain supplies no observations for its tail. Probe
     // farther rather than permanently treating those depths as the prior.
@@ -125,6 +127,11 @@ public:
   }
 
 private:
+  // Keep about ten observations of acceptance evidence at each depth.
+  static constexpr float kEvidenceWeight = 0.90F;
+  // Prefer two drafts when its throughput score is within 3% of one draft.
+  static constexpr float kTie = 0.97F;
+
   [[nodiscard]] float Probability(unsigned depth) const noexcept {
     return depth < state_.explored_depth &&
                    (state_.failed_depths & (1U << depth)) == 0
@@ -138,6 +145,7 @@ private:
     float survival = 1.0F;
     float expected_tokens = 1.0F;  // The sampled target anchor.
     float best_score = 1.0F;       // Ordinary target decoding.
+    float score_of_two = 0.0F;
     std::uint32_t best = 0;
     for (std::uint32_t length = 1; length <= cap; ++length) {
       const auto depth = length - 1;
@@ -149,11 +157,15 @@ private:
       expected_tokens += survival;
       const float cost = costs[length] / costs[0];
       const float score = expected_tokens / cost;
+      if (length == 2)
+        score_of_two = score;
       if (score > best_score) {
         best_score = score;
         best = length;
       }
     }
+    if (best == 1 && cap >= 2 && score_of_two >= best_score * kTie)
+      best = 2;
     return best;
   }
 

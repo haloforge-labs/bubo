@@ -1,0 +1,1461 @@
+{
+  "captured_at": "2026-10-26T15:25:50.6124103-04:00",
+  "candidate_commit": "1a0cd4305a87a527c6bac453910349d754e5944b",
+  "gui_commit": "1a0cd4305a87a527c6bac453910349d754e5944b",
+  "executable": "C:\\bubo\\build\\v12final\\bubo.exe",
+  "executable_sha256": "36393435c2db5ca9ae54c1434f74a8f62c0ea0de2718de46b5a7f399ed647ad2",
+  "engine_sha256": "1811a4ec36f71d882e291bb44ea34b20be8e4ece8f11705b57d36f5bc223011d",
+  "environment": {
+    "PATH": "C:\\bubo\\build\\v12final;C:\\bubo\\src\\gufo-win-060\\build\\deps\\vcpkg\\installed\\x64-windows\\bin;C:\\Windows\\System32;C:\\Windows",
+    "BUBO_*/GUFO_*": "removed except the recorded runtime discovery path",
+    "BUBO_RUNTIME_DIR": "C:\\bubo\\runtimes\\c4pkg-344f41ac\\bin"
+  },
+  "commands": [
+    {
+      "file": "status-main.json",
+      "command": [
+        "bubo.exe",
+        "status",
+        "--json"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:13.3486159-04:00",
+      "finished": "2026-10-26T15:25:13.5281940-04:00",
+      "stdout_bytes": 10014,
+      "stdout_sha256": "b5460e96cb564afa63d800486242c4bdce2854138cd22fbb730d4b9e90c1753c"
+    },
+    {
+      "file": "status-empty.json",
+      "command": [
+        "bubo.exe",
+        "status",
+        "--json"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:13.8109498-04:00",
+      "finished": "2026-10-26T15:25:13.9372270-04:00",
+      "stdout_bytes": 10280,
+      "stdout_sha256": "ba4158f811ec4ae141fde136cf6da86c8e956475d89fe96626efbbbf828a5b7f"
+    },
+    {
+      "file": "switches.json",
+      "command": [
+        "bubo.exe",
+        "serve",
+        "--list-switches",
+        "--json"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:14.2160433-04:00",
+      "finished": "2026-10-26T15:25:14.2845129-04:00",
+      "stdout_bytes": 151331,
+      "stdout_sha256": "4b8d744a1f13569e76415af8b2f62cf2aa088663ab5a09404611f6767d1ea51f"
+    },
+    {
+      "file": "models-list-empty.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "list",
+        "--json"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:14.5884722-04:00",
+      "finished": "2026-10-26T15:25:14.7491593-04:00",
+      "stdout_bytes": 147890,
+      "stdout_sha256": "350f049f6e698770457d06fdb1aca8a7a956467615da744fc6296336c092d8b5"
+    },
+    {
+      "file": "models-list-gui.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "list",
+        "--json",
+        "--scan-folder",
+        "S:\\bubo-walk\\E21\\Import",
+        "--scan-folder",
+        "C:\\bubo\\run\\app\\v8\\E21\\rootA",
+        "--scan-folder",
+        "S:\\bubo-walk\\E21\\rootB"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:15.0172313-04:00",
+      "finished": "2026-10-26T15:25:15.2219102-04:00",
+      "stdout_bytes": 158642,
+      "stdout_sha256": "b5e63a622faeac3420b5405eb57aa80b68587d297a10589159fe68b6e266c061"
+    },
+    {
+      "file": "models-list-table.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "list",
+        "--json",
+        "--models-root",
+        "C:\\bubo\\run\\app\\v8\\E21\\rootA\\models",
+        "--scan-folder",
+        "S:\\bubo-walk\\E21\\rootB\\models",
+        "--scan-folder",
+        "S:\\bubo-walk\\E21\\Import"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:15.5292161-04:00",
+      "finished": "2026-10-26T15:25:15.7960943-04:00",
+      "stdout_bytes": 158353,
+      "stdout_sha256": "d77bb2bd1cd09b50a23eb364f53661407b05dea5bde4de2bfbe6b379b14856e2"
+    },
+    {
+      "file": "models-list-rootB.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "list",
+        "--json",
+        "--models-root",
+        "S:\\bubo-walk\\E21\\rootB\\models",
+        "--scan-folder",
+        "C:\\bubo\\run\\app\\v8\\E21\\rootA\\models",
+        "--scan-folder",
+        "S:\\bubo-walk\\E21\\Import"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:16.0649408-04:00",
+      "finished": "2026-10-26T15:25:16.2847129-04:00",
+      "stdout_bytes": 173084,
+      "stdout_sha256": "20aad551f2187a48c7d6d7ca003c7f1d8cd1095e349f226f36c746858b765fa1"
+    },
+    {
+      "file": "models-list-default-root.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "list",
+        "--json"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:16.5695958-04:00",
+      "finished": "2026-10-26T15:25:16.7076084-04:00",
+      "stdout_bytes": 147792,
+      "stdout_sha256": "ab9c93cbb8219700d6a1253fb50e32f0b5b5122b4ab1b7cfdef33ac22cdaaf43"
+    },
+    {
+      "file": "estimate-flash-default.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "C:\\bubo\\run\\app\\v8\\E21\\rootA\\models\\huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--json"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:16.9908739-04:00",
+      "finished": "2026-10-26T15:25:17.2157720-04:00",
+      "stdout_bytes": 37878,
+      "stdout_sha256": "ae2a9aa13075a39d66c360dcbd9023924dc2d5ca15cf1c1a34ee37831cf7a848"
+    },
+    {
+      "file": "estimate-flash-c262144-s1.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "C:\\bubo\\run\\app\\v8\\E21\\rootA\\models\\huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--json",
+        "--context",
+        "262144",
+        "--sessions",
+        "1"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:17.5541937-04:00",
+      "finished": "2026-10-26T15:25:17.7520305-04:00",
+      "stdout_bytes": 37874,
+      "stdout_sha256": "8e2c048cb3a5bf1a160b3ac14e39ef3b712fe50d87b5f023b7c4ed2b7fdf2e2a"
+    },
+    {
+      "file": "estimate-flash-c262144-s4.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "C:\\bubo\\run\\app\\v8\\E21\\rootA\\models\\huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--json",
+        "--context",
+        "262144",
+        "--sessions",
+        "4"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:18.0669010-04:00",
+      "finished": "2026-10-26T15:25:18.2729790-04:00",
+      "stdout_bytes": 38260,
+      "stdout_sha256": "2dad0b39ba272e22bd8058d2c762ec178d0e56103cdf13e72cd4079a225d84d5"
+    },
+    {
+      "file": "estimate-flash-c65536-s1.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "C:\\bubo\\run\\app\\v8\\E21\\rootA\\models\\huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--json",
+        "--context",
+        "65536",
+        "--sessions",
+        "1"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:18.5618716-04:00",
+      "finished": "2026-10-26T15:25:18.7564319-04:00",
+      "stdout_bytes": 37870,
+      "stdout_sha256": "210d649008614f021c3950f43ff4cd82e7e9048c18b0c9bb5d86cde3dd458d01"
+    },
+    {
+      "file": "estimate-flash-c262144-s2.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "C:\\bubo\\run\\app\\v8\\E21\\rootA\\models\\huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--json",
+        "--context",
+        "262144",
+        "--sessions",
+        "2"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:19.0442262-04:00",
+      "finished": "2026-10-26T15:25:19.2476297-04:00",
+      "stdout_bytes": 37909,
+      "stdout_sha256": "3dcb1431741e8a774168f6f0af629052319fddf2f60c935c4f97fef69029c467"
+    },
+    {
+      "file": "estimate-flash-c65536-s8.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "C:\\bubo\\run\\app\\v8\\E21\\rootA\\models\\huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--json",
+        "--context",
+        "65536",
+        "--sessions",
+        "8"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:19.5361437-04:00",
+      "finished": "2026-10-26T15:25:19.7310566-04:00",
+      "stdout_bytes": 38113,
+      "stdout_sha256": "c9104df702288764034b33edd01b592bb6308017191bf8241c3654105b3a0e7c"
+    },
+    {
+      "file": "estimate-flash-c262144-s8.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "C:\\bubo\\run\\app\\v8\\E21\\rootA\\models\\huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--json",
+        "--context",
+        "262144",
+        "--sessions",
+        "8"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:20.0030035-04:00",
+      "finished": "2026-10-26T15:25:20.2023162-04:00",
+      "stdout_bytes": 38167,
+      "stdout_sha256": "50d0eefa80896613b96336b00acd7729a105531492e6ed2841a9622d7cc76732"
+    },
+    {
+      "file": "estimate-flash-c262144-s12.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "C:\\bubo\\run\\app\\v8\\E21\\rootA\\models\\huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--json",
+        "--context",
+        "262144",
+        "--sessions",
+        "12"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:20.4741682-04:00",
+      "finished": "2026-10-26T15:25:20.6794659-04:00",
+      "stdout_bytes": 38189,
+      "stdout_sha256": "8ed08a631040cadb4b83026f482b5159a7000279c0dee17766f0bf659ac48b1d"
+    },
+    {
+      "file": "estimate-q27-default.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "S:\\bubo-walk\\E21\\rootB\\models\\qwen38-27b-ud-q4-k-xl",
+        "--json"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:20.9583144-04:00",
+      "finished": "2026-10-26T15:25:21.0882345-04:00",
+      "stdout_bytes": 8299,
+      "stdout_sha256": "87d5c639f32bf7a3c41c208232b31340ce5a2656d6ea012aa706d47e2a6c03ae"
+    },
+    {
+      "file": "estimate-q27-c262144-s1.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "S:\\bubo-walk\\E21\\rootB\\models\\qwen38-27b-ud-q4-k-xl",
+        "--json",
+        "--context",
+        "262144",
+        "--sessions",
+        "1"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:21.3669524-04:00",
+      "finished": "2026-10-26T15:25:21.4916782-04:00",
+      "stdout_bytes": 8299,
+      "stdout_sha256": "fb6af0fa62149de9bb99969f4c9678b60bf292193f9acdf58da3b6026ba534ab"
+    },
+    {
+      "file": "estimate-q27-c262144-s4.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "S:\\bubo-walk\\E21\\rootB\\models\\qwen38-27b-ud-q4-k-xl",
+        "--json",
+        "--context",
+        "262144",
+        "--sessions",
+        "4"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:21.7711902-04:00",
+      "finished": "2026-10-26T15:25:21.8933985-04:00",
+      "stdout_bytes": 8298,
+      "stdout_sha256": "3e2d479abfc6b62422dc0d3b95304b988b8471ddc0ae3e1aac69a2ae41ea2e38"
+    },
+    {
+      "file": "estimate-q27-c65536-s1.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "S:\\bubo-walk\\E21\\rootB\\models\\qwen38-27b-ud-q4-k-xl",
+        "--json",
+        "--context",
+        "65536",
+        "--sessions",
+        "1"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:22.1607645-04:00",
+      "finished": "2026-10-26T15:25:22.2838361-04:00",
+      "stdout_bytes": 8297,
+      "stdout_sha256": "c7eae003c16be57c8dcd6e26a3fbddb75547537fb0f5e47e699e5d029925b939"
+    },
+    {
+      "file": "estimate-hauhau-default.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "S:\\bubo-walk\\E21\\rootB\\models\\gemma4-26b-a4b-uncensored-hauhaucs-qat-q4-k-m\\Gemma4-26B-A4B-QAT-Uncensored-HauhauCS-Balanced-Q4_K_M.gguf",
+        "--json"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:22.5488591-04:00",
+      "finished": "2026-10-26T15:25:22.6503743-04:00",
+      "stdout_bytes": 593,
+      "stdout_sha256": "dabb745b8ebba4bb49934ec82aab84e5b610d62f68081e23a5ebe0aca67c6583"
+    },
+    {
+      "file": "estimate-hauhau-c262144-s1.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "S:\\bubo-walk\\E21\\rootB\\models\\gemma4-26b-a4b-uncensored-hauhaucs-qat-q4-k-m\\Gemma4-26B-A4B-QAT-Uncensored-HauhauCS-Balanced-Q4_K_M.gguf",
+        "--json",
+        "--context",
+        "262144",
+        "--sessions",
+        "1"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:22.9316319-04:00",
+      "finished": "2026-10-26T15:25:23.0317087-04:00",
+      "stdout_bytes": 593,
+      "stdout_sha256": "4860e738bbff7c080cedb1f5eb129dd333cf489f0c3988484c0436cdd2ec6fdf"
+    },
+    {
+      "file": "estimate-hauhau-c262144-s4.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "S:\\bubo-walk\\E21\\rootB\\models\\gemma4-26b-a4b-uncensored-hauhaucs-qat-q4-k-m\\Gemma4-26B-A4B-QAT-Uncensored-HauhauCS-Balanced-Q4_K_M.gguf",
+        "--json",
+        "--context",
+        "262144",
+        "--sessions",
+        "4"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:23.2983549-04:00",
+      "finished": "2026-10-26T15:25:23.3992720-04:00",
+      "stdout_bytes": 593,
+      "stdout_sha256": "d1f29f94461fb4dec1fcc1eef3486e74dce05b7cee97f00f8579338846950e12"
+    },
+    {
+      "file": "estimate-hauhau-c65536-s1.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "S:\\bubo-walk\\E21\\rootB\\models\\gemma4-26b-a4b-uncensored-hauhaucs-qat-q4-k-m\\Gemma4-26B-A4B-QAT-Uncensored-HauhauCS-Balanced-Q4_K_M.gguf",
+        "--json",
+        "--context",
+        "65536",
+        "--sessions",
+        "1"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:23.6814964-04:00",
+      "finished": "2026-10-26T15:25:23.8125140-04:00",
+      "stdout_bytes": 593,
+      "stdout_sha256": "323c666079f70059d7115cc02cecdc0ac6b89409b432d583d2d3788f0ad3d276"
+    },
+    {
+      "file": "estimate-importpkg-default.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "S:\\bubo-walk\\E21\\Import\\gemma4-26b-a4b-stock-unsloth-ud-q4-k-m\\gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+        "--json"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:24.0807048-04:00",
+      "finished": "2026-10-26T15:25:24.1834341-04:00",
+      "stdout_bytes": 553,
+      "stdout_sha256": "7105bb1e46e871bd4924bd1c60d6ff73dbd82ed0d717ed758c2650501f372f24"
+    },
+    {
+      "file": "estimate-importpkg-c262144-s1.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "S:\\bubo-walk\\E21\\Import\\gemma4-26b-a4b-stock-unsloth-ud-q4-k-m\\gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+        "--json",
+        "--context",
+        "262144",
+        "--sessions",
+        "1"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:24.4554205-04:00",
+      "finished": "2026-10-26T15:25:24.5609440-04:00",
+      "stdout_bytes": 553,
+      "stdout_sha256": "ab0a3cc46711d083bdb60759b20cb6170e14faddf6eb7446703f12519ee3f038"
+    },
+    {
+      "file": "estimate-partial-default.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "S:\\bubo-walk\\E21\\rootB\\models\\qwen36-27b-ud-q4-k-xl",
+        "--json"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:24.8356038-04:00",
+      "finished": "2026-10-26T15:25:24.9547417-04:00",
+      "stdout_bytes": 8068,
+      "stdout_sha256": "176c9cab8543b6670e82aab08279d5bd99bc9ca3c3d837002e0f797578cf1780"
+    },
+    {
+      "file": "estimate-loose-default.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "S:\\bubo-walk\\E21\\Import\\Qwen3.8-27B-UD-Q8_K_XL.gguf",
+        "--json"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:25.2244642-04:00",
+      "finished": "2026-10-26T15:25:25.3383462-04:00",
+      "stdout_bytes": 8068,
+      "stdout_sha256": "519eac6000cf886942c0af9f89b29a41b079c3e43f41fd645825c569135a8ec4"
+    },
+    {
+      "file": "estimate-loose-c262144-s1.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "S:\\bubo-walk\\E21\\Import\\Qwen3.8-27B-UD-Q8_K_XL.gguf",
+        "--json",
+        "--context",
+        "262144",
+        "--sessions",
+        "1"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:25.6127084-04:00",
+      "finished": "2026-10-26T15:25:25.7575034-04:00",
+      "stdout_bytes": 8063,
+      "stdout_sha256": "6224009ad0a15451afd1b5769f9ae2eedee295c6e6b21f0de54bf7519eacb75d"
+    },
+    {
+      "file": "estimate-flash-catalogue-id.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--json"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:26.0713377-04:00",
+      "finished": "2026-10-26T15:25:26.2314255-04:00",
+      "stdout_bytes": 37960,
+      "stdout_sha256": "602823f1c46b6cfd3a330862ae5a2638ccc2384ac245a982694de45a7da7347a"
+    },
+    {
+      "file": "estimate-missing-folder.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "C:\\bubo\\run\\app\\v8\\E21\\rootA\\models\\no-such-package",
+        "--json"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 12,
+      "stderr": "",
+      "started": "2026-10-26T15:25:26.4902800-04:00",
+      "finished": "2026-10-26T15:25:26.5774695-04:00",
+      "stdout_bytes": 379,
+      "stdout_sha256": "b437d42ae3017165f2acb6973060239d64172d7ef6723950fb67e01cf192eabd"
+    },
+    {
+      "file": "plan-huihui-qwen38-flash-next-ud-q4-k-xl-v1-fresh.jsonl",
+      "command": [
+        "bubo.exe",
+        "prepare",
+        "model",
+        "--catalogue-id",
+        "huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--output",
+        "S:\\bubo-walk\\S24",
+        "--plan",
+        "--jsonl"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:26.8535111-04:00",
+      "finished": "2026-10-26T15:25:26.9253905-04:00",
+      "stdout_bytes": 21924,
+      "stdout_sha256": "04c6c56aef452b9d349ae95ad1e6d6f31928b659af0283703412cb67815d8266"
+    },
+    {
+      "file": "plan-qwen38-flash-next-base-ud-q4-k-xl-v1-fresh.jsonl",
+      "command": [
+        "bubo.exe",
+        "prepare",
+        "model",
+        "--catalogue-id",
+        "qwen38-flash-next-base-ud-q4-k-xl-v1",
+        "--plan",
+        "--jsonl"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:27.1997781-04:00",
+      "finished": "2026-10-26T15:25:27.2883556-04:00",
+      "stdout_bytes": 21907,
+      "stdout_sha256": "577ae81f07015abc5b6cc28367959515c5e37c28462d046064ed288eae2886ee"
+    },
+    {
+      "file": "plan-qwen38-27b-ud-q4-k-xl-fresh.jsonl",
+      "command": [
+        "bubo.exe",
+        "prepare",
+        "model",
+        "--catalogue-id",
+        "qwen38-27b-ud-q4-k-xl",
+        "--plan",
+        "--jsonl"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:27.6127551-04:00",
+      "finished": "2026-10-26T15:25:27.6932434-04:00",
+      "stdout_bytes": 6001,
+      "stdout_sha256": "ae83a390f9b080343dde327ea1a9552296e10273ed697ef07bd7c162cb047d43"
+    },
+    {
+      "file": "plan-qwen36-27b-ud-q4-k-xl-fresh.jsonl",
+      "command": [
+        "bubo.exe",
+        "prepare",
+        "model",
+        "--catalogue-id",
+        "qwen36-27b-ud-q4-k-xl",
+        "--plan",
+        "--jsonl"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:27.9668637-04:00",
+      "finished": "2026-10-26T15:25:28.0377892-04:00",
+      "stdout_bytes": 6001,
+      "stdout_sha256": "22786ac43afa43050a2b936297ad32ac469dda0e67abfba2a469ada3daa62d85"
+    },
+    {
+      "file": "plan-cyber-tiel-coder-35b-a3b-mtp-q4-k-m-fresh.jsonl",
+      "command": [
+        "bubo.exe",
+        "prepare",
+        "model",
+        "--catalogue-id",
+        "cyber-tiel-coder-35b-a3b-mtp-q4-k-m",
+        "--plan",
+        "--jsonl"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:28.3170139-04:00",
+      "finished": "2026-10-26T15:25:28.3888304-04:00",
+      "stdout_bytes": 6252,
+      "stdout_sha256": "4a9e2741f1e288dedf4c35d6a8c2e19df0b7be48410bf8e18f6eaef923bc75ce"
+    },
+    {
+      "file": "plan-flash-rootA-present.jsonl",
+      "command": [
+        "bubo.exe",
+        "prepare",
+        "model",
+        "--catalogue-id",
+        "huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--plan",
+        "--jsonl",
+        "--output",
+        "C:\\bubo\\run\\app\\v8\\E21\\rootA"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:28.6514613-04:00",
+      "finished": "2026-10-26T15:25:30.9863265-04:00",
+      "stdout_bytes": 27473,
+      "stdout_sha256": "44a903f7d6600357ddf0d1e937b20e36776ecf5e364410b7cad9dc2f7810324d"
+    },
+    {
+      "file": "plan-q27-rootB-present.jsonl",
+      "command": [
+        "bubo.exe",
+        "prepare",
+        "model",
+        "--catalogue-id",
+        "qwen38-27b-ud-q4-k-xl",
+        "--plan",
+        "--jsonl",
+        "--output",
+        "S:\\bubo-walk\\E21\\rootB"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:31.2611359-04:00",
+      "finished": "2026-10-26T15:25:31.7439511-04:00",
+      "stdout_bytes": 7022,
+      "stdout_sha256": "be8dad3bad067e6a039c55022fd69983a373ac2976f620aa6775c1a57ba4b342"
+    },
+    {
+      "file": "plan-flash-rootA-present-text.txt",
+      "command": [
+        "bubo.exe",
+        "prepare",
+        "model",
+        "--catalogue-id",
+        "huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--plan",
+        "--output",
+        "C:\\bubo\\run\\app\\v8\\E21\\rootA"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:32.0070977-04:00",
+      "finished": "2026-10-26T15:25:34.3610283-04:00",
+      "stdout_bytes": 4855,
+      "stdout_sha256": "41530e8ae0232950fd8d80fe82d55006cff4f13fb2b27c602f87c36c24d6a72c"
+    },
+    {
+      "file": "plan-q27-rootB-present-text.txt",
+      "command": [
+        "bubo.exe",
+        "prepare",
+        "model",
+        "--catalogue-id",
+        "qwen38-27b-ud-q4-k-xl",
+        "--plan",
+        "--output",
+        "S:\\bubo-walk\\E21\\rootB"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:34.6384319-04:00",
+      "finished": "2026-10-26T15:25:35.1226701-04:00",
+      "stdout_bytes": 1571,
+      "stdout_sha256": "270ae9e148481aa3364b2b23f65f121ed3bc24921edc1989dbbe55e45519ee26"
+    },
+    {
+      "file": "plan-qwen36-rootB-partial.jsonl",
+      "command": [
+        "bubo.exe",
+        "prepare",
+        "model",
+        "--catalogue-id",
+        "qwen36-27b-ud-q4-k-xl",
+        "--plan",
+        "--jsonl",
+        "--output",
+        "S:\\bubo-walk\\E21\\rootB"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:35.4087765-04:00",
+      "finished": "2026-10-26T15:25:35.4951841-04:00",
+      "stdout_bytes": 5862,
+      "stdout_sha256": "640e36fc3bead8cd6f0cdb1c8024ffcb96f06283d3d3bfa518c50e7caefa15e9"
+    },
+    {
+      "file": "plan-flash-rootB-fresh.jsonl",
+      "command": [
+        "bubo.exe",
+        "prepare",
+        "model",
+        "--catalogue-id",
+        "huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--plan",
+        "--jsonl",
+        "--output",
+        "S:\\bubo-walk\\E21\\rootB"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:35.7678996-04:00",
+      "finished": "2026-10-26T15:25:35.8357532-04:00",
+      "stdout_bytes": 21987,
+      "stdout_sha256": "0ad252164fbc335c2e2a8a4161e314330761ca39e8b1bae8016316c9c104cf61"
+    },
+    {
+      "file": "plan-flash-rootC-fresh.jsonl",
+      "command": [
+        "bubo.exe",
+        "prepare",
+        "model",
+        "--catalogue-id",
+        "huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--plan",
+        "--jsonl",
+        "--output",
+        "C:\\bubo\\run\\app\\v8\\E21\\rootC-unused"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:36.1048741-04:00",
+      "finished": "2026-10-26T15:25:36.1900377-04:00",
+      "stdout_bytes": 22119,
+      "stdout_sha256": "b1bb03f964b6680272e76b34f5767108f17e478a1952f06bb14da7a235b5137d"
+    },
+    {
+      "file": "plan-disabled-or-unknown.jsonl",
+      "command": [
+        "bubo.exe",
+        "prepare",
+        "model",
+        "--catalogue-id",
+        "no-such-id",
+        "--plan",
+        "--jsonl"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "exit_code": 2,
+      "stderr": "prepare: E2 unknown catalogue id 'no-such-id'. Catalogue ids: huihui-qwen38-flash-next-ud-q4-k-xl-v1, qwen38-flash-next-base-ud-q4-k-xl-v1, huihui-qwen38-flash-next-lowmemory-v1, qwen38-27b-ud-q4-k-xl, qwen36-27b-ud-q4-k-xl, cyber-tiel-coder-35b-a3b-mtp-q4-k-m, gemma4-26b-a4b-unsloth-qat-ud-q4-k-xl, gemma4-31b-unsloth-qat-ud-q4-k-xl, gemma4-26b-a4b-huihui-abliterated-qat-q4-k, gemma4-31b-huihui-abliterated-qat-q4-k, diffusiongemma-26b-e38-abliterated-nvfp4; run bubo prepare --help\n",
+      "started": "2026-10-26T15:25:36.4606377-04:00",
+      "finished": "2026-10-26T15:25:36.5105694-04:00",
+      "stdout_bytes": 811,
+      "stdout_sha256": "e12c23923094cb8376304b8a052fb8be6fce9b5da8d6507212da51f62237c22f"
+    },
+    {
+      "file": "estimate-lowmemory-default.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "huihui-qwen38-flash-next-lowmemory-v1",
+        "--json"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:36.7823962-04:00",
+      "finished": "2026-10-26T15:25:36.8880897-04:00",
+      "stdout_bytes": 34527,
+      "stdout_sha256": "36322362783bf0289086d4fb7245b83657fb2377d4f39ef83f5cddfd05fbff8d"
+    },
+    {
+      "file": "plan-huihui-qwen38-flash-next-lowmemory-v1-fresh.jsonl",
+      "command": [
+        "bubo.exe",
+        "prepare",
+        "model",
+        "--catalogue-id",
+        "huihui-qwen38-flash-next-lowmemory-v1",
+        "--output",
+        "S:\\bubo-walk\\E21\\rootB",
+        "--plan",
+        "--jsonl"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:37.1677202-04:00",
+      "finished": "2026-10-26T15:25:37.2381671-04:00",
+      "stdout_bytes": 21177,
+      "stdout_sha256": "4040e0a91dea653af7022533db53d909242cfd3e9a404b6c3ed3e5cbcbb55a32"
+    },
+    {
+      "file": "plan-gemma4-26b-a4b-unsloth-qat-ud-q4-k-xl-fresh.jsonl",
+      "command": [
+        "bubo.exe",
+        "prepare",
+        "model",
+        "--catalogue-id",
+        "gemma4-26b-a4b-unsloth-qat-ud-q4-k-xl",
+        "--plan",
+        "--jsonl"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:37.5029752-04:00",
+      "finished": "2026-10-26T15:25:37.5845441-04:00",
+      "stdout_bytes": 7268,
+      "stdout_sha256": "065f5e9448c93a13062908d254cc011a3dc64c9335bb16e2e226e2db453ffaa9"
+    },
+    {
+      "file": "estimate-gemma4-26b-a4b-unsloth-qat-ud-q4-k-xl-default.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "gemma4-26b-a4b-unsloth-qat-ud-q4-k-xl",
+        "--json"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:37.8532343-04:00",
+      "finished": "2026-10-26T15:25:37.9729749-04:00",
+      "stdout_bytes": 516,
+      "stdout_sha256": "91ed9013e52fce9b9080ef75eabfd1aa60a6435021d455c88dd87a6034554b40"
+    },
+    {
+      "file": "plan-gemma4-31b-unsloth-qat-ud-q4-k-xl-fresh.jsonl",
+      "command": [
+        "bubo.exe",
+        "prepare",
+        "model",
+        "--catalogue-id",
+        "gemma4-31b-unsloth-qat-ud-q4-k-xl",
+        "--plan",
+        "--jsonl"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:38.2668599-04:00",
+      "finished": "2026-10-26T15:25:38.3420081-04:00",
+      "stdout_bytes": 7196,
+      "stdout_sha256": "7d31a1d203d7f5563b92b27bc2509faee92c2cf21c6cd2d69d39bbad58705728"
+    },
+    {
+      "file": "estimate-gemma4-31b-unsloth-qat-ud-q4-k-xl-default.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "gemma4-31b-unsloth-qat-ud-q4-k-xl",
+        "--json"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:38.6103425-04:00",
+      "finished": "2026-10-26T15:25:38.6979902-04:00",
+      "stdout_bytes": 512,
+      "stdout_sha256": "a1abebfb9655efff6ae4f7f66a66d293870048224b25534e498c5f611d07c191"
+    },
+    {
+      "file": "plan-gemma4-26b-a4b-huihui-abliterated-qat-q4-k-fresh.jsonl",
+      "command": [
+        "bubo.exe",
+        "prepare",
+        "model",
+        "--catalogue-id",
+        "gemma4-26b-a4b-huihui-abliterated-qat-q4-k",
+        "--plan",
+        "--jsonl"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:38.9689738-04:00",
+      "finished": "2026-10-26T15:25:39.0414204-04:00",
+      "stdout_bytes": 7635,
+      "stdout_sha256": "fabd4b3da81331c5a3ba57817b73f77a334cdb62d8e99b9e0c24e874813030d2"
+    },
+    {
+      "file": "estimate-gemma4-26b-a4b-huihui-abliterated-qat-q4-k-default.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "gemma4-26b-a4b-huihui-abliterated-qat-q4-k",
+        "--json"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:39.3000160-04:00",
+      "finished": "2026-10-26T15:25:39.3864941-04:00",
+      "stdout_bytes": 521,
+      "stdout_sha256": "6256e945cb22e2d3c250a8e67bd9ce8cf0016ed6810bed11306e1bfe0c5ea054"
+    },
+    {
+      "file": "plan-gemma4-31b-huihui-abliterated-qat-q4-k-fresh.jsonl",
+      "command": [
+        "bubo.exe",
+        "prepare",
+        "model",
+        "--catalogue-id",
+        "gemma4-31b-huihui-abliterated-qat-q4-k",
+        "--plan",
+        "--jsonl"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:39.6597212-04:00",
+      "finished": "2026-10-26T15:25:39.7410651-04:00",
+      "stdout_bytes": 7575,
+      "stdout_sha256": "6a340ab568091e62eda86c6ea00eb8a027d8963de8328f6ef8f83f19b57419fd"
+    },
+    {
+      "file": "estimate-gemma4-31b-huihui-abliterated-qat-q4-k-default.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "gemma4-31b-huihui-abliterated-qat-q4-k",
+        "--json"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:40.0389508-04:00",
+      "finished": "2026-10-26T15:25:40.1269987-04:00",
+      "stdout_bytes": 517,
+      "stdout_sha256": "a6f574cffddeeeaccd5cb9a8711e4f7a4dc73a74f1d7038a8c73ae476727e558"
+    },
+    {
+      "file": "plan-diffusiongemma-26b-e38-abliterated-nvfp4-fresh.jsonl",
+      "command": [
+        "bubo.exe",
+        "prepare",
+        "model",
+        "--catalogue-id",
+        "diffusiongemma-26b-e38-abliterated-nvfp4",
+        "--plan",
+        "--jsonl"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:40.3908500-04:00",
+      "finished": "2026-10-26T15:25:40.4841950-04:00",
+      "stdout_bytes": 17383,
+      "stdout_sha256": "024457530dff6edd55380e1dd94aff729055818189ab252b7cad7f011fb5f10f"
+    },
+    {
+      "file": "estimate-diffusiongemma-26b-e38-abliterated-nvfp4-default.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "diffusiongemma-26b-e38-abliterated-nvfp4",
+        "--json"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:40.7564552-04:00",
+      "finished": "2026-10-26T15:25:40.8432465-04:00",
+      "stdout_bytes": 508,
+      "stdout_sha256": "d2e0b44ac76e501eb84db3a3b2833d94ab26ec9d9c0b06c58e697d46a5418427"
+    },
+    {
+      "file": "models-with-warnings.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "list",
+        "--json",
+        "--scan-folder",
+        "S:\\bubo-walk\\E21\\Import",
+        "--scan-folder",
+        "C:\\bubo\\run\\app\\v8\\E21\\rootA",
+        "--scan-folder",
+        "S:\\bubo-walk\\E21\\rootB",
+        "--scan-folder",
+        "C:\\"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:41.1092810-04:00",
+      "finished": "2026-10-26T15:25:41.2793410-04:00",
+      "stdout_bytes": 158721,
+      "stdout_sha256": "f4c6d58de40db1b312df17dee04bf3b7383650dc6c3e2db032b39693c13220b7"
+    },
+    {
+      "file": "plan-runtime-fresh.jsonl",
+      "command": [
+        "bubo.exe",
+        "prepare",
+        "runtime",
+        "--runtime-dir",
+        "C:\\bubo\\evidence\\capture-09\\frozen-capture\\runtime-fresh",
+        "--jsonl"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "exit_code": 3,
+      "stderr": "",
+      "started": "2026-10-26T15:25:41.5472630-04:00",
+      "finished": "2026-10-26T15:25:41.7194355-04:00",
+      "stdout_bytes": 420446,
+      "stdout_sha256": "703d8d591eedbf9435d45e7a90baf051a14338053600a2207479a614014fb97e"
+    },
+    {
+      "file": "plan-lowmemory-short.jsonl",
+      "command": [
+        "bubo.exe",
+        "prepare",
+        "model",
+        "--catalogue-id",
+        "huihui-qwen38-flash-next-lowmemory-v1",
+        "--output",
+        "C:\\bubo\\evidence\\capture-09\\frozen-capture\\lower-memory-plan",
+        "--plan",
+        "--jsonl"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:41.9834440-04:00",
+      "finished": "2026-10-26T15:25:42.0805453-04:00",
+      "stdout_bytes": 21525,
+      "stdout_sha256": "29691cdb0b85dcbe7dc2e92a1f45f4b4898503f515cfa639c35fc7dcc52d36be"
+    },
+    {
+      "file": "estimate-flash-c200000-s1.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "C:\\bubo\\run\\app\\v8\\E21\\rootA\\models\\huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--json",
+        "--context",
+        "200000",
+        "--sessions",
+        "1"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:42.3587199-04:00",
+      "finished": "2026-10-26T15:25:42.5631634-04:00",
+      "stdout_bytes": 37997,
+      "stdout_sha256": "5f1f3c9bd1fd560164f8eb063487d5db93031f06be9cb743542ac25900da43b8"
+    },
+    {
+      "file": "estimate-flash-c200000-s4.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "C:\\bubo\\run\\app\\v8\\E21\\rootA\\models\\huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--json",
+        "--context",
+        "200000",
+        "--sessions",
+        "4"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:42.8360809-04:00",
+      "finished": "2026-10-26T15:25:43.0411159-04:00",
+      "stdout_bytes": 38234,
+      "stdout_sha256": "a666ee893172ee8ad1eb6ac23f77934226983186810ce50dac26dab33b2f136c"
+    },
+    {
+      "file": "estimate-flash-c200000-s2.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "C:\\bubo\\run\\app\\v8\\E21\\rootA\\models\\huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--json",
+        "--context",
+        "200000",
+        "--sessions",
+        "2"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:43.3281994-04:00",
+      "finished": "2026-10-26T15:25:43.5242046-04:00",
+      "stdout_bytes": 38018,
+      "stdout_sha256": "c0d9249ef22f67700ddeb4cfd94a76415ee31bf8e2897c9d0c31569c6f938fa6"
+    },
+    {
+      "file": "estimate-flash-c200000-s8.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "C:\\bubo\\run\\app\\v8\\E21\\rootA\\models\\huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--json",
+        "--context",
+        "200000",
+        "--sessions",
+        "8"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:43.8099436-04:00",
+      "finished": "2026-10-26T15:25:44.0104214-04:00",
+      "stdout_bytes": 38294,
+      "stdout_sha256": "bb296d0057ae8ba9af8428aca139235f8778ac3398ff6f78d892416acdbb6467"
+    },
+    {
+      "file": "estimate-flash-c200000-s12.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "C:\\bubo\\run\\app\\v8\\E21\\rootA\\models\\huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--json",
+        "--context",
+        "200000",
+        "--sessions",
+        "12"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:44.2792619-04:00",
+      "finished": "2026-10-26T15:25:44.4899247-04:00",
+      "stdout_bytes": 38298,
+      "stdout_sha256": "7f74f4ac49b66480651c231cf96f294bf815b8fefa1d58a40a8b3e4a29281eea"
+    },
+    {
+      "file": "estimate-q27-c200000-s1.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "S:\\bubo-walk\\E21\\rootB\\models\\qwen38-27b-ud-q4-k-xl",
+        "--json",
+        "--context",
+        "200000",
+        "--sessions",
+        "1"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:44.7653320-04:00",
+      "finished": "2026-10-26T15:25:44.8892166-04:00",
+      "stdout_bytes": 8303,
+      "stdout_sha256": "e9694f1a23b700cb70aebb609a3fd6de87570884f172585ddd742e5a4664e08a"
+    },
+    {
+      "file": "estimate-q27-c200000-s4.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "S:\\bubo-walk\\E21\\rootB\\models\\qwen38-27b-ud-q4-k-xl",
+        "--json",
+        "--context",
+        "200000",
+        "--sessions",
+        "4"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:45.1553483-04:00",
+      "finished": "2026-10-26T15:25:45.2817592-04:00",
+      "stdout_bytes": 8300,
+      "stdout_sha256": "36d6b749613e99bf65a765e6316c8cacf46159c7639541425abd8a43efe348d5"
+    },
+    {
+      "file": "estimate-hauhau-c200000-s1.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "S:\\bubo-walk\\E21\\rootB\\models\\gemma4-26b-a4b-uncensored-hauhaucs-qat-q4-k-m\\Gemma4-26B-A4B-QAT-Uncensored-HauhauCS-Balanced-Q4_K_M.gguf",
+        "--json",
+        "--context",
+        "200000",
+        "--sessions",
+        "1"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:45.5547221-04:00",
+      "finished": "2026-10-26T15:25:45.6594891-04:00",
+      "stdout_bytes": 593,
+      "stdout_sha256": "9418e14ddb684ef03d6ffc1f3cba3d243677d80b0eb39799e1452d1f113f8d78"
+    },
+    {
+      "file": "estimate-hauhau-c200000-s4.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "S:\\bubo-walk\\E21\\rootB\\models\\gemma4-26b-a4b-uncensored-hauhaucs-qat-q4-k-m\\Gemma4-26B-A4B-QAT-Uncensored-HauhauCS-Balanced-Q4_K_M.gguf",
+        "--json",
+        "--context",
+        "200000",
+        "--sessions",
+        "4"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:45.9177495-04:00",
+      "finished": "2026-10-26T15:25:46.0186626-04:00",
+      "stdout_bytes": 593,
+      "stdout_sha256": "f8c9464be60204d9d18020b41e89dbd74ea22cb316aacc0ad23ee2bfe9d59573"
+    },
+    {
+      "file": "estimate-importpkg-c200000-s1.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "S:\\bubo-walk\\E21\\Import\\gemma4-26b-a4b-stock-unsloth-ud-q4-k-m\\gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+        "--json",
+        "--context",
+        "200000",
+        "--sessions",
+        "1"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:46.2854447-04:00",
+      "finished": "2026-10-26T15:25:46.3963836-04:00",
+      "stdout_bytes": 553,
+      "stdout_sha256": "d715f638e1cee7907dfcb28237c539a0f3e5cb810f3d6c95a05a82e8934cddb9"
+    },
+    {
+      "file": "estimate-loose-c200000-s1.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "S:\\bubo-walk\\E21\\Import\\Qwen3.8-27B-UD-Q8_K_XL.gguf",
+        "--json",
+        "--context",
+        "200000",
+        "--sessions",
+        "1"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:46.6858281-04:00",
+      "finished": "2026-10-26T15:25:46.8049177-04:00",
+      "stdout_bytes": 8068,
+      "stdout_sha256": "516b0f610c5e2afb4cb51a68871d4e6e5815943880203a782f2613ca70756d33"
+    },
+    {
+      "file": "plan-runtime-ready.jsonl",
+      "command": [
+        "bubo.exe",
+        "prepare",
+        "runtime",
+        "--runtime-dir",
+        "C:\\bubo\\runtimes\\c4pkg-344f41ac\\bin",
+        "--jsonl"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-10-26T15:25:47.0703992-04:00",
+      "finished": "2026-10-26T15:25:49.4151056-04:00",
+      "stdout_bytes": 422393,
+      "stdout_sha256": "1598f23c5ad5ba69902a48d1a50be7f991e2d8a36e24f44a7d81f23dd39ff18d"
+    },
+    {
+      "file": "plan-runtime-refresh.jsonl",
+      "command": [
+        "bubo.exe",
+        "prepare",
+        "runtime",
+        "--runtime-dir",
+        "C:\\bubo\\evidence\\capture-09\\frozen-capture\\runtime-payload-without-metadata",
+        "--jsonl"
+      ],
+      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "exit_code": 3,
+      "stderr": "",
+      "started": "2026-10-26T15:25:49.6788429-04:00",
+      "finished": "2026-10-26T15:25:50.6003739-04:00",
+      "stdout_bytes": 422847,
+      "stdout_sha256": "e8249067f6ebec658cd982e62e36e224e9be80c1be443897c4b6a91fe7a74dd4"
+    }
+  ],
+  "note": "CPU-only final integrated CLI. E21/E23 inventory and isolated saved pointer. Existing model roots read only; retired Gemma packages estimated by their main file paths. No server, GUI, GPU or acquisition. Historical running captures remain historical.",
+  "publication_note": "Machine paths and provenance labels are neutral publication fixtures. Output sizes and hashes describe the scrubbed bytes; executable and source revision identities remain historical."
+}

@@ -5,11 +5,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "guard.hpp"
 #include "session.hpp"
 #include "src/core/gguf_reader.hpp"
 
@@ -18,6 +20,14 @@ struct Knobs {
   std::filesystem::path artifacts;
   unsigned slices = 6, gate_slices = 0;
   bool shared_expert = true;
+  bool hal_monitor = true;  // GUFO_NPU_HAL_MONITOR, detection only
+  bool chip_power = true;   // GUFO_NPU_CHIP_POWER, logging only
+  bool mem_trace = true;    // GUFO_NPU_MEM_TRACE, logging only
+  GuardMode guard = GuardMode::kOn;  // GUFO_NPU_GUARD on|off|log
+  GuardOverrides guard_test;         // GUFO_NPU_GUARD_TEST (internal)
+  // GUFO_NPU_TEST_FAIL_CHUNK (internal): NPU chunk of a request to report as
+  // invalid, counted from 0.
+  std::optional<std::uint64_t> test_fail_chunk;
   Timing timing;
 };
 bool IsKnob(std::string_view name) noexcept;
@@ -52,5 +62,9 @@ std::vector<std::byte> StageQ8(const Q8Matrix& weights,
                                const WeightSlice& slice);
 bool QualifiedPrefill(std::uint64_t tokens,
                       std::uint64_t registered_groups) noexcept;
+// Whether a pass of `tokens` rows can take an NPU lane at all (token count
+// only; the weights, the mode and the guard decide the rest): whole 4096
+// groups, at most the executor batch capacity and at most 4 groups.
+bool QualifiedChunk(unsigned tokens, unsigned capacity) noexcept;
 }  // namespace gufo::npu
 #endif

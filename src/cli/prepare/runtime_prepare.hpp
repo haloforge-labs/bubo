@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "src/cli/prepare/prepare.hpp"
+#include "src/cli/prepare/runtime_location.hpp"
 #include "src/core/prepare/runtime_notices.hpp"
 #include "src/core/prepare/runtime_table.hpp"
 #include "src/core/prepare/transport.hpp"
@@ -23,6 +24,9 @@ int RunRuntime(const Options&, std::ostream&, std::ostream&,
                PreparationPlan* preview = nullptr, bool approved = false);
 #ifdef BUBO_PREPARE_TESTING
 struct RuntimeTestEnvironment {
+  // Isolated process inputs for the production runtime resolver. In
+  // particular, test output roots must never select a real user's runtime.
+  RuntimeSearch runtime_search;
   std::array<WheelPin, 3> wheels;
   std::vector<RuntimeMember> members;
   std::vector<RuntimeNotice> notices;

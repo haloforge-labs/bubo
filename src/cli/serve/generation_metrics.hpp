@@ -3,8 +3,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <iomanip>
+#include <mutex>
+#include <optional>
 #include <sstream>
 
 #include "src/cli/serve/text_generation_backend.hpp"
@@ -74,6 +77,59 @@ inline std::atomic<std::int64_t>& RequestsDeferred() {
   static std::atomic<std::int64_t> count{0};
   return count;
 }
+
+// Cache hits count completed successful requests, rather than reused tokens.
+// Keep the counters and the last request together so a status sample cannot
+// combine gauges from different completions. This adds no scheduler state.
+struct CompletedRequestSample {
+  std::uint64_t disk_hits{0};
+  std::uint64_t memory_hits{0};
+  std::uint64_t misses{0};
+  std::optional<double> prefill_tokens_per_second;
+  std::optional<double> decode_tokens_per_second;
+  std::optional<std::chrono::steady_clock::time_point> completed_at;
+};
+
+class CompletedRequestMetrics {
+public:
+  void Record(const TextGenerationBackend::Result& result) {
+    if (result.cancelled ||
+        result.finish_reason == TextGenerationBackend::FinishReason::kCancelled)
+      return;
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (result.cache_disk_hit)
+      ++sample_.disk_hits;
+    else if (result.cache_hit)
+      ++sample_.memory_hits;
+    else
+      ++sample_.misses;
+    sample_.prefill_tokens_per_second =
+        result.prefill_ms > 0.0
+            ? std::optional<double>(1000.0 * result.prefill_tokens /
+                                    result.prefill_ms)
+            : std::nullopt;
+    sample_.decode_tokens_per_second =
+        result.decode_ms > 0.0
+            ? std::optional<double>(1000.0 * result.completion_tokens /
+                                    result.decode_ms)
+            : std::nullopt;
+    sample_.completed_at = std::chrono::steady_clock::now();
+  }
+
+  CompletedRequestSample Sample() const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return sample_;
+  }
+
+private:
+  mutable std::mutex mutex_;
+  CompletedRequestSample sample_;
+};
+
+inline CompletedRequestMetrics& CompletedRequests() {
+  static CompletedRequestMetrics metrics;
+  return metrics;
+}
 }  // namespace detail
 
 inline double PrefillTokensPerSecond(
@@ -87,6 +143,7 @@ inline double PrefillTokensPerSecond(
 /// scheduler calls this when a request ends, whether or not its client reads
 /// the result; failed requests are not added.
 inline void RecordRequestMetrics(const TextGenerationBackend::Result& result) {
+  detail::CompletedRequests().Record(result);
   const auto add_seconds = [](std::atomic<double>& total, double ms) {
     double current = total.load(std::memory_order_relaxed);
     while (!total.compare_exchange_weak(current, current + ms / 1000.0,
@@ -145,9 +202,11 @@ inline void AddPrefillDiagUsage(
   value["fetch_hidden_us"] = t.fetch_hidden_us;
   value["fetch_exposed_us"] = t.fetch_exposed_us;
   value["fetch_wait_us"] = t.fetch_wait_us;
-  value["experts_distinct_min"] = static_cast<std::size_t>(t.experts_distinct_min);
+  value["experts_distinct_min"] =
+      static_cast<std::size_t>(t.experts_distinct_min);
   value["experts_distinct_mean"] = t.Mean();
-  value["experts_distinct_max"] = static_cast<std::size_t>(t.experts_distinct_max);
+  value["experts_distinct_max"] =
+      static_cast<std::size_t>(t.experts_distinct_max);
   value["experts_distinct_sum"] = t.experts_distinct_sum;
   value["layer_samples"] = t.layer_samples;
   value["expert_bytes"] = t.expert_bytes;
@@ -205,8 +264,14 @@ inline std::string GenerationLogDetails(
         << " lookup_proposed=" << result.lookup_tokens;
   if (result.cache_snapshot_bytes > 0)
     out << " cache_snapshot_bytes=" << result.cache_snapshot_bytes;
+  if (result.cache_retained_bytes > 0)
+    out << " cache_retained_bytes=" << result.cache_retained_bytes
+        << " cache_retained_device_bytes=" << result.cache_retained_device_bytes
+        << " cache_retained_host_bytes=" << result.cache_retained_host_bytes;
   if (result.cache_disk_queued_bytes > 0)
     out << " cache_disk_queued_bytes=" << result.cache_disk_queued_bytes;
+  if (result.cache_snapshots_skipped > 0)
+    out << " cache_snapshots_skipped=" << result.cache_snapshots_skipped << " cache_snapshot_skip_reason=" << result.cache_snapshot_skip_reason;
   if (!result.cache_hit && !result.cache_miss_reason.empty())
     out << " cache_miss_reason=" << result.cache_miss_reason
         << " common_prefix_tokens=" << result.cache_common_prefix_tokens
@@ -214,6 +279,10 @@ inline std::string GenerationLogDetails(
   if (result.prefill_diag)
     out << " prefill_diag_passes=" << result.prefill_diag->passes << ' '
         << models::qwen38_flash_next::PrefillDiagFields(*result.prefill_diag);
+  // L-REL-8: where the generated tag token ended reasoning (byte offset in the
+  // generated text). Absent when no tag token was generated.
+  if (result.reasoning_end.byte)
+    out << " reasoning_end_byte=" << *result.reasoning_end.byte;
   return out.str();
 }
 

@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "operation_id": "11111111111111111111111111111111",
+  "seq": 1,
+  "time": "2026-10-13T18:00:00Z",
+  "product": {
+    "name": "bubo",
+    "version": "0.1.0",
+    "revision": "3ff74dce",
+    "engine_version": "0.1.0"
+  },
+  "type": "stopped",
+  "payload": {
+    "identity": {
+      "instance_id": "22222222222222222222222222222222",
+      "pid": 1234,
+      "process_creation_time": "134000000000000000",
+      "exe_path": "C:/Bubo/bubo.exe"
+    }
+  },
+  "instance_id": "22222222222222222222222222222222",
+  "pid": 1234,
+  "process_creation_time": "134000000000000000",
+  "exe_path": "C:/Bubo/bubo.exe"
+}

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -9,12 +10,16 @@
 #include <cstring>
 #include <limits>
 #include <optional>
+#include <set>
+#include <string_view>
 #include <type_traits>
 
 #include "src/cli/serve/logging.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/npu/prefill_plan.hpp"
 #ifdef GUFO_NPU
+#include "src/npu/chunk_retry.hpp"
+#include "src/npu/request_stats.hpp"
 #include "src/npu/server_prefill.hpp"
 #endif
 #include "src/core/platform/tuning.hpp"
@@ -24,27 +29,28 @@
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
 #include "src/models/qwen38_flash_next/ngram.hpp"
+#include "src/models/qwen38_flash_next/npu_retry.hpp"
 #include "src/models/qwen38_flash_next/weights.hpp"
 
 namespace gufo::models::qwen38_flash_next {
 namespace {
 
-// gfx1151, served repository prompts: 4096-token chunks prefill 24K-102K
-// tokens 6-11% faster than 2048 (pp4096 +5% at d0, +6% at d32K). Each
-// chunk's n-gram gather doubles; next-chunk prefetch overlaps that read.
-// Prefill logits do not depend on the chunk size
-// (pre-budget queries always take the dense attention tiles).
+
+
+
+
+
 constexpr std::uint32_t kPrefillChunkTokens = 4096;
 // A prompt ending this close past a chunk finishes in that chunk: a separate
 // tail pass costs about as much as this many more chunk rows.
 constexpr std::uint32_t kPrefillTailTokens = 128;
 
-// GUFO_PREFILL_FORWARD_TOKENS is the single override of upstream's 4,096-token
-// forward size (including checkpoint capture and disk in-pass prefill).
-// Measured on gfx1151 at 28K-token cold prompts: 4,096 -> 0.88 ms/token, 2,048
-// -> 1.4-1.8, 8,192 -> 1.5. Scratch is sized from this value (executor
-// max_batch), so it is read once; unset or out of [64, 16384] keeps the
-// default.
+
+
+
+
+
+
 std::uint32_t PrefillChunkTokens() {
   static const std::uint32_t chunk = [] {
     const char* e = std::getenv("GUFO_PREFILL_FORWARD_TOKENS");
@@ -183,6 +189,43 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
   if (!m->reader_) {
     return nullptr;
   }
+  // Experimental (memory lane, GSQ-RCO hybrid): GUFO_EXPERT_OVERLAY_MODEL names a single-file GGUF of the same architecture whose routed-expert
+  // tensors (blk.N.ffn_{gate,up,down}_exps.weight) replace the base model's; GUFO_EXPERT_OVERLAY_KEEP is a comma list of base tensor names that
+  // stay on the base model. Every other tensor, the tokenizer and the metadata come from the base model.
+  if (const char* overlay = std::getenv("GUFO_EXPERT_OVERLAY_MODEL"); overlay != nullptr && overlay[0] != '\0') {
+    std::set<std::string, std::less<>> keep;
+    if (const char* list = std::getenv("GUFO_EXPERT_OVERLAY_KEEP"); list != nullptr) {
+      const std::string_view all(list);
+      for (std::size_t pos = 0; pos < all.size();) {
+        std::size_t end = all.find(',', pos);
+        if (end == std::string_view::npos)
+          end = all.size();
+        if (end > pos)
+          keep.emplace(all.substr(pos, end - pos));
+        pos = end + 1;
+      }
+    }
+    std::size_t overlaid = 0;
+    std::size_t kept = 0;
+    // Runs exactly once per base tensor while OverlayTensors validates, so the counts are the real ones.
+    const auto take = [&](std::string_view name) {
+      if (!(name.starts_with("blk.") && name.ends_with("_exps.weight") && name.find(".ffn_") != std::string_view::npos))
+        return false;
+      if (keep.contains(name)) {
+        ++kept;
+        return false;
+      }
+      ++overlaid;
+      return true;
+    };
+    if (!m->reader_->OverlayTensors(std::filesystem::u8path(overlay), take, error_msg))
+      return nullptr;
+    if (kept != keep.size()) {
+      AssignError(error_msg, "GUFO_EXPERT_OVERLAY_KEEP names a tensor that is not a routed-expert tensor of the base model");
+      return nullptr;
+    }
+    gufo::server::Logger::Raw("qwen38_flash_next: routed experts overlaid from %s (%zu expert tensors overlaid, %zu kept)\n", overlay, overlaid, kept);
+  }
   auto weights = ModelWeights::Bind(*m->reader_, error_msg);
   if (!weights) {
     return nullptr;
@@ -195,10 +238,9 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     return nullptr;
   }
   try {
-    if (!options.vision_disabled)
-      m->vision_ = qwen::vision::Encoder::Open(
-          std::filesystem::u8path(model_path),
-          std::filesystem::u8path(options.vision_model_path), c.hidden_size);
+    m->vision_ = qwen::vision::Encoder::OpenUnlessDisabled(
+        options.vision_disabled, std::filesystem::u8path(model_path),
+        std::filesystem::u8path(options.vision_model_path), c.hidden_size);
   } catch (const std::exception& e) {
     AssignError(error_msg, e.what());
     return nullptr;
@@ -455,6 +497,22 @@ std::uint32_t Model::PrefillCheckpointSlack() const noexcept {
   return kPrefillTailTokens;
 }
 
+std::uint64_t Model::SnapshotHostBytes(std::uint64_t payload_bytes,
+                                       std::uint32_t token_count) const {
+  // The executor header and the image grid fit in this slack.
+  constexpr std::uint64_t kExecutorHostBytes = 64 * 1024;
+  const std::uint64_t host =
+      SessionSnapshotHostBytes(token_count, VocabSize(), 0) +
+      kExecutorHostBytes;
+  try {
+    if (host < payload_bytes && executor_->SnapshotFitsDevice(payload_bytes))
+      return host;
+  } catch (const std::exception&) {
+    // No device reading: charge the whole payload to the host.
+  }
+  return payload_bytes;
+}
+
 std::vector<platform::LoadedFile> Model::LoadedFiles() const {
   std::vector<platform::LoadedFile> files;
   platform::AppendLoadedFiles(reader_->GetMappedRegions(), "target", &files);
@@ -514,6 +572,15 @@ std::string Model::AccountingLine(core::SessionMode mode,
 
 std::size_t Model::DeferredScratchBytes() const {
   return executor_->DeferredScratchBytes();
+}
+
+std::size_t Model::NpuRetryBackupBytes() const noexcept {
+#ifdef GUFO_NPU
+  return qwen38_flash_next::NpuRetryBackupBytes(
+      config(), options_.npu_prefill != nullptr);
+#else
+  return 0;
+#endif
 }
 
 std::size_t Session::AllocatedBytes() const noexcept {
@@ -653,6 +720,13 @@ void Session::SetCancellationCheck(std::function<bool()> check) {
   session_->SetCancellationCheck(std::move(check));
 }
 
+std::string ImageTokenLimitMessage(std::uint64_t tokens, std::uint32_t limit) {
+  return "the images in this request carry " + std::to_string(tokens) +
+         " image tokens, above the per-request limit of " +
+         std::to_string(limit) +
+         "; send fewer or smaller images, or raise GUFO_MAX_IMAGE_TOKENS";
+}
+
 void Session::ConfigureVision(
     std::shared_ptr<const qwen::vision::Prompt> prompt) {
   if (prompt) {
@@ -661,9 +735,9 @@ void Session::ConfigureVision(
     std::uint64_t image_tokens = 0;
     for (const auto& image : prompt->rope.images)
       image_tokens += std::uint64_t{image.height} * image.width;
-    if (image_tokens > model_->MaxImageTokens(session_->max_context()))
-      throw std::invalid_argument(
-          "image tokens exceed the per-request limit (GUFO_MAX_IMAGE_TOKENS)");
+    if (const auto limit = model_->MaxImageTokens(session_->max_context());
+        image_tokens > limit)
+      throw std::invalid_argument(ImageTokenLimitMessage(image_tokens, limit));
   }
   const auto identity = prompt ? prompt->IdentityForPrefix(tokens_.size())
                                : std::span<const std::uint8_t>{};
@@ -734,6 +808,7 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshotImpl(
       token_count, model_->VocabSize(), identity.size());
   std::unique_ptr<SessionSnapshot> snapshot(
       new SessionSnapshot(host_bytes + executor_bytes));
+  snapshot->executor_bytes_ = executor_bytes;
   std::uint8_t* out = snapshot->data_.get();
   const SessionSnapshotHeader header{
       .magic = kSessionSnapshotMagic,
@@ -779,6 +854,17 @@ bool Session::OwnsSnapshot(const SessionSnapshot& snapshot) const noexcept {
 
 std::uint64_t SessionSnapshot::DeviceBytes() const {
   return deferred_ ? deferred_->DeviceBytes() : 0;
+}
+
+std::uint64_t SessionSnapshot::DeviceBytes(
+    std::unordered_set<const void*>& counted) const {
+  return deferred_ ? deferred_->DeviceBytes(counted) : 0;
+}
+
+std::uint64_t SessionSnapshot::HostBytes() const {
+  if (!deferred_)
+    return size_;
+  return size_ - executor_bytes_ + deferred_->HostBytes();
 }
 
 bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
@@ -979,6 +1065,10 @@ bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
     return false;
   }
   rocm::Executor& exec = *model_->executor_;
+#ifdef GUFO_NPU
+  if (npu::ProcessFailed())
+    exec.ReleaseNpuRetryBackup();
+#endif
   for (std::size_t off = 0; off < tokens.size();) {
     const auto remaining = tokens.size() - off;
     const auto capacity = remaining <= exec.max_batch()
@@ -1000,11 +1090,14 @@ bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
                               : rocm::Executor::ForwardMode::kDecode;
     anchor_candidates_valid_ = false;
     std::unique_ptr<rocm::PrefillCheckpoint> capture;
+    const auto make_capture = [&](std::string* error) {
+      return exec.MakePrefillCheckpoint(
+          *session_, chunk,
+          static_cast<std::uint32_t>(boundary - tokens_.size()), error);
+    };
     if (checkpoint && boundary > tokens_.size() &&
         boundary <= tokens_.size() + n) {
-      capture = exec.MakePrefillCheckpoint(
-          *session_, chunk,
-          static_cast<std::uint32_t>(boundary - tokens_.size()), error_msg);
+      capture = make_capture(error_msg);
       if (!capture)
         return false;
     }
@@ -1014,10 +1107,78 @@ bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
         rest.size() <= exec.max_batch() ? exec.max_batch()
                                         : model_->PrefillCapacity(),
         rest.size()));
-    if (!exec.Forward(*session_, chunk, 1, logits_.data(), mode, error_msg,
-                      capture.get(), false, next)) {
-      return false;
+#ifdef GUFO_NPU
+    // L-REL-2: a chunk the NPU may take is backed up so it can run again on the
+    // GPU. Chunks that cannot use a lane (not whole 4096 groups, a hold that
+    // stays on) are not.
+    const auto* npu_prefill =
+        npu_on ? model_->options_.npu_prefill.get() : nullptr;
+    bool backed_up = false;
+    if (npu_prefill &&
+        npu::ShouldBackupChunk(
+            true,
+            npu::QualifiedChunk(static_cast<unsigned>(n), exec.max_batch()),
+            npu_prefill->HoldWillStay())) {
+      std::string backup_error;
+      backed_up = exec.SaveNpuRetryBackup(*session_, &backup_error);
+      static std::atomic<bool> unavailable_logged{false};
+      if (!backed_up && !unavailable_logged.exchange(true)) {
+        gufo::server::Logger::Warn(
+            "npu",
+            "GPU retry of a faulted NPU chunk is unavailable: " + backup_error);
+      }
     }
+    const bool failed_before = npu::ProcessFailed();
+    const auto serial_before = npu_prefill ? npu_prefill->chunk_serial() : 0;
+    const auto noted_before = npu::RequestChunksNoted();
+#endif
+    bool forwarded = exec.Forward(*session_, chunk, 1, logits_.data(), mode,
+                                  error_msg, capture.get(), false, next);
+#ifdef GUFO_NPU
+    if (backed_up) {
+      double copy_ms = -1;
+      if (!exec.NpuRetryBackupMs(&copy_ms))
+        copy_ms = -1;
+      const bool used = npu::ChunkUsedThisAttempt(
+          serial_before, npu_prefill->chunk_serial(), npu_prefill->ChunkUsed());
+      if (used &&
+          npu::BackupBelongsToChunk(noted_before, npu::RequestChunksNoted()))
+        npu::NoteChunkBackup(copy_ms);
+      if (!forwarded && npu::ShouldRetryChunk(
+                            failed_before, npu::ProcessFailed(), used, true)) {
+        const auto chunk_number =
+            npu::Stats().chunks.load(std::memory_order_relaxed);
+        const auto started = std::chrono::steady_clock::now();
+        std::string retry_error;
+        const bool had_capture = capture != nullptr;
+        capture.reset();
+        forwarded = exec.RestoreNpuRetryBackup(*session_, &retry_error);
+        if (forwarded && had_capture) {
+          capture = make_capture(&retry_error);
+          forwarded = capture != nullptr;
+        }
+        forwarded =
+            forwarded && exec.Forward(*session_, chunk, 1, logits_.data(), mode,
+                                      &retry_error, capture.get(), false, next);
+        if (forwarded) {
+          npu::Faults().gpu_retries.fetch_add(1, std::memory_order_relaxed);
+          gufo::server::Logger::Warn(
+              "npu", npu::FormatChunkRetryWarning(
+                         chunk_number, copy_ms,
+                         std::chrono::duration<double, std::milli>(
+                             std::chrono::steady_clock::now() - started)
+                             .count()));
+        } else if (error_msg) {
+          *error_msg += "; GPU retry failed: " + retry_error;
+        }
+      }
+    }
+    // The NPU is off for the process once it failed: the buffer is dead weight.
+    if (npu::ProcessFailed())
+      exec.ReleaseNpuRetryBackup();
+#endif
+    if (!forwarded)
+      return false;
     const auto kept = capture && capture->tokens < n ? n - capture->tokens : n;
     hidden_base_ = static_cast<std::uint32_t>(
         tokens_.size() + n -

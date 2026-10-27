@@ -6,10 +6,12 @@ import sys
 def assert_model_listing(listing, model, context, input_modalities):
     assert listing["object"] == "list", listing
     entries = listing["data"]
-    assert len(entries) == 1, listing  # The runner starts an isolated text server.
+    assert [entry["id"] for entry in entries] == ([model] if model == "bubo" else [model, "bubo"]), listing
     entry = entries[0]
+    if model != "bubo":
+        assert entries[1] == {**entry, "id": "bubo"}, entries[1]
     assert entry["object"] == "model" and entry["id"] == model, entry
-    assert entry["owned_by"] == "gufo" and entry["context_length"] == context, entry
+    assert entry["owned_by"] == "bubo" and entry["context_length"] == context, entry
     assert type(entry["created"]) is int and entry["created"] > 0, entry
     assert entry["architecture"]["input_modalities"] == input_modalities, entry
 

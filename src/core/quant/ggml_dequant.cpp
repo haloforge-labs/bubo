@@ -4,6 +4,9 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <vector>
+
+#include "src/core/quant/iq_grids.hpp"
 
 namespace gufo::quant {
 
@@ -169,16 +172,16 @@ std::size_t QuantizedRowBytes(core::GgmlType type,
     // GGML storage layouts also used by the DeepSeek runtime. Storage support
     // here does not imply that every model has a compute kernel for the type.
     case core::GgmlType::kQ4_0:
-      block_bytes = 18;
+      block_bytes = sizeof(block_q4_0);
       break;
     case core::GgmlType::kQ4_1:
       block_bytes = 20;
       break;
     case core::GgmlType::kQ5_0:
-      block_bytes = 22;
+      block_bytes = sizeof(block_q5_0);
       break;
     case core::GgmlType::kQ5_1:
-      block_bytes = 24;
+      block_bytes = sizeof(block_q5_1);
       break;
     case core::GgmlType::kQ8_1:
       block_bytes = 36;
@@ -215,6 +218,18 @@ std::size_t QuantizedRowBytes(core::GgmlType type,
       break;
     case core::GgmlType::kIQ3_S:
       block_bytes = sizeof(block_iq3_s);
+      break;
+    case core::GgmlType::kIQ2_XS:
+      block_bytes = sizeof(block_iq2_xs);
+      break;
+    case core::GgmlType::kIQ2_S:
+      block_bytes = sizeof(block_iq2_s);
+      break;
+    case core::GgmlType::kIQ3_XXS:
+      block_bytes = sizeof(block_iq3_xxs);
+      break;
+    case core::GgmlType::kQ2_0:
+      block_bytes = sizeof(block_q2_0);
       break;
     default:
       return 0;
@@ -416,6 +431,100 @@ float DotProductQ8_0(const void* row_data, std::span<const float> vec,
 
     for (std::size_t i = 0; i < 32; ++i) {
       sum += d * static_cast<float>(blocks[b].qs[i]) * v[i];
+    }
+  }
+  return sum;
+}
+
+void DequantizeQ4_0(const void* src, float* dst, std::size_t k) {
+  const auto* blocks = static_cast<const block_q4_0*>(src);
+  const std::size_t nb = k / 32;
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float d = Fp16ToFloat(blocks[b].d);
+    for (std::size_t i = 0; i < 16; ++i) {
+      const std::uint8_t packed = blocks[b].qs[i];
+      dst[(b * 32) + i] = d * static_cast<float>((packed & 0x0F) - 8);
+      dst[(b * 32) + i + 16] = d * static_cast<float>((packed >> 4U) - 8);
+    }
+  }
+}
+
+void DequantizeQ5_0(const void* src, float* dst, std::size_t k) {
+  const auto* blocks = static_cast<const block_q5_0*>(src);
+  const std::size_t nb = k / 32;
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float d = Fp16ToFloat(blocks[b].d);
+    std::uint32_t qh = 0;
+    std::memcpy(&qh, blocks[b].qh, sizeof(qh));
+    for (std::size_t i = 0; i < 16; ++i) {
+      const std::uint8_t packed = blocks[b].qs[i];
+      const std::uint32_t lo = (packed & 0x0FU) | (((qh >> i) & 1U) << 4U);
+      const std::uint32_t hi = (packed >> 4U) | (((qh >> (i + 16)) & 1U) << 4U);
+      dst[(b * 32) + i] = d * static_cast<float>(static_cast<int>(lo) - 16);
+      dst[(b * 32) + i + 16] =
+          d * static_cast<float>(static_cast<int>(hi) - 16);
+    }
+  }
+}
+
+float DotProductQ5_0(const void* row_data, std::span<const float> vec,
+                     std::size_t k) {
+  float values[32];
+  const auto* blocks = static_cast<const block_q5_0*>(row_data);
+  float sum = 0.0F;
+  for (std::size_t b = 0; b < k / 32; ++b) {
+    DequantizeQ5_0(&blocks[b], values, 32);
+    for (std::size_t i = 0; i < 32; ++i) {
+      sum += values[i] * vec[(b * 32) + i];
+    }
+  }
+  return sum;
+}
+
+void DequantizeQ5_1(const void* src, float* dst, std::size_t k) {
+  const auto* blocks = static_cast<const block_q5_1*>(src);
+  const std::size_t nb = k / 32;
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float d = Fp16ToFloat(blocks[b].d);
+    const float m = Fp16ToFloat(blocks[b].m);
+    std::uint32_t qh = 0;
+    std::memcpy(&qh, blocks[b].qh, sizeof(qh));
+    for (std::size_t i = 0; i < 16; ++i) {
+      const std::uint8_t packed = blocks[b].qs[i];
+      const std::uint32_t lo = (packed & 0x0FU) | (((qh >> i) & 1U) << 4U);
+      const std::uint32_t hi = (packed >> 4U) | (((qh >> (i + 16)) & 1U) << 4U);
+      dst[(b * 32) + i] = (d * static_cast<float>(lo)) + m;
+      dst[(b * 32) + i + 16] = (d * static_cast<float>(hi)) + m;
+    }
+  }
+}
+
+float DotProductQ5_1(const void* row_data, std::span<const float> vec,
+                     std::size_t k) {
+  float values[32];
+  const auto* blocks = static_cast<const block_q5_1*>(row_data);
+  float sum = 0.0F;
+  for (std::size_t b = 0; b < k / 32; ++b) {
+    DequantizeQ5_1(&blocks[b], values, 32);
+    for (std::size_t i = 0; i < 32; ++i) {
+      sum += values[i] * vec[(b * 32) + i];
+    }
+  }
+  return sum;
+}
+
+float DotProductQ4_0(const void* row_data, std::span<const float> vec,
+                     std::size_t k) {
+  const auto* blocks = static_cast<const block_q4_0*>(row_data);
+  const std::size_t nb = k / 32;
+  float sum = 0.0F;
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float d = Fp16ToFloat(blocks[b].d);
+    const float* v = vec.data() + (b * 32);
+    for (std::size_t i = 0; i < 16; ++i) {
+      const std::uint8_t packed = blocks[b].qs[i];
+      sum += d * static_cast<float>((packed & 0x0F) - 8) * v[i];
+      sum += d * static_cast<float>((packed >> 4U) - 8) * v[i + 16];
     }
   }
   return sum;
@@ -629,6 +738,150 @@ void DequantizeIQ3_S(const void* src, float* dst, std::size_t k) {
       dst[(b * 256) + i] = Iq3sValue(blocks[b], i);
     }
   }
+}
+
+void DequantizeIQ2_XXS(const void* src, float* dst, std::size_t k) {
+  const auto* blocks = static_cast<const block_iq2_xxs*>(src);
+  const std::size_t nb = k / 256;
+  const std::uint64_t* grids = Iq2xxsGrid();
+  const std::uint8_t* signs_table = SignsIq2xs();
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float d = Fp16ToFloat(blocks[b].d);
+    for (std::size_t ib32 = 0; ib32 < 8; ++ib32) {
+      std::uint32_t aux32[2];
+      // The packed struct's uint16 array is read bytewise: 8 bytes per 32 elements after the fp16 scale.
+      std::memcpy(aux32, reinterpret_cast<const std::uint8_t*>(&blocks[b]) + sizeof(std::uint16_t) + (8 * ib32), sizeof(aux32));
+      const auto* aux8 = reinterpret_cast<const std::uint8_t*>(aux32);
+      const float db = d * (0.5F + static_cast<float>(aux32[1] >> 28U)) * 0.25F;
+      for (std::size_t l = 0; l < 4; ++l) {
+        const auto* grid = reinterpret_cast<const std::uint8_t*>(&grids[aux8[l]]);
+        const std::uint8_t signs = signs_table[(aux32[1] >> (7U * l)) & 127U];
+        for (std::size_t j = 0; j < 8; ++j)
+          dst[j] = db * static_cast<float>(grid[j]) * ((signs & kSignMaskIq2xs[j]) != 0 ? -1.0F : 1.0F);
+        dst += 8;
+      }
+    }
+  }
+}
+
+void DequantizeIQ2_XS(const void* src, float* dst, std::size_t k) {
+  const auto* blocks = static_cast<const block_iq2_xs*>(src);
+  const std::size_t nb = k / 256;
+  const std::uint64_t* grids = Iq2xsGrid();
+  const std::uint8_t* signs_table = SignsIq2xs();
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float d = Fp16ToFloat(blocks[b].d);
+    for (std::size_t ib32 = 0; ib32 < 8; ++ib32) {
+      const float db[2] = {d * (0.5F + static_cast<float>(blocks[b].scales[ib32] & 0xFU)) * 0.25F,
+                           d * (0.5F + static_cast<float>(blocks[b].scales[ib32] >> 4U)) * 0.25F};
+      for (std::size_t l = 0; l < 4; ++l) {
+        const std::uint16_t q = blocks[b].qs[(4 * ib32) + l];
+        const auto* grid = reinterpret_cast<const std::uint8_t*>(&grids[q & 511U]);
+        const std::uint8_t signs = signs_table[q >> 9U];
+        for (std::size_t j = 0; j < 8; ++j)
+          dst[j] = db[l / 2] * static_cast<float>(grid[j]) * ((signs & kSignMaskIq2xs[j]) != 0 ? -1.0F : 1.0F);
+        dst += 8;
+      }
+    }
+  }
+}
+
+void DequantizeIQ2_S(const void* src, float* dst, std::size_t k) {
+  const auto* blocks = static_cast<const block_iq2_s*>(src);
+  const std::size_t nb = k / 256;
+  const std::uint64_t* grids = Iq2sGrid();
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float d = Fp16ToFloat(blocks[b].d);
+    const std::uint8_t* qs = blocks[b].qs;
+    const std::uint8_t* qh = blocks[b].qh;
+    const std::uint8_t* signs = qs + 32;
+    for (std::size_t ib32 = 0; ib32 < 8; ++ib32) {
+      const float db[2] = {d * (0.5F + static_cast<float>(blocks[b].scales[ib32] & 0xFU)) * 0.25F,
+                           d * (0.5F + static_cast<float>(blocks[b].scales[ib32] >> 4U)) * 0.25F};
+      for (std::size_t l = 0; l < 4; ++l) {
+        const float dl = db[l / 2];
+        const std::uint32_t index = static_cast<std::uint32_t>(qs[l]) | ((static_cast<std::uint32_t>(qh[ib32]) << (8U - (2U * l))) & 0x300U);
+        const auto* grid = reinterpret_cast<const std::uint8_t*>(&grids[index]);
+        for (std::size_t j = 0; j < 8; ++j)
+          dst[j] = dl * static_cast<float>(grid[j]) * ((signs[l] & kSignMaskIq2xs[j]) != 0 ? -1.0F : 1.0F);
+        dst += 8;
+      }
+      qs += 4;
+      signs += 4;
+    }
+  }
+}
+
+void DequantizeIQ3_XXS(const void* src, float* dst, std::size_t k) {
+  const auto* blocks = static_cast<const block_iq3_xxs*>(src);
+  const std::size_t nb = k / 256;
+  const std::uint32_t* grids = Iq3xxsGrid();
+  const std::uint8_t* signs_table = SignsIq2xs();
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float d = Fp16ToFloat(blocks[b].d);
+    const std::uint8_t* qs = blocks[b].qs;
+    const std::uint8_t* scales_and_signs = qs + 64;
+    for (std::size_t ib32 = 0; ib32 < 8; ++ib32) {
+      std::uint32_t aux32 = 0;
+      std::memcpy(&aux32, scales_and_signs + (4 * ib32), sizeof(aux32));
+      const float db = d * (0.5F + static_cast<float>(aux32 >> 28U)) * 0.5F;
+      for (std::size_t l = 0; l < 4; ++l) {
+        const std::uint8_t signs = signs_table[(aux32 >> (7U * l)) & 127U];
+        const auto* grid1 = reinterpret_cast<const std::uint8_t*>(&grids[qs[(2 * l) + 0]]);
+        const auto* grid2 = reinterpret_cast<const std::uint8_t*>(&grids[qs[(2 * l) + 1]]);
+        for (std::size_t j = 0; j < 4; ++j) {
+          dst[j + 0] = db * static_cast<float>(grid1[j]) * ((signs & kSignMaskIq2xs[j + 0]) != 0 ? -1.0F : 1.0F);
+          dst[j + 4] = db * static_cast<float>(grid2[j]) * ((signs & kSignMaskIq2xs[j + 4]) != 0 ? -1.0F : 1.0F);
+        }
+        dst += 8;
+      }
+      qs += 8;
+    }
+  }
+}
+
+void DequantizeQ2_0(const void* src, float* dst, std::size_t k) {
+  const auto* blocks = static_cast<const block_q2_0*>(src);
+  const std::size_t nb = k / 64;
+  for (std::size_t b = 0; b < nb; ++b) {
+    const float d = Fp16ToFloat(blocks[b].d);
+    for (std::size_t j = 0; j < 64; ++j) {
+      const int q = (blocks[b].qs[j / 4] >> ((j % 4) * 2)) & 0x03;
+      dst[(b * 64) + j] = static_cast<float>(q - 1) * d;
+    }
+  }
+}
+
+namespace {
+template <typename Dequantize>
+float DotViaDequantize(Dequantize dequantize, const void* row_data, std::span<const float> vec, std::size_t k) {
+  std::vector<float> row(k);
+  dequantize(row_data, row.data(), k);
+  float sum = 0.0F;
+  for (std::size_t i = 0; i < k; ++i)
+    sum += row[i] * vec[i];
+  return sum;
+}
+}  // namespace
+
+float DotProductIQ2_XXS(const void* row_data, std::span<const float> vec, std::size_t k) {
+  return DotViaDequantize(DequantizeIQ2_XXS, row_data, vec, k);
+}
+
+float DotProductIQ2_XS(const void* row_data, std::span<const float> vec, std::size_t k) {
+  return DotViaDequantize(DequantizeIQ2_XS, row_data, vec, k);
+}
+
+float DotProductIQ2_S(const void* row_data, std::span<const float> vec, std::size_t k) {
+  return DotViaDequantize(DequantizeIQ2_S, row_data, vec, k);
+}
+
+float DotProductIQ3_XXS(const void* row_data, std::span<const float> vec, std::size_t k) {
+  return DotViaDequantize(DequantizeIQ3_XXS, row_data, vec, k);
+}
+
+float DotProductQ2_0(const void* row_data, std::span<const float> vec, std::size_t k) {
+  return DotViaDequantize(DequantizeQ2_0, row_data, vec, k);
 }
 
 float DotProductIQ4_NL(const void* row_data, std::span<const float> vec,

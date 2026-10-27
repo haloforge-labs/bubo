@@ -16,7 +16,7 @@ namespace gufo::server {
 /// template renders differently) can be read from what the server actually
 /// received, rendered, generated and sent. Each record is one JSON object per
 /// line carrying `time`, `event` and the `request` id that the matching
-/// `[http] request=` log lines name. Nothing is written unless an operator
+/// `[http] request=` log lines name. Nothing is written unless a user
 /// names a file.
 class Trace {
 public:

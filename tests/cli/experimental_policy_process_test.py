@@ -40,7 +40,9 @@ with tempfile.TemporaryDirectory(prefix='prefill-policy-') as directory:
                            stderr=subprocess.STDOUT, timeout=15, creationflags=flags)
         records = counter.read_text().splitlines() if counter.exists() else []
         rejected = request == 'on' and profile in ('exact', 'stock')
-        positive = mode == 'ON' and profile not in ('exact', 'stock') and (request != 'off' or entry == 'noncli')
+        # v0.1.1: off by default. Only an explicit CLI --npu-prefill on reaches the factory; the 'noncli' second resolution has
+        # no explicit flag (hostile manifest/env only), so it stays off.
+        positive = mode == 'ON' and profile not in ('exact', 'stock') and request == 'on' and entry == 'cli'
         want = expected if expected is not None else 2 if rejected else 83 if positive else 0
         assert r.returncode == want, (argv, r.returncode, want, r.stdout)
         assert records == (['factory=1'] if want == 83 else []), (argv, records)

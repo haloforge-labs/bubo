@@ -1,4 +1,4 @@
-"""Operator-only HTTP gate; no model files, device APIs or internal dumps are read."""
+"""Manual HTTP gate; no model files, device APIs or internal dumps are read."""
 import argparse
 import json
 import math

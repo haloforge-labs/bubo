@@ -1,0 +1,4 @@
+<|im_start|>user
+Describe <|vision_start|><|image_pad|><|vision_end|> please.<|im_end|>
+<|im_start|>assistant
+<think>

@@ -287,6 +287,10 @@ struct FakeControl {
   std::atomic<std::size_t> idle_probes{0};
   std::atomic<TextModelRunner::DeviceProbeStatus> idle_probe_status{
       TextModelRunner::DeviceProbeStatus::kUsable};
+  /// What the fake runner reports to the memory ledger (nullopt: unsupported).
+  std::optional<TextModelRunner::DeviceMemorySample> device_memory;
+  /// Memory guard: what the fake runner reports a request cannot run without.
+  gufo::platform::MemoryNeed memory_need;
   TextRunnerToken advance_gate_label{0};
   TextRunnerToken prefill_gate_label{0};
   bool advance_gate_entered{false};
@@ -804,6 +808,16 @@ public:
     return control_->idle_probe_status.load(std::memory_order_relaxed);
   }
 
+  [[nodiscard]] std::optional<DeviceMemorySample> SampleDeviceMemory()
+      const override {
+    return control_->device_memory;
+  }
+
+  [[nodiscard]] gufo::platform::MemoryNeed RequestMemoryNeed(
+      std::size_t, const gufo::server::TextPromptContext*, bool) const override {
+    return control_->memory_need;
+  }
+
   [[nodiscard]] bool DeviceUsable() const override {
     control_->device_probes.fetch_add(1, std::memory_order_relaxed);
     return control_->device_usable.load(std::memory_order_relaxed);
@@ -919,6 +933,59 @@ void TestDisabledCacheWithRealPool(bool disabled = true) {
     }
   Expect(prefills == 3, "all three requests do a full prefill");
   std::cout << "PASS: TestDisabledCacheWithRealPool\n";
+}
+
+void TestMemoryLedger() {
+  using Sample = TextModelRunner::DeviceMemorySample;
+  const auto run = [](const char* env, std::optional<Sample> memory) {
+    if (env)
+      ::setenv("GUFO_MEM_ACCOUNTING", env, 1);
+    else
+      ::unsetenv("GUFO_MEM_ACCOUNTING");
+    auto control = std::make_shared<FakeControl>();
+    control->device_memory = memory;
+    std::ostringstream lines;
+    gufo::server::Logger::FlushSync();
+    auto* old_buffer = std::clog.rdbuf(lines.rdbuf());
+    {
+      auto scheduler = MakeScheduler(control, 1);
+      scheduler->Submit({1, 2, 3}, 4, 0.0F, {}, false, {}).Wait();
+    }
+    gufo::server::Logger::FlushSync();
+    std::clog.rdbuf(old_buffer);
+    ::unsetenv("GUFO_MEM_ACCOUNTING");
+    return lines.str();
+  };
+  constexpr std::size_t kGiB = std::size_t{1} << 30;
+  const Sample sample{.free_bytes = 80 * kGiB,
+                      .total_bytes = 96 * kGiB,
+                      .split = true,
+                      .local_used_bytes = 10 * kGiB,
+                      .nonlocal_used_bytes = 1 * kGiB};
+  const auto on = run("1", sample);
+  Expect(on.find("event=mem_ledger phase=prefill used_mib=11264 local_mib=10240 "
+                 "nonlocal_mib=1024 free_mib=81920 total_mib=98304") !=
+             std::string::npos,
+         "ledger logs the prefill phase with split usage when the switch is set");
+  Expect(on.find("phase=decode") != std::string::npos &&
+             on.find("phase=request_end") != std::string::npos &&
+             on.find("overall_peak_mib=11264") != std::string::npos,
+         "ledger logs decode and request_end phases and the overall peak");
+  // The same value again must not log the phase a second time (32 MiB steps).
+  std::size_t prefill_lines = 0;
+  for (std::size_t at = on.find("phase=prefill"); at != std::string::npos;
+       at = on.find("phase=prefill", at + 1))
+    ++prefill_lines;
+  Expect(prefill_lines == 1, "an unchanged phase is logged once");
+  Expect(run(nullptr, sample).find("mem_ledger") == std::string::npos,
+         "ledger is silent without the switch");
+  Expect(run("1", std::nullopt).find("mem_ledger") == std::string::npos,
+         "ledger is silent when the runner cannot sample device memory");
+  // Without a split the used bytes come from total minus free.
+  Sample unsplit = sample;
+  unsplit.split = false;
+  Expect(run("1", unsplit).find("used_mib=16384") != std::string::npos,
+         "ledger falls back to total minus free without the split");
 }
 
 void TestConcurrentSharedPrefixesPrefillOnce() {
@@ -1219,6 +1286,79 @@ void TestRunnerCanReuseExactIncrementalText() {
          "exact incremental pieces form the final response text");
   Expect(control->decode_calls.load(std::memory_order_relaxed) == 0,
          "exact incremental text avoids duplicate final decoding");
+}
+
+// L-REL-8: the scheduler records where the generated end-of-reasoning tag
+// token begins. The fake tokenizer encodes "</think>" as token 8 (its length),
+// and token N carries output piece N, so token 1 below writes the same
+// characters as ordinary text.
+void TestReasoningEndTrackedByToken() {
+  using Finish = gufo::server::TextGenerationBackend::FinishReason;
+  // A stop sequence after the tag keeps it; one before the tag ends the
+  // request before the tag token, so nothing is recorded.
+  for (const int stop : {0, 1, 2}) {
+    for (const bool multi : {false, true}) {
+      for (const bool preview : {false, true}) {
+        auto control = std::make_shared<FakeControl>();
+        control->incremental_text_is_exact = true;
+        control->multi_token_decode = multi;
+        control->preview_first_token = preview;
+        control->snapshot_callback = [] {};
+        control->output_pieces = {"Use ", "</think>", " here.", "a",
+                                  stop == 2 ? "<STOP>" : "b", "c", "d", "e",
+                                  "</think>", stop == 1 ? "Done<STOP>x" : "Done"};
+        auto scheduler = MakeScheduler(control, 1);
+        TextGenerationScheduler::RequestMetadata metadata;
+        if (stop != 0)
+          metadata.stop_sequences = {"<STOP>"};
+        const auto result =
+            scheduler->Submit({0}, 12, 0.0F, {}, true, metadata).Wait();
+        if (stop == 2)
+          Expect(result.finish_reason == Finish::kStopSequence &&
+                     result.reasoning_end.tracked && !result.reasoning_end.byte,
+                 "a stop before the tag token records no reasoning end");
+        else
+          Expect(result.reasoning_end.byte == std::optional<std::size_t>(23) &&
+                     result.text.substr(23, 8) == "</think>" &&
+                     result.text.ends_with("Done"),
+                 "the tag offset holds with multi-token decode, preview and "
+                 "stop sequences");
+      }
+    }
+  }
+  for (const bool exact : {true, false}) {
+    auto control = std::make_shared<FakeControl>();
+    control->incremental_text_is_exact = exact;
+    control->output_pieces = {"Use ", "</think>", " here.", "a", "b",
+                              "c",    "d",        "e",      "</think>", "Done"};
+    constexpr std::size_t kTagByte = 23;  // "Use </think> here.abcde"
+    auto scheduler = MakeScheduler(control, 1);
+    auto request = scheduler->Submit({0}, 12, 0.0F, {}, true);
+    std::string streamed;
+    bool covered = false;
+    const auto result = request.Wait([&](std::string_view piece) {
+      if (streamed.size() == kTagByte && piece == "</think>")
+        covered = request.CurrentReasoningEnd().byte ==
+                  std::optional<std::size_t>(kTagByte);
+      streamed += piece;
+      return true;
+    });
+    if (exact) {
+      Expect(result.reasoning_end.tracked &&
+                 result.reasoning_end.byte ==
+                     std::optional<std::size_t>(kTagByte) &&
+                 result.text.substr(kTagByte, 8) == "</think>",
+             "the generated tag token, not the quoted text, ends reasoning");
+      Expect(covered, "the tag offset is known when its piece is delivered");
+      Expect(gufo::server::GenerationLogDetails(result).ends_with(
+                 " reasoning_end_byte=23"),
+             "the completion log line names the tag offset");
+    } else {
+      Expect(!result.reasoning_end.tracked && !result.reasoning_end.byte &&
+                 !request.CurrentReasoningEnd().tracked,
+             "inexact incremental text is not tracked (text rule applies)");
+    }
+  }
 }
 
 // An armed `--trace` records each finished request under the HTTP request id
@@ -2411,6 +2551,102 @@ void TestIdleDeviceProbe() {
   scheduler.reset();
   Expect(gufo::server::detail::DeviceLostTotal() == before + 1,
          "confirmed idle loss increments the counter once");
+}
+
+void TestStallMonitor() {
+  const auto stall_timeout = std::chrono::milliseconds(500);
+  const auto before = gufo::server::detail::DeviceLostTotal().load();
+  {
+    auto control = std::make_shared<FakeControl>();
+    control->block_prefill_label = 1;
+    auto scheduler = MakeScheduler(control, 1);
+    auto request = scheduler->Submit({1}, 2, 0.0F);
+    control->WaitForPrefill(1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    Expect(!scheduler->device_lost(),
+           "a blocked work unit is not reported without a stall timeout");
+    control->ReleasePrefill();
+    Expect(request.Wait().tokens == ExpectedTokens(1, 2),
+           "the blocked request completes once released");
+  }
+  auto control = std::make_shared<FakeControl>();
+  TextSchedulerPolicy policy{.stall_timeout = stall_timeout};
+  auto scheduler = MakeScheduler(control, 1, {}, policy);
+  std::this_thread::sleep_for(stall_timeout + stall_timeout / 2);
+  Expect(!scheduler->device_lost(), "an idle scheduler is never stalled");
+  auto healthy = scheduler->Submit({8, 80}, 2, 0.0F);
+  Expect(healthy.Wait().tokens == ExpectedTokens(8, 2) &&
+             !scheduler->device_lost(),
+         "a progressing request is not reported");
+
+  control->block_prefill_label = 1;
+  auto stalled = scheduler->Submit({1}, 2, 0.0F);
+  control->WaitForPrefill(1);
+  const auto deadline = TextGenerationScheduler::Clock::now() + kTestTimeout;
+  while (!scheduler->device_lost() &&
+         TextGenerationScheduler::Clock::now() < deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  Expect(scheduler->device_lost(),
+         "a work unit that never returns is reported as a lost device");
+  Expect(gufo::server::detail::DeviceLostTotal() == before + 1,
+         "a stall increments the loss counter once");
+  bool rejected = false;
+  try {
+    (void)scheduler->Submit({8, 80}, 2, 0.0F);
+  } catch (const TextGenerationError& error) {
+    rejected = error.code() == TextGenerationErrorCode::kDeviceLost;
+  }
+  Expect(rejected, "submissions after a stall fail before admission");
+  // Let the fake work unit return so the scheduler thread can be joined.
+  control->ReleasePrefill();
+  bool failed = false;
+  try {
+    (void)stalled.Wait();
+  } catch (const TextGenerationError& error) {
+    failed = error.code() == TextGenerationErrorCode::kDeviceLost;
+  }
+  Expect(failed, "the stalled request reports device_lost");
+
+  // A shared checkpoint capture that never completes. It runs on its own
+  // thread, so the scheduler loop keeps turning and serves a peer, but the
+  // requests parked on the capture make no progress.
+  auto capture_control = SharedPrefixControl(true);
+  capture_control->block_prefill_label = 1;
+  std::binary_semaphore entered(0), release(0);
+  std::atomic<unsigned> captures{0};
+  capture_control->snapshot_callback = [&] {
+    if (captures.fetch_add(1) == 0) {
+      entered.release();
+      (void)release.try_acquire_for(2 * kTestTimeout);
+    }
+  };
+  auto capturing = MakeScheduler(capture_control, 3, {}, policy);
+  const auto shared_prompt = SharedPrompt(1200, 7000, 100);
+  auto leader = capturing->Submit(shared_prompt, 2, 0.0F);
+  capture_control->WaitForPrefill(1);
+  auto follower = capturing->Submit(shared_prompt, 2, 0.0F);
+  capture_control->ReleasePrefill();
+  Expect(entered.try_acquire_for(kTestTimeout),
+         "the shared checkpoint capture starts");
+  Expect(capturing->Submit({2, 20}, 2, 0.0F).Wait().tokens ==
+                 ExpectedTokens(2, 2) &&
+             !capturing->device_lost(),
+         "the scheduler serves a peer while the capture is pending");
+  const auto capture_deadline =
+      TextGenerationScheduler::Clock::now() + kTestTimeout;
+  while (!capturing->device_lost() &&
+         TextGenerationScheduler::Clock::now() < capture_deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  Expect(capturing->device_lost(),
+         "a capture that never completes is reported as a lost device");
+  release.release();
+  for (auto* parked : {&leader, &follower}) {
+    try {
+      (void)parked->Wait();
+    } catch (const TextGenerationError&) {
+      // Either outcome is fine; the request must not hang.
+    }
+  }
 }
 
 void TestDeviceLossIsStickyAndReported() {
@@ -3901,6 +4137,120 @@ void TestDiskWriterSchedulerPendingAndTerminalLifetime() {
   std::filesystem::remove_all(directory, error);
 }
 
+// Memory guard (ProcessMemoryGuard): readings are fake, so a test imitates a small machine.
+struct GuardSource final : gufo::platform::MemoryReadingSource {
+  gufo::platform::MemoryReadings Read() noexcept override {
+    const std::lock_guard<std::mutex> lock(mutex);
+    return readings;
+  }
+  void Set(const gufo::platform::MemoryReadings& value) {
+    const std::lock_guard<std::mutex> lock(mutex);
+    readings = value;
+  }
+  std::mutex mutex;
+  gufo::platform::MemoryReadings readings;
+};
+
+void TestMemoryGuardRefusesMandatoryNeedOnly() {
+  constexpr std::uint64_t GiB = std::uint64_t{1} << 30;
+  GuardSource source;
+  gufo::platform::MemoryReadings low;
+  low.ram_ok = true;
+  low.ram_available = 1 * GiB;   // under the 4 GiB floor, the way the owner's game leaves the machine
+  low.ram_total = 31 * GiB;
+  source.Set(low);
+  gufo::platform::MemoryGuard guard(&source, 4 * GiB);
+  gufo::platform::SetProcessMemoryGuard(&guard);
+  {
+    auto control = std::make_shared<FakeControl>();
+    auto scheduler = MakeScheduler(control, 1);
+    Expect(scheduler->Submit({1, 10}, 2, 0.0F).Wait().tokens == ExpectedTokens(1, 2),
+           "a request with no mandatory bytes is served below the floor");
+
+    control->memory_need = {.mandatory_device_bytes = 1 * GiB};
+    bool transient = false;
+    try {
+      (void)scheduler->Submit({2, 20}, 2, 0.0F).Wait();
+    } catch (const TextGenerationError& error) {
+      transient = error.code() == TextGenerationErrorCode::kInsufficientMemory && error.http_status() == 503 && error.retryable() &&
+                  error.retry_after_seconds() == 5 && error.memory_guard() && error.refusal().has_value() &&
+                  error.refusal()->needed_bytes == 1 * GiB;
+    }
+    Expect(transient, "mandatory bytes that do not fit now are refused: 503 insufficient_memory with the numbers");
+
+    control->memory_need = {.mandatory_host_bytes = 100 * GiB};
+    bool permanent = false;
+    try {
+      (void)scheduler->Submit({3, 30}, 2, 0.0F).Wait();
+    } catch (const TextGenerationError& error) {
+      permanent = error.code() == TextGenerationErrorCode::kInsufficientMemoryPermanent && error.http_status() == 507 && !error.retryable() &&
+                  std::string(error.stable_code()) == "insufficient_memory_permanent";
+    }
+    Expect(permanent, "bytes beyond what the machine could ever give are refused: 507, not retryable");
+
+    low.ram_available = 20 * GiB;
+    source.Set(low);
+    control->memory_need = {.mandatory_device_bytes = 1 * GiB};
+    Expect(scheduler->Submit({4, 40}, 2, 0.0F).Wait().tokens == ExpectedTokens(4, 2), "admitted once memory is free again");
+    const auto counters = guard.counters();
+    Expect(counters.refused_transient == 1 && counters.refused_permanent == 1, "refusals are counted");
+    // The gate hook: every request is charged extra mandatory bytes, so any model can be forced over budget.
+    control->memory_need = {};
+    low.ram_available = 1 * GiB;
+    source.Set(low);
+    guard.SetDebugNeed(1 * GiB);
+    bool forced = false;
+    try {
+      (void)scheduler->Submit({5, 50}, 2, 0.0F).Wait();
+    } catch (const TextGenerationError& error) {
+      forced = error.code() == TextGenerationErrorCode::kInsufficientMemory;
+    }
+    Expect(forced, "the debug extra need forces a refusal on a runner that needs nothing");
+    guard.SetDebugNeed(0);
+    Expect(scheduler->Submit({6, 60}, 2, 0.0F).Wait().tokens == ExpectedTokens(6, 2), "cleared: served below the floor again");
+  }
+  gufo::platform::SetProcessMemoryGuard(nullptr);
+}
+
+void TestMemoryGuardStopsARunningRequestOnTheLowMemoryEvent() {
+  constexpr std::uint64_t GiB = std::uint64_t{1} << 30;
+  GuardSource source;
+  gufo::platform::MemoryReadings fine;
+  fine.ram_ok = true;
+  fine.ram_available = 20 * GiB;
+  fine.ram_total = 31 * GiB;
+  source.Set(fine);
+  gufo::platform::MemoryGuard guard(&source, 4 * GiB);
+  gufo::platform::SetProcessMemoryGuard(&guard);
+  {
+    auto control = std::make_shared<FakeControl>();
+    control->block_advance_label = 1;
+    auto scheduler = MakeScheduler(control, 1);
+    auto active = scheduler->Submit({1, 10}, 4, 0.0F);
+    control->WaitForAdvance(1);
+    // Windows reports low memory and nothing is cached: the monitor needs two readings (about 1 s), then 2 s with nothing to drop,
+    // before it asks for one request to be stopped. The scheduler thread is held in the advance, so release it afterwards.
+    auto low = fine;
+    low.low_memory_signal = true;
+    source.Set(low);
+    for (int i = 0; i < 200 && guard.level() != gufo::platform::GuardLevel::kCancelling; ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    Expect(guard.level() == gufo::platform::GuardLevel::kCancelling, "persistent low-memory event with nothing to drop reaches cancelling");
+    control->ReleaseAdvance();
+    bool stopped = false;
+    try {
+      (void)active.Wait();
+    } catch (const TextGenerationError& error) {
+      stopped = error.code() == TextGenerationErrorCode::kMemoryPressure && error.http_status() == 503 && error.memory_guard();
+    }
+    Expect(stopped, "the running request ends with 503 memory_pressure");
+    Expect(guard.counters().cancelled >= 1, "the stop is counted");
+    source.Set(fine);
+    Expect(scheduler->Submit({2, 20}, 2, 0.0F).Wait().tokens == ExpectedTokens(2, 2), "the server stays up and serves the next request");
+  }
+  gufo::platform::SetProcessMemoryGuard(nullptr);
+}
+
 int main(int argc, char** argv) {
   if (argc == 2 && std::string_view(argv[1]) == "--disk-writer-only") {
     ::setenv("GUFO_DISK_PERSIST", "evict_idle", 1);
@@ -3920,6 +4270,8 @@ int main(int argc, char** argv) {
   }
   TestDisabledCacheWithRealPool();
   TestPrefillDiagnosticsHost();
+  TestMemoryGuardRefusesMandatoryNeedOnly();
+  TestMemoryGuardStopsARunningRequestOnTheLowMemoryEvent();
   if (argc == 2 && std::string_view(argv[1]) == "--debug-hooks") {
     TestLiveScoredQueueAndMissingRecords();
     TestDebugTimelineOrderCountsAndOffPath();
@@ -3959,6 +4311,7 @@ int main(int argc, char** argv) {
   ::setenv("NO_COLOR", "1", 1);
   TestProgressLoggingIsOptInAndBounded();
   TestAdmissionLoggingIsDebugTierOnly();
+  TestMemoryLedger();
   TestPromptProgressPrecedesStreamedTokens();
   TestStreamStartPrecedesPrefill();
   TestPromptProgressCancellation();
@@ -4026,6 +4379,7 @@ int main(int argc, char** argv) {
   TestAwaitedCheckpointSurvivesCachePressure();
   TestRunnerCanSkipUnusedFinalAdvance();
   TestRunnerCanReuseExactIncrementalText();
+  TestReasoningEndTrackedByToken();
   TestGenerationTraceRecordsPromptAndOutput();
   TestMultiTokenDecodePublishesDraftMetricsAndDisablesPrefixReuse();
   TestRequestTotalsDoNotNeedAConsumer();
@@ -4065,6 +4419,7 @@ int main(int argc, char** argv) {
   TestRunnerFailureInvalidatesAndDoesNotPoisonReplacement();
   TestDeviceLossIsStickyAndReported();
   TestIdleDeviceProbe();
+  TestStallMonitor();
   Expect(
       gufo::server::detail::RequestsProcessing().load() == 0 &&
           gufo::server::detail::RequestsDeferred().load() == 0,

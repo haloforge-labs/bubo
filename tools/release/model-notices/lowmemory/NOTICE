@@ -1,0 +1,13 @@
+Copyright (c) 2026 Qwen. These files are derived from Qwen/Qwen3.8-Flash-Next.
+
+Dense tensors: taken from huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF (revision 73e9eb7c69fdbf667def63e233e70845e7d5ac0b), which is derived from Qwen/Qwen3.8-Flash-Next, using the importance matrix of unsloth/Qwen3.8-Flash-Next-GGUF.
+
+Routed expert tensors: taken from ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF (revision ed59f92082b1e93c0e96d60a8b11aab089b52f09) by the Deep Algorithms and Systems Lab, Institute of Science and Technology Austria. They are made with GSQ and RCO:
+  GSQ: arXiv:2604.18556
+  RCO: arXiv:2605.00649
+That repository says that its quantized weights inherit the licence of the base model.
+
+Modifications by HaloForge Labs: the dense tensors and the expert tensors are composed into one set of GGUF files. The tensors are copied unchanged. The file metadata (name, quantizer, repository address, file type) is replaced, and keys that name the two sources are added. compose-manifest.json lists the source and the checksum of every tensor.
+
+The Qwen Community License 1.0 applies to these files. See LICENSE.
+These files are not licensed under the MIT licence.

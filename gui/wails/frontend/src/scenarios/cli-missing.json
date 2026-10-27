@@ -1,0 +1,203 @@
+{
+  "actions": {
+    "start": {
+      "allowed": false,
+      "reason_code": "cli_missing",
+      "reason": "Bubo's CLI is missing."
+    },
+    "stop": {
+      "allowed": false,
+      "reason_code": "not_applicable",
+      "reason": "This action is unavailable while Failed."
+    },
+    "restart": {
+      "allowed": false,
+      "reason_code": "not_applicable",
+      "reason": "This action is unavailable while Failed."
+    },
+    "prepare": {
+      "allowed": false,
+      "reason_code": "cli_missing",
+      "reason": "Bubo's CLI is missing."
+    },
+    "download_default": {
+      "allowed": false,
+      "reason_code": "cli_missing",
+      "reason": "Bubo's CLI is missing."
+    },
+    "check": {
+      "allowed": true,
+      "reason_code": "",
+      "reason": ""
+    },
+    "install": {
+      "allowed": false,
+      "reason_code": "not_applicable",
+      "reason": "This action is unavailable while Failed."
+    },
+    "recover": {
+      "allowed": false,
+      "reason_code": "not_applicable",
+      "reason": "This action is unavailable while Failed."
+    },
+    "diagnose": {
+      "allowed": false,
+      "reason_code": "cli_missing",
+      "reason": "Bubo's CLI is missing."
+    },
+    "support_bundle": {
+      "allowed": false,
+      "reason_code": "cli_missing",
+      "reason": "Bubo's CLI is missing."
+    }
+  },
+  "status_label": "Bubo needs to be reinstalled",
+  "serving": false,
+  "auto_restarted": false,
+  "server_warnings": [],
+  "owned_server": false,
+  "current_model": null,
+  "fit": {
+    "class": "unavailable",
+    "sentence": "Checking memory…",
+    "context_tokens": 0,
+    "sessions": 0,
+    "free_after_gib": null,
+    "host_free_after_spill_gib": null,
+    "suggested_context": null
+  },
+  "_source": "fixture",
+  "state": "Failed",
+  "reason": "",
+  "remedy": "",
+  "initialized": true,
+  "startup_phase": "",
+  "prepared": false,
+  "stale": false,
+  "generation": 0,
+  "managed": false,
+  "management_supported": false,
+  "management_message": "",
+  "phase": "cli_missing",
+  "instance": null,
+  "discovered": [],
+  "failure": {
+    "code": "cli_missing",
+    "source": "supervisor",
+    "time": "0001-01-01T00:00:00Z",
+    "remedy": "",
+    "forced": false
+  },
+  "settings": [],
+  "switches": [],
+  "switch_overrides": [],
+  "effective_switches": [],
+  "profiles": [],
+  "product": null,
+  "capabilities": null,
+  "memory_estimate": null,
+  "saved_estimate": {
+    "memory_estimate": null,
+    "reason": null,
+    "error": null
+  },
+  "memory_estimate_reason": null,
+  "process_memory": null,
+  "connection": null,
+  "active_model": null,
+  "client_snippets": [],
+  "npu_prefill_runtime": null,
+  "endpoints": null,
+  "api_key_env": "",
+  "pi_snippet": "",
+  "rates": null,
+  "sessions": null,
+  "queue": null,
+  "slots": [],
+  "live_samples": [],
+  "live_sample_time": "",
+  "requests": [],
+  "counters": null,
+  "last_completed_request": null,
+  "gpu": null,
+  "models": null,
+  "prepared_models": [],
+  "prepared_default": null,
+  "runtime": {
+    "paths": {},
+    "runtime_kind": "",
+    "readiness": {
+      "runtime": false,
+      "model": false
+    }
+  },
+  "saved": {
+    "model_folders": [],
+    "start_gui_at_login": false,
+    "start_server_with_gui": false,
+    "close_to_tray": false,
+    "inference_expanded": false,
+    "allow_tight_setup": false,
+    "lan_access": false
+  },
+  "download_folder": {
+    "path": "",
+    "is_default": true,
+    "drive": "",
+    "free_bytes": null,
+    "change": {
+      "allowed": true,
+      "reason_code": "",
+      "reason": ""
+    }
+  },
+  "key": {
+    "lan_access": false,
+    "lan_active": false,
+    "present": false,
+    "mask": "",
+    "restart_needed": false,
+    "copy_with_key": false,
+    "addresses": []
+  },
+  "window": {
+    "tray_action": "",
+    "tray_available": false,
+    "closing": false
+  },
+  "stall": null,
+  "progress": null,
+  "approval": null,
+  "preparation": [],
+  "preparation_pending": false,
+  "plan_error": null,
+  "restart_needed": [],
+  "inference_defaults": null,
+  "think_marker_bias": null,
+  "loop_breaker": null,
+  "think_marker_entropy_gate": null,
+  "logs": [],
+  "notice": null,
+  "warnings": [],
+  "diagnostic": "",
+  "bundle_preview": "",
+  "update": {
+    "state": "none",
+    "ready": true,
+    "runtime_followup_required": false,
+    "log_path": "",
+    "log_lines": [],
+    "current_version": "",
+    "size_bytes": null,
+    "progress": null,
+    "error": null,
+    "check_failed": false
+  },
+  "check_for_updates": true,
+  "status_feed": {
+    "state": "inactive",
+    "sample_time": "",
+    "age_seconds": null,
+    "error": null
+  }
+}

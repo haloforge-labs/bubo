@@ -1,0 +1,14 @@
+<|im_start|>system
+You are a careful coding assistant.<|im_end|>
+<|im_start|>user
+What is 2+2?<|im_end|>
+<|im_start|>assistant
+<think>
+Simple arithmetic: 2+2=4.
+</think>
+
+4.<|im_end|>
+<|im_start|>user
+And times three?<|im_end|>
+<|im_start|>assistant
+<think>

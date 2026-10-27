@@ -63,6 +63,12 @@ int qfn_mmq_expert_v2k_bridge(const float* gate, const float* up, void* hq,
 int qfn_mmq_expert_v2k_down(int down_type, const void* weights, float* out,
                             int n_tokens, void* scratch, size_t scratch_bytes,
                             hipStream_t stream);
+// qfn_mmq_moe_gated_vec over x already in qfn_mmq_quantize_q8_1's layout.
+int qfn_mmq_moe_gated_vec_preq(int weight_type, const void* gate,
+                               const void* up, const void* x_q8,
+                               const int32_t* ids, float* out, int m, int k,
+                               int tokens, int experts, int experts_used,
+                               hipStream_t stream);
 
 size_t qfn_mmq_q8_1_bytes(int N, int K);
 
@@ -123,8 +129,45 @@ int qfn_mmq_q5_K_moe_raw(
     int M, int K, int n_tokens, int n_experts, int n_expert_used,
     hipStream_t stream);
 
+int qfn_mmq_q3_K_moe_raw(
+    const void * W, const float * X_f32, const int32_t * ids, float * out,
+    int M, int K, int n_tokens, int n_experts, int n_expert_used,
+    hipStream_t stream);
+
+int qfn_mmq_q6_K_moe_raw(
+    const void * W, const float * X_f32, const int32_t * ids, float * out,
+    int M, int K, int n_tokens, int n_experts, int n_expert_used,
+    hipStream_t stream);
+
+// Q3_K/Q4_K/Q5_K/Q6_K/Q8_0 by GGML type id; any other type returns -1.
+int qfn_mmq_k_moe_raw(
+    int weight_type, const void * W, const float * X_f32, const int32_t * ids,
+    float * out, int M, int K, int n_tokens, int n_experts, int n_expert_used,
+    hipStream_t stream);
+
 // IQ experts (e.g. unsloth UD-IQ4_XS: IQ3_S/IQ4_XS gate/up, IQ4_NL down).
 int qfn_mmq_iq3_s_moe_raw(
+    const void * W, const float * X_f32, const int32_t * ids, float * out,
+    int M, int K, int n_tokens, int n_experts, int n_expert_used,
+    hipStream_t stream);
+// ISTA GSQ-RCO IQ3_S rung: IQ3_XXS and IQ2_S gate/up, Q2_0 down (memory lane).
+int qfn_mmq_iq3_xxs_moe_raw(
+    const void * W, const float * X_f32, const int32_t * ids, float * out,
+    int M, int K, int n_tokens, int n_experts, int n_expert_used,
+    hipStream_t stream);
+int qfn_mmq_iq2_xxs_moe_raw(
+    const void * W, const float * X_f32, const int32_t * ids, float * out,
+    int M, int K, int n_tokens, int n_experts, int n_expert_used,
+    hipStream_t stream);
+int qfn_mmq_iq2_xs_moe_raw(
+    const void * W, const float * X_f32, const int32_t * ids, float * out,
+    int M, int K, int n_tokens, int n_experts, int n_expert_used,
+    hipStream_t stream);
+int qfn_mmq_iq2_s_moe_raw(
+    const void * W, const float * X_f32, const int32_t * ids, float * out,
+    int M, int K, int n_tokens, int n_experts, int n_expert_used,
+    hipStream_t stream);
+int qfn_mmq_q2_0_moe_raw(
     const void * W, const float * X_f32, const int32_t * ids, float * out,
     int M, int K, int n_tokens, int n_experts, int n_expert_used,
     hipStream_t stream);

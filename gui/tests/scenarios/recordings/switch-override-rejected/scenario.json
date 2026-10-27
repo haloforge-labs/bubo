@@ -1,0 +1,22 @@
+{
+  "_source": "fixture",
+  "state": "Failed",
+  "records": {
+    "failure": "../../../../../tests/cli/contract/valid/error-runtime_missing.json",
+    "models": "../v12/models-list-gui.json",
+    "status": "../v12/status-main.json",
+    "switches": "../v12/switches.json"
+  },
+  "saved_overrides": {
+    "--think-marker-bias": "1",
+    "GUFO_LOOP_BREAKER": "0"
+  },
+  "override_failure": {
+    "code": "invalid_arguments",
+    "component": "serve",
+    "stage": "startup",
+    "retryable": false,
+    "remedy": "Check the settings and model files.",
+    "switch": "--think-marker-bias"
+  }
+}

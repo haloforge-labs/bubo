@@ -10,7 +10,12 @@
 
 namespace gufo::sampling {
 
-enum class TextModelPreset { kUnspecified, kQwen38, kDeepSeekV4Flash };
+enum class TextModelPreset {
+  kUnspecified,
+  kQwen38,
+  kDeepSeekV4Flash,
+  kGemma4
+};
 
 // Opt in explicitly: an unset switch preserves gufo's native model presets.
 inline bool ProductionTextSamplingEnabled() noexcept {
@@ -39,6 +44,8 @@ struct SamplingOverrides {
 inline TextModelPreset TextPreset(const core::ModelConfig& config) {
   if (config.architecture == "deepseek4")
     return TextModelPreset::kDeepSeekV4Flash;
+  if (config.architecture == "gemma4")
+    return TextModelPreset::kGemma4;
   if (config.architecture == "qwen4exp" ||
       (config.num_layers == 64 && config.hidden_size == 5120 &&
        config.vocab_size == 248320))
@@ -60,6 +67,10 @@ inline SamplingConfig ResolveTextSampling(TextModelPreset model,
   result.behaviour = configured.behaviour;
   result.temperature = 1.0F;
   result.top_p = 0.95F;
+  // Gemma 4: the generation_config (and GGUF general.sampling.*) defaults,
+  // with or without thinking.
+  if (model == TextModelPreset::kGemma4)
+    result.top_k = 64;
   if (model == TextModelPreset::kQwen38) {
     result.top_k = 20;
     if (!thinking.value_or(true)) {

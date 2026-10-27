@@ -25,6 +25,7 @@ from metrics import (CaseComplete, Recorder, canonical, compare, join_server_tim
 from progress import ProgressTrace
 from tool_reasoning import ARGUMENTS, assert_edit, assert_terminal_call, assert_no_envelope_framing
 from discovery import assert_model_listing
+from messages_count_tokens import assert_count_response, assert_prompt_count
 from image_inputs import assert_color, image_cases, invalid_image_cases
 from cache_concurrency import check_cache_concurrency
 from cache_shared_prefix import check_cache_shared_prefix
@@ -41,6 +42,53 @@ from server_metrics import (COUNTERS, TYPES, PROMPT, GENERATED, PROCESSING,
 
 
 class FunctionalRunnerTest(unittest.TestCase):
+    def test_messages_tool_ids_preserve_links_and_argument_data(self):
+        def history(identifier):
+            return {"messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": identifier, "name": "read",
+                     "input": {"type": "message", "id": "user-data"}}]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": identifier, "content": "ok"}]}]}
+
+        first, renamed = history("call_a"), history("call_b")
+        self.assertEqual(canonical(first), canonical(renamed))
+        broken_link = deepcopy(first)
+        broken_link["messages"][1]["content"][0]["tool_use_id"] = "missing_call"
+        self.assertNotEqual(canonical(first), canonical(broken_link))
+        changed_argument = deepcopy(first)
+        changed_argument["messages"][0]["content"][0]["input"]["id"] = "changed-data"
+        self.assertNotEqual(canonical(first), canonical(changed_argument))
+
+    def test_messages_count_tokens_contract(self):
+        body = {"input_tokens": 318}
+        measured, fingerprint = summarize([(1, json.dumps(body).encode())], False, True,
+                                          ("/v1/messages/count_tokens", {}, 200))
+        self.assertEqual(measured, {"prompt_tokens": 318})
+        self.assertIsNotNone(fingerprint)
+        self.assertEqual(assert_count_response(body), 318)
+        for invalid in ({}, {"input_tokens": True}, {"input_tokens": -1},
+                        {"input_tokens": 3.5}, {"input_tokens": 318, "output_tokens": 0}):
+            with self.subTest(invalid=invalid), self.assertRaises(AssertionError):
+                summarize([(1, json.dumps(invalid).encode())], False, True,
+                          ("/v1/messages/count_tokens", {}, 200))
+        with self.assertRaises(AssertionError):
+            summarize([(1, json.dumps(body).encode())], False, False,
+                      ("/v1/messages/count_tokens", {}, 200))
+
+    def test_messages_count_tokens_includes_cached_prompt(self):
+        for usage in ({"input_tokens": 318},
+                      {"input_tokens": 18, "cache_read_input_tokens": 300},
+                      {"input_tokens": 0, "cache_read_input_tokens": 318},
+                      {"input_tokens": 18, "cache_creation_input_tokens": 300}):
+            with self.subTest(usage=usage):
+                assert_prompt_count(318, usage)
+                with self.assertRaises(AssertionError):
+                    assert_prompt_count(317, usage)
+        for value in (-1, True, 1.5, "318"):
+            with self.subTest(value=value), self.assertRaises(AssertionError):
+                assert_prompt_count(318, {"input_tokens": value})
+
     def test_continuation_restore_reports_observed_equality(self):
         import continuation
 
@@ -276,12 +324,12 @@ class FunctionalRunnerTest(unittest.TestCase):
             start.assert_not_called()
 
     def test_discovery_requires_expected_capabilities_and_model_metadata(self):
-        entry = {"id": "test", "object": "model", "created": 1, "owned_by": "gufo",
+        entry = {"id": "test", "object": "model", "created": 1, "owned_by": "bubo",
                  "context_length": 8192, "architecture": {"input_modalities": ["text"]}}
-        listing = {"object": "list", "data": [entry]}
+        listing = {"object": "list", "data": [entry, {**entry, "id": "bubo"}]}
         assert_model_listing(listing, "test", 8192, ["text"])
         image = {**entry, "architecture": {"input_modalities": ["text", "image"]}}
-        assert_model_listing({**listing, "data": [image]}, "test", 8192, ["text", "image"])
+        assert_model_listing({**listing, "data": [image, {**image, "id": "bubo"}]}, "test", 8192, ["text", "image"])
         for invalid in (
             {**listing, "data": []}, {**listing, "data": [entry, entry]},
             {**listing, "data": [{k: v for k, v in entry.items() if k != "architecture"}]},
@@ -542,7 +590,8 @@ class FunctionalRunnerTest(unittest.TestCase):
                             "signature": ""}] if thinking else [])
                 return {"content": blocks + [{"type": "text", "text": "BETA"}],
                         "stop_reason": "end_turn",
-                        "usage": {"input_tokens": total, "cache_read_input_tokens": cached,
+                        "usage": {"input_tokens": total - cached,
+                                  "cache_read_input_tokens": cached,
                                   "output_tokens": 8},
                         "timings": {"prompt_n": total - cached}}
 
@@ -1011,6 +1060,38 @@ class FunctionalRunnerTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_tool_events(events, {"output": []})
 
+    def test_partial_tool_arguments_require_an_interrupted_turn(self):
+        timing = {"prompt_n": 1, "prompt_ms": 2, "predicted_ms": 3,
+                  "cache_restore_ms": 0, "cache_snapshot_ms": 0,
+                  "cache_disk_enqueue_ms": 0, "queue_ms": 0, "ttft_ms": 2}
+        usage = {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3,
+                 "prompt_tokens_details": {"cached_tokens": 0}}
+        body = {"stream": True, "tools": [{"type": "function",
+                "function": {"name": "record", "parameters": {"type": "object"}}}]}
+        events = [
+            {"choices": [{"index": 0, "delta": {"tool_calls": [
+                {"index": 0, "id": "call1", "type": "function",
+                 "function": {"name": "record", "arguments": '{"text":"par'}}]}}]},
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": "length"}],
+             "timings": timing},
+            {"choices": [], "usage": usage},
+        ]
+
+        def check(request):
+            data = b"".join(b"data: " + json.dumps(event).encode() + b"\n\n"
+                            for event in events) + b"data: [DONE]\n\n"
+            return summarize([(1, data)], True, True,
+                             ("/v1/chat/completions", request, 200))
+
+        check(body)
+        events[1]["choices"][0]["finish_reason"] = "stop"
+        check({**body, "stop": "STOP"})
+        with self.assertRaisesRegex(ValueError, "unfinished tool"):
+            check(body)
+        events[1]["choices"][0]["finish_reason"] = "tool_calls"
+        with self.assertRaisesRegex(ValueError, "unfinished tool"):
+            check(body)
+
     def test_mode_coverage_checks_loader_restart_and_executed_drafts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1069,18 +1150,65 @@ class FunctionalRunnerTest(unittest.TestCase):
             self.assertEqual(measured["prefill_ms"], 2)
             self.assertIsNotNone(fingerprint)
 
+    def test_integer_usage_accepts_exponents_but_rejects_invalid_counts(self):
+        # The production serializer writes a 200K cache hit as 2e+05. JSON
+        # Schema's integer type describes the value, not Python's parsed type.
+        timing = {"prompt_n": 92.0, "prompt_ms": 2, "predicted_ms": 3,
+                  "cache_restore_ms": 0, "cache_snapshot_ms": 0,
+                  "cache_disk_enqueue_ms": 0, "queue_ms": 0, "ttft_ms": 2}
+        for endpoint in ("chat/completions", "completions", "responses"):
+            if endpoint == "responses":
+                usage = {"input_tokens": 200092.0, "output_tokens": 219.0,
+                         "total_tokens": 200311.0,
+                         "input_tokens_details": {"cached_tokens": 200000.0}}
+                response = {"status": "completed", "output": [], "usage": usage,
+                            "timings": timing}
+                input_key, output_key, details = "input_tokens", "output_tokens", "input_tokens_details"
+            else:
+                usage = {"prompt_tokens": 200092.0, "completion_tokens": 219.0,
+                         "total_tokens": 200311.0,
+                         "prompt_tokens_details": {"cached_tokens": 200000.0}}
+                response = {"choices": [{"index": 0, "finish_reason": "stop",
+                             "message": {"role": "assistant", "content": "ok"}}],
+                            "usage": usage, "timings": timing}
+                input_key, output_key, details = "prompt_tokens", "completion_tokens", "prompt_tokens_details"
+
+            def check(value):
+                raw = json.dumps(value).replace("200000.0", "2e+05").encode()
+                return summarize([(5, raw)], False, True, ("/v1/" + endpoint, {}, 200))
+
+            measured, fingerprint = check(response)
+            self.assertEqual(measured["cached_tokens"], 200000)
+            self.assertIsNotNone(fingerprint)
+            for bad in (True, False, -1, .5, "200000", None, float("nan"), float("inf")):
+                for path in (("usage", input_key), ("usage", output_key),
+                             ("usage", "total_tokens"), ("usage", details, "cached_tokens"),
+                             ("timings", "prompt_n")):
+                    with self.subTest(endpoint=endpoint, path=path, bad=bad):
+                        altered = deepcopy(response)
+                        target = altered
+                        for key in path[:-1]:
+                            target = target[key]
+                        target[path[-1]] = bad
+                        with self.assertRaises(ValueError):
+                            check(altered)
+            altered = deepcopy(response)
+            altered["usage"][details]["cached_tokens"] = 200093
+            with self.assertRaisesRegex(ValueError, "invalid cached token count"):
+                check(altered)
+
     def messages_fixture(self):
         request = {"model": "fixture", "max_tokens": 2, "temperature": 0, "seed": 31,
                    "stop_sequences": ["END", "HALT"],
                    "messages": [{"role": "user", "content": "Reply BETA."}]}
-        # Buffered Messages uses input_tokens including cached work, no total_tokens,
+        # Buffered Messages reports cache reads apart from input_tokens, no total_tokens,
         # ordered content blocks, and the separate GenerationTimings object.
         response = {"id": "msg_fixture", "type": "message", "role": "assistant",
                     "model": "fixture", "content": [
                         {"type": "thinking", "thinking": "The code is BETA.", "signature": ""},
                         {"type": "text", "text": "BETA"}],
                     "stop_reason": "end_turn", "stop_sequence": None,
-                    "usage": {"input_tokens": 10, "output_tokens": 2,
+                    "usage": {"input_tokens": 4, "output_tokens": 2,
                               "cache_creation_input_tokens": 0, "cache_read_input_tokens": 6},
                     "timings": {"prompt_n": 4, "prompt_ms": 2, "prompt_per_token_ms": .5,
                                 "prompt_per_second": 2000, "predicted_n": 2, "predicted_ms": 3,
@@ -1125,7 +1253,7 @@ class FunctionalRunnerTest(unittest.TestCase):
             for label, before, after, expected in cases:
                 with self.subTest(change=label):
                     for root, payload in ((baseline, before), (candidate, after)):
-                        with patch("metrics.time.monotonic", return_value=1):
+                        with patch("metrics.time.perf_counter", return_value=1):
                             recorder = Recorder(root / "messages.requests.json")
                             step = recorder.begin("/v1/messages", request)
                             step.row["http_status"] = 200

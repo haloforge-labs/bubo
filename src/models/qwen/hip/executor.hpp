@@ -15,6 +15,7 @@
 
 #include "src/core/model_config.hpp"
 #include "src/models/qwen/forward.hpp"
+#include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen/generator.hpp"
 #include "src/models/qwen/state.hpp"
 #include "src/models/qwen/tokenizer.hpp"
@@ -107,6 +108,10 @@ public:
   [[nodiscard]] const core::ModelConfig& GetConfig() const noexcept {
     return weights_.config;
   }
+  /// The compiled chat template dialect that the GGUF's own template selects.
+  [[nodiscard]] tokenization::QwenTemplateDialect ChatDialect() const noexcept {
+    return chat_dialect_;
+  }
   [[nodiscard]] std::size_t GetWeightRegionCount() const noexcept {
     return weight_regions_.size();
   }
@@ -120,6 +125,8 @@ private:
   std::shared_ptr<const tokenization::QwenTokenizer> tokenizer_;
   std::vector<QwenGpuWeightRegion> weight_regions_;
   std::shared_ptr<models::qwen::vision::Encoder> vision_;
+  tokenization::QwenTemplateDialect chat_dialect_{
+      tokenization::QwenTemplateDialect::kQwen};
 };
 
 class QwenGpuSnapshot final {

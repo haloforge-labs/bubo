@@ -115,6 +115,9 @@ seed. Speed depends on acceptance and verification cost.
   `maxPending`; set it lower so one client cannot hog the whole queue.
 - `requestTimeoutMs` — requests are killed after this many milliseconds. In
   practice: prevents stuck requests from holding GPU sessions forever.
+- `stallTimeoutMs` — the server exits as `device_lost` when generation makes
+  no progress for this many milliseconds, so the service manager restarts
+  it. Off unless set; at least 60000.
 - `maxOutputBytes` — maximum response size per request.
 - `maxBufferedOutputBytes` — maximum generated-but-not-yet-delivered output
   buffered for one request; protects against slow clients.
@@ -135,7 +138,9 @@ seed. Speed depends on acceptance and verification cost.
 
 ### Video
 
-TODO
+`bubo video` generates MiniMax H3 text-to-video. Run `bubo video --help` for
+the options. Video generation is compiled in; v0.1.1 does not test it on
+Windows.
 
 ### Audio (TTS and ASR)
 
@@ -204,6 +209,10 @@ These apply to every modality, before or after the subcommand:
 ## Commands
 
 ```text
+bubo prepare
+bubo status
+bubo stop
+bubo models
 bubo serve
 bubo chat
 bubo prompt
@@ -212,7 +221,16 @@ bubo bench
 bubo video
 bubo transcribe
 bubo diagnose
+bubo probe
+bubo help
 ```
+
+`prepare` downloads and checks the AMD runtime files and a model (start here:
+`bubo prepare`, then `bubo serve`). `status` reports preparation and running
+servers. `stop` stops a server that the app started (`--json`; in a terminal,
+press Ctrl+C). `models` lists the catalogue and the models on this computer,
+and estimates memory. `probe` checks that the GPU runtime loads. `help COMMAND`
+prints the help of one command.
 
 `serve` starts the OpenAI-compatible server. `chat` maintains an interactive
 conversation. `prompt` executes one request and exits. `eval` grades the pinned
@@ -249,7 +267,8 @@ bubo serve llm --help
 
 ### Diagnose
 
-Bubo can self detect if everything is correctly configured to be able to run, such as drivers, groups, permissions, etc.
+`bubo diagnose` checks the platform, the CPU, memory, the GPU and the
+runtime toolchain, and reports PASS, WARN or FAIL for each check.
 
 ### Benchmarks and Evaluations
 

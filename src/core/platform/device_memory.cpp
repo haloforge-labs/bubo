@@ -81,6 +81,9 @@ DeviceMemorySplit QueryDeviceMemorySplit() noexcept {
   split.local_budget = static_cast<std::size_t>(local.Budget);
   split.nonlocal_used = static_cast<std::size_t>(shared.CurrentUsage);
   split.nonlocal_budget = static_cast<std::size_t>(shared.Budget);
+  DXGI_ADAPTER_DESC description{};
+  if (SUCCEEDED(adapter->GetDesc(&description)))
+    split.dedicated = static_cast<std::size_t>(description.DedicatedVideoMemory);
   return split;
 }
 

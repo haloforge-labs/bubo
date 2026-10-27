@@ -25,6 +25,8 @@
 
 #include "src/cli/serve/behaviour_options.hpp"
 #include "src/cli/serve/logging.hpp"
+#include "src/cli/serve/prompt_scoring.hpp"
+#include "src/cli/serve/qwen_prompt_options.hpp"
 #include "src/cli/serve/text_generation_scheduler.hpp"
 #include "src/cli/serve/text_model_runner.hpp"
 #include "src/core/gguf_identity.hpp"
@@ -40,6 +42,7 @@
 #include "src/models/qwen/chat_template.hpp"
 #include "src/models/qwen/control_tokens.hpp"
 #include "src/models/qwen/generator.hpp"
+#include "src/models/qwen/incremental_tokenize.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include "src/core/hip/device_probe.hpp"
@@ -48,6 +51,10 @@
 #include "src/core/speculative/speculative_verifier.hpp"
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
+#include "src/models/gemma4/chat_template.hpp"
+#include "src/models/gemma4/engine.hpp"
+#include "src/models/gemma4/vision/encoder.hpp"
+#include "src/models/gemma4/vision/prompt.hpp"
 #include "src/models/qwen/hip/detail/attention_policy.hpp"
 #include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
@@ -83,25 +90,15 @@ struct QwenImageContext final : TextPromptContext {
   std::shared_ptr<const models::qwen::vision::Prompt> prompt;
 };
 
-tokenization::ChatTemplateOptions QwenChatOptions(const ChatRequest& request,
-                                                  std::uint32_t max_context) {
-  auto options = tokenization::ResolveQwenChatOptions(request.reasoning,
-                                                      request.add_vision_id);
-  options.require_tool_call =
-      request.tool_choice == ChatRequest::ToolChoice::kRequired;
-  // gufo #285: the rendered prompt may be as long as the context can hold.
-  options.max_output_bytes =
-      tokenization::RenderedPromptBoundBytes(max_context);
-  return options;
-}
-
 TextPreparedPrompt PrepareQwenPrompt(
     const ChatRequest& request, const tokenization::QwenTokenizer& tokenizer,
     const std::shared_ptr<models::qwen::vision::Encoder>& encoder,
-    std::uint32_t max_context) {
+    std::uint32_t max_context,
+    tokenization::QwenTemplateDialect dialect =
+        tokenization::QwenTemplateDialect::kQwen) {
   const bool has_images = std::ranges::any_of(
       request.messages, [](const auto& m) { return !m.images.empty(); });
-  const auto options = QwenChatOptions(request, max_context);
+  const auto options = QwenChatOptions(request, max_context, dialect);
   auto prompt = std::make_shared<models::qwen::vision::Prompt>(
       models::qwen::vision::Prepare(
           tokenizer, request.messages,
@@ -251,6 +248,45 @@ std::vector<std::uint8_t> QwenFlashNextCompatibilityIdentity(
   const std::string canonical = identity.str();
   return {canonical.begin(), canonical.end()};
 }
+
+#if defined(ENGINE_ENABLE_HIP)
+std::vector<std::uint8_t> Gemma4CompatibilityIdentity(
+    std::string_view artifact_fingerprint, std::string_view mtp_fingerprint,
+    bool has_mtp, std::uint32_t max_context, std::uint32_t draft_tokens,
+    std::uint32_t ring) {
+  if (!IsSha256Hex(artifact_fingerprint) ||
+      (has_mtp && !IsSha256Hex(mtp_fingerprint))) {
+    throw std::invalid_argument(
+        "Gemma 4 disk cache requires artifact fingerprints");
+  }
+  std::ostringstream identity;
+  identity << "schema=gufo-text-continuation-v2\n"
+           << "model_kind=gemma4\n"
+           << "artifact_id=" << core::kGgufIdentityScheme << ':'
+           << artifact_fingerprint << '\n'
+           << "tokenizer=embedded-in-artifact\n"
+           << "chat_template=" << models::gemma4::ChatTemplate::TemplateId()
+           << '\n'
+           << "chat_template_reference_sha256="
+           << models::gemma4::ChatTemplate::UnslothTemplateSha256() << '\n'
+           << "state_abi=gemma4-rocm-session-v1\n"
+           << "payload_layout=gemma4-rocm-session-snapshot-v"
+           << models::gemma4::Session::kSnapshotPayloadVersion << '\n'
+           << "kv_layout=f16-token-major-global+sliding-ring-logical\n"
+           << "sliding_ring_slots=" << ring << '\n'
+           << "context_tokens=" << max_context << '\n'
+           << "position_policy=absolute-v1\n"
+           << "adapters=none\n";
+  if (has_mtp) {
+    identity << "draft_backend=gemma4-assistant-mtp-v1\n"
+             << "draft_artifact_id=" << core::kGgufIdentityScheme << ':'
+             << mtp_fingerprint << '\n'
+             << "draft_tokens=" << draft_tokens << '\n';
+  }
+  const std::string canonical = identity.str();
+  return {canonical.begin(), canonical.end()};
+}
+#endif
 
 std::vector<std::uint8_t> QwenCompatibilityIdentity(
     std::string_view artifact_fingerprint,
@@ -864,6 +900,21 @@ public:
                                 : DeviceProbeStatus::kLost;
   }
 
+  [[nodiscard]] std::optional<DeviceMemorySample> SampleDeviceMemory()
+      const override {
+    DeviceMemorySample sample;
+    if (gufo::platform::DeviceMemoryInfo(&sample.free_bytes,
+                                         &sample.total_bytes) != hipSuccess)
+      return std::nullopt;
+    const auto split = gufo::platform::QueryDeviceMemorySplit();
+    sample.split = split.valid;
+    sample.local_used_bytes = split.local_used;
+    sample.nonlocal_used_bytes = split.nonlocal_used;
+    sample.local_budget_bytes = split.local_budget;
+    sample.nonlocal_budget_bytes = split.nonlocal_budget;
+    return sample;
+  }
+
   [[nodiscard]] bool DeviceUsable() const override {
     constexpr auto kTimeout = std::chrono::seconds(5);
     const auto deadline = Clock::now() + kTimeout;
@@ -957,24 +1008,22 @@ public:
     std::optional<std::size_t> capacity;
     if (gufo::platform::DeviceMemoryInfo(&free_bytes, &total_bytes) ==
         hipSuccess) {
-      capacity = free_bytes;
+      capacity = gufo::platform::StateCapacityBytes(free_bytes);
     }
-    // Snapshot buffers are device allocations, but on a unified-memory APU
-    // they are carved from the same RAM as every host allocation, and HIP's
-    // free figure does not see host pressure. Cap them by the host budget too.
-    std::size_t snapshot_capacity = HostSnapshotBudgetBytes();
-    std::size_t snapshot_ceiling = HostSnapshotCeilingBytes();
-    if (capacity.has_value()) {
-      snapshot_capacity = std::min(snapshot_capacity, *capacity);
-      snapshot_ceiling = std::min(snapshot_ceiling, *capacity);
-    }
+    // Snapshot buffers are device allocations. The pool plans the capacity
+    // from the host and device totals (L-REL-5), with this model's footprint
+    // on the device side, not from free memory; on a shared-RAM APU the
+    // device total is the smaller one.
+    std::optional<std::size_t> device_total;
+    if (capacity.has_value())
+      device_total = total_bytes;
     return {
         .resident_weights_bytes = resident_weights,
         .state_capacity_bytes = capacity,
         .per_request_state_bytes = usage.request_state_bytes,
         .temporary_scratch_bytes = usage.temporary_scratch_bytes,
-        .retained_snapshot_capacity_bytes = snapshot_capacity,
-        .retained_snapshot_ceiling_bytes = snapshot_ceiling,
+        .snapshot_capacity_from_totals = true,
+        .device_total_bytes = device_total,
         .requires_device_runtime_lock = true,
     };
   }
@@ -1019,13 +1068,14 @@ public:
         request.tool_choice == ChatRequest::ToolChoice::kNone
             ? std::span<const tokenization::ChatTool>{}
             : std::span<const tokenization::ChatTool>{request.tools},
-        QwenChatOptions(request, max_context_));
+        QwenChatOptions(request, max_context_, model_->ChatDialect()));
   }
 
   [[nodiscard]] std::optional<TextPreparedPrompt> PreparePrompt(
       const ChatRequest& request) const override {
     return PrepareQwenPrompt(request, model_->GetTokenizer(),
-                             model_->VisionEncoder(), max_context_);
+                             model_->VisionEncoder(), max_context_,
+                             model_->ChatDialect());
   }
 
   void SetPromptContext(
@@ -1704,7 +1754,7 @@ public:
     std::optional<std::size_t> capacity;
     if (gufo::platform::DeviceMemoryInfo(&free_bytes, &total_bytes) ==
         hipSuccess) {
-      capacity = free_bytes;
+      capacity = gufo::platform::StateCapacityBytes(free_bytes);
     }
     return {
         .resident_weights_bytes = std::nullopt,
@@ -2405,6 +2455,32 @@ public:
     return static_cast<std::size_t>(snapshot->SizeBytes());
   }
 
+  // The checkpoint state stays in device memory until a byte reader or a
+  // device-exhausted rewind copies it to the host payload.
+  [[nodiscard]] std::size_t HostBytes() const noexcept override {
+    if (snapshot == nullptr)
+      return 0;
+    try {
+      const std::uint64_t bytes = snapshot->HostBytes();
+      if (bytes <= static_cast<std::uint64_t>(
+                       std::numeric_limits<std::size_t>::max()))
+        return static_cast<std::size_t>(bytes);
+    } catch (...) {
+    }
+    return PayloadBytes();
+  }
+
+  [[nodiscard]] std::size_t DeviceBytes(
+      std::unordered_set<const void*>& counted) const noexcept override {
+    if (snapshot == nullptr)
+      return 0;
+    try {
+      return static_cast<std::size_t>(snapshot->DeviceBytes(counted));
+    } catch (...) {
+      return 0;
+    }
+  }
+
   [[nodiscard]] bool PrefersState(
       const ContinuationState& state) const noexcept override {
     const auto* flash =
@@ -2540,7 +2616,9 @@ public:
     if (config.logprobs < 0 || config.logprobs > 20)
       throw std::invalid_argument("prompt scoring requires logprobs in 0..20");
     if (prompt.size() > max_context_)
-      throw std::invalid_argument("prompt scoring exceeds the model context");
+      throw std::invalid_argument(
+          PromptScoreContextMessage(prompt.size(), max_context_));
+    CheckPromptScoreResponseSize(prompt.size());
     std::vector<std::optional<sampling::TokenLogprob>> scores(prompt.size());
     if (prompt.empty())
       return scores;
@@ -2564,11 +2642,20 @@ public:
             free_bytes - *score_claim.temporary_scratch_bytes)
       throw std::runtime_error(
           "prompt scoring session resource claim exceeds free device memory");
+    // Device sessions draw from host RAM on a unified-memory APU, which the
+    // device free figure does not see. Check the host side too.
+    if (const auto shortfall = PromptScoreHostShortfall(
+            prompt.size(), *score_claim.per_request_state_bytes,
+            *score_claim.temporary_scratch_bytes, HostAvailableBytes()))
+      throw TextGenerationError(TextGenerationErrorCode::kScoringOutOfMemory,
+                                *shortfall);
     // This worker-owned session cannot mutate another request or cached state.
-    auto session = model_->CreateSession(
-        model_->HasMtp() ? gufo::core::SessionMode::kSpeculative
-                         : gufo::core::SessionMode::kAutoregressive,
-        score_context, &error);
+    auto session = GuardPromptScoringStage("session creation", 0, [&] {
+      return model_->CreateSession(
+          model_->HasMtp() ? gufo::core::SessionMode::kSpeculative
+                           : gufo::core::SessionMode::kAutoregressive,
+          score_context, &error);
+    });
     if (!session)
       throw std::runtime_error("prompt scoring session failed: " + error);
     session->SetCancellationCheck(cancelled);
@@ -2580,25 +2667,38 @@ public:
     sampler.Accept(prompt.front());
     std::vector<float> rows;
     const std::size_t vocab = model_->VocabSize();
-    for (std::size_t p = 1; p < prompt.size();) {
-      if (cancelled && cancelled())
-        throw std::runtime_error("generation cancelled");
-      const auto width =
-          std::min<std::size_t>(session->MaxVerifyWidth(), prompt.size() - p);
-      scores[p] =
-          sampler.RawLogprobs(session->Logits(), prompt[p],
-                              static_cast<std::size_t>(config.logprobs));
-      sampler.Accept(prompt[p]);
-      if (!session->TeacherForce(std::span(tokens).subspan(p, width), &rows,
-                                 &error))
-        throw std::runtime_error("prompt teacher forcing failed: " + error);
-      for (std::size_t j = 1; j < width; ++j) {
-        scores[p + j] = sampler.RawLogprobs(
-            std::span<const float>(rows).subspan((j - 1) * vocab, vocab),
-            prompt[p + j], static_cast<std::size_t>(config.logprobs));
-        sampler.Accept(prompt[p + j]);
+    // Name the stage and token of an allocation failure (L-REL-6): the bare
+    // "bad allocation" of the 25.8K-token run did not say where it came from.
+    std::size_t at = 1;
+    std::string_view stage = "scoring";
+    try {
+      for (std::size_t p = 1; p < prompt.size();) {
+        if (cancelled && cancelled())
+          throw std::runtime_error("generation cancelled");
+        const auto width =
+            std::min<std::size_t>(session->MaxVerifyWidth(), prompt.size() - p);
+        at = p;
+        stage = "log-probability scoring";
+        scores[p] =
+            sampler.RawLogprobs(session->Logits(), prompt[p],
+                                static_cast<std::size_t>(config.logprobs));
+        sampler.Accept(prompt[p]);
+        stage = "teacher forcing";
+        if (!session->TeacherForce(std::span(tokens).subspan(p, width), &rows,
+                                   &error))
+          throw std::runtime_error("prompt teacher forcing failed: " + error);
+        stage = "log-probability scoring";
+        for (std::size_t j = 1; j < width; ++j) {
+          at = p + j;
+          scores[p + j] = sampler.RawLogprobs(
+              std::span<const float>(rows).subspan((j - 1) * vocab, vocab),
+              prompt[p + j], static_cast<std::size_t>(config.logprobs));
+          sampler.Accept(prompt[p + j]);
+        }
+        p += width;
       }
-      p += width;
+    } catch (const std::bad_alloc&) {
+      throw PromptScoringOutOfMemory(stage, at);
     }
     return scores;
   }
@@ -2617,6 +2717,10 @@ public:
         max_context_(max_context),
         use_mtp_(use_mtp),
         max_draft_tokens_(max_draft_tokens) {
+    if (BehaviourSwitch("GUFO_INCREMENTAL_TOKENIZE"))
+      incremental_tokenize_ =
+          std::make_unique<tokenization::QwenIncrementalTokenizer>(
+              [](std::string_view line) { Logger::Info("tokenize", line); });
     if (!artifact_fingerprint.empty()) {
       persistence_ = TextRunnerPersistenceDescriptor{
           .compatibility_identity = QwenFlashNextCompatibilityIdentity(
@@ -2672,7 +2776,8 @@ public:
     if (gufo::platform::DeviceMemoryInfo(&free_bytes, &total_bytes) ==
         hipSuccess) {
       const auto deferred = model_->DeferredScratchBytes();
-      capacity = free_bytes > deferred ? free_bytes - deferred : 0;
+      const auto fit_bytes = gufo::platform::StateCapacityBytes(free_bytes);
+      capacity = fit_bytes > deferred ? fit_bytes - deferred : 0;
     }
     if (std::getenv("GUFO_MEM_ACCOUNTING") != nullptr) {
       static std::atomic<bool> logged{false};
@@ -2706,8 +2811,10 @@ public:
         // Runtime scratch is shared and already allocated at model load;
         // reserve its remaining lazy buffers once from aggregate capacity.
         .temporary_scratch_bytes = 0,
-        .retained_snapshot_capacity_bytes = HostSnapshotBudgetBytes(),
-        .retained_snapshot_ceiling_bytes = HostSnapshotCeilingBytes(),
+        .snapshot_capacity_from_totals = true,
+        .device_total_bytes =
+            capacity.has_value() ? std::optional<std::size_t>(total_bytes)
+                                 : std::nullopt,
         .requires_device_runtime_lock = true,
     };
   }
@@ -2739,18 +2846,68 @@ public:
 
   [[nodiscard]] std::optional<std::vector<TextRunnerToken>> RenderAndTokenize(
       const ChatRequest& request) const override {
-    return tokenization::QwenChatTemplate::RenderAndTokenize(
+    if (!incremental_tokenize_)
+      return tokenization::QwenChatTemplate::RenderAndTokenize(
+          model_->tokenizer(), request.messages,
+          request.tool_choice == ChatRequest::ToolChoice::kNone
+              ? std::span<const tokenization::ChatTool>{}
+              : std::span<const tokenization::ChatTool>{request.tools},
+          QwenChatOptions(request, max_context_));
+    auto tokens = tokenization::QwenChatTemplate::RenderAndTokenize(
         model_->tokenizer(), request.messages,
         request.tool_choice == ChatRequest::ToolChoice::kNone
             ? std::span<const tokenization::ChatTool>{}
             : std::span<const tokenization::ChatTool>{request.tools},
         QwenChatOptions(request, max_context_));
+    incremental_tokenize_->RecordExternalFull("count_tokens",
+                                              tokens ? tokens->size() : 0);
+    return tokens;
   }
 
   [[nodiscard]] std::optional<TextPreparedPrompt> PreparePrompt(
       const ChatRequest& request) const override {
-    return PrepareQwenPrompt(request, model_->tokenizer(),
-                             model_->VisionEncoder(), max_context_);
+    if (incremental_tokenize_) {
+      const bool images = std::any_of(
+          request.messages.begin(), request.messages.end(),
+          [](const auto& message) { return !message.images.empty(); });
+      if (images) {
+        incremental_tokenize_->RecordExternalFull("images");
+      } else {
+        const auto guard = QwenIncrementalRequestGuard(request);
+        auto prompt = incremental_tokenize_->Prepare(
+            model_->tokenizer(), request.client_id, request.messages,
+            request.tool_choice == ChatRequest::ToolChoice::kNone
+                ? std::span<const tokenization::ChatTool>{}
+                : std::span<const tokenization::ChatTool>{request.tools},
+            QwenChatOptions(request, max_context_), max_context_, guard);
+        return TextPreparedPrompt{
+            std::move(prompt.tokens), {}, prompt.cache_prefix_tokens};
+      }
+    }
+    auto prepared = PrepareQwenPrompt(request, model_->tokenizer(),
+                                      model_->VisionEncoder(), max_context_);
+    // Refuse an over-limit request here, as a 400, before it holds a session:
+    // the admission reservation covers at most MaxImageTokens image tokens.
+    if (const auto prompt = QwenPrompt(prepared.context)) {
+      std::uint64_t image_tokens = 0;
+      for (const auto& image : prompt->rope.images)
+        image_tokens += std::uint64_t{image.height} * image.width;
+      if (incremental_tokenize_)
+        incremental_tokenize_->RecordExternalTokens(
+            prepared.tokens.size() - image_tokens + prepared.tokens.size() -
+            prepared.cache_prefix_tokens);
+      if (const auto limit = model_->MaxImageTokens(max_context_);
+          image_tokens > limit)
+        throw std::invalid_argument(
+            models::qwen38_flash_next::ImageTokenLimitMessage(image_tokens,
+                                                              limit));
+    }
+    return prepared;
+  }
+
+  [[nodiscard]] json::Value PromptTokenizationStats() const override {
+    return incremental_tokenize_ ? incremental_tokenize_->Statistics()
+                                 : json::Value{};
   }
 
   void SetPromptContext(
@@ -2839,6 +2996,12 @@ public:
       return 4096;
 #endif
     return 0;
+  }
+  // GPU alone: checkpoints on the forward chunk (4,096 in the release
+  // profile), so no checkpoint cuts a pass short.
+  [[nodiscard]] std::size_t PrefillCheckpointGrid() const noexcept override {
+    return npu::CheckpointGrid(PrefillPreferredChunk(),
+                               model_->PrefillLegacyCapacity());
   }
   [[nodiscard]] std::optional<std::size_t> PrefillCheckpointBytes(
       const TextRunnerState& state, std::span<const TextRunnerToken> prompt,
@@ -3122,6 +3285,14 @@ public:
     return static_cast<std::size_t>(bytes);
   }
 
+  [[nodiscard]] std::uint64_t SnapshotHostBytes(
+      std::uint64_t payload_bytes, std::size_t token_count) const override {
+    return model_->SnapshotHostBytes(
+        payload_bytes,
+        static_cast<std::uint32_t>(std::min<std::size_t>(
+            token_count, std::numeric_limits<std::uint32_t>::max())));
+  }
+
   [[nodiscard]] std::unique_ptr<TextRunnerSnapshot> Snapshot(
       const TextRunnerState& state) const override {
     return CaptureSnapshot(state,
@@ -3271,6 +3442,13 @@ public:
     // completion continuations use the final matched start/end in the prompt.
     if (request) {
       policy->loop_exempt = !request->tools.empty();
+      if (policy->loop_breaker && policy->loop_tool_args && policy->loop_exempt) {
+        policy->tool_framing_ids.clear();
+        for (const auto text : {tokenization::kToolCallStart, tokenization::kToolCallEnd}) {
+          if (const auto id = tokenizer.FindSpecialToken(text))
+            policy->tool_framing_ids.push_back(*id);
+        }
+      }
       const bool thinking_on =
           QwenChatOptions(*request, max_context_).enable_thinking;
       auto tracker = *policy;
@@ -3316,7 +3494,7 @@ public:
         "different reconsider rethink backtrack retry recheck revisit doubt "
         "confused wrong mistake error incorrect";
     std::set<std::uint32_t> ids;
-    if (policy->marker_bias != 0) {
+    if (policy->marker_bias != 0 || policy->marker_entropy_gate) {
       std::vector<std::string> marker_words;
       if (const char* list = std::getenv("GUFO_THINK_MARKER_LIST");
           list && *list) {
@@ -3381,11 +3559,716 @@ private:
   mutable std::shared_ptr<const std::vector<std::string>> behaviour_pieces_;
   mutable std::vector<std::uint32_t> behaviour_eog_;
   std::shared_ptr<QwenFlashNextModel> model_;
+  std::unique_ptr<tokenization::QwenIncrementalTokenizer> incremental_tokenize_;
   std::vector<std::uint32_t> suppress_tokens_;
   std::uint32_t max_context_;
   bool use_mtp_;
   std::uint32_t max_draft_tokens_;
   std::optional<TextRunnerPersistenceDescriptor> persistence_;
+};
+#endif
+
+#if defined(ENGINE_ENABLE_HIP)
+// Each Gemma 4 request owns its KV cache (global rows plus the sliding-window
+// ring) and its snapshots; forwards of different requests are serialized.
+constexpr std::string_view kGemma4StateAbi = "gemma4-rocm-session-v1";
+
+using Gemma4Model = models::gemma4::Model;
+using Gemma4Session = models::gemma4::Session;
+
+std::int32_t Gemma4EngineToken(TextRunnerToken token) {
+  if (token >
+      static_cast<TextRunnerToken>(std::numeric_limits<std::int32_t>::max())) {
+    throw std::invalid_argument("Gemma 4 token ID exceeds engine range");
+  }
+  return static_cast<std::int32_t>(token);
+}
+
+using Gemma4VisionPrompt = models::gemma4::vision::Prompt;
+
+/// The image part of one Gemma 4 request: the rendered prompt with its
+/// resized pixels, placement and identities (the runner encodes lazily).
+struct Gemma4ImageContext final : TextPromptContext {
+  std::shared_ptr<const Gemma4VisionPrompt> prompt;
+};
+
+std::shared_ptr<const Gemma4VisionPrompt> Gemma4Prompt(
+    const std::shared_ptr<const TextPromptContext>& context) {
+  if (!context)
+    return {};
+  const auto* image = dynamic_cast<const Gemma4ImageContext*>(context.get());
+  if (!image)
+    throw std::invalid_argument("invalid Gemma 4 prompt context");
+  return image->prompt;
+}
+
+class Gemma4TextRunnerState final : public TextRunnerState {
+public:
+  Gemma4TextRunnerState(const std::shared_ptr<Gemma4Model>& model,
+                        std::uint32_t max_context) {
+    std::string error;
+    session_ = model->CreateSession(max_context, &error);
+    if (session_ == nullptr) {
+      throw std::runtime_error("Failed to create Gemma 4 session: " + error);
+    }
+  }
+  void Invalidate() noexcept override { session_->Reset(); }
+  void SetCancellationCheck(const CancellationCheck&) override {}
+  [[nodiscard]] TextRunnerMeasuredResources MeasuredResources()
+      const noexcept override {
+    return {.per_request_state_bytes = session_->AllocatedBytes(),
+            .temporary_scratch_bytes = 0};
+  }
+  [[nodiscard]] Gemma4Session& session() const { return *session_; }
+  /// Images of the current request (null for a text prompt); replaced, never
+  /// inherited, before every request.
+  void set_prompt(std::shared_ptr<const Gemma4VisionPrompt> prompt) {
+    prompt_ = std::move(prompt);
+  }
+  [[nodiscard]] const std::shared_ptr<const Gemma4VisionPrompt>& prompt()
+      const noexcept {
+    return prompt_;
+  }
+
+private:
+  std::unique_ptr<Gemma4Session> session_;
+  std::shared_ptr<const Gemma4VisionPrompt> prompt_;
+};
+
+class Gemma4TextRunnerSnapshot final : public TextRunnerSnapshot {
+public:
+  Gemma4TextRunnerSnapshot(
+      std::shared_ptr<Gemma4Model> model,
+      std::unique_ptr<models::gemma4::SessionSnapshot> snapshot,
+      std::size_t position)
+      : model(std::move(model)),
+        snapshot(std::move(snapshot)),
+        position(position) {}
+  [[nodiscard]] std::size_t PayloadBytes() const noexcept override {
+    return snapshot == nullptr
+               ? 0
+               : static_cast<std::size_t>(snapshot->SizeBytes());
+  }
+  std::shared_ptr<Gemma4Model> model;
+  std::unique_ptr<models::gemma4::SessionSnapshot> snapshot;
+  std::size_t position;
+};
+
+Gemma4TextRunnerState& RequireGemma4State(TextRunnerState& state) {
+  auto* gemma = dynamic_cast<Gemma4TextRunnerState*>(&state);
+  if (gemma == nullptr) {
+    throw std::logic_error("text runner state is not Gemma 4");
+  }
+  return *gemma;
+}
+
+const Gemma4TextRunnerState& RequireGemma4State(const TextRunnerState& state) {
+  const auto* gemma = dynamic_cast<const Gemma4TextRunnerState*>(&state);
+  if (gemma == nullptr) {
+    throw std::logic_error("text runner state is not Gemma 4");
+  }
+  return *gemma;
+}
+
+class Gemma4TextRunner final : public HipTextModelRunner {
+public:
+  /// Device memory reserved for image input when a sidecar is bound: the
+  /// tower's BF16 weights (uploaded on the first image) and the encoder's
+  /// per-image scratch (about 0.6 GB at the largest token budget).
+  static constexpr std::size_t kVisionReserveBytes = std::size_t{2} << 30;
+  /// The encoder's per-image scratch once the tower is resident (about 0.6 GB at the largest token budget).
+  static constexpr std::size_t kVisionScratchBytes = std::size_t{640} << 20;
+
+  Gemma4TextRunner(std::shared_ptr<Gemma4Model> model,
+                   std::uint32_t max_context, std::uint32_t ring,
+                   std::string artifact_fingerprint = {},
+                   std::string mtp_fingerprint = {},
+                   std::shared_ptr<models::gemma4::vision::Encoder> vision = {},
+                   std::uint32_t max_image_tokens = 0)
+      : model_(std::move(model)),
+        max_context_(max_context),
+        vision_(std::move(vision)),
+        max_image_tokens_(max_image_tokens) {
+    if (!artifact_fingerprint.empty()) {
+      persistence_ = TextRunnerPersistenceDescriptor{
+          .compatibility_identity = Gemma4CompatibilityIdentity(
+              artifact_fingerprint, mtp_fingerprint, model_->HasMtp(),
+              max_context_, model_->DraftTokens(), ring),
+          .payload_version = Gemma4Session::kSnapshotPayloadVersion,
+      };
+    }
+  }
+
+  [[nodiscard]] TextRunnerDescriptor Descriptor() const override {
+    return {
+        .model_id = model_->ModelName(),
+        .state_abi = std::string(kGemma4StateAbi),
+        .max_context = max_context_,
+        .capabilities =
+            TextRunnerCapabilities{
+                .incremental_prefill = true,
+                .snapshot = true,
+                .fork = true,
+                .final_token_advance_required = false,
+                .incremental_text_is_exact = true,
+                .multi_token_decode = model_->HasMtp(),
+                .batched_multi_token_decode = model_->HasMtp(),
+                .batched_multi_token_decode_max_width = 8,
+                .prefix_reuse = true,
+            },
+        .persistence = persistence_,
+    };
+  }
+
+  /// What `bubo serve` records as the engine's settings at startup; without
+  /// it the Windows startup path (which always asks) fails with no message.
+  [[nodiscard]] json::Value DebugSettings() const override {
+    auto settings = json::Value::object();
+    settings["model_name"] = model_->ModelName();
+    settings["model_context"] = static_cast<std::size_t>(model_->MaxContext());
+    settings["context"] = static_cast<std::size_t>(max_context_);
+    settings["speculative_mode"] = model_->HasMtp() ? "mtp" : "off";
+    settings["draft_tokens"] = static_cast<std::size_t>(model_->DraftTokens());
+    settings["vision_enabled"] = vision_ != nullptr;
+    settings["max_image_tokens"] = static_cast<std::size_t>(max_image_tokens_);
+    return settings;
+  }
+
+  /// Memory guard: the first image of the process uploads the vision tower and sizes the encoder scratch (g4_memory_steps: +1.36 GiB at
+  /// the first image chat); later images need only the per-image scratch. Text requests need nothing new.
+  [[nodiscard]] gufo::platform::MemoryNeed RequestMemoryNeed(
+      std::size_t, const TextPromptContext* context, bool) const override {
+    gufo::platform::MemoryNeed need;
+    const auto* image = dynamic_cast<const Gemma4ImageContext*>(context);
+    if (vision_ != nullptr && image != nullptr && image->prompt != nullptr && !image->prompt->images.empty())
+      need.mandatory_device_bytes = vision_resident_.load(std::memory_order_relaxed) ? kVisionScratchBytes : kVisionReserveBytes;
+    return need;
+  }
+
+  [[nodiscard]] TextRunnerResourceClaim ResourceClaim() const override {
+    std::size_t free_bytes = 0;
+    std::size_t total_bytes = 0;
+    std::optional<std::size_t> capacity;
+    if (gufo::platform::DeviceMemoryInfo(&free_bytes, &total_bytes) ==
+        hipSuccess) {
+      capacity = gufo::platform::StateCapacityBytes(free_bytes);
+    }
+    // Snapshot bodies are device rows (gemma4::SessionSnapshot), so plan the
+    // capacity from the host and device totals with this model's footprint
+    // on the device side (L-REL-5), as for Flash-Next.
+    std::optional<std::size_t> device_total;
+    if (capacity.has_value())
+      device_total = total_bytes;
+    return {
+        .resident_weights_bytes = model_->ResidentBytes(),
+        .state_capacity_bytes = capacity,
+        .per_request_state_bytes = model_->SessionBytes(max_context_),
+        .temporary_scratch_bytes = vision_ ? kVisionReserveBytes : 0,
+        .snapshot_capacity_from_totals = true,
+        .device_total_bytes = device_total,
+        .requires_device_runtime_lock = true,
+    };
+  }
+
+  [[nodiscard]] std::vector<TextExecutionPlan> SupportedPlans() const override {
+    // Up to eight sessions share one forward (decode widths stay exact).
+    std::vector<TextExecutionPlan> plans{
+        {.kind = TextExecutionPlanKind::kSerial, .physical_width = 1}};
+    for (std::size_t width = 2; width <= 8; ++width) {
+      plans.push_back(
+          {.kind = TextExecutionPlanKind::kBatched, .physical_width = width});
+    }
+    return plans;
+  }
+
+  [[nodiscard]] std::vector<TextRunnerToken> Tokenize(
+      std::string_view text) const override {
+    const auto tokens = model_->Tokenize(text);
+    return {tokens.begin(), tokens.end()};
+  }
+
+  [[nodiscard]] std::optional<std::vector<TextRunnerToken>> RenderAndTokenize(
+      const ChatRequest& request) const override {
+    const auto prepared = PreparePrompt(request);
+    if (!prepared) {
+      return std::nullopt;
+    }
+    return prepared->tokens;
+  }
+
+  [[nodiscard]] std::optional<TextPreparedPrompt> PreparePrompt(
+      const ChatRequest& request) const override {
+    if (std::ranges::any_of(request.messages,
+                            [](const auto& m) { return !m.images.empty(); })) {
+      return PrepareImagePrompt(request);
+    }
+    std::string error;
+    const auto rendered = models::gemma4::ChatTemplate::Render(
+        request.messages, Tools(request), ChatOptions(request), &error);
+    if (!rendered) {
+      throw std::invalid_argument("Gemma 4 chat template: " + error);
+    }
+    TextPreparedPrompt prepared;
+    prepared.tokens = Tokenize(rendered->text);
+    // The stable prefix is shared by the next turn; the text after it starts
+    // with a special token, so it tokenizes apart.
+    if (rendered->stable_prefix_offset < rendered->text.size()) {
+      const auto suffix = Tokenize(std::string_view(rendered->text)
+                                       .substr(rendered->stable_prefix_offset));
+      if (suffix.size() < prepared.tokens.size() &&
+          std::equal(suffix.begin(), suffix.end(),
+                     prepared.tokens.end() -
+                         static_cast<std::ptrdiff_t>(suffix.size()))) {
+        prepared.cache_prefix_tokens = prepared.tokens.size() - suffix.size();
+      }
+    }
+    return prepared;
+  }
+
+  /// A prompt with images: rendered, tokenized and expanded by the vision
+  /// preparer (soft-token rows per image); the pixels travel in the context.
+  [[nodiscard]] TextPreparedPrompt PrepareImagePrompt(
+      const ChatRequest& request) const {
+    if (!vision_) {
+      throw std::invalid_argument(
+          "image input requires a matching --mmproj BF16 sidecar");
+    }
+    auto prompt = std::make_shared<Gemma4VisionPrompt>(
+        models::gemma4::vision::Prepare(model_->tokenizer(), request.messages,
+                                        Tools(request), ChatOptions(request),
+                                        vision_->identity(), max_context_));
+    if (max_image_tokens_ != 0) {
+      std::uint64_t image_tokens = 0;
+      for (const auto& image : prompt->images)
+        image_tokens += image.span.rows;
+      if (image_tokens > max_image_tokens_) {
+        throw std::invalid_argument(
+            "image tokens exceed the per-request limit "
+            "(GUFO_MAX_IMAGE_TOKENS)");
+      }
+    }
+    auto context = std::make_shared<Gemma4ImageContext>();
+    context->cache_identity = prompt->cache_identity;
+    for (const auto& image : prompt->images) {
+      const auto identity = prompt->IdentityForPrefix(image.span.offset);
+      context->cache_prefixes.push_back(
+          {image.span.offset, {identity.begin(), identity.end()}});
+    }
+    TextPreparedPrompt prepared;
+    prepared.tokens.assign(prompt->tokens.begin(), prompt->tokens.end());
+    prepared.cache_prefix_tokens = prompt->stable_prefix_tokens;
+    context->prompt = std::move(prompt);
+    prepared.context = std::move(context);
+    return prepared;
+  }
+
+  void SetPromptContext(
+      TextRunnerState& state,
+      std::shared_ptr<const TextPromptContext> context) const override {
+    RequireGemma4State(state).set_prompt(Gemma4Prompt(context));
+  }
+
+  [[nodiscard]] TextGenerationBackend::InitialOutputState InitialOutputState(
+      const ChatRequest& request) const override {
+    const auto options = ChatOptions(request);
+    if (!options.enable_thinking) {
+      // Gemma 4 still opens an empty thought channel after tool responses.
+      return TextGenerationBackend::InitialOutputState::kAuto;
+    }
+    // After a tool response the prompt already opened the thought channel.
+    std::string error;
+    std::vector<std::size_t> image_offsets;
+    const auto rendered = models::gemma4::ChatTemplate::Render(
+        request.messages, Tools(request), options, &error, &image_offsets);
+    if (rendered && rendered->text.ends_with(models::gemma4::kThoughtStart)) {
+      return TextGenerationBackend::InitialOutputState::kReasoning;
+    }
+    return TextGenerationBackend::InitialOutputState::kAuto;
+  }
+
+  [[nodiscard]] std::shared_ptr<const sampling::ConstraintVocabulary>
+  BuildConstraintVocabulary() const override {
+    return std::make_shared<const sampling::ConstraintVocabulary>(
+        model_->VocabSize(), [this](std::uint32_t id) {
+          const auto token = static_cast<std::int32_t>(id);
+          return sampling::ConstraintVocabulary::Piece{
+              model_->Decode(std::span(&token, 1)), model_->IsStopToken(token)};
+        });
+  }
+
+  sampling::JsonConstraint::ToolFormat ToolFormat() const override {
+    return sampling::JsonConstraint::ToolFormat::kGemma4;
+  }
+
+  [[nodiscard]] TextGenerationBackend::OutputMarkup Markup() const override {
+    return {
+        .reasoning_start = models::gemma4::kThoughtStart,
+        .reasoning_end = models::gemma4::kThoughtEnd,
+        .tool_syntax = TextGenerationBackend::OutputMarkup::ToolSyntax::kGemma4,
+    };
+  }
+
+  [[nodiscard]] std::string Decode(
+      std::span<const TextRunnerToken> tokens) const override {
+    std::vector<std::int32_t> converted;
+    converted.reserve(tokens.size());
+    for (const auto token : tokens) {
+      converted.push_back(Gemma4EngineToken(token));
+    }
+    return model_->Decode(converted);
+  }
+
+  [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
+    return std::make_unique<Gemma4TextRunnerState>(model_, max_context_);
+  }
+
+  void PreparePrefixReuse(
+      TextRunnerState& state,
+      std::span<const TextRunnerToken> prefix) const override {
+    if (RequireGemma4State(state).session().Position() != prefix.size()) {
+      throw std::logic_error("Gemma 4 reused prefix does not match checkpoint");
+    }
+  }
+
+  [[nodiscard]] TextPrefillStep Prefill(
+      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t max_input_tokens) const override {
+    auto& gemma_state = RequireGemma4State(state);
+    auto& session = gemma_state.session();
+    if (offset != session.Position() || offset >= prompt.size()) {
+      throw std::logic_error("Gemma 4 prefill offset does not match state");
+    }
+    const auto& images = gemma_state.prompt();
+    std::size_t end = offset + std::min(max_input_tokens, prompt.size() - offset);
+    if (images && !images->images.empty()) {
+      end = ImageSafePrefillEnd(*images, offset, end, prompt.size());
+    }
+    const std::size_t consumed = end - offset;
+    std::vector<std::int32_t> prefix;
+    prefix.reserve(end);
+    for (const auto token : prompt.first(end)) {
+      prefix.push_back(Gemma4EngineToken(token));
+    }
+    std::string error;
+    bool synced = false;
+    if (images && !images->images.empty()) {
+      if (!vision_) {
+        throw std::logic_error("Gemma 4 image prompt without a vision encoder");
+      }
+      // Every image that lies wholly inside the prefix (with its end marker),
+      // in order: they are a leading run of the prompt's images.
+      std::vector<models::gemma4::ImageSpan> spans;
+      for (const auto& image : images->images) {
+        if (std::size_t{image.span.offset} + image.span.rows >= end)
+          break;
+        spans.push_back(
+            {image.span.offset, image.span.rows, image.prefix_identity});
+      }
+      // Encoded when the engine asks (an image it must evaluate), kept until
+      // Sync returns.
+      std::vector<std::shared_ptr<const models::gemma4::vision::Encoder::Embedding>>
+          encoded(spans.size());
+      const models::gemma4::ImageEmbeddings embed =
+          [&](std::size_t index) -> const float* {
+        if (index >= encoded.size())
+          return nullptr;
+        if (!encoded[index])
+          encoded[index] = vision_->Encode(images->images[index].pixels);
+        vision_resident_.store(true, std::memory_order_relaxed);
+        return encoded[index]->data();
+      };
+      synced = session.Sync(prefix, spans, embed, &error);
+    } else {
+      synced = session.Sync(prefix, &error);
+    }
+    if (!synced) {
+      session.Reset();
+      throw std::runtime_error("Gemma 4 prefill failed: " + error);
+    }
+    return {.consumed_tokens = consumed,
+            .decode_ready = offset + consumed == prompt.size()};
+  }
+
+  [[nodiscard]] TextDecodeSelection SelectNext(
+      TextRunnerState& state, sampling::SamplerState& sampler) const override {
+    auto& session = RequireGemma4State(state).session();
+    if (session.Position() >= max_context_) {
+      return {.stop = true, .piece = {}};
+    }
+    const auto logits = session.Logits();
+    if (logits.empty()) {
+      throw std::runtime_error("Gemma 4 token selection has no logits");
+    }
+    const auto token = static_cast<std::int32_t>(sampler.Sample(logits));
+    if (state.stop_at_eos() && model_->IsStopToken(token)) {
+      return {.stop = true, .token = 0, .piece = {}};
+    }
+    return {.stop = false,
+            .token = static_cast<TextRunnerToken>(token),
+            .piece = model_->TokenText(token)};
+  }
+
+  void Advance(TextRunnerState& state, TextRunnerToken token) const override {
+    std::string error;
+    if (!RequireGemma4State(state).session().Evaluate(Gemma4EngineToken(token),
+                                                      &error)) {
+      throw std::runtime_error("Gemma 4 decode failed: " + error);
+    }
+  }
+
+  [[nodiscard]] std::optional<TextDecodeSelection> PreviewFirstToken(
+      TextRunnerState& state, sampling::SamplerState& sampler) const override {
+    return SelectNext(state, sampler);
+  }
+
+  [[nodiscard]] TextDecodeStep DecodeStep(
+      TextRunnerState& state, std::size_t max_tokens,
+      sampling::SamplerState& sampler) const override {
+    auto& session = RequireGemma4State(state).session();
+    // Select-and-advance samples Logits(), which only predicts the next
+    // token while no emitted token is pending.
+    if (!model_->HasMtp() || (max_tokens == 1 && !session.HasPendingToken())) {
+      return TextModelRunner::DecodeStep(state, max_tokens, sampler);
+    }
+    if (session.Position() >= max_context_) {
+      return {.selections = {}, .stop = true};
+    }
+    const auto before = session.Statistics();
+    sampling::SamplerState working = sampler;
+    Gemma4Session::DecodeResult decoded;
+    std::string error;
+    if (!session.DecodeStep(
+            std::min<std::size_t>(max_tokens, model_->DraftTokens() + 1),
+            working, &decoded, &error, state.stop_at_eos())) {
+      throw std::runtime_error("Gemma 4 MTP decode failed: " + error);
+    }
+    sampler.CopyDrawStateFrom(working);
+    TextDecodeStep step;
+    for (const std::int32_t token : decoded.tokens) {
+      if (state.stop_at_eos() && model_->IsStopToken(token)) {
+        step.stop = true;
+        break;
+      }
+      step.selections.push_back({.stop = false,
+                                 .token = static_cast<TextRunnerToken>(token),
+                                 .piece = model_->TokenText(token)});
+    }
+    const auto after = session.Statistics();
+    step.draft_rounds = after.verified - before.verified;
+    step.draft_tokens = after.drafted - before.drafted;
+    step.draft_accepted_tokens = after.accepted - before.accepted;
+    return step;
+  }
+
+  void AdvanceBatch(
+      std::span<const TextRunnerAdvance> advances) const override {
+    if (advances.size() < 2) {
+      return TextModelRunner::AdvanceBatch(advances);
+    }
+    std::vector<Gemma4Session*> sessions;
+    std::vector<std::int32_t> tokens;
+    for (const auto& advance : advances) {
+      sessions.push_back(&RequireGemma4State(advance.state.get()).session());
+      tokens.push_back(Gemma4EngineToken(advance.token));
+    }
+    std::string error;
+    if (!Gemma4Session::EvaluateBatch(sessions, tokens, &error)) {
+      const auto failure = std::make_exception_ptr(
+          std::runtime_error("Gemma 4 batched decode failed: " + error));
+      for (const auto& advance : advances) {
+        if (!advance.failure) {
+          std::rethrow_exception(failure);
+        }
+        *advance.failure = failure;
+      }
+    }
+  }
+
+  [[nodiscard]] std::vector<TextDecodeStep> DecodeBatch(
+      std::span<const TextRunnerDecode> decodes) const override {
+    if (decodes.size() < 2 || !model_->HasMtp()) {
+      return TextModelRunner::DecodeBatch(decodes);
+    }
+    std::vector<TextDecodeStep> steps(decodes.size());
+    std::vector<Gemma4Session::DecodeResult> results(decodes.size());
+    std::vector<Gemma4Session::SpeculativeStats> before(decodes.size());
+    std::vector<sampling::SamplerState> working;
+    working.reserve(decodes.size());
+    std::vector<Gemma4Session::BatchDecode> batch;
+    std::vector<std::size_t> index;
+    for (std::size_t i = 0; i < decodes.size(); ++i) {
+      auto& state = RequireGemma4State(decodes[i].state.get());
+      auto& session = state.session();
+      if (decodes[i].max_tokens == 1 && !session.HasPendingToken()) {
+        // A one-token step evaluates its token, as DecodeStep does.
+        try {
+          steps[i] = DecodeStep(state, 1, decodes[i].sampler.get());
+        } catch (...) {
+          steps[i].failure = std::current_exception();
+        }
+        continue;
+      }
+      if (session.Position() >= max_context_) {
+        steps[i].stop = true;
+        continue;
+      }
+      before[i] = session.Statistics();
+      working.push_back(decodes[i].sampler.get());
+      batch.push_back({.session = &session,
+                       .max_tokens = std::min<std::size_t>(
+                           decodes[i].max_tokens, model_->DraftTokens() + 1),
+                       .sampler = &working.back(),
+                       .result = &results[i],
+                       .stop_at_eos = state.stop_at_eos(),
+                       .error = {}});
+      index.push_back(i);
+    }
+    (void)Gemma4Session::DecodeBatch(batch);
+    const TextExecutionPlan plan{.kind = TextExecutionPlanKind::kBatched,
+                                 .physical_width = batch.size()};
+    for (std::size_t k = 0; k < batch.size(); ++k) {
+      const std::size_t i = index[k];
+      auto& step = steps[i];
+      if (!batch[k].error.empty()) {
+        step.failure = std::make_exception_ptr(
+            std::runtime_error("Gemma 4 MTP decode failed: " + batch[k].error));
+        continue;
+      }
+      decodes[i].sampler.get().CopyDrawStateFrom(working[k]);
+      const bool stop_at_eos = batch[k].stop_at_eos;
+      for (const std::int32_t token : results[i].tokens) {
+        if (stop_at_eos && model_->IsStopToken(token)) {
+          step.stop = true;
+          break;
+        }
+        step.selections.push_back({.stop = false,
+                                   .token = static_cast<TextRunnerToken>(token),
+                                   .piece = model_->TokenText(token)});
+      }
+      const auto after = batch[k].session->Statistics();
+      step.draft_rounds = after.verified - before[i].verified;
+      step.draft_tokens = after.drafted - before[i].drafted;
+      step.draft_accepted_tokens = after.accepted - before[i].accepted;
+      step.execution_plan = plan;
+    }
+    return steps;
+  }
+
+  [[nodiscard]] std::size_t CheckpointPosition(
+      const TextRunnerState& state) const override {
+    return RequireGemma4State(state).session().Position();
+  }
+
+  [[nodiscard]] std::size_t SnapshotPayloadBytes(
+      const TextRunnerState& state) const override {
+    return static_cast<std::size_t>(
+        RequireGemma4State(state).session().SnapshotBytes());
+  }
+
+  [[nodiscard]] std::unique_ptr<TextRunnerSnapshot> Snapshot(
+      const TextRunnerState& state) const override {
+    const auto& session = RequireGemma4State(state).session();
+    std::string error;
+    auto snapshot = session.SaveSnapshot(&error);
+    if (snapshot == nullptr) {
+      throw std::runtime_error("Gemma 4 snapshot failed: " + error);
+    }
+    return std::make_unique<Gemma4TextRunnerSnapshot>(
+        model_, std::move(snapshot), session.Position());
+  }
+
+  void RestoreOrFork(TextRunnerState& state,
+                     const TextRunnerSnapshot& snapshot) const override {
+    const auto& owned = Owned(snapshot);
+    auto& restored = RequireGemma4State(state);
+    std::string error;
+    if (!restored.session().RestoreSnapshot(*owned.snapshot, &error)) {
+      restored.Invalidate();
+      throw std::runtime_error("Gemma 4 snapshot restore failed: " + error);
+    }
+  }
+
+  [[nodiscard]] std::size_t PersistentSnapshotPayloadBytes(
+      const TextRunnerSnapshot& snapshot) const override {
+    return Owned(snapshot).PayloadBytes();
+  }
+
+  [[nodiscard]] std::size_t SerializePersistentSnapshot(
+      const TextRunnerSnapshot& snapshot,
+      std::span<std::uint8_t> destination) const override {
+    const auto& owned = Owned(snapshot);
+    if (destination.size() != owned.PayloadBytes() ||
+        !owned.snapshot->CopyTo(destination)) {
+      throw std::invalid_argument(
+          "Gemma 4 persistent snapshot serialization failed");
+    }
+    return destination.size();
+  }
+
+  void StreamPersistentSnapshot(const TextRunnerSnapshot& snapshot,
+                                const SnapshotSink& sink) const override {
+    if (!Owned(snapshot).snapshot->Stream(sink)) {
+      throw std::runtime_error("Gemma 4 persistent snapshot copy failed");
+    }
+  }
+
+  void RestorePersistentSnapshot(
+      TextRunnerState& state,
+      std::span<const std::uint8_t> payload) const override {
+    auto& restored = RequireGemma4State(state);
+    std::string error;
+    if (!restored.session().RestoreSnapshot(payload, &error)) {
+      restored.Invalidate();
+      throw std::runtime_error("Gemma 4 persistent snapshot restore failed: " +
+                               error);
+    }
+  }
+
+private:
+  [[nodiscard]] const Gemma4TextRunnerSnapshot& Owned(
+      const TextRunnerSnapshot& snapshot) const {
+    const auto* owned =
+        dynamic_cast<const Gemma4TextRunnerSnapshot*>(&snapshot);
+    if (owned == nullptr || owned->model.get() != model_.get() ||
+        owned->snapshot == nullptr) {
+      throw std::invalid_argument(
+          "Gemma 4 snapshot does not belong to this model");
+    }
+    return *owned;
+  }
+  static std::span<const tokenization::ChatTool> Tools(
+      const ChatRequest& request) {
+    return request.tool_choice == ChatRequest::ToolChoice::kNone
+               ? std::span<const tokenization::ChatTool>{}
+               : std::span<const tokenization::ChatTool>{request.tools};
+  }
+  static models::gemma4::ChatOptions ChatOptions(const ChatRequest& request) {
+    return models::gemma4::ResolveChatOptions(request.reasoning);
+  }
+  /// A prefill step never ends inside an image or right after its soft
+  /// tokens: the engine evaluates an image whole and needs its end marker in
+  /// the same Sync. An end that would do so moves to the image's start, or,
+  /// when the step begins at the image, past its end marker.
+  static std::size_t ImageSafePrefillEnd(const Gemma4VisionPrompt& prompt,
+                                         std::size_t offset, std::size_t end,
+                                         std::size_t total) {
+    for (const auto& image : prompt.images) {
+      const std::size_t begin = image.span.offset;
+      const std::size_t image_end = begin + image.span.rows;
+      if (end > begin && end <= image_end) {
+        end = begin > offset ? begin : std::min(image_end + 1, total);
+      }
+    }
+    return end;
+  }
+
+  std::shared_ptr<Gemma4Model> model_;
+  std::uint32_t max_context_;
+  std::optional<TextRunnerPersistenceDescriptor> persistence_;
+  std::shared_ptr<models::gemma4::vision::Encoder> vision_;
+  /// Set after the first successful image encode (the tower is uploaded then); read by the memory guard.
+  mutable std::atomic<bool> vision_resident_{false};
+  std::uint32_t max_image_tokens_{0};
 };
 #endif
 
@@ -3412,15 +4295,25 @@ struct InferenceBackend::Impl {
         : state_(std::move(model_state)),
           request_(std::move(scheduled_request)),
           tool_format_(tool_format) {
-      if (initial == InitialOutputState::kReasoning)
-        reasoning_end_ = state_->scheduler->runner().Tokenize("</think>");
+      const auto& runner = state_->scheduler->runner();
+      if (initial != InitialOutputState::kContent)
+        reasoning_end_ = runner.Tokenize(runner.Markup().reasoning_end);
+      // Output that may open reasoning itself counts it only when it does.
+      if (initial == InitialOutputState::kAuto)
+        reasoning_start_ = runner.Tokenize(runner.Markup().reasoning_start);
     }
 
     Result Wait(const TokenCallback& on_token,
                 const ProgressCallback& on_progress,
                 const StartCallback& on_start) override {
       auto result = request_.Wait(on_token, on_progress, on_start);
-      if (!reasoning_end_.empty()) {
+      const bool reasoning =
+          !reasoning_end_.empty() &&
+          (reasoning_start_.empty() ||
+           (result.tokens.size() >= reasoning_start_.size() &&
+            std::equal(reasoning_start_.begin(), reasoning_start_.end(),
+                       result.tokens.begin())));
+      if (reasoning) {
         const auto end =
             std::search(result.tokens.begin(), result.tokens.end(),
                         reasoning_end_.begin(), reasoning_end_.end());
@@ -3434,6 +4327,9 @@ struct InferenceBackend::Impl {
       return request_.Wait({}, {}, {}, on_score);
     }
     void Cancel() noexcept override { request_.Cancel(); }
+    ReasoningEnd CurrentReasoningEnd() const override {
+      return request_.CurrentReasoningEnd();
+    }
 
     std::optional<sampling::JsonConstraint::ToolFormat> ToolFormat()
         const override {
@@ -3444,6 +4340,7 @@ struct InferenceBackend::Impl {
     std::shared_ptr<const State> state_;
     TextGenerationScheduler::Request request_;
     std::vector<tokenization::TokenId> reasoning_end_;
+    std::vector<tokenization::TokenId> reasoning_start_;
     const std::optional<sampling::JsonConstraint::ToolFormat> tool_format_;
   };
 
@@ -3559,8 +4456,7 @@ InferenceBackend::start_score(std::string_view prompt,
     throw std::invalid_argument(
         "prompt logprobs are not supported for this model");
   auto tokens = state->scheduler->runner().Tokenize(prompt);
-  if (tokens.size() > max_score_tokens)
-    throw std::invalid_argument("prompt exceeds --max-score-tokens");
+  CheckPromptScoreLimits(tokens.size(), max_score_tokens);
   auto configured =
       state->scheduler->runner().ConfigureSampling(sampling, nullptr, {});
   TextRequestMetadata metadata;
@@ -3578,8 +4474,13 @@ InferenceBackend::start_score(std::string_view prompt,
 json::Value InferenceBackend::debug_settings() const {
 #if defined(ENGINE_ENABLE_HIP)
   const auto state = impl_->Snapshot();
-  if (state)
-    return state->scheduler->DebugSettings();
+  if (state) {
+    auto settings = state->scheduler->DebugSettings();
+    auto counters = state->scheduler->runner().PromptTokenizationStats();
+    if (!counters.is_null())
+      settings["incremental_tokenize"] = std::move(counters);
+    return settings;
+  }
 #endif
   throw std::invalid_argument("debug settings require a loaded text model");
 }
@@ -3672,6 +4573,81 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                 prefill_policy, scheduler_policy, speculative_config,
                 std::move(resolved_disk_cache_config), ram_cache_config);
   }
+  if (reader->GetMetadataString("general.architecture") == "gemma4") {
+    // The mmproj BF16 sidecar must match this model's embedding width; a
+    // wrong one is refused here, before the model loads.
+    std::shared_ptr<models::gemma4::vision::Encoder> vision;
+    if (!vision_model_path.empty()) {
+      const auto width =
+          reader->GetMetadataUint64("gemma4.embedding_length").value_or(0);
+      try {
+        vision = std::make_shared<models::gemma4::vision::Encoder>(
+            std::filesystem::u8path(vision_model_path),
+            static_cast<std::uint32_t>(width));
+      } catch (const std::exception& exception) {
+        SetError(error, std::string("Gemma 4 --mmproj: ") + exception.what());
+        return false;
+      }
+    }
+    const bool mtp = speculative_config.backend == TextSpeculativeBackend::kMtp;
+    if (speculative_config.backend != TextSpeculativeBackend::kDisabled &&
+        !mtp) {
+      SetError(error,
+               "Gemma 4 HTTP models support only MTP speculative decoding "
+               "(--speculative mtp --mtp-model)");
+      return false;
+    }
+    if (mtp && (speculative_config.draft_model_path.empty() ||
+                speculative_config.max_draft_tokens == 0)) {
+      SetError(error,
+               "Gemma 4 MTP requires --mtp-model and a positive draft limit");
+      return false;
+    }
+    models::gemma4::ModelOptions gemma_options{
+        .max_context = max_context,
+        .mtp_model_path =
+            mtp ? speculative_config.draft_model_path : std::string{},
+        .draft_tokens = speculative_config.max_draft_tokens_given
+                            ? speculative_config.max_draft_tokens
+                            : models::gemma4::kDefaultDraftTokens,
+        .min_draft_tokens = speculative_config.min_draft_tokens,
+    };
+    try {
+      gemma_options.draft_policy =
+          models::gemma4::ParseDraftPolicy(speculative_config.mtp_draft_policy);
+      gemma_options.draft_calibration =
+          models::gemma4::ParseDraftCalibrationScope(
+              speculative_config.mtp_draft_calibration);
+    } catch (const std::invalid_argument& e) {
+      SetError(error, e.what());
+      return false;
+    }
+    auto model =
+        models::gemma4::Model::Load(model_path, gemma_options, &load_error);
+    if (model == nullptr) {
+      SetError(error, "Failed to create Gemma 4 model: " + load_error);
+      return false;
+    }
+    if (DiskCacheEnabled(resolved_disk_cache_config) &&
+        resolved_disk_cache_config.model_artifact_fingerprint.empty() &&
+        !FingerprintArtifact(
+            "Gemma 4", *reader,
+            &resolved_disk_cache_config.model_artifact_fingerprint, error)) {
+      return false;
+    }
+    if (DiskCacheEnabled(resolved_disk_cache_config) && mtp &&
+        resolved_disk_cache_config.draft_model_artifact_fingerprint.empty() &&
+        !FingerprintArtifactFile(
+            "Gemma 4 MTP", speculative_config.draft_model_path,
+            &resolved_disk_cache_config.draft_model_artifact_fingerprint,
+            error)) {
+      return false;
+    }
+    return load(std::move(model), error, max_context, session_count,
+                prefill_policy, scheduler_policy, speculative_config,
+                std::move(resolved_disk_cache_config), ram_cache_config,
+                std::move(vision));
+  }
   if (reader->GetMetadataString("general.architecture") == "qwen4exp") {
     if (speculative_config.backend != TextSpeculativeBackend::kDisabled &&
         speculative_config.backend != TextSpeculativeBackend::kMtp) {
@@ -3688,10 +4664,12 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
     }
     if (speculative_config.backend == TextSpeculativeBackend::kMtp &&
         (speculative_config.max_draft_tokens == 0 ||
-         speculative_config.min_draft_tokens != 1)) {
+         speculative_config.min_draft_tokens != 1 ||
+         !speculative_config.mtp_draft_policy.empty() ||
+         !speculative_config.mtp_draft_calibration.empty())) {
       SetError(error,
-               "Flash-Next MTP requires a positive draft limit and "
-               "--min-draft-tokens 1");
+               "Flash-Next MTP requires a positive draft limit, "
+               "--min-draft-tokens 1 and no --draft-policy");
       return false;
     }
     // The compiled Qwen3.8 chat template renders through the artifact's
@@ -3771,6 +4749,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
     a3b.latin_draft_vocab = speculative_config.mtp_latin_draft_vocabulary;
     a3b.prompt_lookup = speculative_config.prompt_lookup;
     a3b.vision_model_path = vision_model_path;
+    a3b.vision_disabled = speculative_config.vision_disabled;
     switch (speculative_config.backend) {
       case TextSpeculativeBackend::kDisabled:
         break;
@@ -3825,7 +4804,9 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
 #endif
   std::shared_ptr<models::qwen::vision::Encoder> vision;
   try {
-    if (reader->GetMetadataUint64("qwen35.embedding_length") == 5120) {
+    if (speculative_config.vision_disabled) {
+      // --no-vision: image input is off, whatever sits beside the model.
+    } else if (reader->GetMetadataUint64("qwen35.embedding_length") == 5120) {
       vision = models::qwen::vision::Encoder::Open(model_path,
                                                    vision_model_path, 5120);
     } else if (!vision_model_path.empty()) {
@@ -4189,6 +5170,91 @@ bool InferenceBackend::load(
     return false;
   }
 }
+
+bool InferenceBackend::load(
+    std::shared_ptr<models::gemma4::Model> model, std::string* error,
+    std::uint32_t max_context, std::size_t session_count,
+    TextPrefillPolicy prefill_policy, TextSchedulerPolicy scheduler_policy,
+    TextSpeculativeConfig speculative_config,
+    TextDiskCacheConfig disk_cache_config,
+    TextRunnerRamCacheOptions ram_cache_config,
+    std::shared_ptr<models::gemma4::vision::Encoder> vision) {
+  if (model == nullptr) {
+    SetError(error, "Gemma 4 model must not be null");
+    return false;
+  }
+  if (max_context == 0)
+    max_context = model->MaxContext();
+  if (session_count == 0 || max_context == 0 ||
+      max_context > model->MaxContext()) {
+    SetError(error, "Gemma 4 HTTP sessions or context exceed the loaded model");
+    return false;
+  }
+  if ((speculative_config.backend == TextSpeculativeBackend::kMtp) !=
+      model->HasMtp()) {
+    SetError(error, "Gemma 4 MTP requires a model loaded with its drafter");
+    return false;
+  }
+  if (DiskCacheEnabled(disk_cache_config) &&
+      (!IsSha256Hex(disk_cache_config.model_artifact_fingerprint) ||
+       (model->HasMtp() &&
+        !IsSha256Hex(disk_cache_config.draft_model_artifact_fingerprint)) ||
+       disk_cache_config.capacity_bytes == 0)) {
+    SetError(error, "Gemma 4 persistent disk cache configuration is invalid");
+    return false;
+  }
+  try {
+    auto new_state = std::make_shared<Impl::State>();
+    new_state->sampling_defaults.model = sampling::TextModelPreset::kGemma4;
+    new_state->sampling_defaults.supplied = {};
+    // Images are accepted only with the model's vision sidecar bound.
+    new_state->supports_images = vision != nullptr;
+    const std::uint32_t ring =
+        static_cast<std::uint32_t>(model->SessionRingSlots());
+    // GUFO_MAX_IMAGE_TOKENS caps the soft tokens of all images in one
+    // request, as for Flash-Next (unset: only the context limits them).
+    std::uint32_t max_image_tokens = 0;
+    if (const char* cap = std::getenv("GUFO_MAX_IMAGE_TOKENS");
+        cap != nullptr && *cap != '\0') {
+      char* parsed_end = nullptr;
+      const auto value = std::strtoull(cap, &parsed_end, 10);
+      if (parsed_end == cap || *parsed_end != '\0' || value == 0 ||
+          value > std::numeric_limits<std::uint32_t>::max()) {
+        SetError(error, "GUFO_MAX_IMAGE_TOKENS must be a positive integer");
+        return false;
+      }
+      max_image_tokens = static_cast<std::uint32_t>(value);
+    }
+    auto runner = std::make_shared<Gemma4TextRunner>(
+        std::move(model), max_context, ring,
+        disk_cache_config.model_artifact_fingerprint,
+        disk_cache_config.draft_model_artifact_fingerprint, std::move(vision),
+        max_image_tokens);
+    new_state->model_id = runner->Descriptor().model_id;
+    new_state->max_context = max_context;
+    std::optional<TextRunnerDiskCacheOptions> runner_disk_cache;
+    if (DiskCacheEnabled(disk_cache_config)) {
+      runner_disk_cache = TextRunnerDiskCacheOptions{
+          .directory = std::move(disk_cache_config.directory),
+          .capacity_bytes = disk_cache_config.capacity_bytes,
+          .staging_capacity_bytes = disk_cache_config.staging_capacity_bytes,
+      };
+    }
+    auto runner_pool = std::make_shared<TextRunnerPool>(
+        std::move(runner), session_count, std::move(runner_disk_cache),
+        ram_cache_config);
+    new_state->scheduler = std::make_shared<TextGenerationScheduler>(
+        std::move(runner_pool), prefill_policy, scheduler_policy);
+    {
+      const std::lock_guard<std::mutex> lock(impl_->state_mutex);
+      impl_->state = std::move(new_state);
+    }
+    return true;
+  } catch (const std::exception& exception) {
+    SetError(error, exception.what());
+    return false;
+  }
+}
 #endif
 
 std::string InferenceBackend::model_id() const {
@@ -4277,6 +5343,16 @@ InferenceBackend::InitialOutputState InferenceBackend::initial_output_state(
 #endif
 }
 
+InferenceBackend::OutputMarkup InferenceBackend::output_markup() const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  return state != nullptr ? state->scheduler->runner().Markup()
+                          : OutputMarkup{};
+#else
+  return {};
+#endif
+}
+
 void InferenceBackend::set_model_id(const std::string& model_id) {
 #if defined(ENGINE_ENABLE_HIP)
   if (model_id.empty()) {
@@ -4334,8 +5410,8 @@ InferenceBackend::Result InferenceBackend::complete(
     std::string_view prompt, std::size_t max_tokens,
     const sampling::SamplingConfig& sampling_config,
     const CancellationCheck& is_cancelled, const TokenCallback& on_token,
-    std::string_view client_id,
-    const std::vector<std::string>& stop_sequences) {
+    std::string_view client_id, const std::vector<std::string>& stop_sequences,
+    bool cache_prompt) {
 #if defined(ENGINE_ENABLE_HIP)
   const auto request_start = Clock::now();
   const auto state = impl_->Snapshot();
@@ -4348,8 +5424,9 @@ InferenceBackend::Result InferenceBackend::complete(
   return impl_->GenerateScheduled(
       state, std::move(prompt_tokens), request_start, max_tokens,
       effective_sampling, is_cancelled, on_token, std::string(client_id), {},
-      true, 0, stop_sequences);
+      cache_prompt, 0, stop_sequences);
 #else
+  (void)cache_prompt;
   (void)client_id;
   (void)stop_sequences;
   (void)prompt;
@@ -4403,14 +5480,15 @@ InferenceBackend::start_complete(
     const sampling::SamplingConfig& sampling_config,
     const CancellationCheck& is_cancelled, bool stream_output, bool ignore_eos,
     std::string_view client_id, const std::vector<std::string>& stop_sequences,
-    bool return_progress, bool debug_timeline) {
+    bool return_progress, bool debug_timeline, bool cache_prompt) {
 #if defined(ENGINE_ENABLE_HIP)
   const auto request_start = Clock::now();
   const auto state = impl_->Snapshot();
   if (state == nullptr) {
     return TextGenerationBackend::start_complete(
         prompt, max_tokens, sampling_config, is_cancelled, stream_output,
-        ignore_eos, client_id, stop_sequences, return_progress, debug_timeline);
+        ignore_eos, client_id, stop_sequences, return_progress, debug_timeline,
+        cache_prompt);
   }
 
   std::shared_ptr<DebugTimeline> timeline;
@@ -4438,7 +5516,7 @@ InferenceBackend::start_complete(
           .deadline = std::nullopt,
           .request_start = request_start,
           .prompt_context = {},
-          .cache_prompt = true,
+          .cache_prompt = cache_prompt,
           .cache_prefix_tokens = 0,
           .stop_at_eos = !ignore_eos,
           .stop_sequences = stop_sequences,
@@ -4451,7 +5529,8 @@ InferenceBackend::start_complete(
 #else
   return TextGenerationBackend::start_complete(
       prompt, max_tokens, sampling_config, is_cancelled, stream_output,
-      ignore_eos, client_id, stop_sequences, return_progress, debug_timeline);
+      ignore_eos, client_id, stop_sequences, return_progress, debug_timeline,
+      cache_prompt);
 #endif
 }
 
@@ -4492,6 +5571,9 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
         std::chrono::duration<double, std::milli>(Clock::now() - render_start)
             .count();
     event["token_count"] = prompt->tokens.size();
+    auto counters = state->scheduler->runner().PromptTokenizationStats();
+    if (!counters.is_null())
+      event["incremental_tokenize"] = std::move(counters);
     timeline->Add("render", render_start, std::move(event));
   }
 
@@ -4541,6 +5623,34 @@ std::size_t InferenceBackend::count_tokens(std::string_view text) const {
 #else
   (void)text;
   return 0;
+#endif
+}
+
+std::optional<std::size_t> InferenceBackend::count_chat_tokens(
+    const ChatRequest& request) const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  if (state == nullptr) {
+    return std::nullopt;
+  }
+  // The same preparation as chat(): constrained tool or format requests add
+  // prompt text before the template is rendered.
+  auto sampling = sampling::SamplingConfig{};
+  auto constrained =
+      ConstrainChatRequest(request, state->scheduler->runner(), &sampling);
+  const auto& effective_request = constrained ? *constrained : request;
+  // Messages accepts text only. Count it before context admission so callers
+  // can size an oversized prompt before trimming it, as with llama.cpp.
+  // Generation still enforces the execution context limit.
+  const auto tokens =
+      state->scheduler->runner().RenderAndTokenize(effective_request);
+  if (!tokens.has_value()) {
+    return std::nullopt;
+  }
+  return tokens->size();
+#else
+  (void)request;
+  return std::nullopt;
 #endif
 }
 

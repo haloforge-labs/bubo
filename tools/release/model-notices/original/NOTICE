@@ -1,0 +1,13 @@
+Halowin Bubo model files: notice (original model)
+
+Copyright (c) 2026 Qwen. The eight model files that the original-model option of `bubo prepare` downloads are derived from Qwen3.8 Flash Next (Qwen/Qwen3.8-Flash-Next). The Qwen Community License 1.0 applies to all eight files. The licence text is in the file LICENSE next to this notice. These files are not licensed under the MIT licence.
+
+Notice chain: Qwen (model) -> Unsloth (GGUF source, MTP predictor, vision projector and importance matrix) -> HaloForge Labs (dense twin and draft head).
+
+1. Four main shards (UD-Q4_K_XL): from unsloth/Qwen3.8-Flash-Next-GGUF, revision 766911a6b7369840a91dbcd95f9f997acaab6cd6, unchanged. This is the original model. It is not an abliterated build.
+2. MTP predictor and vision projector: from unsloth/Qwen3.8-Flash-Next-GGUF, revision 766911a6b7369840a91dbcd95f9f997acaab6cd6, unchanged.
+3. Dense twin and draft head: made by HaloForge Labs from the Unsloth UD-Q4_K_XL shards, using the importance matrix of unsloth/Qwen3.8-Flash-Next-GGUF. Modifications by HaloForge Labs: IQ4_XS/IQ4_NL dense twin of selected tensors and a Q4_K output head. Hosted at HaloForgeLabs/bubo-qwen3.8-flash-next, revision 0a3c343bec2095f43f2906371c83e4faa8a47da1.
+
+Conditions of the Qwen Community License 1.0 for commercial use: a product with more than 100,000,000 monthly active users or US$20,000,000 monthly revenue must show the model name in its interface. A Model as a Service or AI Work Assistant business needs a separate licence from Qwen. HaloForge Labs offers these files for free and runs no such service. Read the full licence in LICENSE before you redistribute.
+
+Halowin Bubo program code is separate and uses the MIT licence.

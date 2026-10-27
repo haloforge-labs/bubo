@@ -1,0 +1,6 @@
+<|im_start|>system
+Padded rule.<|im_end|>
+<|im_start|>user
+Hi there<|im_end|>
+<|im_start|>assistant
+<think>

@@ -52,6 +52,10 @@ struct TextSchedulerPolicy {
   std::size_t max_buffered_output_bytes_total{
       kDefaultMaxBufferedOutputBytesTotal};
   std::chrono::milliseconds request_timeout{0};
+  /// A scheduler that has work but starts no work unit and completes no
+  /// pending capture for this long is reported as a lost device. Zero
+  /// disables it.
+  std::chrono::milliseconds stall_timeout{0};
   bool log_progress{false};
 };
 
@@ -109,6 +113,11 @@ public:
                 const StartCallback& on_start = {},
                 const ScoredTokenCallback& on_score = {});
     void Cancel() noexcept;
+    /// The first generated end-of-reasoning tag so far, by token ids. It is
+    /// recorded before the tag's piece is queued, so it covers every piece
+    /// Wait has delivered.
+    [[nodiscard]] TextGenerationBackend::ReasoningEnd CurrentReasoningEnd()
+        const;
 
   private:
     friend class TextGenerationScheduler;

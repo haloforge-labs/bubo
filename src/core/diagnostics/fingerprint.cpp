@@ -251,13 +251,21 @@ std::string MachineFingerprint::ToHuman() const {
   oss << "=== Machine Fingerprint ===\n";
   oss << "Fingerprint ID      : " << fingerprint_id << "\n";
   oss << "Target Platform     : " << canonical.cpu_architecture
+#ifdef _WIN32
+      << "-windows (Windows " << canonical.kernel_release << ")\n";
+#else
       << "-linux (Linux " << canonical.kernel_release << ")\n";
+#endif
   oss << "CPU Model           : " << canonical.cpu_model << " ("
       << canonical.cpu_logical_cores << " threads)\n";
   oss << "GPU Architecture    : " << canonical.gpu_name << " ["
       << canonical.gpu_architecture << ", " << canonical.gpu_compute_units
       << " CUs]\n";
+#ifdef _WIN32
+  oss << "ROCm Runtime        : " << canonical.rocm_version << "\n";
+#else
   oss << "Pinned Toolchain    : ROCm " << canonical.rocm_version << "\n";
+#endif
   return oss.str();
 }
 

@@ -10,8 +10,10 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
+#include "src/core/image.hpp"
 #include "src/core/sampling.hpp"
 #include "src/core/session_mode.hpp"
 #include "src/models/qwen/tokenizer.hpp"
@@ -95,6 +97,11 @@ struct ModelOptions {
 class Session;
 class SessionSnapshot;
 
+/// The error text for a request whose images carry `tokens` image tokens
+/// against a per-request limit of `limit`. It names GUFO_MAX_IMAGE_TOKENS.
+[[nodiscard]] std::string ImageTokenLimitMessage(std::uint64_t tokens,
+                                                 std::uint32_t limit);
+
 /// Gufo-owned API over the ROCm runtime: one resident model, any number of
 /// sessions with shared projection batches and independent context state.
 class Model final : public std::enable_shared_from_this<Model> {
@@ -125,6 +132,11 @@ public:
   /// Prints the decode-twin counters under `tag`; no-op without a twin.
   void LogTwinCounters(const char* tag) const;
   [[nodiscard]] std::uint32_t PrefillCheckpointSlack() const noexcept;
+  /// Host memory a new checkpoint of `payload_bytes` covering `token_count`
+  /// tokens will hold: its session part while the device can hold the rest
+  /// (a borrowed capture keeps its state there), else the whole payload.
+  [[nodiscard]] std::uint64_t SnapshotHostBytes(std::uint64_t payload_bytes,
+                                                std::uint32_t token_count) const;
   [[nodiscard]] std::vector<platform::LoadedFile> LoadedFiles() const;
   [[nodiscard]] const ModelOptions& options() const noexcept {
     return options_;
@@ -149,16 +161,22 @@ public:
   /// Worst-case per-request image state: the position table (12 B per context
   /// token) plus the encoder embeddings of at most MaxImageTokens(context)
   /// image tokens (hidden_size floats each). Zero when no vision encoder is
-  /// loaded. GUFO_MAX_IMAGE_TOKENS (read at load; unset = context) caps the
-  /// image tokens a request may carry, which bounds this reservation.
+  /// loaded. GUFO_MAX_IMAGE_TOKENS (read at load; unset =
+  /// core::kDefaultRequestImageTokens) caps the image tokens one request may
+  /// carry, which bounds this reservation.
   [[nodiscard]] std::size_t VisionSessionBytes(
       std::uint32_t context) const noexcept;
   [[nodiscard]] std::uint32_t MaxImageTokens(
       std::uint32_t context) const noexcept {
-    return max_image_tokens_ == 0 ? context
-                                  : std::min(context, max_image_tokens_);
+    return std::min(context, max_image_tokens_ == 0
+                                 ? core::kDefaultRequestImageTokens
+                                 : max_image_tokens_);
   }
   [[nodiscard]] std::size_t DeferredScratchBytes() const;
+  /// Device bytes of the buffer that lets a faulted NPU prefill chunk run
+  /// again on the GPU (npu_retry.hpp): one per executor, allocated at the
+  /// first NPU chunk; 0 when NPU prefill is off.
+  [[nodiscard]] std::size_t NpuRetryBackupBytes() const noexcept;
   [[nodiscard]] std::string AccountingLine(core::SessionMode mode,
                                            std::uint32_t context) const;
   [[nodiscard]] const std::shared_ptr<qwen::vision::Encoder>& VisionEncoder()
@@ -180,7 +198,7 @@ private:
   std::unique_ptr<rocm::Executor> executor_;
   std::shared_ptr<qwen::vision::Encoder> vision_;
   std::uint32_t max_image_tokens_{
-      0};  ///< GUFO_MAX_IMAGE_TOKENS; 0 = no cap beyond the context
+      0};  ///< GUFO_MAX_IMAGE_TOKENS; 0 = core::kDefaultRequestImageTokens
   MtpBatchController batch_policy_;
   /// DraftVocabulary::kAuto: 1 for each token id in the latin draft set (the
   /// same list the executor's subset head is gathered from).
@@ -326,7 +344,7 @@ public:
   }
 
   /// Compatibility version; bump on payload or inference arithmetic changes.
-  static constexpr std::uint32_t kSnapshotPayloadVersion = 16;
+  static constexpr std::uint32_t kSnapshotPayloadVersion = 18;
   /// Bytes a snapshot of the current context occupies.
   [[nodiscard]] std::uint64_t SnapshotBytes() const;
   [[nodiscard]] std::uint64_t PrefillCheckpointBytes(
@@ -451,6 +469,13 @@ public:
   /// Frozen device storage, counting each shared backing block once.
   /// Borrowed live rows and allocator reservations are excluded.
   [[nodiscard]] std::uint64_t DeviceBytes() const;
+  /// As DeviceBytes(), counting a block that is already in `counted` once.
+  [[nodiscard]] std::uint64_t DeviceBytes(
+      std::unordered_set<const void*>& counted) const;
+  /// Bytes this checkpoint holds in host memory now: the session part
+  /// (header, tokens, logits) while its executor state stays on the device,
+  /// the whole payload once it was copied to the host.
+  [[nodiscard]] std::uint64_t HostBytes() const;
   /// Materializes borrowed rows; may throw on a failed device transfer.
   [[nodiscard]] std::span<const std::uint8_t> bytes() const;
   [[nodiscard]] bool CopyTo(std::span<std::uint8_t> destination) const noexcept;
@@ -460,6 +485,7 @@ private:
 
   std::shared_ptr<std::uint8_t[]> data_;
   std::uint64_t size_{0};
+  std::uint64_t executor_bytes_{0};
   std::shared_ptr<rocm::SnapshotState> deferred_;
 
   friend class Session;

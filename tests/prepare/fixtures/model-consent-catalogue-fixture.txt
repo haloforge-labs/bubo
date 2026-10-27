@@ -1,0 +1,25 @@
+Bubo will prepare these files.
+one.gguf | huggingface.co |
+https://huggingface.co/fixture/model/resolve/11111111111111111111111111111111111
+11111/one.gguf | 3 bytes | 0.000 GiB | ba7816bf8f01 |
+ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad | Apache-2.0 |
+C:/golden-root/models/fixture-model/one.gguf | download
+config.json | huggingface.co |
+https://huggingface.co/fixture/model/resolve/11111111111111111111111111111111111
+11111/config.json | 3 bytes | 0.000 GiB | ba7816bf8f01 |
+ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad | Apache-2.0 |
+C:/golden-root/models/fixture-model/config.json | download
+Total file size: 6 bytes (0.000 GiB).
+Total download size: 6 bytes (0.000 GiB).
+Free space: 123456789012 bytes. Required space: 2149580962 bytes. Volume:
+fixture-volume.
+License: Apache-2.0. Fixture model.
+Licence: Apache License 2.0 (Apache-2.0)
+Licence link: https://www.apache.org/licenses/LICENSE-2.0
+Model: Fixture model
+A copy is saved in C:/golden-root/models/fixture-model/licenses after the
+download.
+Estimated download time: unknown; download speed is not known.
+Bubo checks each download's full SHA-256 while it receives the file.
+Downloads can redirect to allowed hosts under huggingface.co or hf.co.
+Bubo will not build a model on this computer.

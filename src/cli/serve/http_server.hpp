@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "src/cli/serve/generation_metrics.hpp"
+#include "src/cli/serve/request_history.hpp"
 #include "src/cli/serve/text_generation_backend.hpp"
 
 namespace gufo::server {
@@ -87,6 +88,10 @@ struct HttpResponse {
   /// keepalives still cover prefill and queue waits.
   bool defer_stream_headers{false};
   bool omit_cors{false};
+  /// The frame an event stream writes after HttpServerOptions::sse_heartbeat_interval without any write. Unset: the SSE comment ": ping".
+  /// Called by the heartbeat while the transport's write lock is held, so it must not block or take a lock a writer holds while it writes
+  /// (use try_lock); an empty result writes nothing this time.
+  std::function<std::string()> heartbeat_frame{};
 };
 
 using Handler =
@@ -104,6 +109,8 @@ struct HttpServerOptions {
   /// a lost device. Health, readiness and generation answer 503 `device_lost`
   /// from then on; the hook decides how the process exits.
   std::function<void()> on_device_lost{};
+  std::function<void()> on_signal_stop{};
+  std::function<void(json::Value)> on_request_completed{};
 };
 
 /// Minimal bounded HTTP/1.1 server for trusted-LAN model serving.
@@ -137,6 +144,16 @@ public:
   void request_stop() noexcept;
 
   [[nodiscard]] int port() const noexcept { return port_; }
+  const std::string& bound_host() const noexcept { return bound_host_; }
+  std::string bound_endpoint() const {
+    const auto host = bound_host_.find(':') == std::string::npos
+                          ? bound_host_
+                          : "[" + bound_host_ + "]";
+    return "http://" + host + ":" + std::to_string(port_) + "/v1";
+  }
+  // Shares the health route predicate. Call after start() has bound/listened.
+  [[nodiscard]] bool ready();
+  json::Value recent_requests() const { return requests_.Sample(); }
 
 private:
   struct ConnectionWorker;
@@ -148,6 +165,8 @@ private:
   void register_routes();
 
   std::string host_;
+  std::string bound_host_;
+  RequestHistory requests_;
   int port_;
   std::shared_ptr<TextGenerationBackend> backend_;
   std::shared_ptr<VideoJobService> video_jobs_;
@@ -167,6 +186,8 @@ private:
 /// Scheduled requests are recorded by the scheduler when they finish. Other
 /// backends contribute here, at completion.
 inline void RecordServerMetrics(const TextGenerationBackend::Result& result) {
+  if (http_result_observer)
+    http_result_observer(result);
   if (result.token_metrics_recorded)
     return;
   // Older backends may only report prompt/cache totals. Infer their completed

@@ -58,6 +58,13 @@ public:
       const std::function<void(std::size_t, std::span<const std::byte>)>&
           consume);
   void PrepareWeight(std::span<const std::byte> b);
+  // Guard hold: no keepalive heartbeats while paused (session and BOs stay).
+  void SetKeepalivePaused(bool paused) noexcept;
+  // One synchronous heartbeat through the normal dispatch path. False (with
+  // *error) on failure; the normal fault path (FailProcess) has then run.
+  bool WarmUpBeat(std::string* error);
+  // Sampled buffer-page addresses for the log-only residency trace.
+  std::vector<const void*> SamplePages();
   NpuResult Dispatch(std::span<const std::byte> a, std::span<const std::byte> b,
                      DispatchInfo info);
   NpuResult RejectResult(std::string error);

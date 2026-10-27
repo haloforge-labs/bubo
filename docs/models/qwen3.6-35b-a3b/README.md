@@ -34,6 +34,16 @@ One session (`--sessions 1`); image input uses the Qwen3.6 BF16 vision sidecar
 this model. The prompt cache keeps the recurrent state (~130 MB per snapshot) and
 reuses the KV rows in place.
 
+## Chat template
+
+Cyber-Tiel-Coder supports its own chat template and thinking rules.
+
+By default the copy writes tool calls in XML (`<tool_call>`, `<function=...>`,
+`<parameter=...>`), the same as stock llama.cpp does with this template. A
+request can ask for JSON tool calls (`<tool_call>` with a `{"name": ...,
+"arguments": {...}}` object) with `"chat_template_kwargs": {"tool_call_format":
+"json"}`. The server then also parses and constrains the calls as JSON.
+
 ## Exactness
 
 Every verified row is sampled with the request's own sampler and a draft is

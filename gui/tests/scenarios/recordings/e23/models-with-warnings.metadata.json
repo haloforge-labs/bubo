@@ -1,0 +1,19 @@
+{
+  "purpose": "S20: candidate 4 rows with CLI contract scan warnings; derived fixture, not raw CLI stdout.",
+  "_source": "fixture",
+  "base": {
+    "kept": "everything except payload.scan_warnings and payload.scanned",
+    "sha256": "dd3bcb604aa115554df648f1a2bdea338d28b192f3531da05aa4b3e05e8df31b",
+    "file": "gui/tests/scenarios/recordings/e23/models-list-gui.json"
+  },
+  "copied": {
+    "fields": [
+      "payload.scan_warnings",
+      "payload.scanned"
+    ],
+    "sha256": "cf4c9b8aeae4f84ea79f10393130bf179738685a9189824b70d85dd112f65897",
+    "file": "tests/cli/contract/valid/models.json"
+  },
+  "fixture_bytes": 126796,
+  "fixture_sha256": "06805fe441aba7b2cb690e69188441aec162cc9b741add338beba671271fc6c3"
+}

@@ -1,0 +1,2 @@
+# sources.json pins the exact captured CLI bytes, including line endings.
+status-*.json -text

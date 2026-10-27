@@ -59,16 +59,16 @@ struct QueuePlan {
   /// Upper bound on the queues this process will add. A process that creates
   /// fewer streams than its cap allows settles below this.
   std::uint32_t expected_queues{0};
-  /// The operator set GPU_MAX_HW_QUEUES; their value is never overridden.
+  /// The user set GPU_MAX_HW_QUEUES; their value is never overridden.
   bool operator_supplied{false};
-  /// The operator's value, when it parses as a queue count. Zero means it does
+  /// The user's value, when it parses as a queue count. Zero means it does
   /// not, and only the floor can be reasoned about.
   std::uint32_t operator_cap{0};
   /// Even the two-queue floor does not fit: the device will idle busy.
   bool exceeds_budget{false};
   /// The upper bound does not fit, so the device may idle busy. Always set
   /// when exceeds_budget is. For a cap this process chose the two agree, since
-  /// it only ever picks a cap that fits; they differ for an operator value,
+  /// it only ever picks a cap that fits; they differ for a user value,
   /// which is honoured whether or not it fits.
   bool may_exceed_budget{false};
 };

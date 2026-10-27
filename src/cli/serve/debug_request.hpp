@@ -33,10 +33,9 @@ inline bool DebugLoopbackListener(std::string_view host) {
 
 // Parse alongside the existing body, so an ordinary request needs no second
 // JSON parse and requested diagnostics cannot silently disappear.
-inline std::optional<std::string> ParseDebugRequest(const json::Value& body,
-                                                    bool enabled,
-                                                    bool* timeline,
-                                                    bool loopback = true) {
+inline std::optional<std::string> ParseDebugRequest(
+    const json::Value& body, bool enabled, bool* timeline, bool loopback = true,
+    bool* raw_output = nullptr) {
   if (!enabled)
     return std::nullopt;
   const auto* debug = body.find("debug");
@@ -50,12 +49,15 @@ inline std::optional<std::string> ParseDebugRequest(const json::Value& body,
     return "'debug' must be an object";
   bool probe = false;
   for (const auto& [key, value] : debug->members()) {
-    if (key != "timeline" && key != "cache_probe")
+    if (key != "timeline" && key != "cache_probe" &&
+        !(key == "raw_output" && raw_output))
       return "unknown debug field: " + key;
     if (!value.is_bool())
       return "'debug." + key + "' must be a boolean";
     if (key == "timeline")
       *timeline = value.as_bool();
+    else if (key == "raw_output")
+      *raw_output = value.as_bool();
     else
       probe = value.as_bool();
   }

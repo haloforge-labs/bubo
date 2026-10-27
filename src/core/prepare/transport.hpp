@@ -72,6 +72,9 @@ struct DownloadOptions {
   std::function<void(std::uint64_t, std::uint64_t)> progress;
   std::function<void(const std::string&)> on_host;
   unsigned max_attempts = 256;
+  // Save the resume checkpoint while streaming, every this many bytes, so a
+  // stall or crash keeps what was written. Tests may lower it.
+  std::uint64_t checkpoint_bytes = 256ULL << 20;
   std::chrono::seconds max_time{24 * 60 * 60};
   // Clock/wait injection has no URL or pin authority; J3 can reuse it.
   std::function<void(std::chrono::seconds)> wait;

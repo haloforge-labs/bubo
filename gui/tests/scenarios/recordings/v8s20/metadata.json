@@ -1,0 +1,17 @@
+{
+  "purpose": "S20 (W6b): CLI text at the Models sites. Fixture assembly, not a recording: the E21 recorded model list (candidate exe 4924e51e), with scan_warnings and scanned copied verbatim from the CLI contract fixture. E21 could not record a scan warning or an unusable file.",
+  "_source": "fixture",
+  "base": {
+    "file": "gui/tests/scenarios/recordings/e21/models-list-gui.json",
+    "sha256": "efe264a37f6d4a63f4063a0ddb74b36ab84c9d13242cc412fd0caa4b8647aa04",
+    "kept": "everything except scan_warnings and scanned"
+  },
+  "copied": {
+    "file": "tests/cli/contract/valid/models.json",
+    "sha256": "cf4c9b8aeae4f84ea79f10393130bf179738685a9189824b70d85dd112f65897",
+    "fields": [
+      "payload.scan_warnings",
+      "payload.scanned"
+    ]
+  }
+}

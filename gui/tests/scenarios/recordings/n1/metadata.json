@@ -1,0 +1,33 @@
+{
+  "source": "recorded",
+  "executable": "C:\\bubo\\run\\app\\bin\\bubo-n1-c9d12b97\\bubo.exe",
+  "executable_sha256": "edb8e1aad7b52a8b34a63bbf90627132583e3d038786483607a045b081c187c2",
+  "revision": "c9d12b97",
+  "command": [
+    "serve",
+    "--list-switches",
+    "--json"
+  ],
+  "environment": {
+    "PATH": "C:\\bubo\\run\\app\\bin\\bubo-b4-d7cc0a53;C:\\Windows\\System32;C:\\Windows"
+  },
+  "dependency_sha256": {
+    "bubo-engine.dll": "ad05d1f3ccfad64a73b89add2a5a849419665ec77f0d71f8de78d2b09f89298d",
+    "jpeg62.dll": "4bcebb840485215a7c5ae17cd8bb4ba687dba6fd8ee6e162e7c968124c2abe19",
+    "libwebp.dll": "969f81437eb489e6c463930f8f1e33a2bc03bdd9f3fd0ac83217f6bde2f63c9e",
+    "libsharpyuv.dll": "fee2648b33e3a2763ee6105efaf7053b67f22d103bf403e7e8e87dc7ec38c970",
+    "libpng16.dll": "3bcf80b5e699803a9d1dc30e08670a19970b73ff803f7fcd8f293dd6880d08e8",
+    "z.dll": "9361407a5b618e4818e3bbbb7d2c1c7c407692c64dd817f769b70903aa95903c",
+    "icuuc78.dll": "bb8c3f3c2bcab9b2ff735ed827378422e7c0f1b68cf24928a4199e7b6d4b3f38",
+    "icudt78.dll": "2e793cd9637eb7c6e068da74092eabd8e538d7c42729161e8fd4e1b88ab02c58",
+    "libcrypto-3-x64.dll": "35bdf9d189ed8e7bacfbc6ae9a69ad48aaf79fa101307bcc44887fa2d6cbb753",
+    "libcurl.dll": "1b38cb0c7b6d35ca7814dace364c4b9ff7e2051b780bb951c32c20dfbe3c26bf"
+  },
+  "started": "2026-10-15T02:48:10.7689454-04:00",
+  "exit_code": 0,
+  "record_sha256": "5285fc1fe61654f5e393bd3be01b3c1ca9b6fefb73a00a9697a7d2979cd0cd45",
+  "rows": 214,
+  "rows_with_secret": 214,
+  "secret_rows": 3,
+  "note": "Registry-only CPU read. Frozen existing B4 DLL directory reused in place; no engine workload or binary copies. Initial run without that dependency PATH exited -1073741515."
+}

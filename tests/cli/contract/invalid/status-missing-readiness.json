@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "operation_id": "11111111111111111111111111111111",
+  "seq": 1,
+  "time": "2026-10-13T18:00:00Z",
+  "product": {
+    "name": "bubo",
+    "version": "0.1.0",
+    "revision": "3ff74dce",
+    "engine_version": "0.1.0"
+  },
+  "type": "status",
+  "payload": {
+    "prepared": false,
+    "phase": "not_prepared",
+    "versions": {
+      "name": "bubo",
+      "version": "0.1.0",
+      "revision": "3ff74dce",
+      "engine_version": "0.1.0"
+    },
+    "capabilities": {
+      "schema_version": 1,
+      "prepare_jsonl": true,
+      "diagnose_json": true,
+      "status_json": true,
+      "instance_control": false,
+      "status_watch": false
+    },
+    "paths": {
+      "runtime": "C:/Bubo",
+      "local_app_data": "C:/local",
+      "manifest": null
+    },
+    "prepared_default": null,
+    "instances": [],
+    "effective_settings": null,
+    "memory": null,
+    "last_error": {
+      "code": "runtime_missing",
+      "component": "runtime",
+      "stage": "status",
+      "retryable": false,
+      "remedy": "Run bubo prepare runtime."
+    },
+    "sample_time": "2026-10-13T18:00:00Z"
+  }
+}

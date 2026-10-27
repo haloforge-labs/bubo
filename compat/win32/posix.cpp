@@ -1,24 +1,24 @@
-// Win32 implementation of the POSIX subset declared in include/gufo_posix.h.
-//
-// File descriptors are UCRT descriptors wrapping Win32 handles, so `int fd`
-// code keeps working, but every read, write and seek goes straight to the
-// handle rather than through the CRT's text-mode machinery.
-//
-// Semantics that differ from Linux and matter to Gufo:
-// - O_DIRECT opens with FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED. As on
-//   Linux, offsets, lengths and buffers must be sector aligned; the overlapped
-//   handle lets many threads pread() one descriptor concurrently.
-// - O_DIRECT reads of a file that is also mapped are serialized by NTFS:
-//   32 threads doing 4 KiB reads fall from ~70K to ~5K reads/s (measured on
-//   a Kingston NVMe with a model shard mapped). O_CONCURRENT_RANDOM (Windows
-//   only) opens a cached overlapped handle instead, which keeps full speed.
-// - open("/proc/self/fd/N") reopens descriptor N with ReOpenFile, which is the
-//   exact Win32 equivalent of Gufo's "independent file description for the
-//   same inode" idiom.
-// - flock() locks one byte far beyond any real file offset, because Windows
-//   byte-range locks are mandatory and would otherwise block ordinary reads.
-// - mmap() offsets are aligned down to the 64 KiB allocation granularity and
-//   munmap() releases whole views.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN

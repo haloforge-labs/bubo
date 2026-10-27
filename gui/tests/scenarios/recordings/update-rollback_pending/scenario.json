@@ -1,0 +1,34 @@
+{
+  "_source": "fixture",
+  "state": "Stopped",
+  "records": {
+    "models": "../v12/models-list-gui.json",
+    "saved_estimate": "../v12/estimate-flash-default.json",
+    "status": "../v12/status-main.json",
+    "switches": "../v12/switches.json"
+  },
+  "update": {
+    "state": "rollback_pending",
+    "ready": true,
+    "runtime_followup_required": false,
+    "log_path": "",
+    "log_lines": null,
+    "current_version": "0.1.0",
+    "available_version": "0.1.1",
+    "notes": "The Bubo app. Pick a model, press Start, and watch memory and requests. Update Bubo with one click.",
+    "size_bytes": 66131579,
+    "runtime_download_bytes": 0,
+    "models_download_bytes": 0,
+    "progress": null,
+    "error": {
+      "code": "rollback_pending",
+      "component": "update",
+      "stage": "",
+      "retryable": true,
+      "remedy": "new GUI is still running; .previous is intact and rollback must wait for its exit close the new GUI and its server, then invoke Recover; no processes were killed"
+    },
+    "last_result_notice": "Update rollback is pending. Install retries recovery after stopping CLI work. new GUI is still running; .previous is intact and rollback must wait for its exit",
+    "check_failed": false,
+    "previous_version": "0.1.0"
+  }
+}

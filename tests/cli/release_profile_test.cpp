@@ -1,5 +1,6 @@
 #include "src/cli/serve/release_profile.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -11,8 +12,11 @@
 #include <stdexcept>
 #include <string>
 
+#include "src/cli/instance_control.hpp"
+#include "src/cli/machine_exit.hpp"
 #include "src/cli/model_families.hpp"
 #include "src/cli/serve/debug_settings.hpp"
+#include "src/cli/settings_support.hpp"
 
 using namespace gufo::server;
 namespace {
@@ -37,7 +41,7 @@ ReleaseInputs Inputs(const std::string& profile = "default") {
   inputs.model_family = "qwen3.8-flash-next";
   inputs.profile = profile;
   // Synthetic sidecar path: resolver tests never load tensors.
-  if (profile != "exact" && profile != "stock")
+  if (profile != "exact" && profile != "vanilla")
     inputs.explicit_flags["--mtp-model"] = "mtp-test.gguf";
   return inputs;
 }
@@ -109,6 +113,50 @@ void AuditCatalog() {
   const std::regex getenv_literal(
       R"audit((?:std::getenv|\bgetenv)\s*\(\s*"([A-Za-z_][A-Za-z_0-9]*)")audit");
   const std::set<std::string> irrelevant = {"NO_COLOR"};
+  const std::string gate = "GUFO_THINK_MARKER_ENTROPY_GATE";
+  Expect(names.contains(gate) && DebugSettingsListsEnvironment(gate),
+         "research entropy gate is registered and diagnosed");
+  for (const char* profile : {"default", "subagents", "exact", "vanilla"}) {
+    auto inputs = Inputs(profile);
+    const auto unset = ResolveReleaseSettings(inputs);
+    Expect(!Find(unset, gate).value &&
+               std::ranges::none_of(unset.injections,
+                                    [&](const auto& injection) {
+                                      return injection.name == gate;
+                                    }),
+           "no profile injects the research entropy gate");
+    const auto settings = ReleaseSettingsJson(unset);
+    Expect(!ReleaseOrigins(unset).contains(gate) &&
+               !settings.find("origin")->contains(gate) &&
+               std::ranges::none_of(settings.find("settings")->items(),
+                                    [&](const auto& row) {
+                                      return row.member_str("name") == gate;
+                                    }),
+           "unset gate adds no effective release metadata");
+    inputs.environment[gate] = "0.75";
+    const auto configured = ResolveReleaseSettings(inputs);
+    Expect(Find(configured, gate).value == std::optional<std::string>("0.75") &&
+               ReleaseOrigins(configured).contains(gate) &&
+               std::ranges::none_of(configured.injections,
+                                    [&](const auto& injection) {
+                                      return injection.name == gate;
+                                    }),
+           "explicit entropy gate resolves without profile injection");
+    inputs.environment[gate] = "nan";
+    if (std::string_view(profile) == "vanilla") {
+      // Stock downgrades registry validation errors to warnings. The
+      // behaviour reader still rejects nonfinite thresholds in every profile.
+      const auto invalid = ResolveReleaseSettings(inputs);
+      Expect(Find(invalid, gate).value == std::optional<std::string>("nan") &&
+                 std::ranges::count(
+                     invalid.logs,
+                     "warning: " + gate + ": invalid value 'nan'") == 1,
+             "vanilla retains the invalid entropy gate with a numeric warning");
+    } else {
+      Reject([&] { (void)ResolveReleaseSettings(inputs); },
+             "release profiles reject nonfinite entropy gates");
+    }
+  }
   for (const auto& file :
        std::filesystem::recursive_directory_iterator(root / "src")) {
     const auto ext = file.path().extension().string();
@@ -179,10 +227,11 @@ void ReviewRegression(int finding) {
     Expect(Find(result, "GUFO_THINK_GUARD_ESCALATE").value ==
                std::optional<std::string>("0"),
            "no-behaviour turns guard escalation off");
-    // The full resolver test checks all nine rows and every unchanged row.
+    // The full resolver test checks the explicit suppression rows and every
+    // unchanged row.
   } else if (finding == 3) {
     for (const auto* name :
-         {"GUFO_EVAL_API_KEY", "GUFO_EVAL_ARTIFACT_ID",
+         {"BUBO_API_KEY", "GUFO_EVAL_API_KEY", "GUFO_EVAL_ARTIFACT_ID",
           "GUFO_EVAL_MODEL_REVISION", "GUFO_EVAL_SERVER_COMMIT",
           "GUFO_EVAL_SERVER_CONFIG", "GUFO_EVAL_SERVER_LABEL", "PATH", "TEMP"})
       Expect(!DebugSettingsListsEnvironment(name),
@@ -191,11 +240,13 @@ void ReviewRegression(int finding) {
          {"GUFO_EVAL_API_KEY", "GUFO_EVAL_ARTIFACT_ID",
           "GUFO_EVAL_MODEL_REVISION", "GUFO_EVAL_SERVER_COMMIT",
           "GUFO_EVAL_SERVER_CONFIG", "GUFO_EVAL_SERVER_LABEL"})
-      (void)Find(ResolveReleaseSettings(Inputs("stock")), name);
+      (void)Find(ResolveReleaseSettings(Inputs("vanilla")), name);
     const auto settings =
         BuildEffectiveSettings(gufo::json::Value::object(), "v", "r", "b");
     Expect(!settings.find("environment")->contains("GUFO_EVAL_API_KEY"),
            "debug echo never contains a secret row");
+    Expect(!settings.find("environment")->contains("BUBO_API_KEY"),
+           "debug echo never contains the server API key row");
   } else if (finding == 4) {
     const auto text = Read(std::filesystem::path(GUFO_RELEASE_SOURCE_ROOT) /
                            "cmake/Checks.cmake");
@@ -203,9 +254,9 @@ void ReviewRegression(int finding) {
                    .find("release_profile_test") != std::string::npos,
            "check-pr builds and runs release_profile_test");
   } else if (finding == 5) {
-    for (const auto* profile : {"stock", "default", "exact"}) {
+    for (const auto* profile : {"vanilla", "default", "exact"}) {
       auto inputs = Inputs(profile);
-      if (std::string_view(profile) != "stock")
+      if (std::string_view(profile) != "vanilla")
         inputs.model_family = "other";
       inputs.environment["GUFO_DISK_IDLE_MS"] = "700000";
       inputs.environment["GUFO_PREFILL_FORWARD_TOKENS"] = "32768";
@@ -241,9 +292,9 @@ void ReviewRegression(int finding) {
 #else
     setenv("GUFO_THINK_GUARD_ESCALATE", "", 1);
 #endif
-    ApplyInjections(ResolveReleaseSettings(Inputs("stock")));
+    ApplyInjections(ResolveReleaseSettings(Inputs("vanilla")));
     Expect(!SnapshotReleaseEnvironment().at("GUFO_THINK_GUARD_ESCALATE"),
-           "empty real catalog value is removed in stock");
+           "empty real catalog value is removed in vanilla");
 #ifdef _WIN32
     _putenv_s("GUFO_THINK_GUARD_ESCALATE", prior ? prior->c_str() : "");
 #else
@@ -281,6 +332,8 @@ void ReviewRegression(int finding) {
     const std::map<std::string, std::optional<std::string>> off = {
         {"GUFO_THINK_EOG_GUARD", "0"},
         {"GUFO_ROUTED_LANEROW", "0"},
+        {"GUFO_ROUTED_WMMA_IQ", "0"},
+        {"GUFO_INCREMENTAL_TOKENIZE", "0"},
         {"GUFO_THINK_MARKER_BIAS", "0"},
         {"GUFO_LOGIT_BIAS", "0"},
         {"GUFO_MODEL_SUPPRESS_TOKENS", "0"},
@@ -393,9 +446,9 @@ void ReviewRegression(int finding) {
     Expect(disabled, "no-cache effective setting reaches the parser sink");
     Expect(Find(ResolveReleaseSettings(Inputs()), "--no-cache").origin ==
                    "built-in" &&
-               Find(ResolveReleaseSettings(Inputs("stock")), "--no-cache")
+               Find(ResolveReleaseSettings(Inputs("vanilla")), "--no-cache")
                        .origin == "built-in",
-           "stock and default do not inject no-cache");
+           "vanilla and default do not inject no-cache");
   } else {
     throw std::invalid_argument("unknown regression");
   }
@@ -430,7 +483,7 @@ void Review2Regression(int finding) {
   if (finding == 1) {
     Expect(Find(ResolveReleaseSettings(inputs), "GUFO_ROUTED_LANEROW").value ==
                std::optional<std::string>("0"),
-           "exact uses the stock routed kernel");
+           "exact uses the vanilla routed kernel");
   } else if (finding == 2) {
     inputs.explicit_flags["--seed"] = "-1";
     Reject([&] { (void)ResolveReleaseSettings(inputs); },
@@ -450,7 +503,18 @@ void Review2Regression(int finding) {
     inputs = Inputs("exact");
     inputs.environment["GUFO_HIPBLASLT_PLAN_CACHE"] = "0";
     inputs.environment["GUFO_EVAL_API_KEY"] = "secret-marker";
+    inputs.environment["BUBO_API_KEY"] = "bubo-secret-marker";
     const auto result = ResolveReleaseSettings(inputs);
+    Expect(std::none_of(
+               result.logs.begin(), result.logs.end(),
+               [](const auto& line) {
+                 return line.find("BUBO_API_KEY") != std::string::npos ||
+                        line.find("bubo-secret-marker") != std::string::npos;
+               }),
+           "BUBO_API_KEY is not stripped, listed or logged by the profile");
+    Expect(Find(result, "BUBO_API_KEY").value ==
+               std::optional<std::string>("bubo-secret-marker"),
+           "BUBO_API_KEY survives profile resolution");
     Expect(std::none_of(result.logs.begin(), result.logs.end(),
                         [](const auto& line) {
                           return line.find("secret-marker") !=
@@ -467,10 +531,11 @@ void Review2Regression(int finding) {
     Expect(docs.find("identical to plain autoregressive decoding of that build "
                      "with the same settings") != std::string::npos,
            "docs qualify reference equality");
-    Expect(docs.find("--profile stock --speculative off --no-cache --sessions "
-                     "1 --seed 1 --think on --reasoning-effort medium") !=
-               std::string::npos,
-           "docs state the complete reference command");
+    Expect(
+        docs.find("--profile vanilla --speculative off --no-cache --sessions "
+                  "1 --seed 1 --think on --reasoning-effort medium") !=
+            std::string::npos,
+        "docs state the complete reference command");
   } else if (finding == 5) {
     PlaceholderNotesCheck(ReleaseSwitchTable());
     for (const auto* classification : {"OPTION", "DEFAULT"}) {
@@ -546,7 +611,8 @@ void Review2Regression(int finding) {
         "other-family exact accepts its ordinary session and cache options");
     Expect(RenderReleaseDocs(ReleaseSwitchTable())
                    .find("Other model families keep their existing defaults "
-                         "except for the exact seed and NPU profile policy.") != std::string::npos,
+                         "except for the exact seed and NPU profile policy.") !=
+               std::string::npos,
            "docs state the other-family seed exception");
   } else if (finding == 8) {
     inputs = Inputs("default");
@@ -637,19 +703,24 @@ void NpuPolicyTest() {
 #else
   constexpr bool available = false;
 #endif
-  for (const auto* profile : {"default", "subagents", "exact", "stock"}) {
+  for (const auto* profile : {"default", "subagents", "exact", "vanilla"}) {
     const bool restricted = std::string_view(profile) == "exact" ||
-                            std::string_view(profile) == "stock";
+                            std::string_view(profile) == "vanilla";
     auto inputs = Inputs(profile);
     inputs.manifest_defaults["--npu-prefill"] = "off";
     inputs.environment["--npu-prefill"] = "off";
     auto resolved = ResolveReleaseSettings(inputs);
-    Expect(resolved.prefill_authorization.Allows(ExperimentalFeature::Prefill) ==
-               (available && !restricted),
-           "NPU profile default ignores manifest and environment flag values");
-    Expect(Find(resolved, "--npu-prefill").value ==
-               (available && !restricted ? "on" : "off"),
-           "NPU effective policy matches build and profile");
+    // v0.1.1: the NPU is off by default in every profile. Only an explicit
+    // command-line --npu-prefill on (below) turns it on; a manifest or an
+    // environment value does not.
+    Expect(!resolved.prefill_authorization.Allows(ExperimentalFeature::Prefill),
+           "NPU is off by default; manifest and environment flag values do not "
+           "enable it");
+    Expect(Find(resolved, "--npu-prefill").value == "off",
+           "NPU effective policy is off without an explicit flag");
+    Expect(restricted || resolved.prefill_authorization.reason() ==
+                             "profile default OFF",
+           "NPU default reason names the default");
     if (restricted) {
       for (const auto& log : resolved.logs)
         Expect(log.find("npu") == std::string::npos &&
@@ -659,34 +730,38 @@ void NpuPolicyTest() {
       inputs.environment["GUFO_NPU_SLICES"] = "malformed";
       resolved = ResolveReleaseSettings(inputs);
       bool called = false;
-      Expect(!gufo::core::CreateAuthorizedPrefill(
-                 resolved.prefill_authorization, [&](auto) { called = true; }) &&
-                 !called,
-             "restricted profile never creates an NPU session");
+      Expect(
+          !gufo::core::CreateAuthorizedPrefill(resolved.prefill_authorization,
+                                               [&](auto) { called = true; }) &&
+              !called,
+          "restricted profile never creates an NPU session");
     }
     inputs.explicit_flags["--npu-prefill"] = "off";
     inputs.manifest_defaults["--npu-prefill"] = "on";
     inputs.environment["--npu-prefill"] = "on";
     resolved = ResolveReleaseSettings(inputs);
-    Expect(!resolved.prefill_authorization.Allows(ExperimentalFeature::Prefill) &&
-               Find(resolved, "--npu-prefill").value == "off",
-           "explicit NPU OFF cannot be overridden");
+    Expect(
+        !resolved.prefill_authorization.Allows(ExperimentalFeature::Prefill) &&
+            Find(resolved, "--npu-prefill").value == "off",
+        "explicit NPU OFF cannot be overridden");
     inputs.explicit_flags["--npu-prefill"] = "on";
     if (restricted) {
       bool rejected = false;
       try {
         (void)ResolveReleaseSettings(inputs);
       } catch (const std::invalid_argument& error) {
-        rejected = std::string(error.what()).find(
-                       "effective=off: profile=" + std::string(profile) +
-                       " forces OFF") != std::string::npos;
+        rejected = std::string(error.what())
+                       .find("effective=off: profile=" + std::string(profile) +
+                             " forces OFF") != std::string::npos;
       }
       Expect(rejected, "restricted profile rejects explicit NPU ON");
     } else {
       resolved = ResolveReleaseSettings(inputs);
-      Expect(resolved.prefill_authorization.Allows(ExperimentalFeature::Prefill) ==
-                 available,
+      Expect(resolved.prefill_authorization.Allows(
+                 ExperimentalFeature::Prefill) == available,
              "explicit ON tolerates a build without NPU");
+      Expect(Find(resolved, "--npu-prefill").value == (available ? "on" : "off"),
+             "explicit --npu-prefill on opts in when the build has an NPU");
     }
   }
 }
@@ -733,7 +808,8 @@ void TestResolver() {
   }
   for (const auto* name :
        {"GUFO_THINK_EOG_GUARD", "GUFO_EOG_BOUNDARY", "GUFO_LOOP_BREAKER",
-        "GUFO_ROUTED_LANEROW", "GUFO_EOG_MIN_PROB", "GUFO_EOG_DEFER_P"}) {
+        "GUFO_ROUTED_LANEROW", "GUFO_INCREMENTAL_TOKENIZE",
+        "GUFO_EOG_MIN_PROB", "GUFO_EOG_DEFER_P"}) {
     auto inputs = Inputs();
     const std::string value = name == std::string("GUFO_EOG_MIN_PROB")  ? "0.3"
                               : name == std::string("GUFO_EOG_DEFER_P") ? "0.7"
@@ -761,6 +837,65 @@ void TestResolver() {
   Expect(Find(ResolveReleaseSettings(inputs), "GUFO_DENSE_TWIN_MODEL").origin ==
              "env",
          "session requirements use the integer flag value");
+  // More than one session with a twin selects the batched twin; one session,
+  // no twin, vanilla and exact do not (decode gate 2026-10-14).
+  inputs = Inputs();
+  inputs.manifest_defaults["GUFO_DENSE_TWIN_MODEL"] = "twin.gguf";
+  inputs.explicit_flags["--sessions"] = "2";
+  {
+    const auto multi = ResolveReleaseSettings(inputs);
+    Expect(
+        Find(multi, "GUFO_DENSE_TWIN_BATCH").value ==
+                std::optional<std::string>("1") &&
+            Find(multi, "GUFO_DENSE_TWIN_BATCH").origin == "profile:default" &&
+            Find(multi, "GUFO_DENSE_TWIN_MODEL").value ==
+                std::optional<std::string>("twin.gguf") &&
+            Find(multi, "GUFO_DENSE_TWIN_MODEL").skipped_reason.empty() &&
+            std::any_of(multi.injections.begin(), multi.injections.end(),
+                        [](const auto& s) {
+                          return s.name == "GUFO_DENSE_TWIN_BATCH" &&
+                                 s.value == std::optional<std::string>("1");
+                        }),
+        "sessions > 1 with a twin sets and injects the batched twin");
+  }
+  {
+    const auto document = ReleaseSettingsJson(ResolveReleaseSettings(inputs));
+    const auto* twin_batched = document.find("engine")->find("twin_batched");
+    Expect(twin_batched && twin_batched->as_bool(),
+           "engine.twin_batched is true");
+  }
+  inputs.explicit_flags["--sessions"] = "1";
+  Expect(Find(ResolveReleaseSettings(inputs), "GUFO_DENSE_TWIN_BATCH").value !=
+             std::optional<std::string>("1"),
+         "one session leaves the batched twin off");
+  {
+    const auto document = ReleaseSettingsJson(ResolveReleaseSettings(inputs));
+    Expect(!document.find("engine")->find("twin_batched")->as_bool(),
+           "engine.twin_batched is false with one session");
+  }
+  inputs.explicit_flags["--sessions"] = "2";
+  inputs.explicit_flags["--no-twin"] = "1";
+  {
+    const auto no_twin = ResolveReleaseSettings(inputs);
+    Expect(!Find(no_twin, "GUFO_DENSE_TWIN_MODEL").value &&
+               Find(no_twin, "GUFO_DENSE_TWIN_BATCH").value !=
+                   std::optional<std::string>("1"),
+           "no twin means no batched twin");
+  }
+  inputs.explicit_flags.erase("--no-twin");
+  inputs.environment["GUFO_DENSE_TWIN_BATCH"] = "0";
+  {
+    const auto off = ResolveReleaseSettings(inputs);
+    Expect(Find(off, "GUFO_DENSE_TWIN_BATCH").origin == "env" &&
+               !Find(off, "GUFO_DENSE_TWIN_MODEL").value,
+           "explicit batch 0 keeps the old skip");
+  }
+  inputs = Inputs("vanilla");
+  inputs.explicit_flags["--sessions"] = "2";
+  inputs.manifest_defaults["GUFO_DENSE_TWIN_MODEL"] = "twin.gguf";
+  Expect(Find(ResolveReleaseSettings(inputs), "GUFO_DENSE_TWIN_BATCH").value !=
+             std::optional<std::string>("1"),
+         "vanilla never sets the batched twin");
   inputs = Inputs();
   inputs.explicit_flags["--think"] = "off";
   Expect(!Find(ResolveReleaseSettings(inputs), "--reasoning-effort").value,
@@ -823,6 +958,31 @@ void TestResolver() {
   inputs.environment["GUFO_PREFILL_FORWARD_TOKENS"] = "2048";
   Reject([&] { (void)ResolveReleaseSettings(inputs); },
          "exact refuses a different prefill geometry");
+  inputs = Inputs("exact");
+  inputs.environment["GUFO_PREFILL_FORWARD_TOKENS"] = "4097";
+  {
+    std::string message;
+    try {
+      (void)ResolveReleaseSettings(inputs);
+    } catch (const std::invalid_argument& error) {
+      message = error.what();
+    }
+    Expect(message.find("GUFO_PREFILL_FORWARD_TOKENS=4097") !=
+                   std::string::npos &&
+               message.find("requires 4096") != std::string::npos &&
+               message.find("aligned to 4") != std::string::npos,
+           "exact refuses an unaligned prefill forward size with a reason");
+  }
+  inputs = Inputs("exact");
+  inputs.environment["GUFO_PREFILL_FORWARD_TOKENS"] = "4096";
+  Expect(Find(ResolveReleaseSettings(inputs), "GUFO_PREFILL_FORWARD_TOKENS")
+                 .value == std::optional<std::string>("4096"),
+         "exact accepts forward size 4096");
+  inputs = Inputs("default");
+  inputs.environment["GUFO_PREFILL_FORWARD_TOKENS"] = "4097";
+  Expect(Find(ResolveReleaseSettings(inputs), "GUFO_PREFILL_FORWARD_TOKENS")
+                 .value == std::optional<std::string>("4097"),
+         "default profile keeps forward size 4097");
   const std::map<std::string, std::optional<std::string>> off = {
       {"GUFO_THINK_GUARD_ESCALATE", "0"},
       {"GUFO_THINK_EOG_GUARD", "0"},
@@ -831,8 +991,13 @@ void TestResolver() {
       {"GUFO_EOG_DEFER_P", "0"},
       {"GUFO_SPEC_EOG_STOP", "0"},
       {"GUFO_LOOP_BREAKER", "0"},
+      {"GUFO_LOOP_BREAKER_TOOL_ARGS", "0"},
       {"GUFO_LOOP_BREAKER_EOG_CLOSE", "0"},
       {"GUFO_THINK_MARKER_BIAS_BY_EFFORT", std::nullopt}};
+  // The nine engine controls retain their values. The new CLI alias must
+  // also show the loop breaker's disabled effective state.
+  const std::map<std::string, std::optional<std::string>> aliases = {
+      {"--loop-breaker", "off"}};
   inputs = Inputs();
   inputs.explicit_flags["--no-behaviour"] = "1";
   auto disabled = ResolveReleaseSettings(inputs);
@@ -840,9 +1005,12 @@ void TestResolver() {
     if (off.contains(setting.name))
       Expect(Find(disabled, setting.name).value == off.at(setting.name),
              "behaviour off: " + setting.name);
+    else if (aliases.contains(setting.name))
+      Expect(Find(disabled, setting.name).value == aliases.at(setting.name),
+             "behaviour flag alias off: " + setting.name);
     else if (setting.name != "--no-behaviour")
       Expect(Find(disabled, setting.name).value == setting.value,
-             "no-behaviour changes only nine rows");
+             "no-behaviour changes only the explicit suppression rows");
   }
   inputs.environment["GUFO_THINK_EOG_GUARD"] = "1";
   Expect(Find(ResolveReleaseSettings(inputs), "GUFO_THINK_EOG_GUARD").origin ==
@@ -911,9 +1079,9 @@ void TestResolver() {
   Expect(help_families == families,
          "public family list matches the real catalog");
   for (const auto& family : families) {
-    for (const auto* profile : {"default", "subagents", "stock", "exact"}) {
+    for (const auto* profile : {"default", "subagents", "vanilla", "exact"}) {
       for (const bool suppressed : {false, true}) {
-        auto upstream_inputs = Inputs("stock");
+        auto upstream_inputs = Inputs("vanilla");
         upstream_inputs.model_family = family;
         if (suppressed)
           upstream_inputs.explicit_flags["--no-behaviour"] = "1";
@@ -922,7 +1090,7 @@ void TestResolver() {
         candidate_inputs.profile = profile;
         const auto candidate = ResolveReleaseSettings(candidate_inputs);
         if (family == "qwen3.8-flash-next" &&
-            std::string_view(profile) != "stock") {
+            std::string_view(profile) != "vanilla") {
           Expect(!candidate.injections.empty() ||
                      candidate.effective_flags != upstream.effective_flags,
                  "Flash Next retains its tuned profile");
@@ -933,21 +1101,20 @@ void TestResolver() {
         if (exact)
           flags["--seed"] = "1";
 #ifdef GUFO_NPU
-        const bool npu_default = std::string_view(profile) == "default" ||
-                                 std::string_view(profile) == "subagents";
-        flags["--npu-prefill"] = npu_default ? "on" : "off";
+        flags["--npu-prefill"] = "off";  // v0.1.1: off in every profile unless
+                                         // --npu-prefill on is given
 #endif
         Expect(candidate.effective_flags == flags,
                "upstream flag diff: " + std::string(family) + "/" + profile);
         Expect(candidate.injections.empty(), "upstream env injections empty");
         for (const auto& setting : candidate.settings) {
-          const auto& stock = Find(upstream, setting.name);
-          Expect(setting.value == (setting.name == "--npu-prefill"
-                                       ? std::optional<std::string>(
-                                             flags.at(setting.name))
-                                   : exact && setting.name == "--seed"
-                                       ? std::optional<std::string>("1")
-                                       : stock.value),
+          const auto& vanilla = Find(upstream, setting.name);
+          Expect(setting.value ==
+                     (setting.name == "--npu-prefill"
+                          ? std::optional<std::string>(flags.at(setting.name))
+                      : exact && setting.name == "--seed"
+                          ? std::optional<std::string>("1")
+                          : vanilla.value),
                  "effective env/flag diff: " + std::string(family) + "/" +
                      profile + "/" + setting.name);
         }
@@ -972,7 +1139,7 @@ void TestResolver() {
       }
       std::cout << "PASS: family=" << family << " profile=" << profile
                 << (family == "qwen3.8-flash-next" &&
-                            std::string_view(profile) != "stock"
+                            std::string_view(profile) != "vanilla"
                         ? " tuned defaults retained"
                     : std::string_view(profile) == "exact"
                         ? " diff=seed:1 only; message checked"
@@ -980,8 +1147,8 @@ void TestResolver() {
                 << " (with/without --no-behaviour)\n";
     }
   }
-  Expect(ResolveReleaseSettings(Inputs("stock")).injections.empty(),
-         "stock injects nothing");
+  Expect(ResolveReleaseSettings(Inputs("vanilla")).injections.empty(),
+         "vanilla injects nothing");
   inputs = Inputs();
   inputs.explicit_flags["--cache-disk"] = "cache";
   auto disk = ResolveReleaseSettings(inputs);
@@ -1080,9 +1247,757 @@ void TestResolver() {
     unsetenv("GUFO_THINK_EOG_GUARD");
 #endif
 }
+void RegistryNormalizationTest() {
+  const auto strip = [](const gufo::json::Value& source, bool labels) {
+    const std::set<std::string> optional = {"echo", "audience", "gui_control",
+                                            "experimental", "restart_required"};
+    auto row = gufo::json::Value::object();
+    for (const auto& [key, value] : source.members())
+      if (!optional.contains(key) && (labels || key != "label"))
+        row[key] = value;
+    return row;
+  };
+  auto start = passed;
+  std::vector<gufo::json::Value> engine_rows;
+  for (const auto& row : ReleaseSwitchTable())
+    engine_rows.push_back(strip(row, true));
+  const auto rows = NormalizeSwitchTable(engine_rows);
+  ValidateSwitchTable(engine_rows);
+  for (std::size_t i = 0; i < rows.size(); ++i) {
+    const auto& row = rows[i];
+    const auto& catalog = ReleaseSwitchTable()[i];
+    Expect(row.find("allowed")->dump() == catalog.find("allowed")->dump(),
+           "row retains its accepted values: " + row.member_str("name"));
+    Expect(row.member_str("group") == catalog.member_str("group"),
+           "row retains its chosen group");
+    Expect(row.member_str("audience") == "debug" &&
+               !row.find("gui_control")->as_bool() &&
+               !row.find("experimental")->as_bool() &&
+               !row.find("echo")->as_bool(),
+           "engine-only row defaults to hidden debug metadata");
+    Expect(row.find("restart_required")->as_bool() ==
+               (row.member_str("class") != "REMOVED"),
+           "removed switches do not require restart");
+  }
+  Expect(RenderReleaseInclude(engine_rows) == RenderReleaseInclude(rows),
+         "include renderer applies the shared normalizer");
+  Expect(RenderReleaseDocs(engine_rows) == RenderReleaseDocs(rows),
+         "docs renderer applies the shared normalizer");
+  std::cout << "PASS: RegistryMissingMetadata " << passed - start
+            << " checks\n";
+
+  start = passed;
+  auto future = strip(ReleaseSwitchTable().front(), false);
+  future["name"] = "--cache-future-engine-option";
+  future["group"] = "Behaviour";
+  future["requires"] = gufo::json::Value::array();
+  future["suppressed_by"] = gufo::json::Value::array();
+  future["inject_with"] = nullptr;
+  std::vector<gufo::json::Value> new_rows = {future};
+  ValidateSwitchTable(new_rows);
+  const auto normalized = NormalizeSwitchTable(new_rows);
+  Expect(normalized.front().member_str("group") == "Behaviour",
+         "future engine switch accepts its row group independent of its name");
+  Expect(RenderReleaseInclude(new_rows).find("--cache-future-engine-option") !=
+             std::string::npos,
+         "future engine switch generates with no GUI metadata");
+  std::cout << "PASS: RegistryFutureEngineRow " << passed - start
+            << " checks\n";
+
+  start = passed;
+  auto no_labels = ReleaseSwitchTable();
+  for (auto& row : no_labels)
+    row = strip(row, false);
+  ValidateSwitchTable(no_labels);
+  auto labeled = no_labels;
+  labeled[0]["label"] = "New setting";
+  ValidateSwitchTable(labeled);
+  for (const auto& value : {gufo::json::Value(""), gufo::json::Value(" \t"),
+                            gufo::json::Value(42), gufo::json::Value()}) {
+    labeled[0]["label"] = value;
+    Reject([&] { ValidateSwitchTable(labeled); },
+           "invalid optional label refuses");
+  }
+  auto missing_core = gufo::json::Value::object();
+  for (const auto& [key, value] : future.members())
+    if (key != "purpose")
+      missing_core[key] = value;
+  new_rows = {missing_core};
+  Reject([&] { ValidateSwitchTable(new_rows); },
+         "missing engine metadata still refuses");
+  std::cout << "PASS: RegistryOptionalLabelValidation " << passed - start
+            << " checks\n";
+
+  start = passed;
+  std::size_t labels = 0;
+  const auto settings = ReleaseSettingsJson(ResolveReleaseSettings(Inputs()));
+  for (const auto& row : ReleaseSwitchTable()) {
+    if (row.member_str("audience") != "user" &&
+        row.member_str("audience") != "advanced")
+      continue;
+    ++labels;
+    Expect(row.find("label") && !row.member_str("label").empty(),
+           "user and advanced rows carry labels");
+    const auto& effective = settings.find("effective_switches")->items();
+    const auto found =
+        std::find_if(effective.begin(), effective.end(), [&](const auto& item) {
+          return item.member_str("name") == row.member_str("name");
+        });
+    Expect(found != effective.end() &&
+               found->member_str("label") == row.member_str("label"),
+           "effective switch emitter preserves registry label");
+  }
+  Expect(labels == 48, "all reviewed user and advanced labels are present");
+  const auto runtime =
+      std::find_if(ReleaseSwitchTable().begin(), ReleaseSwitchTable().end(),
+                   [](const auto& row) {
+                     return row.member_str("name") == "BUBO_RUNTIME_DIR";
+                   });
+  Expect(runtime != ReleaseSwitchTable().end() &&
+             runtime->member_str("audience") == "debug" &&
+             runtime->find("echo")->as_bool() &&
+             !runtime->find("gui_control")->as_bool(),
+         "runtime override is a complete debug row");
+  std::cout << "PASS: RegistryLabelsAndRuntimeRow " << passed - start
+            << " checks\n";
+}
+void DefaultSessionContextTest() {
+  const auto start = passed;
+  auto inputs = Inputs();
+  inputs.native_context = 262144;
+  bubo::cli::MemoryEstimateInputs memory;
+  memory.package_id = std::string(bubo::prepare::kPackageId);
+  memory.profile = "default";
+  memory.context = *inputs.native_context;
+  memory.sessions = 4;
+  memory.mtp = memory.twin = memory.draft_head = memory.vision = true;
+  memory.available_bytes = 102892924928ULL;
+  memory.host_available_bytes = 11900000000ULL;
+  memory.npu_prefill = true;
+  std::string error;
+  const auto estimate = bubo::cli::MemoryEstimate(memory, &error);
+  Expect(estimate.is_object(), "context test uses the CLI estimator: " + error);
+  std::uint64_t recommended = 0;
+  for (const auto& row :
+       estimate.find("recommended_context")->find("by_sessions")->items())
+    if (row.member_size("sessions") == 4)
+      recommended = row.member_size("context_per_session");
+  Expect(recommended > 0 && recommended < *inputs.native_context,
+         "four sessions have a smaller recommendation");
+  auto single = ResolveReleaseSettings(inputs);
+  Expect(!ResolveDefaultSessionContext(single, 1, estimate),
+         "single session keeps the release context default");
+  Expect(ReleaseSettingsJson(single).find("engine")->member_str("context") ==
+             "200000",
+         "single-session Flash Next context is 200000");
+  std::cout << "PASS: DefaultContextSingleSession200000 2 checks\n";
+  inputs.explicit_flags["--sessions"] = "4";
+  auto four = ResolveReleaseSettings(inputs);
+  Expect(ResolveDefaultSessionContext(four, 4, estimate) == recommended,
+         "four-session default selects the estimator row");
+  Expect(four.effective_flags.at("--context") == std::to_string(recommended) &&
+             Find(four, "--context").origin == "recommended_context",
+         "resolved context has its source");
+  const auto output = ReleaseSettingsJson(four);
+  bool reason_present = false;
+  for (const auto& row : output.find("effective_switches")->items())
+    if (row.member_str("name") == "--context")
+      reason_present =
+          row.member_str("source") == "default" &&
+          row.member_str("reason").find("recommended_context.by_sessions") !=
+              std::string::npos;
+  Expect(reason_present && !four.logs.empty() &&
+             four.logs.back().find(std::to_string(recommended)) !=
+                 std::string::npos,
+         "context reason reaches machine output and logs");
+  std::cout << "PASS: DefaultContextFourSessionsRecommended 3 checks; context="
+            << recommended << '\n';
+  for (const auto* context : {"65536", "0"}) {
+    inputs.explicit_flags["--context"] = context;
+    auto explicit_context = ResolveReleaseSettings(inputs);
+    Expect(!ResolveDefaultSessionContext(explicit_context, 4, estimate) &&
+               explicit_context.effective_flags.at("--context") == context &&
+               Find(explicit_context, "--context").origin == "flag",
+           "an explicit context, including zero/native, is preserved");
+  }
+  std::cout << "PASS: DefaultContextExplicitOverrideUnchanged 2 checks\n";
+  bool unsupported = false;
+  try {
+    ResolveDefaultSessionContext(four, 4, gufo::json::Value());
+  } catch (const bubo::cli::ControlError& error) {
+    unsupported = error.ExitCode() ==
+                  static_cast<int>(bubo::cli::MachineExit::Unsupported);
+  }
+  Expect(unsupported, "missing recommendation returns typed unsupported");
+  memory.available_bytes = 1;
+  const auto short_estimate = bubo::cli::MemoryEstimate(memory, &error);
+  Reject([&] { ResolveDefaultSessionContext(four, 4, short_estimate); },
+         "a non-fitting recommendation fails before loading");
+  auto no_margin = estimate;
+  auto no_margin_rows = gufo::json::Value::array();
+  for (auto row : no_margin["recommended_context"]["by_sessions"].items()) {
+    if (row.member_size("sessions") == 4) {
+      row["fits"] = true;
+      row["recommended"] = false;
+      row["reason"] = "Insufficient recommendation headroom.";
+    }
+    no_margin_rows.push_back(std::move(row));
+  }
+  no_margin["recommended_context"]["by_sessions"] = std::move(no_margin_rows);
+  Reject(
+      [&] { ResolveDefaultSessionContext(four, 4, no_margin); },
+      "admission fit alone does not select an unrecommended default context");
+  std::cout << "PASS: DefaultSessionContext " << passed - start << " checks\n";
+}
+void BuiltinDefaultDisplayTest() {
+  const auto start = passed;
+  for (const auto* profile : {"default", "subagents", "exact", "vanilla"}) {
+    const auto resolved = ResolveReleaseSettings(Inputs(profile));
+    const auto& floor = Find(resolved, "GUFO_CACHE_HOST_FLOOR_MB");
+    Expect(!floor.value && floor.origin == "built-in",
+           "host floor is not injected");
+    Expect(std::none_of(resolved.injections.begin(), resolved.injections.end(),
+                        [](const auto& row) {
+                          return row.name == "GUFO_CACHE_HOST_FLOOR_MB";
+                        }),
+           "display defaults never become injections");
+    const auto output = ReleaseSettingsJson(resolved);
+    bool found = false;
+    for (const auto& row : output.find("effective_switches")->items())
+      if (row.member_str("name") == "GUFO_CACHE_HOST_FLOOR_MB") {
+        found = row.member_str("effective") == "4096" &&
+                row.member_str("source") == "default";
+      }
+    Expect(found, "effective host floor displays the engine built-in");
+  }
+  Expect(gufo::server::kDefaultHostFloorMiB == 4096,
+         "independent engine host floor constant");
+  std::cout << "PASS: BuiltinDefaultDisplay " << passed - start << " checks\n";
+}
 }  // namespace
+static void StatusSummaryAndRejectionTest() {
+  auto inputs = Inputs("default");
+  const auto resolved = ResolveReleaseSettings(inputs);
+  const auto settings = ReleaseSettingsJson(resolved);
+  for (const auto& row : settings.find("effective_switches")->items()) {
+    const auto summary = ReleaseSettingSummary(row);
+    Expect(summary.size() == 5, "status setting retains five contract fields");
+    for (const auto* key :
+         {"requested", "effective", "source", "reason", "allowed"})
+      Expect(summary.find(key)->dump() == row.find(key)->dump(),
+             "status projection retains documented setting value");
+  }
+  for (const auto* name :
+       {"--think-marker-bias", "--npu-prefill", "--sessions"}) {
+    inputs.explicit_flags.clear();
+    inputs.explicit_flags[name] = "not-a-value";
+    bool rejected = false;
+    try {
+      ResolveReleaseSettings(inputs);
+    } catch (const ReleaseSettingError& error) {
+      rejected = error.switch_name == name;
+    }
+    Expect(rejected, "typed release rejection retains registry name");
+  }
+  const char* args[] = {"--think-marker-bias", "not-a-value"};
+  const auto startup = PrepareReleaseSettings(args);
+  Expect(
+      startup.error_switch == std::optional<std::string>("--think-marker-bias"),
+      "startup retains switch after catching typed rejection");
+  const auto& rows = ReleaseSwitchTable();
+  std::size_t secrets = 0;
+  for (const auto& row : rows) {
+    if (row.find("secret")->as_bool()) {
+      ++secrets;
+      Expect(!row.find("echo")->as_bool(), "secret cannot echo");
+      Expect(!row.find("gui_control")->as_bool(),
+             "secret cannot be GUI-writable");
+    }
+  }
+  Expect(secrets == 4,
+         "credential flag and environment secrets are registered");
+}
+
+void RegistryRecipe(const std::filesystem::path& path) {
+  const auto recipe = gufo::json::parse(Read(path));
+  const auto& rows = recipe.find("switches")->items();
+  ValidateSwitchTable(rows);
+  for (const auto& test : recipe.find("cases")->items()) {
+    auto inputs = Inputs();
+    const auto name = test.member_str("name");
+    const auto value = test.member_str("value");
+    if (const auto* direct = test.find("value_only");
+        direct && direct->as_bool()) {
+      const auto row = std::ranges::find_if(rows, [&](const auto& item) {
+        return item.member_str("name") == name;
+      });
+      Expect(row != rows.end(), "value agreement row exists");
+      if (test.find("accepted")->as_bool()) {
+        ValidateSwitchValue(*row, value);
+        Expect(true, "listed value agrees with C++ reader grammar");
+      } else {
+        Reject([&] { ValidateSwitchValue(*row, value); },
+               "C++ rejects value outside the row contract");
+      }
+      continue;
+    }
+    if (name.starts_with("--"))
+      inputs.explicit_flags[name] = value;
+    else
+      inputs.environment[name] = value;
+    const auto resolve = [&] { return ResolveReleaseSettings(inputs, rows); };
+    if (!test.find("accepted")->as_bool()) {
+      Reject([&] { (void)resolve(); }, "recipe rejects " + name + "=" + value);
+      continue;
+    }
+    const auto resolved = resolve();
+    const auto settings = ReleaseSettingsJson(resolved, rows);
+    Expect(settings.dump().find("effective_switches") != std::string::npos,
+           "recipe emits effective settings through the production emitter");
+    const auto& switches = settings.find("effective_switches")->items();
+    const auto found = std::ranges::find_if(switches, [&](const auto& row) {
+      return row.member_str("name") == name;
+    });
+    Expect(found != switches.end(), "recipe row reaches effective settings");
+    Expect(found->find("allowed")->dump() ==
+               std::ranges::find_if(rows,
+                                    [&](const auto& row) {
+                                      return row.member_str("name") == name;
+                                    })
+                   ->find("allowed")
+                   ->dump(),
+           "recipe row carries its own bounds to the emitter");
+    if (const auto* secret = test.find("secret"); secret && secret->as_bool()) {
+      Expect(settings.dump().find(value) == std::string::npos,
+             "recipe credential is absent from every emitted field");
+      for (const auto& log : resolved.logs)
+        Expect(log.find(value) == std::string::npos,
+               "recipe credential is absent from resolver logs");
+    } else
+      Expect(found->member_str("effective") == value,
+             "recipe value reaches effective settings");
+  }
+  std::cout << "PASS: RegistryRecipe " << passed << " checks\n";
+}
+
+// `--speculative mtp` on a model whose file holds the MTP head needs no
+// --mtp-model: no warning. A model without a head still gets the warning, and
+// Flash-Next keeps requiring its own sidecar whatever the file says.
+void InFileMtpWarningTest() {
+  const auto warns = [](const ReleaseResolution& result) {
+    return std::any_of(result.logs.begin(), result.logs.end(),
+                       [](const auto& line) {
+                         return line == "warning: --speculative: needs "
+                                        "artefact:mtp";
+                       });
+  };
+  for (const bool has_head : {false, true}) {
+    ReleaseInputs inputs;
+    inputs.profile = "default";
+    inputs.model_family = "other";
+    inputs.model_has_mtp = has_head;
+    inputs.explicit_flags["--speculative"] = "mtp";
+    const auto result = ResolveReleaseSettings(inputs);
+    Expect(warns(result) != has_head,
+           has_head ? "an in-file MTP head meets artefact:mtp: no warning"
+                    : "no MTP head and no --mtp-model: the warning stays");
+  }
+  ReleaseInputs flash;
+  flash.profile = "default";
+  flash.model_family = "qwen3.8-flash-next";
+  flash.model_has_mtp = true;
+  flash.explicit_flags["--speculative"] = "mtp";
+  Reject([&] { (void)ResolveReleaseSettings(flash); },
+         "Flash-Next without --mtp-model is still refused, whatever the file "
+         "says");
+}
+// ---- Gemma 4 MTP (item 7) -------------------------------------------------
+// Flash Next's effective settings for every profile and for the controls the
+// MTP rows touch. tests/cli/contract/flash_next_settings.golden.json holds the
+// output of this function from before Gemma 4 shared those rows; the test
+// compares it byte for byte. `--write-flash-baseline FILE` rewrites it.
+std::string FlashNextBaseline() {
+  using gufo::json::Value;
+  const std::map<std::string, std::string> artefacts = {
+      {"--mtp-model", "mtp.gguf"},
+      {"--mmproj", "mmproj.gguf"},
+      {"GUFO_DENSE_TWIN_MODEL", "twin.gguf"},
+      {"GUFO_DRAFT_OUT_MODEL", "head.gguf"}};
+  auto scenarios = Value::array();
+  for (const char* profile : {"default", "subagents", "exact", "vanilla"})
+    for (int scenario = 0; scenario < 6; ++scenario) {
+      ReleaseInputs inputs;
+      inputs.model_family = "qwen3.8-flash-next";
+      inputs.profile = profile;
+      inputs.manifest_present = true;
+      inputs.native_context = 262144;
+      if (scenario >= 1 && scenario <= 4)
+        inputs.manifest_defaults = artefacts;
+      if (scenario == 2)
+        inputs.explicit_flags["--no-mtp"] = "1";
+      if (scenario == 3)
+        inputs.explicit_flags["--speculative"] = "off";
+      if (scenario == 4)
+        inputs.explicit_flags["--sessions"] = "2";
+      if (scenario == 5)
+        inputs.explicit_flags["--speculative"] = "mtp";
+      auto entry = Value::object();
+      entry["profile"] = profile;
+      entry["scenario"] = scenario;
+      try {
+        const auto result = ResolveReleaseSettings(inputs);
+        auto settings = Value::array();
+        for (const auto& setting : result.settings) {
+          if (!setting.value && setting.skipped_reason.empty())
+            continue;  // rows with no value say nothing
+          auto row = Value::object();
+          row["name"] = setting.name;
+          row["value"] = setting.value ? Value(*setting.value) : Value();
+          row["origin"] = setting.origin;
+          row["skipped"] = setting.skipped_reason;
+          settings.push_back(std::move(row));
+        }
+        entry["settings"] = std::move(settings);
+        auto flags = Value::object();
+        for (const auto& [name, value] : result.effective_flags)
+          flags[name] = value;
+        entry["effective_flags"] = std::move(flags);
+        auto logs = Value::array();
+        for (const auto& line : result.logs)
+          logs.push_back(line);
+        entry["logs"] = std::move(logs);
+        auto bound = Value::object();
+        bound["present"] = result.artefacts.present;
+        bound["mtp"] = result.artefacts.mtp;
+        bound["twin"] = result.artefacts.twin;
+        bound["draft_head"] = result.artefacts.draft_head;
+        bound["mmproj"] = result.artefacts.mmproj;
+        entry["artefacts"] = std::move(bound);
+      } catch (const std::exception& error) {
+        entry["error"] = std::string(error.what());
+      }
+      scenarios.push_back(std::move(entry));
+    }
+  return scenarios.dump() + "\n";
+}
+void FlashNextUnchangedTest() {
+  const auto golden =
+      Read(std::filesystem::path(GUFO_RELEASE_SOURCE_ROOT) /
+           "tests/cli/contract/flash_next_settings.golden.json");
+  Expect(FlashNextBaseline() == golden,
+         "Flash Next effective settings equal the recorded baseline");
+}
+
+
+
+
+
+
+
+void CacheRamDefaultTest() {
+  const auto Row = [](const ReleaseInputs& inputs) {
+    const auto result = ResolveReleaseSettings(inputs);
+    const auto& row = Find(result, "--cache-ram-bytes");
+    return std::pair{row.value, row.origin};
+  };
+  {
+    const auto [value, origin] = Row(Inputs("default"));
+    Expect(value && *value == "8589934592" && origin == "profile:default",
+           "default profile: 8 GiB RAM cache from the profile");
+  }
+  {
+    auto inputs = Inputs("default");
+    inputs.explicit_flags["--sessions"] = "2";
+    const auto [value, origin] = Row(inputs);
+    Expect(value && *value == "8589934592" && origin == "profile:default",
+           "default profile with --sessions 2: the budget stays 8 GiB (one "
+           "shared cache)");
+  }
+  {
+    const auto [value, origin] = Row(Inputs("subagents"));
+    Expect(value && *value == "4294967296" && origin == "profile:subagents",
+           "subagents profile keeps its 4 GiB RAM cache");
+  }
+  {
+    auto inputs = Inputs("default");
+    inputs.explicit_flags["--cache-ram-bytes"] = "6442450944";
+    const auto [value, origin] = Row(inputs);
+    Expect(value && *value == "6442450944" && origin == "flag",
+           "an explicit --cache-ram-bytes wins over the profile");
+  }
+  {
+    const auto [value, origin] = Row(Inputs("vanilla"));
+    Expect(value && *value == "0" && origin == "built-in",
+           "vanilla injects no RAM cache budget (built-in 0 = automatic)");
+  }
+}
+
+// A Gemma 4 package whose files carry an mtp head binds it and decodes with
+// MTP by default; without the head it stays off; --no-mtp wins.
+void Gemma4MtpTest() {
+  const auto resolve = [](const std::string& profile, bool head,
+                          const std::string& flag = {}) {
+    ReleaseInputs inputs;
+    inputs.model_family = "gemma4";
+    inputs.architecture = "gemma4";
+    inputs.profile = profile;
+    inputs.manifest_present = true;
+    inputs.manifest_defaults["--mmproj"] = "mmproj.gguf";
+    if (head)
+      inputs.manifest_defaults["--mtp-model"] = "head.gguf";
+    if (!flag.empty())
+      inputs.explicit_flags[flag] = "1";
+    return ResolveReleaseSettings(inputs);
+  };
+  for (const char* profile : {"default", "subagents"}) {
+    const auto with_head = resolve(profile, true);
+    Expect(Find(with_head, "--speculative").value ==
+                   std::optional<std::string>("mtp") &&
+               Find(with_head, "--mtp-model").value ==
+                   std::optional<std::string>("head.gguf") &&
+               Find(with_head, "--mtp-model").origin == "manifest" &&
+               with_head.artefacts.mtp == "head.gguf",
+           std::string("Gemma 4 with a head decodes with MTP: ") + profile);
+    const auto without = resolve(profile, false);
+    const auto speculative = Find(without, "--speculative").value;
+    Expect((!speculative || *speculative == "off") &&
+               !Find(without, "--mtp-model").value &&
+               without.artefacts.mtp.empty(),
+           std::string("Gemma 4 without a head stays off: ") + profile);
+    const auto muted = resolve(profile, true, "--no-mtp");
+    Expect(Find(muted, "--speculative").value ==
+                   std::optional<std::string>("off") &&
+               !Find(muted, "--mtp-model").value && muted.artefacts.mtp.empty(),
+           std::string("--no-mtp wins over the head: ") + profile);
+  }
+  for (const char* profile : {"vanilla", "exact"}) {
+    const auto result = resolve(profile, true);
+    const auto speculative = Find(result, "--speculative").value;
+    Expect(!speculative || *speculative != "mtp",
+           std::string("profile ") + profile + " keeps Gemma 4 off MTP");
+  }
+  // The projector binding is the same as before.
+  Expect(Find(resolve("default", true), "--mmproj").value ==
+             std::optional<std::string>("mmproj.gguf"),
+         "the Gemma 4 projector still binds");
+  // Another family with a head file is not given MTP by this rule.
+  ReleaseInputs other;
+  other.model_family = "qwen3.8-27b";
+  other.profile = "default";
+  other.manifest_present = true;
+  other.manifest_defaults["--mtp-model"] = "head.gguf";
+  const auto other_result = ResolveReleaseSettings(other);
+  Expect(Find(other_result, "--speculative").value !=
+             std::optional<std::string>("mtp"),
+         "only Flash Next and Gemma 4 take MTP by default");
+}
+
+// Item 9: the typed artefact rows say what they need, as --mmproj and
+// --mtp-model already do.
+void RegistryRequiresTest() {
+  const auto row_of = [](const std::string& name) {
+    for (const auto& row : ReleaseSwitchTable())
+      if (row.member_str("name") == name)
+        return row;
+    throw std::runtime_error("missing registry row " + name);
+  };
+  const auto requires_of = [&](const std::string& name) {
+    std::vector<std::string> out;
+    const auto row = row_of(name);
+    for (const auto& item : row.find("requires")->items())
+      out.push_back(item.str());
+    return out;
+  };
+  Expect(requires_of("--twin-model") ==
+             std::vector<std::string>{"artefact:twin"},
+         "--twin-model requires its twin file");
+  Expect(requires_of("--draft-head-model") ==
+             std::vector<std::string>{"artefact:draft_head"},
+         "--draft-head-model requires its draft head file");
+}
+// Item 10: user and advanced rows use plain words, with no internal names and
+// no measurement notes.
+void RegistryWordingTest() {
+  for (const auto& row : ReleaseSwitchTable()) {
+    if (row.member_str("audience") == "debug")
+      continue;
+    for (const char* key : {"purpose", "note", "default_text"}) {
+      auto text = row.member_str(key);
+      std::transform(text.begin(), text.end(), text.begin(),
+                     [](unsigned char c) { return std::tolower(c); });
+      for (const char* word : {"sidecar", "unmeasured", "not measured"})
+        Expect(text.find(word) == std::string::npos,
+               row.member_str("name") + " " + key + " says '" + word + "'");
+    }
+  }
+}
+
+// Decode's policy (2026-10-20): MTP is on by default at any --sessions, and an
+// explicit --speculative off wins. The row's help says what the gain is.
+void Gemma4MtpPolicyTest() {
+  const auto resolve = [](const std::map<std::string, std::string>& flags) {
+    ReleaseInputs inputs;
+    inputs.model_family = "gemma4";
+    inputs.architecture = "gemma4";
+    inputs.profile = "default";
+    inputs.manifest_present = true;
+    inputs.manifest_defaults["--mtp-model"] = "head.gguf";
+    inputs.explicit_flags = flags;
+    return ResolveReleaseSettings(inputs);
+  };
+  for (const char* sessions : {"1", "2", "4"})
+    Expect(Find(resolve({{"--sessions", sessions}}), "--speculative").value ==
+               std::optional<std::string>("mtp"),
+           std::string("Gemma 4 decodes with MTP at sessions=") + sessions);
+  const auto off = resolve({{"--speculative", "off"}});
+  Expect(Find(off, "--speculative").value == std::optional<std::string>("off"),
+         "an explicit --speculative off wins");
+  for (const auto& row : ReleaseSwitchTable())
+    if (row.member_str("name") == "--speculative") {
+      Expect(row.member_str("note").find(
+                 "Speeds up replies for a single request; with two or more "
+                 "sessions the gain is small.") != std::string::npos,
+             "--speculative help names the single-request gain");
+      Expect(row.member_str("note").find("percent") == std::string::npos &&
+                 row.member_str("note").find("%") == std::string::npos,
+             "--speculative help carries no speed number");
+    }
+}
+
+// Item 11: the API model name defaults to the product name. An explicit
+// --served-model-name wins. /v1/models lists the backend's model id, which
+// serve sets from this name, so it reports the served name.
+void ServedModelNameTest() {
+  Expect(ServedModelAlias() == "bubo", "the compatibility alias stays bubo");
+  Expect(AcceptsServedModel("real-model", "real-model"),
+         "the selected served model is accepted");
+  Expect(AcceptsServedModel(ServedModelAlias(), "real-model"),
+         "the compatibility alias is accepted");
+  Expect(!AcceptsServedModel("wrong-model", "real-model"),
+         "other model names are refused");
+  Expect(!AcceptsServedModel("Bubo", "real-model"),
+         "model identity remains case sensitive");
+  ModelPackage package;
+  package.manifest_path = "fixture/bubo-package.json";
+  package.package_id = "huihui-qwen38-flash-next-ud-q4-k-xl-v1";
+  Expect(
+      ServedModelName("", "fixture/model.gguf", package) == package.package_id,
+      "a package serves its real id");
+  Expect(ServedModelName("", "folder/plain-model.gguf") == "plain-model",
+         "a plain GGUF serves its file name without the extension");
+  Expect(ServedModelName("mine", "folder/model.gguf", package) == "mine",
+         "an explicit served name wins over the package id");
+  const auto plain = ResolveReleaseSettings(Inputs());
+  Expect(!Find(plain, "--served-model-name").value,
+         "the registry leaves the served name for model selection");
+  auto named = Inputs();
+  named.explicit_flags["--served-model-name"] = "mine";
+  Expect(Find(ResolveReleaseSettings(named), "--served-model-name").value ==
+             std::optional<std::string>("mine"),
+         "an explicit --served-model-name wins in the settings");
+  for (const auto& row : ReleaseSwitchTable())
+    if (row.member_str("name") == "--served-model-name")
+      Expect(row.member_str("default_text") == "Package ID or GGUF file name",
+             "the help names the default: " + row.member_str("default_text"));
+}
+
+void V12SettingsTest() {
+  auto canonical = Inputs("vanilla");
+  auto alias = canonical;
+  alias.profile = "stock";
+  const auto canonical_settings = ResolveReleaseSettings(canonical);
+  const auto alias_settings = ResolveReleaseSettings(alias);
+  Expect(alias_settings.profile == "vanilla" &&
+             ReleaseSettingsJson(canonical_settings).dump() ==
+                 ReleaseSettingsJson(alias_settings).dump(),
+         "stock aliases vanilla with identical effective settings");
+  const std::array<const char*, 4> alias_args{"llm", "--profile", "stock",
+                                              "--print-effective-settings"};
+  const auto parsed_alias = PrepareReleaseSettings(alias_args, {}, true);
+  Expect(
+      parsed_alias.error.empty() && parsed_alias.resolved.profile == "vanilla",
+      "the CLI parser accepts stock and resolves vanilla");
+  const auto profiles = bubo::cli::SettingsProfiles();
+  Expect(
+      profiles.items()[2].member_str("name") == "vanilla" &&
+          profiles.items()[2].member_str("label") == "Vanilla (no Bubo tuning)",
+      "GUI profile contract names vanilla");
+  auto flash = Inputs();
+  flash.native_context = 262144;
+  Expect(Find(ResolveReleaseSettings(flash), "--context").value ==
+             std::optional<std::string>("200000"),
+         "Flash Next default context is 200000");
+  flash.explicit_flags["--context"] = "262144";
+  Expect(Find(ResolveReleaseSettings(flash), "--context").value ==
+             std::optional<std::string>("262144"),
+         "Flash Next explicit native maximum remains available");
+  flash.explicit_flags.clear();
+  flash.model_family = "gemma4";
+  Expect(Find(ResolveReleaseSettings(flash), "--context").value ==
+             std::optional<std::string>("0"),
+         "other model families retain their native context default");
+  const std::set<std::string> debug = {
+      "GUFO_DRAFT_OUT_MODEL",       "GUFO_EXPERT_V2K",
+      "GUFO_ROUTED_WMMA_IQ",        "GUFO_IQ_ROUTE_MIN_ROWS",
+      "GUFO_ROUTED_LANEROW",        "GUFO_LENIENT",
+      "GUFO_LENIENT_LAMBDA",        "GUFO_INCREMENTAL_TOKENIZE",
+      "GUFO_PREFILL_FORWARD_TOKENS"};
+  const std::map<std::string, std::string> labels = {
+      {"--top-k", "Top K (sampling candidate limit)"},
+      {"--top-p", "Top P (cumulative probability filter)"},
+      {"--min-p", "Min P (relative probability filter)"},
+      {"--repeat-penalty", "Repeat Penalty (repetition penalty)"},
+      {"--repeat-last-n", "Repeat Last N (repetition window)"},
+      {"--presence-penalty", "Presence Penalty (repeated token penalty)"},
+      {"--frequency-penalty", "Frequency Penalty (token frequency penalty)"},
+      {"--max-tokens", "Max Tokens (new tokens per request)"},
+      {"--seed", "Seed (random seed)"},
+      {"--min-keep", "Min Keep (minimum sampling candidates)"}};
+  const std::set<std::string> unbounded = {
+      "--cache-disk-bytes", "--cache-disk-staging-bytes",
+      "--cache-ram-bytes",  "--context",
+      "--sessions",         "GUFO_MAX_IMAGE_TOKENS",
+      "--max-connections",  "--max-request-bytes",
+      "--prefill-chunk"};
+  for (const auto& row : ReleaseSwitchTable()) {
+    const auto name = row.member_str("name");
+    if (debug.contains(name))
+      Expect(row.member_str("audience") == "debug",
+             name + " uses the debug tier");
+    if (labels.contains(name))
+      Expect(row.member_str("label") == labels.at(name),
+             name + " has its approved label");
+    if (unbounded.contains(name)) {
+      Expect(!row.find("allowed")->find("maximum"),
+             name + " omits its unlimited maximum");
+      ValidateSwitchValue(row, "18446744073709551615");
+      Expect(true, name + " retains uint64 maximum parsing");
+      Reject([&] { ValidateSwitchValue(row, "18446744073709551616"); },
+             name + " still rejects uint64 overflow");
+    }
+    if (const auto* maximum = row.find("allowed")->find("maximum"))
+      Expect(maximum->as_double() <= 9007199254740991.0,
+             name + " has a representable maximum");
+  }
+}
+
 int main(int argc, char** argv) {
   try {
+    if (argc == 3 && std::string_view(argv[1]) == "--write-flash-baseline") {
+      std::ofstream(argv[2], std::ios::binary) << FlashNextBaseline();
+      return 0;
+    }
+    if (argc == 3 && std::string_view(argv[1]) == "--registry-recipe") {
+      RegistryRecipe(argv[2]);
+      return 0;
+    }
+    BuiltinDefaultDisplayTest();
+    StatusSummaryAndRejectionTest();
+    if (argc > 1 && std::string_view(argv[1]) == "--registry") {
+      RegistryNormalizationTest();
+      std::cout << "PASS: registry " << passed << " checks\n";
+      return 0;
+    }
     // CPU-only echo harness uses the same startup resolver as RunServe.
     if (argc > 1 && std::string_view(argv[1]) == "--print-effective-settings") {
       const auto startup = PrepareReleaseSettings(std::span<const char* const>(
@@ -1117,8 +2032,19 @@ int main(int argc, char** argv) {
     for (int finding = 1; finding <= 8; ++finding)
       Review2Regression(finding);
     NpuPolicyTest();
+    RegistryNormalizationTest();
     TestResolver();
+    DefaultSessionContextTest();
     HeaderTest();
+    InFileMtpWarningTest();
+    Gemma4MtpTest();
+    Gemma4MtpPolicyTest();
+    ServedModelNameTest();
+    V12SettingsTest();
+    RegistryRequiresTest();
+    RegistryWordingTest();
+    FlashNextUnchangedTest();
+    CacheRamDefaultTest();
     AuditCatalog();
     if (argc > 2 && std::string_view(argv[1]) == "--production-spec")
       CheckSpec(argv[2]);

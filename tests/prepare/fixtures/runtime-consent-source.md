@@ -1,5 +1,5 @@
-# `bubo prepare` runtime step: consent screen text + install-doc paragraph (release thread, 2026-10-11)
-Source: codex-jobs\2026-10-11\release-amd-terms\REPORT-20261011-1753.md. Rule: do NOT claim that no other terms apply. Wording is ASD-STE100 style. Binding text for the runtime step (prefill uses it in a test; the hashes below are full and come from release-amd-path REPORT-20261010-1958; prefill verifies them against the compiled pins).
+# `bubo prepare` runtime step: consent screen and install documentation
+Source: AMD ROCm 10.0.0 package metadata and licence notices. The consent text discloses that other terms can apply. Tests verify the package hashes against the compiled pins.
 
 ## Consent screen
 ```
@@ -16,10 +16,10 @@ Bubo downloads three packages directly from AMD (ROCm 10.0.0 for gfx1151):
 
 Files go to: <per-user folder>. Bubo needs no administrator access.
 
-Licences: AMD licenses ROCm per component. Components can have third-party terms.
-  AMD licence page: https://rocm.docs.amd.com/en/docs-10.0.0/about/license.html
-  Licence texts that come with the packages (COMGR, hipcc) are saved in: <licenses folder>
-  Component licences (MIT, Apache-2.0 with LLVM exception, BSD): see <licenses folder>\NOTICE-windows.md
+Licenses: AMD licenses ROCm per component. Components can have third-party terms.
+  AMD license page: https://rocm.docs.amd.com/en/docs-10.0.0/about/license.html
+  License texts that come with the packages (COMGR, hipcc) are saved in: <licenses folder>
+  Component licenses (MIT, Apache-2.0 with LLVM exception, BSD): see <licenses folder>\NOTICE-windows.md
 Other AMD terms can apply to these files. Bubo cannot confirm which. If you continue, you accept the terms that apply to the AMD files.
 
 Continue? [y/N]
@@ -29,8 +29,6 @@ Continue? [y/N]
 ## Install-doc paragraph
 Bubo does not include AMD files. The runtime step of `bubo prepare` downloads AMD's ROCm 10.0.0 packages for `gfx1151` directly from `stable.repo.amd.com`. Before it downloads, it shows the address, size and SHA-256 value of each package, and the licence information. AMD licenses ROCm per component, and components can have third-party terms. Read the [AMD ROCm 10.0.0 licence page](https://rocm.docs.amd.com/en/docs-10.0.0/about/license.html) and the licence texts that Bubo saves in the `licenses` folder. Other AMD terms can apply to these files. If you continue, you accept the terms that apply.
 
-## Owner decision (item f): approved 2026-10-11, "yeah" (via operator)
-Route B goes ahead with this disclosure: source URLs, sizes, SHA-256, licence links, "AMD terms may apply; continuing accepts them". No "no other terms" claim. The owner may ask AMD later; this does not hold the release.
-
-## Owner-facing residual risk (item f)
-AMD's index has no click-through and the wheels carry no licence field. Neither AMD's Software EULA nor the HIP SDK agreement names these wheels; no permission or ban for third-party installers was found. Risk of stating "no extra terms apply": medium-high, so we do not state it. Recommendation: proceed with the disclosure above; optionally ask AMD later.
+## Disclosure policy
+Show source URLs, sizes, SHA-256 values and licence links before acquisition.
+State that other AMD terms can apply and that continuing accepts applicable terms.

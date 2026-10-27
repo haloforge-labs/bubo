@@ -1,0 +1,16 @@
+<|im_start|>user
+Do it.<|im_end|>
+<|im_start|>assistant
+A<|im_end|>
+<|im_start|>user
+<tool_response>
+x
+</tool_response> and more<|im_end|>
+<|im_start|>assistant
+<think>
+r2
+</think>
+
+B<|im_end|>
+<|im_start|>assistant
+<think>

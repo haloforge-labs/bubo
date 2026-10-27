@@ -1,0 +1,11 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": ["src/routes/**/*.{ts,tsx}", "src/**/*.shots.tsx", "scripts/*.mjs"],
+  "project": [
+    "src/**/*.{ts,tsx,css}",
+    "tests/**/*.{ts,tsx}",
+    "*.{ts,js}",
+    "scripts/*.mjs"
+  ],
+  "ignore": ["src/generated/**"]
+}

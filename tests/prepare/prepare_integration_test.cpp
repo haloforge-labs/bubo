@@ -261,7 +261,7 @@ int main(int argc, char** argv) {
     };
     const auto tight = PrepareAll(options, model, tight_runtime, mirror);
     Check(tight.code == 7 && mirror.requests == 0 &&
-              tight.err.find("combined free space") != tight.err.npos,
+              tight.err.find("Not enough free space on ") != tight.err.npos,
           "combined allocation rejects individually sufficient same volume");
     options.yes = false;
     const auto prepared = PrepareAll(options, model, runtime, mirror, "y\n");
@@ -270,6 +270,10 @@ int main(int argc, char** argv) {
               Count(prepared.out,
                     "Approve the complete runtime and model plan?") == 1,
           "all eleven fixed inputs with one input approval");
+    // One answer is read, so one question is printed.
+    Check(Count(prepared.out, "[y/N]") == 1,
+          "bare prepare prints one question: " +
+              std::to_string(Count(prepared.out, "[y/N]")));
     const auto model_root = fs::u8path(ModelRoot(options));
     const auto manifest_path = model_root / "bubo-package.json";
     const auto manifest_text = Read(manifest_path);

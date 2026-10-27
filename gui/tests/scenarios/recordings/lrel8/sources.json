@@ -1,0 +1,42 @@
+[
+  {
+    "scenario": "ready-busy",
+    "file": "status-0027-002858.110.json",
+    "source": "C:\\bubo\\run\\app\\recordings\\lrel8\\pid60380\\status-0027-002858.110.json",
+    "sha256": "7a36a9aa2e239312c31283fdc077e45d99ad9095cd3abdadbe2f6efdd15a3553",
+    "product": {
+      "name": "bubo",
+      "version": "0.1.0",
+      "revision": "7704f9d6",
+      "engine_version": "0.10.0"
+    },
+    "sample_time": "2026-10-15T04:28:58Z",
+    "live_throughput": {
+      "label": "aggregate wall throughput",
+      "unit": "tokens_per_second",
+      "interval_ms": 2591.048,
+      "prefill_tokens_per_second": 190.27050058509144,
+      "decode_tokens_per_second": 20.06909945319423
+    }
+  },
+  {
+    "scenario": "ready-idle",
+    "file": "status-0029-002905.317.json",
+    "source": "C:\\bubo\\run\\app\\recordings\\lrel8\\pid60380\\status-0029-002905.317.json",
+    "sha256": "2f6609064fc4bd3485106cef28dfb7578709d0754ae76e5023dc6252885400a9",
+    "product": {
+      "name": "bubo",
+      "version": "0.1.0",
+      "revision": "7704f9d6",
+      "engine_version": "0.10.0"
+    },
+    "sample_time": "2026-10-15T04:29:06Z",
+    "live_throughput": {
+      "label": "aggregate wall throughput",
+      "unit": "tokens_per_second",
+      "interval_ms": 3821.6524999999997,
+      "prefill_tokens_per_second": 0,
+      "decode_tokens_per_second": 45.2683753951988
+    }
+  }
+]

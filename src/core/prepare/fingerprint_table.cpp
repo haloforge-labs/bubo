@@ -5,6 +5,8 @@
 #include <stdexcept>
 
 #include "src/core/prepare/fingerprints/embedded_tables.hpp"
+#include "src/core/prepare/fingerprints/embedded_tables_lowmemory.hpp"
+#include "src/core/prepare/fingerprints/embedded_tables_original.hpp"
 #include "src/core/prepare/metadata_json.hpp"
 
 namespace bubo::prepare {
@@ -143,9 +145,25 @@ std::string SerializeFingerprintTable(const FingerprintTable& table) {
 }
 
 FingerprintResult ProductionFingerprintTable(const Entry& shard) {
-  for (const auto& [name, text] : kEmbeddedFingerprintTables)
-    if (name == shard.logical_name)
-      return LoadFingerprintTable(text, shard);
+  // The model sets share the logical names main_1..main_4. The table whose
+  // file_sha256 equals the entry's pinned SHA-256 is the one that loads; the
+  // other set's table fails the identity check. A failure is never a table.
+  FingerprintResult first_error;
+  bool named = false;
+  for (const auto* tables :
+       {&kEmbeddedFingerprintTables, &kEmbeddedFingerprintTablesOriginal,
+        &kEmbeddedFingerprintTablesLowMemory})
+    for (const auto& [name, text] : *tables)
+      if (name == shard.logical_name) {
+        auto loaded = LoadFingerprintTable(text, shard);
+        if (loaded)
+          return loaded;
+        if (!named)
+          first_error = std::move(loaded);
+        named = true;
+      }
+  if (named)
+    return first_error;
   return {{}, "missing production fingerprint table"};
 }
 }  // namespace bubo::prepare

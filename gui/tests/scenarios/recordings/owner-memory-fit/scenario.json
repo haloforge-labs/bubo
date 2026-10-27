@@ -1,0 +1,10 @@
+{
+  "_source": "fixture",
+  "state": "Stopped",
+  "records": {
+    "estimate": "../v12/estimate-q27-c262144-s1.json",
+    "models": "../v12/models-list-gui.json",
+    "status": "../v12/status-main.json",
+    "switches": "../v12/switches.json"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "_source": "fixture",
+  "state": "Ready",
+  "records": {
+    "models": "../v12/models-list-gui.json",
+    "npu_runtime": "../../../../../tests/cli/contract/valid/status-npu-on.json",
+    "status": "../v12/status-w-idle.json",
+    "switches": "../v12/switches.json"
+  }
+}

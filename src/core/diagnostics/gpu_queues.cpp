@@ -82,9 +82,9 @@ QueuePlan PlanQueues(QueueProfile profile, const QueueCensus& census,
   plan.observed_queues = census.compute_queues;
 
   if (operator_value != nullptr && *operator_value != '\0') {
-    // A deliberate operator setting is never overridden, but it is still
+    // A deliberate user setting is never overridden, but it is still
     // checked: a cap of N resolves to at most N + 1 resident queues, which is
-    // enough to tell the operator their choice will not fit.
+    // enough to tell the user their choice will not fit.
     plan.operator_supplied = true;
     const std::string_view value(operator_value);
     std::uint32_t parsed = 0;
@@ -139,7 +139,7 @@ void ApplyQueuePlan(const QueuePlan& plan) {
   if (plan.cap == 0) {
     return;
   }
-  // Never clobbers an existing value; the operator case returns a zero cap.
+  // Never clobbers an existing value; the user case returns a zero cap.
   (void)::setenv(kQueueCapEnvironment, std::to_string(plan.cap).c_str(), 0);
 }
 
@@ -172,7 +172,7 @@ std::string DescribeQueuePressure(const QueuePlan& plan) {
     // Even the floor every process pays does not fit, so this is certain.
     message += " adds_at_least=" + std::to_string(kMinimumProcessQueues);
   } else {
-    // The operator's cap is honoured whether or not it fits; the upper bound
+    // The user's cap is honoured whether or not it fits; the upper bound
     // is what says it will not.
     message += " adds_up_to=" + std::to_string(plan.expected_queues);
     message += " cap=operator:" + std::to_string(plan.operator_cap);

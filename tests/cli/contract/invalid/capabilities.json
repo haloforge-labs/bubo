@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "operation_id": "11111111111111111111111111111111",
+  "seq": 0,
+  "time": "2026-10-13T18:00:00Z",
+  "product": {
+    "name": "bubo",
+    "version": "0.1.0",
+    "revision": "3ff74dce",
+    "engine_version": "0.1.0"
+  },
+  "type": "capabilities",
+  "payload": {
+    "schema_version": 1,
+    "prepare_jsonl": true,
+    "diagnose_json": true,
+    "status_json": true,
+    "instance_control": false,
+    "status_watch": false
+  }
+}

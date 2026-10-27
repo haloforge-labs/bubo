@@ -10,7 +10,10 @@
 #include <fstream>
 #include <future>
 #include <iostream>
+#include <mutex>
+#include <vector>
 
+#include "fake_hal_source.hpp"
 #include "fake_hip.hpp"
 #include "fake_xrt.hpp"
 #include "file_io_hook.hpp"
@@ -27,6 +30,26 @@ int main(int argc, char** argv) {
   fake::Reset();
   fake::control.expected_a = 0;
   const std::string mode = argv[1];
+  // Runtime-status publisher: records every snapshot (may be called from a
+  // worker thread on a failure).
+  std::mutex status_mutex;
+  std::vector<NpuRuntimeStatus> statuses;
+  SetNpuRuntimeStatusPublisher([&](const NpuRuntimeStatus& status) {
+    std::lock_guard lock(status_mutex);
+    statuses.push_back(status);
+  });
+  const auto last_status = [&] {
+    std::lock_guard lock(status_mutex);
+    assert(!statuses.empty());
+    return statuses.back();
+  };
+  const auto any_faulted = [&] {
+    std::lock_guard lock(status_mutex);
+    for (const auto& s : statuses)
+      if (s.state == NpuState::kFaulted)
+        return true;
+    return false;
+  };
   SessionOptions o;
   o.authorization = gufo::core::ExperimentalAuthorization::FakePrefill();
   o.artifacts = argv[2];
@@ -86,6 +109,9 @@ int main(int argc, char** argv) {
     }
     auto failed = std::make_shared<ServerPrefill>(o);
     assert(!failed->Start() && !failed->ready() && ProcessFailed());
+    // A start-up failure is "off" with the reason, never "faulted".
+    assert(last_status().state == NpuState::kOff &&
+           last_status().reason == "NPU startup failed." && !any_faulted());
     const auto calls = fake::control.calls;
     assert(!failed->Start() && fake::control.calls == calls);
     auto retry = std::make_shared<ServerPrefill>(o);
@@ -106,6 +132,10 @@ int main(int argc, char** argv) {
   auto service = std::make_shared<ServerPrefill>(o);
   auto& session = service->session();
   assert(service->Start());
+  assert(last_status().state == NpuState::kOn && !last_status().reason &&
+         !any_faulted());
+  // Test mode: no event-log subscription, no PDH sampler, no memory probe.
+  assert(!GlobalHalMonitor() && !GlobalChipPower() && !GlobalMemProbe());
   if (mode == "power_unavailable" || mode == "power_turbo") {
     assert(service->ready() && !ProcessFailed());
     assert(std::count(fake::control.calls.begin(), fake::control.calls.end(),
@@ -149,7 +179,7 @@ int main(int argc, char** argv) {
       auto result = FinishLinearZ(*work, transfer, 6144);
       assert(result.valid && result.packed && result.tail.empty());
     };
-    service->BeginChunk();
+    service->BeginChunk(kTokens);
     if (mode == "clean") {
       // All 834 layers are enqueued before the single chunk completion wait.
       for (unsigned i = 0; i < 834; ++i)
@@ -161,6 +191,7 @@ int main(int argc, char** argv) {
       assert(stream.hostfuncs == 1668 && stream.syncs == 1 &&
              stream.resets == 1);
       assert(session.Healthy() && fake::control.allocations == allocations);
+      assert(last_status().state == NpuState::kOn && !any_faulted());
       unsigned a_syncs = 0, b_syncs = 0, c_syncs = 0;
       for (const auto& call : fake::control.calls) {
         if (call == "bo.sync.1.TO_DEVICE")
@@ -260,12 +291,40 @@ int main(int argc, char** argv) {
         assert(line.find("qgate_begins=1 shared_begins=1") !=
                std::string::npos);
         assert(line.find("hostfunc_lat_ms=") != std::string::npos);
+        // Extra request-line fields are appended at the end.
+        assert(line.find("failures=0 stall_ms[") != std::string::npos);
+        assert(line.find(" t_first_utc=") != std::string::npos &&
+               line.find(" t_first_utc=") > line.find("blocked[linear="));
+        assert(line.find(" hal_faults=0 whea_events=0") != std::string::npos);
+        std::cout << "REQUEST-LINE: " << line << "\n";
         service->BeginChunk();
         linear(0);
         assert(hipStreamSynchronize(stream.get()) == hipSuccess);
         assert(CheckHipPrefillChunk(*service, &error) && stream.resets == 2);
       }
       fake::control.on_call = {};
+    } else if (mode == "hal_event" || mode == "invalid_hal") {
+      // Detection only: a fake HAL fault arrives during the chunk. With a valid
+      // result the chunk still passes and the NPU stays on; with an invalid
+      // result the failure line carries the fault count.
+      auto owned = std::make_unique<fake::HalSource>();
+      auto* hal = owned.get();
+      InstallGlobalHalMonitor(std::move(owned), true);
+      stream.check_c = mode == "invalid_hal";
+      if (mode == "invalid_hal")
+        stream.invalidate_next_decode = true;
+      linear(0);
+      hal->EmitHal();
+      assert(hipStreamSynchronize(stream.get()) == hipSuccess);
+      std::string error;
+      const bool ok = CheckHipPrefillChunk(*service, &error);
+      assert(ok == (mode == "hal_event"));
+      assert(ProcessFailed() == (mode == "invalid_hal"));
+      assert(session.Healthy() == (mode == "hal_event"));
+      assert(GlobalHalMonitor()->Sequence() >= 1);
+      const auto line = TakeRequestLine();
+      assert(line.find(" hal_faults=1 whea_events=0") != std::string::npos);
+      StopGlobalHalMonitor();
     } else {
       stream.check_c = mode == "invalid";
       if (mode == "timeout")
@@ -283,6 +342,12 @@ int main(int argc, char** argv) {
       std::string error;
       assert(!CheckHipPrefillChunk(*service, &error) && !error.empty());
       assert(ProcessFailed() && !service->ready() && !session.Healthy());
+      // Disabled for the process after an invalid chunk / XRT failure: sticky
+      // faulted with reason "fault", published.
+      assert(last_status().state == NpuState::kFaulted &&
+             last_status().reason == "fault");
+      if (mode == "invalid" || mode == "invalid_hal")
+        assert(last_status().invalid_chunks == 1);
       const auto starts = fake::control.starts;
       const auto hostfuncs = stream.hostfuncs.load();
       unsigned gpu_fallbacks = 0;

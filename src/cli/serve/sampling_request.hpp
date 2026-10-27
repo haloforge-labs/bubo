@@ -60,6 +60,13 @@ inline std::optional<SamplingRequestError> ReadSamplingFloat(
   return std::nullopt;
 }
 
+/// Clients built for other servers send -1 (llama.cpp: no limit) or null for "no limit given". Both leave the server default in place; every
+/// explicit non-negative integer takes the checked path unchanged.
+inline bool UnsetTokenLimit(const json::Value& body, std::string_view field) {
+  const json::Value* value = body.find(std::string(field));
+  return value != nullptr && (value->is_null() || (value->is_number() && value->as_double() == -1.0));
+}
+
 template<typename Integer>
 inline std::optional<SamplingRequestError> ReadSamplingInteger(
     const json::Value& body, std::string_view field, Integer minimum,

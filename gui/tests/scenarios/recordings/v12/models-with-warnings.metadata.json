@@ -1,0 +1,20 @@
+{
+  "_source": "recorded",
+  "file": "models-with-warnings.json",
+  "command": [
+    "bubo.exe",
+    "models",
+    "list",
+    "--json",
+    "--scan-folder",
+    "S:\\bubo-walk\\E21\\Import",
+    "--scan-folder",
+    "C:\\bubo\\run\\app\\v8\\E21\\rootA",
+    "--scan-folder",
+    "S:\\bubo-walk\\E21\\rootB",
+    "--scan-folder",
+    "C:\\"
+  ],
+  "fixture_bytes": 158721,
+  "fixture_sha256": "f4c6d58de40db1b312df17dee04bf3b7383650dc6c3e2db032b39693c13220b7"
+}

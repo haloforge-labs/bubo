@@ -1,0 +1,223 @@
+{
+  "archive": {
+    "name": "bubo-v0.1.0-windows-x64-gfx1151.zip",
+    "sha256": "d1c92dacf68e8e379b8e02c8d68ba18ba102b2fd22784e25cb06b0757fac1306",
+    "size": 44096931,
+    "revision": "3ff74dce9a67182e572dbddbd8279c058e60fe31",
+    "version": "0.1.0",
+    "exe_sha256": "49b7043faba0bdbde108448abc07489e62d9e65d5906796398b4d5aa010b9f90"
+  },
+  "archive_path": "C:\\bubo\\run\\release-dist-final2\\bubo-v0.1.0-windows-x64-gfx1151.zip",
+  "published_build": {
+    "product": "bubo",
+    "exe": "bubo.exe",
+    "default_profile": "default",
+    "product_version": "0.1.0",
+    "engine_version": "0.10.0",
+    "revision": "3ff74dce"
+  },
+  "cli": "C:\\bubo\\build\\v12final\\bubo.exe",
+  "cli_sha256": "36393435c2db5ca9ae54c1434f74a8f62c0ea0de2718de46b5a7f399ed647ad2",
+  "engine_sha256": "1811a4ec36f71d882e291bb44ea34b20be8e4ece8f11705b57d36f5bc223011d",
+  "runtime_member_count": 263,
+  "commands": [
+    {
+      "file": "legacy-runtime-preview.jsonl",
+      "args": [
+        "prepare",
+        "runtime",
+        "--runtime-dir",
+        "C:\\bubo\\evidence\\capture-09\\frozen-legacy-capture\\local\\Bubo\\runtime\\rocm-10.0.0-gfx1151",
+        "--offline",
+        "--jsonl"
+      ],
+      "started": "2026-10-26T15:26:05.5081966-04:00",
+      "finished": "2026-10-26T15:26:06.5035536-04:00",
+      "exit_code": 3,
+      "sha256": "7a099ab34fc1a239f637c54d062926f6ddd85a7653fcd71bda612dff72474c26"
+    },
+    {
+      "file": "legacy-model-plan.jsonl",
+      "args": [
+        "prepare",
+        "model",
+        "--catalogue-id",
+        "huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--output",
+        "C:\\bubo\\evidence\\capture-09\\frozen-legacy-capture\\root",
+        "--plan",
+        "--offline",
+        "--jsonl"
+      ],
+      "started": "2026-10-26T15:26:06.7940749-04:00",
+      "finished": "2026-10-26T15:26:09.1185693-04:00",
+      "exit_code": 0,
+      "sha256": "19a2a24209fa590558bd2d1910a866b5e20a768d6ad9beca1fe9d54c39e0de86"
+    },
+    {
+      "file": "legacy-runtime-refreshed.jsonl",
+      "args": [
+        "prepare",
+        "runtime",
+        "--runtime-dir",
+        "C:\\bubo\\evidence\\capture-09\\frozen-legacy-capture\\local\\Bubo\\runtime\\rocm-10.0.0-gfx1151",
+        "--offline",
+        "--yes",
+        "--jsonl"
+      ],
+      "started": "2026-10-26T15:26:09.4063313-04:00",
+      "finished": "2026-10-26T15:26:14.7863774-04:00",
+      "exit_code": 0,
+      "sha256": "89a639b53c3bc5625ca32de32d5a5e724b53c5089ed8b9774c9e19d18394870b"
+    },
+    {
+      "file": "legacy-model-refreshed.jsonl",
+      "args": [
+        "prepare",
+        "model",
+        "--catalogue-id",
+        "huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--output",
+        "C:\\bubo\\evidence\\capture-09\\frozen-legacy-capture\\root",
+        "--offline",
+        "--yes",
+        "--jsonl"
+      ],
+      "started": "2026-10-26T15:26:15.0641576-04:00",
+      "finished": "2026-10-26T15:26:24.0826575-04:00",
+      "exit_code": 0,
+      "sha256": "9f7fc66ac082b63137dbaffe5ab4f3a6a8bdb7493170fe87424f5bc9b219e780"
+    },
+    {
+      "file": "legacy-status.json",
+      "args": [
+        "status",
+        "--manifest",
+        "C:\\bubo\\evidence\\capture-09\\frozen-legacy-capture\\root\\models\\huihui-qwen38-flash-next-ud-q4-k-xl-v1\\bubo-package.json",
+        "--json"
+      ],
+      "started": "2026-10-26T15:26:24.3499512-04:00",
+      "finished": "2026-10-26T15:26:24.4680175-04:00",
+      "exit_code": 0,
+      "sha256": "16c733049b0e3cc03081ba20b64a718d515738ef4f147badaa5b27e62cf9c998"
+    }
+  ],
+  "payload_before": [
+    {
+      "file": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+      "size": 10946752,
+      "modified": 639269309199812031,
+      "identity": "File ID is 0x0000000000000000000b000000035273",
+      "pinned_sha256": "290a31ca20b74ed2c21b257d378a5678d821ad9fdd8feb1fc52c719761668903"
+    },
+    {
+      "file": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf",
+      "size": 49859583296,
+      "modified": 639269317051637955,
+      "identity": "File ID is 0x0000000000000000000b00000003d452",
+      "pinned_sha256": "0ebf70d076e0e98f74dc414a90b92c67d7267876ae524bc7799cf463e27b754b"
+    },
+    {
+      "file": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf",
+      "size": 49376141664,
+      "modified": 639269321479693295,
+      "identity": "File ID is 0x000000000000000000010000001bd47b",
+      "pinned_sha256": "e9b12f44e13e60d6ef9396449f7b4356b2e2911222b8183a596830c2418db19a"
+    },
+    {
+      "file": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf",
+      "size": 12087983680,
+      "modified": 639269323296650627,
+      "identity": "File ID is 0x000000000000000000020000001bd7e0",
+      "pinned_sha256": "983901b3e47686f56f5fcec87ba8c51e7e2c6996277dd77bc3fc804a1d563da3"
+    },
+    {
+      "file": "mtp/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+      "size": 2786568256,
+      "modified": 639256845109319479,
+      "identity": "File ID is 0x000000000000000000030000000d1769",
+      "pinned_sha256": "5ff54097406a905cf3a724c709124ceb0e3e10235ee862298969e91c96fa96e6"
+    },
+    {
+      "file": "mmproj/mmproj-Qwen3.8-Flash-Next-BF16.gguf",
+      "size": 907542944,
+      "modified": 639270559820583592,
+      "identity": "File ID is 0x0000000000000000000c000000158ca4",
+      "pinned_sha256": "2e788f8c511d8093c7b43cb87b2fd7e14228340318057f8fb20c86df2efe2355"
+    },
+    {
+      "file": "twin/iq4-nofullattn-nohc.gguf",
+      "size": 1230788768,
+      "modified": 639270453278084740,
+      "identity": "File ID is 0x00000000000000000004000000157db2",
+      "pinned_sha256": "18e0831234551a4d14a0407c24598fb02fdb1fe83a20a4fcff23f410399c66c2"
+    },
+    {
+      "file": "draft_head/draft-out-q4k.gguf",
+      "size": 357581248,
+      "modified": 639270453675036021,
+      "identity": "File ID is 0x0000000000000000000a000000157d96",
+      "pinned_sha256": "6867948dc9f5c467818daa4281c4878dc64b53cd1bba9d16970fd77cd1656777"
+    }
+  ],
+  "payload_after": [
+    {
+      "file": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+      "size": 10946752,
+      "modified": 639269309199812031,
+      "identity": "File ID is 0x0000000000000000000b000000035273",
+      "pinned_sha256": "290a31ca20b74ed2c21b257d378a5678d821ad9fdd8feb1fc52c719761668903"
+    },
+    {
+      "file": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf",
+      "size": 49859583296,
+      "modified": 639269317051637955,
+      "identity": "File ID is 0x0000000000000000000b00000003d452",
+      "pinned_sha256": "0ebf70d076e0e98f74dc414a90b92c67d7267876ae524bc7799cf463e27b754b"
+    },
+    {
+      "file": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf",
+      "size": 49376141664,
+      "modified": 639269321479693295,
+      "identity": "File ID is 0x000000000000000000010000001bd47b",
+      "pinned_sha256": "e9b12f44e13e60d6ef9396449f7b4356b2e2911222b8183a596830c2418db19a"
+    },
+    {
+      "file": "Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf",
+      "size": 12087983680,
+      "modified": 639269323296650627,
+      "identity": "File ID is 0x000000000000000000020000001bd7e0",
+      "pinned_sha256": "983901b3e47686f56f5fcec87ba8c51e7e2c6996277dd77bc3fc804a1d563da3"
+    },
+    {
+      "file": "mtp/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+      "size": 2786568256,
+      "modified": 639256845109319479,
+      "identity": "File ID is 0x000000000000000000030000000d1769",
+      "pinned_sha256": "5ff54097406a905cf3a724c709124ceb0e3e10235ee862298969e91c96fa96e6"
+    },
+    {
+      "file": "mmproj/mmproj-Qwen3.8-Flash-Next-BF16.gguf",
+      "size": 907542944,
+      "modified": 639270559820583592,
+      "identity": "File ID is 0x0000000000000000000c000000158ca4",
+      "pinned_sha256": "2e788f8c511d8093c7b43cb87b2fd7e14228340318057f8fb20c86df2efe2355"
+    },
+    {
+      "file": "twin/iq4-nofullattn-nohc.gguf",
+      "size": 1230788768,
+      "modified": 639270453278084740,
+      "identity": "File ID is 0x00000000000000000004000000157db2",
+      "pinned_sha256": "18e0831234551a4d14a0407c24598fb02fdb1fe83a20a4fcff23f410399c66c2"
+    },
+    {
+      "file": "draft_head/draft-out-q4k.gguf",
+      "size": 357581248,
+      "modified": 639270453675036021,
+      "identity": "File ID is 0x0000000000000000000a000000157d96",
+      "pinned_sha256": "6867948dc9f5c467818daa4281c4878dc64b53cd1bba9d16970fd77cd1656777"
+    }
+  ],
+  "model_download_bytes": 0,
+  "note": "Actual published package extracted as data; old prepare-created metadata reconstructed from independently captured 0.1.0 pins. Existing payload hard links, metadata copied. All prepare calls offline; original binaries never run. Source payload identity and timestamps unchanged."
+}

@@ -45,7 +45,7 @@ Model and loopback CTest wrappers choose fresh folders under the build
 directory. For direct execution, supply `prepare_model_test` an unused fixture
 root and `fixtures/model-consent.txt`; set `BUBO_PREPARE_TEST_ROOT` for
 `prepare_loopback_test`. Native tests retain tiny evidence fixtures. Every
-build/run requires the operator's owned build lock and BelowNormal priority.
+build/run requires the user's owned build lock and BelowNormal priority.
 
 `model_mutations.cmake` and `transport_mutations.cmake` copy actual source with
 mandatory anchors, remove one guard, and link the same intact tests. Mutants

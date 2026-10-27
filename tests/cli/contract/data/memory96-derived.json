@@ -1,0 +1,42 @@
+{
+  "source": "derived, not sampled on a 96 GiB computer",
+  "base": "tests/cli/contract/data/memory96-source-128.json (captured at 97092eba; retained unchanged)",
+  "base_sha256": "2a23c20578042ad8e4b76513cf0258e1d07c6df02966f87388f9a0d63cef0eb0",
+  "units": "bytes; VGM GB are treated as GiB (2^30), with the recorded firmware losses retained",
+  "base_128": {
+    "installed": 137438953472,
+    "dedicated": 102892945408,
+    "gpu_budget": 119078668288,
+    "host_total": 33982058496,
+    "host_available": 11172806656
+  },
+  "96-64": {
+    "installed": 103079215104,
+    "dedicated": 68533207040,
+    "gpu_budget": 84718929920,
+    "host_total": 33982058496,
+    "host_available": 11172806656,
+    "derivation": "Subtract 32 GiB from installed, dedicated and local budget; retain OS total/free and firmware losses. Non-local budget and process usage are zero."
+  },
+  "96-72": {
+    "installed": 103079215104,
+    "dedicated": 77123141632,
+    "gpu_budget": 89013897216,
+    "host_total": 25392123904,
+    "host_available": 11172806656,
+    "derivation": "Subtract 32 GiB installed, 24 GiB dedicated, 8 GiB OS total and 28 GiB local budget (dedicated plus half OS change); retain base free host RAM and firmware losses. Non-local budget and process usage are zero."
+  },
+  "hardware_identity": "AMD vendor 0x1002 and device 0x1586/0x1587/0x1588, from src/core/diagnostics/system_inventory.cpp",
+  "vgm_sources": [
+    "https://www.amd.com/en/blogs/2025/faqs-amd-variable-graphics-memory-vram-ai-model-sizes-quantization-mcp-more.html",
+    "https://www.gmktec.com/pages/drivers-and-software"
+  ],
+  "calibrated_main_bytes": 55774419200,
+  "calibration": "82500000000 minus matched c4 startup-footprint saving 26725580800 at contexts 133760 and 262144. This is a calibrated estimate, not a measured main-only allocation.",
+  "calibration_sources": [
+    "C:/bubo/evidence/capture-06/gate5-20261025-025026-744/{hybrid,production-q4}/server.err",
+    "C:/bubo/evidence/capture-07/run-20261025-032447/{H1,A1}/server.err"
+  ],
+  "manifest_fixture": "lowmemory-manifest.json is copied unchanged from S:/bubo-models/hybrid-pkg-c4test2/models/huihui-qwen38-flash-next-lowmemory-v1/bubo-package.json, revision 2f4f068840c7d85c7b0d8ac044db9e410687d636. Only metadata is copied; no placeholder model payload or load claim.",
+  "boundary_cases": "80/112 GiB installed-band edges, unsupported PCI identities, unavailable GPU budget, 1 GiB host-available pressure and 63999999999/64000000000 dedicated-byte warning edges are logical boundary arrangements, not claimed shipping configurations."
+}

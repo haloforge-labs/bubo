@@ -1,0 +1,15 @@
+<|im_start|>user
+Q1<|im_end|>
+<|im_start|>assistant
+<think>
+kept reasoning
+</think>
+
+<think>
+old
+</think>
+Final<|im_end|>
+<|im_start|>user
+Q2<|im_end|>
+<|im_start|>assistant
+<think>

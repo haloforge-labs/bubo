@@ -35,6 +35,16 @@ struct Format {
       return {256, 136};
     case GgmlType::kIQ3_S:
       return {256, 110};
+    case GgmlType::kIQ3_XXS:
+      return {256, 98};
+    case GgmlType::kIQ2_S:
+      return {256, 82};
+    case GgmlType::kIQ2_XS:
+      return {256, 74};
+    case GgmlType::kIQ2_XXS:
+      return {256, 66};
+    case GgmlType::kQ2_0:
+      return {64, 18};
     case GgmlType::kQ4_K:
       return {256, 144};
     case GgmlType::kQ5_K:
@@ -146,9 +156,11 @@ struct Binder {
     const std::uint64_t hc_dim = c.HcDim();
     const auto dense = {GgmlType::kQ8_0, GgmlType::kBF16, GgmlType::kF16,
                         GgmlType::kF32};
+    // IQ3_XXS, IQ2_S and Q2_0 are the ISTA GSQ-RCO IQ3_S rung's extra expert types (GPU routes: step 3 of the memory lane).
     const auto experts = {GgmlType::kQ4_K,   GgmlType::kQ5_K,  GgmlType::kQ6_K,
                           GgmlType::kQ5_1,   GgmlType::kQ8_0,  GgmlType::kIQ3_S,
-                          GgmlType::kIQ4_XS, GgmlType::kIQ4_NL};
+                          GgmlType::kIQ4_XS, GgmlType::kIQ4_NL, GgmlType::kIQ3_XXS,
+                          GgmlType::kIQ2_S,  GgmlType::kQ2_0};
 
     l.hc_attn = Mixer(p + "hc_attn", c, true);
     l.hc_ffn = Mixer(p + "hc_ffn", c, true);

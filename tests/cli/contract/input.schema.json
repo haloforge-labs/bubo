@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "action": {
+      "enum": [
+        "approve",
+        "decline",
+        "cancel"
+      ]
+    },
+    "operation_id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{32}$"
+    },
+    "plan_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  },
+  "required": [
+    "action",
+    "operation_id"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "enum": [
+              "approve",
+              "decline"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "plan_digest"
+        ]
+      }
+    }
+  ],
+  "additionalProperties": false
+}

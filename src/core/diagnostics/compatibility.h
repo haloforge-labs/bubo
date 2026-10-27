@@ -14,6 +14,7 @@ enum class CompatibilityVerdict : std::uint8_t {
   kSupported,
   kUnsupported,
   kUnknown,
+  kNotApplicable,  ///< The item is a Linux check and the host is not Linux.
 };
 
 [[nodiscard]] std::string_view ToString(CompatibilityVerdict verdict);

@@ -341,6 +341,14 @@ void ManifestCases(const fs::path& directory) {
   fixture.Save();
   Reject([&] { fixture.Load(); }, "schema_version");
   fixture.manifest = baseline;
+  fixture.manifest["engine_min"] = "0.1.1";
+  fixture.Save();
+  Expect(fixture.Load().files.size() == 8,
+         "current product version 0.1.1 is accepted");
+  fixture.manifest["engine_min"] = "0.1.2";
+  fixture.Save();
+  Reject([&] { fixture.Load(); }, "engine_min");
+  fixture.manifest = baseline;
   fixture.manifest["engine_min"] = "0.2.0";
   fixture.Save();
   Reject([&] { fixture.Load(); }, "engine_min");
@@ -427,7 +435,7 @@ void DiskStampCases(const fs::path& directory) {
              fs::exists(state_path),
          "disk cache automatically verifies and writes all needed rows");
   Expect(progress.str().find("disk cache: verifying model files once") !=
-             std::string::npos &&
+                 std::string::npos &&
              progress.str().find("verify-model:") != std::string::npos,
          "automatic verification explains its cost and reports hash progress");
   const auto identity = package.MainIdentity();
@@ -441,13 +449,13 @@ void DiskStampCases(const fs::path& directory) {
   progress.str("");
   EnsureDiskCacheIdentity(package, selected, &progress);
   Expect(package.hashed_files == 0 && package.MainIdentity() == identity &&
-             std::ranges::all_of(package.files, [](const auto& file) {
-               return file.observed_verified;
-             }),
+             std::ranges::all_of(
+                 package.files,
+                 [](const auto& file) { return file.observed_verified; }),
          "matching lease snapshots authorize exact identity without hashing");
-  Expect(progress.str() ==
-             "disk cache: model identity from verification stamp\n",
-         "warm disk cache emits one stamp identity line");
+  Expect(
+      progress.str() == "disk cache: model identity from verification stamp\n",
+      "warm disk cache emits one stamp identity line");
   package = {};
   package = fixture.Load(true);
   Expect(package.hashed_files == 8,
@@ -499,8 +507,8 @@ void DiskStampCases(const fs::path& directory) {
   }
   Write(state_path, baseline.dump());
   const auto shard = fixture.root / fixture.entries[0].destination;
-  fs::last_write_time(shard, fs::last_write_time(shard) +
-                                std::chrono::seconds(2));
+  fs::last_write_time(shard,
+                      fs::last_write_time(shard) + std::chrono::seconds(2));
   package = fixture.Load();
   Expect(package.hashed_files == 0 && !package.files[0].observed_verified,
          "mtime change revokes only the stale file's verification");
@@ -560,16 +568,16 @@ void DiskStampCases(const fs::path& directory) {
   Write(override_path, Read(selected[2]));
   const std::array<fs::path, 1> override_selected{override_path};
   package = fixture.Load();
-  CheckPackageOverrides(package,
-                        {{"GUFO_DENSE_TWIN_MODEL", Utf8(override_path)}}, false);
+  CheckPackageOverrides(
+      package, {{"GUFO_DENSE_TWIN_MODEL", Utf8(override_path)}}, false);
   EnsureDiskCacheIdentity(package, override_selected);
-  Expect(package.hashed_files == 1 &&
-             !package.IdentityFor(override_path).empty(),
-         "distinct selected override is automatically verified once");
+  Expect(
+      package.hashed_files == 1 && !package.IdentityFor(override_path).empty(),
+      "distinct selected override is automatically verified once");
   package = {};
   package = fixture.Load();
-  CheckPackageOverrides(package,
-                        {{"GUFO_DENSE_TWIN_MODEL", Utf8(override_path)}}, false);
+  CheckPackageOverrides(
+      package, {{"GUFO_DENSE_TWIN_MODEL", Utf8(override_path)}}, false);
   EnsureDiskCacheIdentity(package, override_selected);
   Expect(package.hashed_files == 0 && package.files.back().observed_verified,
          "override lease also reuses its matching verification row");
@@ -579,14 +587,16 @@ void DiskStampCases(const fs::path& directory) {
   fs::remove(fixture.root / "bubo-package.json");
   package = fixture.Load();
   Reject([&] { EnsureDiskCacheIdentity(package, main_only); }, "bubo prepare");
-  const char* args[] = {"llm", "--cache-disk", "cache"};
+  const auto plain_model = Utf8(shard);
+  const char* args[] = {"llm", "--model", plain_model.c_str(), "--cache-disk",
+                        "cache"};
   const auto absent = PrepareReleaseSettings(args);
   Expect(absent.error.find("bubo prepare") != std::string::npos &&
              absent.error.find("--verify-model") == std::string::npos,
          "startup without manifest directs disk cache users to preparation");
-  const auto plain_model = Utf8(shard);
-  const char* plain_args[] = {"llm", "--model", plain_model.c_str(),
-                             "--profile", "stock", "--cache-disk", "cache"};
+  const char* plain_args[] = {"llm",       "--model", plain_model.c_str(),
+                              "--profile", "stock",   "--cache-disk",
+                              "cache"};
   const auto plain = PrepareReleaseSettings(plain_args);
   Expect(plain.error.find("bubo prepare") != std::string::npos &&
              plain.package.hashed_files == 0,
@@ -607,6 +617,25 @@ int main() {
     fs::remove_all(scratch);
     fs::create_directories(scratch);
     Matrix();
+    {
+      Fixture fixture(scratch / "unknown-package");
+      fixture.manifest["package_id"] = "previous-user-package";
+      fixture.Save();
+      const auto main = fixture.root / fixture.entries[0].destination;
+      const auto plain = LoadModelPackage(main, "default");
+      Expect(plain.manifest_path.empty() && plain.files.empty(),
+             "an unknown adjacent package marker leaves a plain file import");
+      const auto folder = LoadModelPackage(fixture.root, "default");
+      Expect(folder.manifest_path.empty() && folder.files.empty(),
+             "an unknown folder marker leaves a plain import");
+      Reject(
+          [&] {
+            LoadModelPackage(main, "default", false, nullptr,
+                             fixture.root / "bubo-package.json");
+          },
+          "package_id");
+      Reject([&] { LoadModelPackage(main, "default", true); }, "package_id");
+    }
     DiskStampCases(scratch / "disk-stamps");
     ManifestCases(scratch / fs::u8path("models with spaces-\xc3\xa9"));
     fs::remove_all(scratch);

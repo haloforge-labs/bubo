@@ -27,4 +27,7 @@ EvidenceResult LoadSourceEvidence(std::string_view json);
 // Offline, no alternate trust pins or runtime URL/catalogue overrides.
 std::string ValidateReleaseEvidence(std::span<const Entry> entries,
                                     std::span<const SourceEvidence> evidence);
+// Local composition evidence is separate from immutable HF source trees.
+// Hosting placeholders never qualify as published provenance.
+std::string ValidateLowMemoryLocalEvidence(std::string_view json);
 }  // namespace bubo::prepare

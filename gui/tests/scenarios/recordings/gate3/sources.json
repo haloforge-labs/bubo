@@ -1,0 +1,37 @@
+[
+  {
+    "file": "index.tsv",
+    "source": "C:\\bubo\\run\\app\\recordings\\gate3\\index.tsv",
+    "sha256": "ab5f069ed29e5b7277bbb420311c7b319ae0d4627bed8878f5d3c6edab365701"
+  },
+  {
+    "file": "models-list.json",
+    "source": "C:\\bubo\\run\\app\\recordings\\gate3\\models-list.json",
+    "sha256": "2577615c24ebea56cba468ecbabe3d45c0fd7b213907688226611e8a70d4e214"
+  },
+  {
+    "file": "serve-list-switches.json",
+    "source": "C:\\bubo\\run\\app\\recordings\\gate3\\serve-list-switches.json",
+    "sha256": "471a6ee4b1e6bbec0a93b1515688a1a4553bc5c1762972f1b25eac30ab3b309f"
+  },
+  {
+    "file": "status-0001-230211.374.json",
+    "source": "C:\\bubo\\run\\app\\recordings\\gate3\\P1\\status-0001-230211.374.json",
+    "sha256": "9718eca61999874008a6edb1de536b221d7d9d692c975ed68e3b2fdb8b4f0f18"
+  },
+  {
+    "file": "status-0007-230224.488.json",
+    "source": "C:\\bubo\\run\\app\\recordings\\gate3\\P1\\status-0007-230224.488.json",
+    "sha256": "8e1106870d11a7c8f6ba173bd2e70413f78ab9ce7dff55c321e51e6f0b5390bb"
+  },
+  {
+    "file": "status-0015-230244.050.json",
+    "source": "C:\\bubo\\run\\app\\recordings\\gate3\\P1\\status-0015-230244.050.json",
+    "sha256": "8588d6533c2861f5686bfbdf240f8e937f1ca76a8af4ee2dbf1d6707642d1142"
+  },
+  {
+    "file": "status-now-no-gate-server.json",
+    "source": "C:\\bubo\\run\\app\\recordings\\gate3\\status-now-no-gate-server.json",
+    "sha256": "1ee11c9ddc0b748d1ed5dd012f72b07586c4a42020f11867906ce2f8fc5e84b6"
+  }
+]

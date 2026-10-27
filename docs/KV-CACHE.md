@@ -31,7 +31,7 @@ and only when its tokens are an exact prefix of the new prompt.
 
 Prefill cost scales with prompt length. Decode cost scales with tokens
 generated. Agent conversations have a large prompt and a small output, and
-turn *N*'s prompt is nearly all of turn *N−1*'s prompt. Without cross-request
+turn *N*'s prompt is nearly all of turn *Nâˆ’1*'s prompt. Without cross-request
 reuse, every turn pays for the whole conversation again and total cost grows
 quadratically with conversation length.
 
@@ -445,14 +445,14 @@ checkpoints are all recent will displace every other conversation in age order
 
 Anything that changes the token prefix. In practice:
 
-- **Tool definitions** — adding, removing or reordering changes the prompt head
+- **Tool definitions** â€” adding, removing or reordering changes the prompt head
   and invalidates everything after it.
-- **System prompt** — including anything volatile inside it, such as a
+- **System prompt** â€” including anything volatile inside it, such as a
   timestamp or a working directory.
-- **Response schema** — `response_format` is rendered into the prompt.
-- **Images** — changing, removing or moving an earlier image invalidates
+- **Response schema** â€” `response_format` is rendered into the prompt.
+- **Images** â€” changing, removing or moving an earlier image invalidates
   checkpoints after it. Appending a new one does not.
-- **Reasoning the client cannot replay** — thinking is on by default for Qwen
+- **Reasoning the client cannot replay** â€” thinking is on by default for Qwen
   and `reasoning_content` is not part of the OpenAI schema, so an ordinary
   client omits it when sending the conversation back. Gufo retains each turn's
   boundary before the assistant opening, so the next turn can reuse the prior
@@ -464,8 +464,9 @@ These do **not** invalidate reuse **(measured)**: changing `temperature`,
 `top_p`, `seed`, `max_tokens`, penalties or `stop` between turns; streaming
 versus not, which reuse identically and interoperate within one conversation.
 
-`cache_prompt: false` bypasses lookup for a single request. The result can
-still populate the cache.
+`cache_prompt: false` on `/v1/chat/completions`, `/v1/responses`,
+`/v1/completions` or `/completion` bypasses lookup for a single request. The
+result can still populate the cache. `null` keeps the default, `true`.
 
 ## Observing it
 
@@ -486,7 +487,23 @@ Per-request outcomes appear in the completion log and in `usage.gufo`:
 `queue_ms`), plus
 `prompt_n` (newly processed) and `cache_n` (reused) in the llama.cpp-compatible
 `timings` object. Miss reasons are `no_checkpoint`, `prefix_changed`,
-`input_changed` and `disabled`.
+`input_changed` and `disabled`, and, when the cache itself dropped or refused
+a checkpoint that covers the start of the prompt, one of:
+
+| `cache_miss_reason` | Meaning |
+|---|---|
+| `evicted_byte_capacity` | the checkpoint was evicted to stay inside `--cache-ram-bytes` |
+| `evicted_entry_capacity` | the checkpoint was evicted because every cache record was in use |
+| `evicted_guard` | the memory guard dropped the checkpoint under memory pressure |
+| `skipped_capacity` | the checkpoint was never stored: it did not fit `--cache-ram-bytes` |
+| `skipped_entry_capacity` | the checkpoint was never stored: no record was free |
+| `skipped_host_floor` | the checkpoint was never stored: free RAM would fall under the keep-free floor (`GUFO_CACHE_HOST_FLOOR_MB`) |
+| `skipped_guard` | the checkpoint was never stored: the memory guard was under pressure |
+
+With one of these, `cache_checkpoint_tokens` is the length of the dropped checkpoint. The cache remembers the last 8 dropped or refused checkpoints.
+A request also reports the snapshot copies it wanted and the cache refused, when there are any: `cache_snapshots_skipped` (count) and
+`cache_snapshot_skip_reason` (`byte_capacity`, `entry_capacity`, `host_memory_floor`, `memory_pressure`, `capture_failure` or `reservation_mismatch`, the
+last one). The completion log line carries the same two fields.
 
 Reading them:
 

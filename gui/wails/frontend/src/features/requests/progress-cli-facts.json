@@ -1,0 +1,303 @@
+{
+  "product": {
+    "name": "bubo",
+    "version": "0.1.1",
+    "revision": "1a0cd430",
+    "engine_version": "0.10.0"
+  },
+  "context_per_session": 200000,
+  "replay": [
+    {
+      "name": "cold",
+      "polls": 2,
+      "phase": "ready",
+      "slots": [
+        {
+          "id": 0,
+          "processing": true,
+          "state": "prefilling",
+          "state_label": "Reading a prompt",
+          "tokens_used": 0,
+          "speculative": true,
+          "request_id": 2,
+          "context_tokens": 200000,
+          "prompt_tokens": 493,
+          "cached_prompt_tokens": 0,
+          "prefilled_tokens": 0,
+          "generated_tokens": 0,
+          "remaining_tokens": 1024
+        }
+      ]
+    },
+    {
+      "name": "long",
+      "polls": 3,
+      "phase": "ready",
+      "slots": [
+        {
+          "id": 0,
+          "processing": true,
+          "state": "prefilling",
+          "state_label": "Reading a prompt",
+          "tokens_used": 0,
+          "speculative": true,
+          "request_id": 3,
+          "context_tokens": 200000,
+          "prompt_tokens": 100000,
+          "cached_prompt_tokens": 0,
+          "prefilled_tokens": 0,
+          "generated_tokens": 0,
+          "remaining_tokens": 1024
+        }
+      ]
+    },
+    {
+      "name": "long-step",
+      "polls": 3,
+      "phase": "ready",
+      "slots": [
+        {
+          "id": 0,
+          "processing": true,
+          "state": "prefilling",
+          "state_label": "Reading a prompt",
+          "tokens_used": 4096,
+          "speculative": true,
+          "request_id": 3,
+          "context_tokens": 200000,
+          "prompt_tokens": 100000,
+          "cached_prompt_tokens": 0,
+          "prefilled_tokens": 4096,
+          "generated_tokens": 0,
+          "remaining_tokens": 1024
+        }
+      ]
+    },
+    {
+      "name": "long-step-two",
+      "polls": 3,
+      "phase": "ready",
+      "slots": [
+        {
+          "id": 0,
+          "processing": true,
+          "state": "prefilling",
+          "state_label": "Reading a prompt",
+          "tokens_used": 8192,
+          "speculative": true,
+          "request_id": 3,
+          "context_tokens": 200000,
+          "prompt_tokens": 100000,
+          "cached_prompt_tokens": 0,
+          "prefilled_tokens": 8192,
+          "generated_tokens": 0,
+          "remaining_tokens": 1024
+        }
+      ]
+    },
+    {
+      "name": "backwards",
+      "polls": 1,
+      "phase": "ready",
+      "slots": [
+        {
+          "id": 0,
+          "processing": true,
+          "state": "prefilling",
+          "state_label": "Reading a prompt",
+          "tokens_used": 4096,
+          "speculative": true,
+          "request_id": 3,
+          "context_tokens": 200000,
+          "prompt_tokens": 100000,
+          "cached_prompt_tokens": 0,
+          "prefilled_tokens": 4096,
+          "generated_tokens": 0,
+          "remaining_tokens": 1024
+        }
+      ]
+    },
+    {
+      "name": "cached",
+      "polls": 2,
+      "phase": "ready",
+      "slots": [
+        {
+          "id": 0,
+          "processing": true,
+          "state": "prefilling",
+          "state_label": "Reading a prompt",
+          "tokens_used": 1345,
+          "speculative": true,
+          "request_id": 4,
+          "context_tokens": 200000,
+          "prompt_tokens": 1373,
+          "cached_prompt_tokens": 1345,
+          "prefilled_tokens": 0,
+          "generated_tokens": 0,
+          "remaining_tokens": 1024
+        },
+        {
+          "id": 1,
+          "processing": false,
+          "state": "idle",
+          "state_label": "Idle",
+          "tokens_used": 0,
+          "speculative": true,
+          "request_id": null,
+          "context_tokens": 200000,
+          "prompt_tokens": 0,
+          "cached_prompt_tokens": 0,
+          "prefilled_tokens": 0,
+          "generated_tokens": 0,
+          "remaining_tokens": null
+        }
+      ]
+    },
+    {
+      "name": "cached-finish",
+      "polls": 1,
+      "phase": "ready",
+      "slots": [
+        {
+          "id": 0,
+          "processing": true,
+          "state": "prefilling",
+          "state_label": "Reading a prompt",
+          "tokens_used": 1373,
+          "speculative": true,
+          "request_id": 4,
+          "context_tokens": 200000,
+          "prompt_tokens": 1373,
+          "cached_prompt_tokens": 1345,
+          "prefilled_tokens": 28,
+          "generated_tokens": 0,
+          "remaining_tokens": 1024
+        },
+        {
+          "id": 1,
+          "processing": false,
+          "state": "idle",
+          "state_label": "Idle",
+          "tokens_used": 0,
+          "speculative": true,
+          "request_id": null,
+          "context_tokens": 200000,
+          "prompt_tokens": 0,
+          "cached_prompt_tokens": 0,
+          "prefilled_tokens": 0,
+          "generated_tokens": 0,
+          "remaining_tokens": null
+        }
+      ]
+    },
+    {
+      "name": "writing",
+      "polls": 2,
+      "phase": "ready",
+      "slots": [
+        {
+          "id": 0,
+          "processing": true,
+          "state": "generating",
+          "state_label": "Writing a response",
+          "tokens_used": 1387,
+          "speculative": true,
+          "request_id": 4,
+          "context_tokens": 200000,
+          "prompt_tokens": 1373,
+          "cached_prompt_tokens": 1345,
+          "prefilled_tokens": 28,
+          "generated_tokens": 14,
+          "remaining_tokens": 1010
+        }
+      ]
+    },
+    {
+      "name": "replacement",
+      "polls": 1,
+      "phase": "ready",
+      "slots": [
+        {
+          "id": 0,
+          "processing": true,
+          "state": "prefilling",
+          "state_label": "Reading a prompt",
+          "tokens_used": 0,
+          "speculative": true,
+          "request_id": 5,
+          "context_tokens": 200000,
+          "prompt_tokens": 493,
+          "cached_prompt_tokens": 0,
+          "prefilled_tokens": 0,
+          "generated_tokens": 0,
+          "remaining_tokens": 1024
+        }
+      ]
+    },
+    {
+      "name": "unknown",
+      "polls": 1,
+      "phase": "ready",
+      "slots": [
+        {
+          "id": 0,
+          "processing": true,
+          "state": "prefilling",
+          "state_label": "Reading a prompt",
+          "tokens_used": 0,
+          "speculative": true,
+          "request_id": 5,
+          "context_tokens": 200000,
+          "prompt_tokens": null,
+          "cached_prompt_tokens": 0,
+          "prefilled_tokens": null,
+          "generated_tokens": 0,
+          "remaining_tokens": 1024
+        }
+      ]
+    },
+    {
+      "name": "idle",
+      "polls": 3,
+      "phase": "ready",
+      "slots": [
+        {
+          "id": 0,
+          "processing": false,
+          "state": "idle",
+          "state_label": "Idle",
+          "tokens_used": 0,
+          "speculative": true,
+          "request_id": null,
+          "context_tokens": 200000,
+          "prompt_tokens": 0,
+          "cached_prompt_tokens": 0,
+          "prefilled_tokens": 0,
+          "generated_tokens": 0,
+          "remaining_tokens": null
+        }
+      ]
+    },
+    {
+      "name": "no-slots",
+      "polls": 1,
+      "phase": "ready",
+      "slots": []
+    },
+    {
+      "name": "loading",
+      "polls": 1,
+      "phase": "loading",
+      "slots": []
+    }
+  ],
+  "provenance": {
+    "long_prompt_tokens": "decode-fork-parity/run-sample-20260101-1200/P1/fork/steps.jsonl:2",
+    "prefill_tokens_per_second": 1338,
+    "forward_tokens": 4096,
+    "cadence": "4096 tokens every three approximately one-second polls; 1338 tok/s recorded over the whole 100K prompt",
+    "cached_prompt": "Owner r10: 1373 total, 1345 cached, 28 newly read",
+    "states": "Legal arranged intermediate states of real recorded counts; request IDs advance from ready-busy request 2"
+  }
+}

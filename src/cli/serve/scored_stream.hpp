@@ -14,7 +14,9 @@ inline HttpResponse ScoredOpenAiStream(
     std::shared_ptr<TextGenerationBackend::GenerationRequest> generation,
     TextGenerationBackend& backend, std::string id, long long created,
     bool chat, bool include_usage,
-    std::function<json::Value(const TextGenerationBackend::Result&)> usage) {
+    std::function<json::Value(const TextGenerationBackend::Result&)> usage,
+    std::function<void(json::Value&, const TextGenerationBackend::Result&)>
+        decorate_usage = {}) {
   auto log = std::make_shared<HttpResponse::StreamLog>();
   return {
       .status = 200,
@@ -25,6 +27,7 @@ inline HttpResponse ScoredOpenAiStream(
       .streaming_body =
           [generation, &backend, id = std::move(id), created, chat,
            include_usage, usage = std::move(usage),
+           decorate_usage = std::move(decorate_usage),
            log](const HttpResponse::BodyWriter& writer) {
             bool started = false;
             std::size_t count = 0, offset = 0;
@@ -75,9 +78,11 @@ inline HttpResponse ScoredOpenAiStream(
                 chunk["choices"].push_back(std::move(choice));
               }
               if (result) {
-                if (usage_only)
+                if (usage_only) {
                   chunk["usage"] = usage(*result);
-                else {
+                  if (decorate_usage)
+                    decorate_usage(chunk, *result);
+                } else {
                   chunk["timings"] = GenerationTimings(*result);
                   AddDebugTimeline(chunk, *result);
                 }

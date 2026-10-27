@@ -1,0 +1,2 @@
+2026-10-15 07:51:25 [INFO] [gpu] event=queue_budget kind=llm observed=0 budget=8 expected_max=3 cap=2
+2026-10-15 07:51:56 [INFO] [cache] event=snapshot_cache_configured sessions=1 snapshot_entries=128 capacity_bytes=6442450944 automatic_bytes=7355345494 max_bytes=14710690988

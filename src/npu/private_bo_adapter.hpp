@@ -63,9 +63,17 @@ public:
   void CopyOutput(std::span<std::byte> destination);
   bool DmaPossible() const noexcept;
   bool Failed() const noexcept;
+  // Debug only (GUFO_NPU_WEIGHT_GUARD=1): times a weight vector at an already
+  // known address had different bytes (first/last 4 KiB) and was re-sent.
+  std::uint64_t StaleWeightRepairs() const noexcept;
   std::string PowerMode();
+  // Page addresses for the log-only residency sample: A BO (2), an output BO
+  // (2) and up to four distinct weight BOs (1 each). Empty until weights exist.
+  // Call under the session mutex; the caller caches the result.
+  std::vector<const void*> SamplePages();
 
 private:
+  void RefreshIfStale(std::span<const std::byte> b);
   struct Impl;
   PrivateBoAdapter();
   std::unique_ptr<Impl> impl_;

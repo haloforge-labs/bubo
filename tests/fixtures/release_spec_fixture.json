@@ -1,6 +1,7 @@
 {
   "env": {
     "GUFO_ROUTED_LANEROW": "1",
+    "GUFO_INCREMENTAL_TOKENIZE": "1",
     "GUFO_THINK_EOG_GUARD": "1",
     "GUFO_EOG_BOUNDARY": "1",
     "GUFO_EOG_MIN_PROB": "0.2",
@@ -14,9 +15,9 @@
   },
   "args": {
     "--sessions": "1",
-    "--context": "262144",
+    "--context": "200000",
     "--max-request-bytes": "67108864",
-    "--cache-ram-bytes": "6442450944",
+    "--cache-ram-bytes": "8589934592",
     "--speculative": "mtp",
     "--mtp-policy": "survival",
     "--mtp-draft-vocab": "auto",

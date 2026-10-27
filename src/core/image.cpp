@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <csetjmp>
 #include <cstring>
 #include <fstream>
@@ -448,6 +449,8 @@ bool IsPublicImageAddress(std::span<const std::uint8_t> address) noexcept {
 
 std::vector<std::uint8_t> ReadImageUrl(std::string_view url,
                                        ImageReadBudget& budget) {
+  if (!budget.accepts_images)
+    throw std::invalid_argument("model does not support image input");
   const auto remaining_ms =
       std::chrono::duration_cast<std::chrono::milliseconds>(
           budget.deadline - std::chrono::steady_clock::now())
@@ -566,6 +569,143 @@ std::vector<std::uint8_t> ReadImageUrl(std::string_view url,
         "cannot download image within size/time limits");
   }
   return bytes;
+}
+
+namespace {
+
+// Pillow's separable resampling (Resample.c): one filter row per output
+// pixel, normalized in double and quantized to 22-bit fixed point; the
+// horizontal pass rounds to 8 bits before the vertical pass.
+constexpr int kResamplePrecisionBits = 22;
+constexpr double kBicubicSupport = 2.0;
+
+// Keys cubic with a = -0.5, as Pillow's BICUBIC.
+double BicubicWeight(double x) {
+  constexpr double a = -0.5;
+  x = std::abs(x);
+  if (x < 1.0) {
+    return ((a + 2.0) * x - (a + 3.0)) * x * x + 1.0;
+  }
+  if (x < 2.0) {
+    return (((x - 5.0) * x + 8.0) * x - 4.0) * a;
+  }
+  return 0.0;
+}
+
+struct ResampleAxis {
+  std::vector<std::int32_t> first;    // first input index per output pixel
+  std::vector<std::int32_t> count;    // taps per output pixel
+  std::vector<std::int32_t> weights;  // output * taps_max, fixed point
+  std::size_t taps_max{0};
+};
+
+ResampleAxis ResampleCoefficients(std::uint32_t input, std::uint32_t output) {
+  const double scale = static_cast<double>(input) / output;
+  const double filter_scale = std::max(scale, 1.0);
+  const double support = kBicubicSupport * filter_scale;
+  ResampleAxis axis;
+  axis.taps_max = static_cast<std::size_t>(std::ceil(support)) * 2 + 1;
+  axis.first.resize(output);
+  axis.count.resize(output);
+  axis.weights.assign(std::size_t{output} * axis.taps_max, 0);
+  std::vector<double> taps(axis.taps_max);
+  for (std::uint32_t i = 0; i < output; ++i) {
+    const double center = (i + 0.5) * scale;
+    const double inverse = 1.0 / filter_scale;
+    auto begin = static_cast<std::int32_t>(center - support + 0.5);
+    begin = std::max(begin, 0);
+    auto end = static_cast<std::int32_t>(center + support + 0.5);
+    end = std::min(end, static_cast<std::int32_t>(input));
+    const std::int32_t length = end - begin;
+    double total = 0.0;
+    for (std::int32_t k = 0; k < length; ++k) {
+      taps[k] = BicubicWeight((k + begin - center + 0.5) * inverse);
+      total += taps[k];
+    }
+    for (std::int32_t k = 0; k < length; ++k) {
+      if (total != 0.0) {
+        taps[k] /= total;
+      }
+      const double fixed = taps[k] * (1 << kResamplePrecisionBits);
+      axis.weights[std::size_t{i} * axis.taps_max + k] =
+          static_cast<std::int32_t>(fixed < 0 ? fixed - 0.5 : fixed + 0.5);
+    }
+    axis.first[i] = begin;
+    axis.count[i] = length;
+  }
+  return axis;
+}
+
+std::uint8_t ClampFixed(std::int64_t value) {
+  return static_cast<std::uint8_t>(
+      std::clamp<std::int64_t>(value >> kResamplePrecisionBits, 0, 255));
+}
+
+}  // namespace
+
+Image ResizeBicubic(const Image& image, std::uint32_t width,
+                    std::uint32_t height) {
+  if (image.width == 0 || image.height == 0 ||
+      image.pixels.size() != std::size_t{image.width} * image.height * 3) {
+    throw std::invalid_argument("invalid image to resize");
+  }
+  ValidateDimensions(width, height);
+  Image result{width, height, {}};
+  const bool horizontal = width != image.width;
+  const bool vertical = height != image.height;
+  if (!horizontal && !vertical) {
+    result.pixels = image.pixels;
+    return result;
+  }
+  // Horizontal pass first, as Pillow does; a pass that keeps the size is
+  // skipped.
+  std::vector<std::uint8_t> middle;
+  const std::vector<std::uint8_t>* source = &image.pixels;
+  if (horizontal) {
+    const auto axis = ResampleCoefficients(image.width, width);
+    middle.resize(std::size_t{width} * image.height * 3);
+    for (std::uint32_t y = 0; y < image.height; ++y) {
+      for (std::uint32_t x = 0; x < width; ++x) {
+        const std::int32_t* weights =
+            axis.weights.data() + std::size_t{x} * axis.taps_max;
+        for (std::size_t c = 0; c < 3; ++c) {
+          std::int64_t sum = std::int64_t{1} << (kResamplePrecisionBits - 1);
+          for (std::int32_t k = 0; k < axis.count[x]; ++k) {
+            const auto column = static_cast<std::size_t>(axis.first[x] + k);
+            sum += std::int64_t{image.pixels[(std::size_t{y} * image.width +
+                                              column) *
+                                                 3 +
+                                             c]} *
+                   weights[k];
+          }
+          middle[(std::size_t{y} * width + x) * 3 + c] = ClampFixed(sum);
+        }
+      }
+    }
+    source = &middle;
+  }
+  if (vertical) {
+    const auto axis = ResampleCoefficients(image.height, height);
+    result.pixels.resize(std::size_t{width} * height * 3);
+    for (std::uint32_t y = 0; y < height; ++y) {
+      const std::int32_t* weights =
+          axis.weights.data() + std::size_t{y} * axis.taps_max;
+      for (std::uint32_t x = 0; x < width; ++x) {
+        for (std::size_t c = 0; c < 3; ++c) {
+          std::int64_t sum = std::int64_t{1} << (kResamplePrecisionBits - 1);
+          for (std::int32_t k = 0; k < axis.count[y]; ++k) {
+            const auto row = static_cast<std::size_t>(axis.first[y] + k);
+            sum += std::int64_t{(*source)[(row * width + x) * 3 + c]} *
+                   weights[k];
+          }
+          result.pixels[(std::size_t{y} * width + x) * 3 + c] = ClampFixed(sum);
+        }
+      }
+    }
+  } else {
+    result.pixels = std::move(middle);
+  }
+  return result;
 }
 
 }  // namespace gufo::core

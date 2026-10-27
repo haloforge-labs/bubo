@@ -70,6 +70,8 @@ inline std::shared_ptr<sampling::BehaviourConfig> ParseBehaviourOptions(
     throw std::invalid_argument("EOG probabilities must be in [0,1] (-1 disables minimum)");
   cfg->spec_eog_stop = BehaviourSwitch("GUFO_SPEC_EOG_STOP");
   cfg->loop_breaker = BehaviourSwitch("GUFO_LOOP_BREAKER");
+  const char* tool_args = std::getenv("GUFO_LOOP_BREAKER_TOOL_ARGS");
+  cfg->loop_tool_args = !tool_args || !*tool_args || BehaviourSwitch("GUFO_LOOP_BREAKER_TOOL_ARGS");
   cfg->loop_eog_close = BehaviourSwitch("GUFO_LOOP_BREAKER_EOG_CLOSE");
   const double transition = BehaviourNumber("GUFO_LOOP_BREAKER_TRANSITION", 2.0);
   if (transition != std::floor(transition) || transition < 0 || transition > 2)
@@ -79,6 +81,15 @@ inline std::shared_ptr<sampling::BehaviourConfig> ParseBehaviourOptions(
   cfg->logit_bias_enabled = BehaviourSwitch("GUFO_LOGIT_BIAS");
   cfg->model_suppress_tokens = BehaviourSwitch("GUFO_MODEL_SUPPRESS_TOKENS");
   cfg->marker_bias = BehaviourNumber("GUFO_THINK_MARKER_BIAS", 0.0);
+  cfg->marker_entropy_gate.reset();
+  if (const char* gate = std::getenv("GUFO_THINK_MARKER_ENTROPY_GATE");
+      gate && *gate) {
+    const double tau = BehaviourNumber("GUFO_THINK_MARKER_ENTROPY_GATE", 0.0);
+    if (tau < 0 || tau > 12)
+      throw std::invalid_argument(
+          "GUFO_THINK_MARKER_ENTROPY_GATE must be in [0,12]");
+    cfg->marker_entropy_gate = tau;
+  }
   if (const char* map = std::getenv("GUFO_THINK_MARKER_BIAS_BY_EFFORT"))
     cfg->marker_bias_by_effort = map;
   cfg->production_sampling = BehaviourSwitch("GUFO_PRODUCTION_SAMPLING");
@@ -161,8 +172,9 @@ inline std::shared_ptr<sampling::BehaviourConfig> ParseBehaviourOptions(
   }
   if (!(cfg->think_eog_guard || cfg->eog_boundary || cfg->eog_min_prob >= 0 ||
         cfg->eog_defer_p > 0 || cfg->spec_eog_stop || cfg->loop_breaker ||
-        cfg->reasoning_budget_enabled || cfg->logit_bias_enabled || cfg->model_suppress_tokens ||
-        cfg->marker_bias != 0 || !cfg->marker_bias_by_effort.empty() || cfg->production_sampling))
+        cfg->reasoning_budget_enabled || cfg->logit_bias_enabled ||
+        cfg->model_suppress_tokens || cfg->marker_bias != 0 ||
+        !cfg->marker_bias_by_effort.empty() || cfg->production_sampling))
     return nullptr;
   return cfg;
 }

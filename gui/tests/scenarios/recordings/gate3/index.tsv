@@ -1,0 +1,16 @@
+time	phase	server_pid	rc	bytes	status_phase	instances	decode_tok_s	file
+2026-10-14T23:02:12.0275699-04:00	P1	54628	0	328169	ready	1		C:\bubo\run\app\recordings\gate3\P1\status-0001-230211.374.json
+2026-10-14T23:02:13.9859173-04:00	P1	54628	0	328489	ready	1		C:\bubo\run\app\recordings\gate3\P1\status-0002-230213.189.json
+2026-10-14T23:02:16.2924704-04:00	P1	54628	0	328756	ready	1		C:\bubo\run\app\recordings\gate3\P1\status-0003-230215.175.json
+2026-10-14T23:02:18.3377408-04:00	P1	54628	0	328758	ready	1		C:\bubo\run\app\recordings\gate3\P1\status-0004-230217.722.json
+2026-10-14T23:02:20.6263390-04:00	P1	54628	0	328758	ready	1		C:\bubo\run\app\recordings\gate3\P1\status-0005-230219.690.json
+2026-10-14T23:02:23.1020340-04:00	P1	54628	0	328758	ready	1		C:\bubo\run\app\recordings\gate3\P1\status-0006-230222.051.json
+2026-10-14T23:02:25.7748263-04:00	P1	54628	0	328759	ready	1		C:\bubo\run\app\recordings\gate3\P1\status-0007-230224.488.json
+2026-10-14T23:02:27.9409063-04:00	P1	54628	0	328759	ready	1		C:\bubo\run\app\recordings\gate3\P1\status-0008-230227.180.json
+2026-10-14T23:02:31.0835533-04:00	P1	54628	0	328759	ready	1		C:\bubo\run\app\recordings\gate3\P1\status-0009-230229.353.json
+2026-10-14T23:02:33.5342261-04:00	P1	54628	0	328759	ready	1		C:\bubo\run\app\recordings\gate3\P1\status-0010-230232.490.json
+2026-10-14T23:02:37.1968866-04:00	P1	54628	0	328759	ready	1		C:\bubo\run\app\recordings\gate3\P1\status-0011-230234.956.json
+2026-10-14T23:02:39.2481968-04:00	P1	54628	0	328759	ready	1		C:\bubo\run\app\recordings\gate3\P1\status-0012-230238.645.json
+2026-10-14T23:02:41.0513570-04:00	P1	54628	0	329013	ready	1		C:\bubo\run\app\recordings\gate3\P1\status-0013-230240.512.json
+2026-10-14T23:02:42.8352369-04:00	P1	54628	0	329014	ready	1		C:\bubo\run\app\recordings\gate3\P1\status-0014-230242.192.json
+2026-10-14T23:02:44.4587541-04:00	P1	54628	0	9910	not_prepared	0		C:\bubo\run\app\recordings\gate3\P1\status-0015-230244.050.json

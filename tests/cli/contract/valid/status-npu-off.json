@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "operation_id": "11111111111111111111111111111111",
+  "seq": 1,
+  "time": "2026-10-13T18:00:00Z",
+  "product": {
+    "name": "bubo",
+    "version": "0.1.0",
+    "revision": "3ff74dce",
+    "engine_version": "0.1.0"
+  },
+  "type": "status",
+  "payload": {
+    "prepared": false,
+    "phase": "not_prepared",
+    "versions": {
+      "name": "bubo",
+      "version": "0.1.0",
+      "revision": "3ff74dce",
+      "engine_version": "0.1.0"
+    },
+    "capabilities": {
+      "schema_version": 1,
+      "prepare_jsonl": true,
+      "diagnose_json": true,
+      "status_json": true,
+      "instance_control": false,
+      "status_watch": false
+    },
+    "paths": {
+      "runtime": "C:/Bubo",
+      "local_app_data": "C:/local",
+      "manifest": null
+    },
+    "prepared_default": null,
+    "instances": [],
+    "effective_settings": null,
+    "memory": null,
+    "last_error": {
+      "code": "runtime_missing",
+      "component": "runtime",
+      "stage": "status",
+      "retryable": false,
+      "remedy": "Run bubo prepare runtime."
+    },
+    "sample_time": "2026-10-13T18:00:00Z",
+    "readiness": {
+      "runtime": false,
+      "model": false
+    },
+    "identity": null,
+    "endpoint": null,
+    "log_path": null,
+    "last_transition": null,
+    "counters": null,
+    "last_completed_request": null,
+    "sessions": null,
+    "queue": null,
+    "slots": null,
+    "selection_required": false,
+    "live_throughput": {
+      "label": "aggregate wall throughput",
+      "unit": "tokens_per_second",
+      "interval_ms": null,
+      "prefill_tokens_per_second": null,
+      "decode_tokens_per_second": null
+    },
+    "npu_prefill_runtime": {
+      "state": "off",
+      "reason": "fixture startup denial",
+      "trips": 0,
+      "hal_faults": 2,
+      "whea_events": 3,
+      "invalid_chunks": 0,
+      "chip_power": {
+        "state": "off",
+        "w_mean": null,
+        "window_s": 0.25
+      }
+    }
+  }
+}

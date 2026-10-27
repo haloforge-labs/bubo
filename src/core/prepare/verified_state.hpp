@@ -13,13 +13,15 @@
 namespace bubo::prepare {
 using VerifiedStamps = std::map<std::pair<std::string, std::string>, FileStamp>;
 
-inline VerifiedStamps ReadVerifiedStamps(const std::filesystem::path& root) {
+inline VerifiedStamps ReadVerifiedStamps(
+    const std::filesystem::path& root,
+    std::string_view package_id = kPackageId) {
   try {
     const auto state = metadata::Parse(metadata::Read(
         NativePath(root / ".bubo" / "verified-state.json")));
     metadata::Keys(state, {"schema_version", "package_id", "files"});
     if (metadata::Integer(metadata::Required(state, "schema_version")) != 1 ||
-        metadata::String(metadata::Required(state, "package_id")) != kPackageId)
+        metadata::String(metadata::Required(state, "package_id")) != package_id)
       return {};
     const auto& files = metadata::Required(state, "files");
     if (!files.is_array())
@@ -48,7 +50,8 @@ inline VerifiedStamps ReadVerifiedStamps(const std::filesystem::path& root) {
 // rows without blocking model reads or the preparation ownership lock.
 inline bool SaveVerifiedStamps(const std::filesystem::path& root,
                                const VerifiedStamps& verified,
-                               std::string& error) {
+                               std::string& error,
+                               std::string_view package_id = kPackageId) {
   if (verified.empty())
     return true;
   try {
@@ -57,12 +60,12 @@ inline bool SaveVerifiedStamps(const std::filesystem::path& root,
     PrepareLock lock;
     if (!lock.Acquire(directory / "verified-state.lock", error))
       return false;
-    auto stamps = ReadVerifiedStamps(root);
+    auto stamps = ReadVerifiedStamps(root, package_id);
     for (const auto& [key, stamp] : verified)
       stamps[key] = stamp;
     auto state = metadata::Value::object(), files = metadata::Value::array();
     state["schema_version"] = 1;
-    state["package_id"] = std::string(kPackageId);
+    state["package_id"] = std::string(package_id);
     for (const auto& [key, stamp] : stamps) {
       auto row = metadata::Value::object();
       row["file"] = key.first;

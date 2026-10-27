@@ -8,6 +8,7 @@
 #include <memory>
 #include <span>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 namespace gufo::server {
@@ -86,6 +87,18 @@ public:
   // Set once, before publication; workers mutate only the atomic state.
   mutable std::shared_ptr<SnapshotPersistence> persistence;
   [[nodiscard]] virtual std::size_t PayloadBytes() const noexcept = 0;
+  /// Bytes this snapshot holds in host memory now, for the host-memory floor.
+  /// A runner that keeps checkpoint state in device memory reports less than
+  /// the payload; the default charges the whole payload to the host.
+  [[nodiscard]] virtual std::size_t HostBytes() const noexcept {
+    return PayloadBytes();
+  }
+  /// Device bytes this snapshot holds in storage of its own, for the retained-memory report. A backing block shared with other
+  /// snapshots counts once across all calls that pass the same `counted`. A runner that keeps checkpoints on the host reports 0.
+  [[nodiscard]] virtual std::size_t DeviceBytes(std::unordered_set<const void*>& counted) const noexcept {
+    (void)counted;
+    return 0;
+  }
   /// Prefer an available state that still holds this snapshot's borrowed rows.
   /// This is an allocation hint; every state must remain able to restore it.
   [[nodiscard]] virtual bool PrefersState(
@@ -106,6 +119,7 @@ enum class SnapshotEventReason : std::uint8_t {
   kCaptureFailure,
   kReservationMismatch,
   kHostMemoryFloor,   ///< skipped: host MemAvailable minus this snapshot would fall under the floor (GUFO_CACHE_HOST_FLOOR_MB)
+  kMemoryPressure,    ///< skipped or removed by the memory guard (RAM under the floor, Windows low-memory event, GPU budget used up)
 };
 
 /// Continuation boundaries take precedence over optional history/retry copies.
@@ -172,6 +186,10 @@ public:
     // would fall under host_floor_bytes. A refused snapshot costs a later cache miss; an admitted one at ~1 GB free costs the request (HTTP 500).
     std::function<std::uint64_t()> host_available_bytes;
     std::uint64_t host_floor_bytes;   // no default member initializer: the class uses SnapshotSupport{} as a default argument (compile error otherwise); {} zero-initializes
+    // Host bytes a new snapshot of (payload bytes, tokens) will hold, for the floor. Unset: the whole payload.
+    std::function<std::uint64_t(std::uint64_t, std::size_t)> host_bytes;
+    // Memory guard: false skips every new snapshot (event reason memory_pressure) without evicting anything. Unset: always allowed.
+    std::function<bool()> allow_new;
   };
 
   class Lease {
@@ -217,6 +235,11 @@ public:
         bool preserve_source = false,
         SnapshotPurpose purpose = SnapshotPurpose::kContinuation,
         std::span<const ContinuationToken> replacement_prefix = {});
+
+    /// Snapshot copies THIS request wanted and the cache refused or dropped (capacity, floor, memory guard, failed capture), and the reason of
+    /// the last one. Reported per request next to the miss reason (GitHub #9).
+    [[nodiscard]] std::size_t skipped_snapshots() const noexcept { return skips_.count; }
+    [[nodiscard]] SnapshotEventReason skip_reason() const noexcept { return skips_.reason; }
 
     /// Releases an admitted reservation and records a sanitized skip reason.
     void SkipSnapshot(SnapshotEventReason reason, std::size_t snapshot_bytes,
@@ -271,6 +294,10 @@ public:
       return PrefixInputIdentity(input_identity_, input_prefixes_, count);
     }
     ContinuationLookup lookup_;
+    struct Skips {
+      std::size_t count{0};
+      SnapshotEventReason reason{SnapshotEventReason::kByteCapacity};
+    } skips_;
   };
 
   /// Snapshot records are separate from execution slots. A zero record count
@@ -326,6 +353,20 @@ public:
   [[nodiscard]] std::size_t retained_snapshot_bytes() const noexcept;
   [[nodiscard]] std::size_t reserved_snapshot_bytes() const noexcept;
 
+  /// What the retained snapshots hold. `logical_bytes` is the payload sum the byte budget charges (retained_snapshot_bytes());
+  /// `device_bytes` and `host_bytes` are the memory they occupy now, a shared backing block counted once. Reporting only.
+  struct SnapshotFootprint {
+    std::uint64_t logical_bytes{0};
+    std::uint64_t device_bytes{0};
+    std::uint64_t host_bytes{0};
+  };
+  [[nodiscard]] SnapshotFootprint snapshot_footprint() const;
+
+  /// Memory guard: drops retained snapshots, lowest removal priority first and the oldest within a rank, until at least `target_bytes`
+  /// are freed or none are left. `host_only` counts only the host part of each snapshot (what returns system RAM). Returns the bytes freed
+  /// by that measure. Safe while leases are open: snapshots are immutable shared records, and a restore in progress keeps its own reference.
+  std::uint64_t TrimSnapshots(std::uint64_t target_bytes, bool host_only = false);
+
 private:
   struct Entry;
 
@@ -337,7 +378,8 @@ private:
       std::size_t token_count, bool preserve_source, SnapshotPurpose& purpose,
       std::span<const ContinuationToken> replacement_prefix,
       std::span<const std::uint8_t> input_identity,
-      std::vector<std::shared_ptr<const ContinuationSnapshot>>& superseded);
+      std::vector<std::shared_ptr<const ContinuationSnapshot>>& superseded,
+      SnapshotEventReason* skip_reason = nullptr);
   void ResolveRemoved(
       std::vector<std::shared_ptr<const ContinuationSnapshot>>& removed,
       const std::shared_ptr<const ContinuationSnapshot>& survivor = {}) noexcept;

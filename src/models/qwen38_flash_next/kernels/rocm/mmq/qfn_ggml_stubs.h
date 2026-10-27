@@ -169,7 +169,8 @@ enum ggml_type {
     GGML_TYPE_MXFP4   = 39,
     GGML_TYPE_NVFP4   = 40,
     GGML_TYPE_Q1_0    = 41,
-    GGML_TYPE_COUNT   = 42,
+    GGML_TYPE_Q2_0    = 42,
+    GGML_TYPE_COUNT   = 43,
 };
 
 enum ggml_glu_op {
@@ -258,6 +259,7 @@ inline size_t ggml_type_size(enum ggml_type t) {
         case GGML_TYPE_MXFP4:   return 17;
         case GGML_TYPE_NVFP4:   return 18;
         case GGML_TYPE_Q1_0:    return 36;
+        case GGML_TYPE_Q2_0:    return 18;
         default:                return 0;
     }
 }
@@ -284,6 +286,7 @@ inline int64_t ggml_blck_size(enum ggml_type t) {
         case GGML_TYPE_MXFP4:
             return 32;
         case GGML_TYPE_NVFP4:
+        case GGML_TYPE_Q2_0:
             return 64;
         case GGML_TYPE_Q2_K:
         case GGML_TYPE_Q3_K:

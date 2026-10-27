@@ -1,0 +1,493 @@
+{
+ "schema_version": 1,
+ "catalogue_version": "2026-10-26",
+ "flash_next": {
+  "architecture": "qwen4exp",
+  "model_family": "qwen3.8-flash-next",
+  "huihui": {
+   "id": "huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+   "display_name": "Qwen3.8 Flash Next · Huihui abliterated · UD-Q4_K_XL",
+   "technical_name": "Huihui-Qwen3.8-Flash-Next-abliterated · Unsloth UD-Q4_K_XL",
+   "about": "Qwen3.8 Flash Next is a text and image model by Alibaba Qwen. Huihui made this abliterated version, which reduces refusal behavior. Unsloth’s UD-Q4_K_XL stores weights at mixed precision, mostly 4-bit, to reduce memory use. This is Bubo’s default model.",
+   "selection_label": "Huihui abliterated (default)"
+  },
+  "original": {
+   "id": "qwen38-flash-next-base-ud-q4-k-xl-v1",
+   "display_name": "Qwen3.8 Flash Next · Unsloth UD-Q4_K_XL",
+   "technical_name": "Qwen3.8-Flash-Next · Unsloth UD-Q4_K_XL",
+   "about": "Qwen3.8 Flash Next is a text and image model by Alibaba Qwen. This is the original version, without abliteration. Unsloth’s UD-Q4_K_XL stores weights at mixed precision, mostly 4-bit, to reduce memory use. It is offered for people who prefer the original model’s behavior.",
+   "selection_label": "Unsloth original (not abliterated)"
+  },
+  "lowmemory": {
+   "id": "huihui-qwen38-flash-next-lowmemory-v1",
+   "display_name": "Qwen3.8 Flash Next · HaloForge Labs lower-memory quant (GSQ-RCO)",
+   "technical_name": "Huihui-Qwen3.8-Flash-Next-abliterated · HaloForge Labs GSQ-RCO",
+   "about": "A lower-memory version of Alibaba Qwen’s Qwen3.8 Flash Next, using Huihui’s abliterated base, which reduces refusal behavior. HaloForge Labs prepared this quantisation to reduce memory use. GSQ-RCO by ISTA DAS Lab. Expert weights from ISTA DAS Lab’s GSQ-RCO file; for that file, ISTA reports results matching the original model on AIME25 and within 0.57 points on LiveCodeBench v6.",
+   "about_links": [
+    "https://arxiv.org/abs/2604.18556",
+    "https://arxiv.org/abs/2605.00649"
+   ],
+   "selection_label": "HaloForge Labs lower-memory (abliterated)"
+  }
+ },
+ "entries": [
+  {
+   "id": "qwen38-27b-ud-q4-k-xl",
+   "display_name": "Qwen3.8 27B original (Unsloth UD-Q4_K_XL)",
+   "role": "supported",
+   "architecture": "qwen35",
+   "set": "original",
+   "repository": "unsloth/Qwen3.8-27B-GGUF",
+   "commit": "4ca720788d1e01f1bff70c033e0d0028fd02e502",
+   "files": [
+    {
+     "name": "Qwen3.8-27B-UD-Q4_K_XL.gguf",
+     "repo_path": "Qwen3.8-27B-UD-Q4_K_XL.gguf",
+     "url": "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+     "bytes": 17559178144,
+     "sha256": "3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
+     "role": "main"
+    },
+    {
+     "name": "Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+     "repo_path": "Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+     "url": "https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2-GGUF/resolve/2d9571f8ce46e151f61c6499c99dee6079e1d610/Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+     "bytes": 1143006816,
+     "sha256": "1a25c56858e1ebe93f2718ac1d49d1151f9323325c1bbfd6209370f4db131ebd",
+     "role": "draft_head",
+     "repository": "z-lab/Qwen3.8-27B-DFlash2-GGUF",
+     "commit": "2d9571f8ce46e151f61c6499c99dee6079e1d610",
+     "optional": true,
+     "downloadable": false,
+     "licence_text": "not yet read"
+    },
+    {
+     "name": "mmproj-BF16.gguf",
+     "repo_path": "mmproj-BF16.gguf",
+     "url": "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/4ca720788d1e01f1bff70c033e0d0028fd02e502/mmproj-BF16.gguf",
+     "bytes": 931146432,
+     "sha256": "83ee4f4f205fa514161778c41df1ea14144faa0f713510893b63c2395f5c2d53",
+     "role": "mmproj"
+    }
+   ],
+   "licence": {
+    "id": "Apache-2.0",
+    "name": "Apache License 2.0",
+    "url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/main/LICENSE",
+    "prompt_line": "License: Apache-2.0. Qwen3.8-27B by Alibaba Qwen, GGUF by Unsloth.",
+    "note": "",
+    "verified_upstream": true
+   },
+   "default_status": "none",
+   "download_enabled": true,
+   "disabled_reason": null,
+   "speed": {
+    "writing_tok_s": 11.4,
+    "reading_tok_s": 475,
+    "prompt_tokens": null,
+    "source": "coordinator brief 10-14 (prompt length not recorded)",
+    "label": "measured on Strix Halo 128 GB, smoke-grade"
+   },
+   "technical_name": "Qwen3.8-27B-UD-Q4_K_XL",
+   "about": "Qwen3.8 27B is a text and image model by Alibaba Qwen, quantised by Unsloth. UD-Q4_K_XL uses mixed precision, mostly 4-bit, to reduce memory use. It is offered as a smaller alternative to Flash Next."
+  },
+  {
+   "id": "qwen36-27b-ud-q4-k-xl",
+   "display_name": "Qwen3.6 27B original (Unsloth UD-Q4_K_XL)",
+   "role": "supported",
+   "architecture": "qwen35",
+   "set": "original",
+   "repository": "unsloth/Qwen3.6-27B-GGUF",
+   "commit": "82d411acf4a06cfb8d9b073a5211bf410bfc29bf",
+   "files": [
+    {
+     "name": "Qwen3.6-27B-UD-Q4_K_XL.gguf",
+     "repo_path": "Qwen3.6-27B-UD-Q4_K_XL.gguf",
+     "url": "https://huggingface.co/unsloth/Qwen3.6-27B-GGUF/resolve/82d411acf4a06cfb8d9b073a5211bf410bfc29bf/Qwen3.6-27B-UD-Q4_K_XL.gguf",
+     "bytes": 17612564704,
+     "sha256": "ff6941ded525b34eb159496762c29dd0ec6e71dc31b74d57e75d871a03eec259",
+     "role": "main"
+    },
+    {
+     "name": "mmproj-BF16.gguf",
+     "repo_path": "mmproj-BF16.gguf",
+     "url": "https://huggingface.co/unsloth/Qwen3.6-27B-GGUF/resolve/82d411acf4a06cfb8d9b073a5211bf410bfc29bf/mmproj-BF16.gguf",
+     "bytes": 931146304,
+     "sha256": "05353347512982ee62317b9d8c89372bc815f4b4043580e7ef3ad411ec1a1cd3",
+     "role": "mmproj"
+    }
+   ],
+   "licence": {
+    "id": "Apache-2.0",
+    "name": "Apache License 2.0",
+    "url": "https://huggingface.co/Qwen/Qwen3.6-27B/blob/main/LICENSE",
+    "prompt_line": "License: Apache-2.0. Qwen3.6-27B by Alibaba Qwen, GGUF by Unsloth.",
+    "note": "",
+    "verified_upstream": true
+   },
+   "default_status": "none",
+   "download_enabled": true,
+   "disabled_reason": null,
+   "speed": {
+    "writing_tok_s": 11.45,
+    "reading_tok_s": 389.5,
+    "prompt_tokens": 8329,
+    "source": "smoke run benchmarks/w1-dense-qwen3.6-27b-smoke-20261014-172615 (merged int runtime bubo-int-5d95b13c; decode from code_a, prefill from the 8329-token prompt)",
+    "label": "measured on Strix Halo 128 GB, smoke-grade"
+   },
+   "technical_name": "Qwen3.6-27B-UD-Q4_K_XL",
+   "about": "Qwen3.6 27B is a text and image model by Alibaba Qwen, quantised by Unsloth. UD-Q4_K_XL uses mixed precision, mostly 4-bit, to reduce memory use. It is offered as a smaller alternative to Flash Next."
+  },
+  {
+   "id": "cyber-tiel-coder-35b-a3b-mtp-q4-k-m",
+   "display_name": "Cyber-Tiel Coder 35B-A3B (Q4_K_M)",
+   "role": "supported",
+   "architecture": "qwen35moe",
+   "set": "uncensored",
+   "repository": "peculiar-ragdoll/Cyber-Tiel-Coder-35B-A3B-GGUF-MTP",
+   "commit": "fa19d4f33561dc0d107c2a2f8943f1ca2e288109",
+   "files": [
+    {
+     "name": "Cyber-Tiel-Coder-35B-A3B-MTP-UD-Q4_K_M.gguf",
+     "repo_path": "Cyber-Tiel-Coder-35B-A3B-MTP-UD-Q4_K_M.gguf",
+     "url": "https://huggingface.co/peculiar-ragdoll/Cyber-Tiel-Coder-35B-A3B-GGUF-MTP/resolve/fa19d4f33561dc0d107c2a2f8943f1ca2e288109/Cyber-Tiel-Coder-35B-A3B-MTP-UD-Q4_K_M.gguf",
+     "bytes": 22523953472,
+     "sha256": "5962eb46804f4d6198aadc34bc7efe472a0399f0147cea74ed5a20c2180168fd",
+     "role": "main"
+    },
+    {
+     "name": "mmproj-BF16.gguf",
+     "repo_path": "mmproj-BF16.gguf",
+     "url": "https://huggingface.co/peculiar-ragdoll/Cyber-Tiel-Coder-35B-A3B-GGUF-MTP/resolve/fa19d4f33561dc0d107c2a2f8943f1ca2e288109/mmproj-BF16.gguf",
+     "bytes": 902822016,
+     "sha256": "d9ce31026d1cb1f3f8d5152e2e2a014d9d2b302b6c93a7dc07bb0a0487f52837",
+     "role": "mmproj"
+    }
+   ],
+   "licence": {
+    "id": "MIT",
+    "name": "MIT License (stated by the model card)",
+    "url": "https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B",
+    "prompt_line": "MIT, as stated by the model card; upstream LICENSE file not found",
+    "note": "MIT, as stated by the model card; upstream LICENSE file not found",
+    "verified_upstream": false
+   },
+   "default_status": "none",
+   "download_enabled": true,
+   "disabled_reason": null,
+   "speed": {
+    "writing_tok_s": 59,
+    "reading_tok_s": 1655,
+    "prompt_tokens": 8500,
+    "source": "coordinator brief 10-14",
+    "label": "measured on Strix Halo 128 GB, smoke-grade"
+   },
+   "technical_name": "Cyber-Tiel-Coder-35B-A3B-MTP-UD-Q4_K_M",
+   "about": "Cyber-Tiel Coder 35B-A3B is an abliterated, uncensored coding model from peculiar-ragdoll, built on Huihui’s abliterated Ornith 1.5. It can produce sensitive or explicit content. It supports text and image input. Q4_K_M uses mostly 4-bit weights with some weights kept at higher precision to reduce memory use. It is offered as a coding alternative."
+  },
+  {
+   "id": "gemma4-26b-a4b-unsloth-qat-ud-q4-k-xl",
+   "display_name": "Gemma 4 26B-A4B · Unsloth QAT UD-Q4_K_XL",
+   "technical_name": "gemma-4-26B-A4B-it-qat-GGUF",
+   "about": "Gemma 4 26B-A4B is a text and image model with 26 billion parameters and about 4 billion active per token by Google. Unsloth prepared this original model in UD-Q4_K_XL, a mixed-precision format with mostly 4-bit weights. QAT means the model was trained with quantisation in mind. It is offered as an original Gemma alternative with image input and a multi-token prediction head.",
+   "role": "supported",
+   "architecture": "gemma4",
+   "set": "original",
+   "repository": "unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+   "commit": "7b92b5b28818151e8669af2e45e88d6086f490dd",
+   "files": [
+    {
+     "name": "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf",
+     "repo_path": "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf",
+     "url": "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-qat-GGUF/resolve/7b92b5b28818151e8669af2e45e88d6086f490dd/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf",
+     "bytes": 14249047104,
+     "sha256": "a7c5bc715f5ff8e99a3e8901ce7d2b42b402c669bf24f7c5250747633d0f5891",
+     "role": "main"
+    },
+    {
+     "name": "mmproj-BF16.gguf",
+     "repo_path": "mmproj-BF16.gguf",
+     "url": "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-qat-GGUF/resolve/7b92b5b28818151e8669af2e45e88d6086f490dd/mmproj-BF16.gguf",
+     "bytes": 1194828256,
+     "sha256": "7b06953ccdbe8cf363f47841a7afaacd2b1c2ff9a8d6b426fdec7521a6878744",
+     "role": "mmproj"
+    },
+    {
+     "name": "mtp-gemma-4-26B-A4B-it.gguf",
+     "repo_path": "mtp-gemma-4-26B-A4B-it.gguf",
+     "url": "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-qat-GGUF/resolve/7b92b5b28818151e8669af2e45e88d6086f490dd/mtp-gemma-4-26B-A4B-it.gguf",
+     "bytes": 251939328,
+     "sha256": "7272d97595f0d4c74bd7b623492b7dbdaafd8b7c72f329a8270ba4eca68f768a",
+     "role": "mtp"
+    }
+   ],
+   "licence": {
+    "id": "Apache-2.0",
+    "name": "Apache License 2.0",
+    "url": "https://ai.google.dev/gemma/docs/gemma_4_license",
+    "prompt_line": "License: Apache-2.0. Google Gemma 4 26B-A4B, QAT GGUF by Unsloth.",
+    "note": "",
+    "verified_upstream": true
+   },
+   "default_status": "none",
+   "family_group": "gemma4-26b-a4b",
+   "download_enabled": true,
+   "disabled_reason": null,
+   "estimate_note": "Bubo has no memory estimate for this model yet."
+  },
+  {
+   "id": "gemma4-31b-unsloth-qat-ud-q4-k-xl",
+   "display_name": "Gemma 4 31B · Unsloth QAT UD-Q4_K_XL",
+   "technical_name": "gemma-4-31B-it-qat-GGUF",
+   "about": "Gemma 4 31B is a dense text and image model with 31 billion parameters by Google. Unsloth prepared this original model in UD-Q4_K_XL, a mixed-precision format with mostly 4-bit weights. QAT means the model was trained with quantisation in mind. It is offered as an original Gemma alternative with image input and a multi-token prediction head.",
+   "role": "supported",
+   "architecture": "gemma4",
+   "set": "original",
+   "repository": "unsloth/gemma-4-31B-it-qat-GGUF",
+   "commit": "43cc1aeb31adf47ec06a854507ce552cd9862e6f",
+   "files": [
+    {
+     "name": "gemma-4-31B-it-qat-UD-Q4_K_XL.gguf",
+     "repo_path": "gemma-4-31B-it-qat-UD-Q4_K_XL.gguf",
+     "url": "https://huggingface.co/unsloth/gemma-4-31B-it-qat-GGUF/resolve/43cc1aeb31adf47ec06a854507ce552cd9862e6f/gemma-4-31B-it-qat-UD-Q4_K_XL.gguf",
+     "bytes": 17287670048,
+     "sha256": "00b5a7c497f0c8934033088c10a7fa9a4c015e46ee6d89e9c6890650ba5d0e71",
+     "role": "main"
+    },
+    {
+     "name": "mmproj-BF16.gguf",
+     "repo_path": "mmproj-BF16.gguf",
+     "url": "https://huggingface.co/unsloth/gemma-4-31B-it-qat-GGUF/resolve/43cc1aeb31adf47ec06a854507ce552cd9862e6f/mmproj-BF16.gguf",
+     "bytes": 1200726496,
+     "sha256": "d904b3579a9fbfbd50bc9bf40cb7384909edbd69fa9276db5ddc853e80f0edca",
+     "role": "mmproj"
+    },
+    {
+     "name": "mtp-gemma-4-31B-it.gguf",
+     "repo_path": "mtp-gemma-4-31B-it.gguf",
+     "url": "https://huggingface.co/unsloth/gemma-4-31B-it-qat-GGUF/resolve/43cc1aeb31adf47ec06a854507ce552cd9862e6f/mtp-gemma-4-31B-it.gguf",
+     "bytes": 279955968,
+     "sha256": "3a5e99fd8d0b23afb1fccd1ee0c9ebd1f571d00399c2dae2292d217feeec0f6b",
+     "role": "mtp"
+    }
+   ],
+   "licence": {
+    "id": "Apache-2.0",
+    "name": "Apache License 2.0",
+    "url": "https://ai.google.dev/gemma/docs/gemma_4_license",
+    "prompt_line": "License: Apache-2.0. Google Gemma 4 31B, QAT GGUF by Unsloth.",
+    "note": "",
+    "verified_upstream": true
+   },
+   "default_status": "none",
+   "family_group": "gemma4-31b",
+   "download_enabled": true,
+   "disabled_reason": null,
+   "estimate_note": "Bubo has no memory estimate for this model yet."
+  },
+  {
+   "id": "gemma4-26b-a4b-huihui-abliterated-qat-q4-k",
+   "display_name": "Gemma 4 26B-A4B · Huihui abliterated QAT · Q4_K",
+   "technical_name": "Huihui-gemma-4-26B-A4B-it-qat-q4_0-unquantized-abliterated-GGUF",
+   "about": "Gemma 4 26B-A4B is a text and image model with 26 billion parameters and about 4 billion active per token by Google. Huihui made this abliterated version, which reduces refusal behavior. Q4_K stores weights mostly at 4-bit precision. QAT means the model was trained with quantisation in mind. It is offered as an abliterated Gemma alternative with image input and a multi-token prediction head.",
+   "role": "supported",
+   "architecture": "gemma4",
+   "set": "uncensored",
+   "repository": "huihui-ai/Huihui-gemma-4-26B-A4B-it-qat-q4_0-unquantized-abliterated-GGUF",
+   "commit": "6cd6fd4d423acb18e05f1f808958d14db5226ac1",
+   "files": [
+    {
+     "name": "Huihui-gemma-4-26B-A4B-it-qat-q4_0-unquantized-abliterated-Q4_K.gguf",
+     "repo_path": "Huihui-gemma-4-26B-A4B-it-qat-q4_0-unquantized-abliterated-Q4_K.gguf",
+     "url": "https://huggingface.co/huihui-ai/Huihui-gemma-4-26B-A4B-it-qat-q4_0-unquantized-abliterated-GGUF/resolve/6cd6fd4d423acb18e05f1f808958d14db5226ac1/Huihui-gemma-4-26B-A4B-it-qat-q4_0-unquantized-abliterated-Q4_K.gguf",
+     "bytes": 16796015648,
+     "sha256": "4b4f9d4b448fca16230f08d50c18a95c81ecfaefede95d3bdfcf1880b4b620f5",
+     "role": "main"
+    },
+    {
+     "name": "mmproj-model-bf16.gguf",
+     "repo_path": "mmproj-model-bf16.gguf",
+     "url": "https://huggingface.co/huihui-ai/Huihui-gemma-4-26B-A4B-it-qat-q4_0-unquantized-abliterated-GGUF/resolve/6cd6fd4d423acb18e05f1f808958d14db5226ac1/mmproj-model-bf16.gguf",
+     "bytes": 1194827872,
+     "sha256": "966dbada52d2dd1ab1e3a6faa393ca6242df881bb404286a3c4619fd9c760212",
+     "role": "mmproj"
+    },
+    {
+     "name": "mtp-ggml-model-bf16.gguf",
+     "repo_path": "mtp-ggml-model-bf16.gguf",
+     "url": "https://huggingface.co/huihui-ai/Huihui-gemma-4-26B-A4B-it-qat-q4_0-unquantized-abliterated-GGUF/resolve/6cd6fd4d423acb18e05f1f808958d14db5226ac1/mtp-ggml-model-bf16.gguf",
+     "bytes": 855246336,
+     "sha256": "9c2424cef7469d01035a906e84f606d13fc44a5b48d54e4a8d1d30c2b19d2cb3",
+     "role": "mtp"
+    }
+   ],
+   "licence": {
+    "id": "Apache-2.0",
+    "name": "Apache License 2.0",
+    "url": "https://ai.google.dev/gemma/docs/gemma_4_license",
+    "prompt_line": "License: Apache-2.0. Google Gemma 4 26B-A4B, abliterated QAT build by Huihui.",
+    "note": "",
+    "verified_upstream": true
+   },
+   "default_status": "default",
+   "family_group": "gemma4-26b-a4b",
+   "download_enabled": true,
+   "disabled_reason": null,
+   "estimate_note": "Bubo has no memory estimate for this model yet."
+  },
+  {
+   "id": "gemma4-31b-huihui-abliterated-qat-q4-k",
+   "display_name": "Gemma 4 31B · Huihui abliterated QAT · Q4_K",
+   "technical_name": "Huihui-gemma-4-31B-it-qat-q4_0-unquantized-abliterated-GGUF",
+   "about": "Gemma 4 31B is a dense text and image model with 31 billion parameters by Google. Huihui made this abliterated version, which reduces refusal behavior. Q4_K stores weights mostly at 4-bit precision. QAT means the model was trained with quantisation in mind. It is offered as an abliterated Gemma alternative with image input and a multi-token prediction head.",
+   "role": "supported",
+   "architecture": "gemma4",
+   "set": "uncensored",
+   "repository": "huihui-ai/Huihui-gemma-4-31B-it-qat-q4_0-unquantized-abliterated-GGUF",
+   "commit": "d88eed23c256f41cd4b58c582231c3fbb61014b2",
+   "files": [
+    {
+     "name": "Huihui-gemma-4-31B-it-qat-q4_0-unquantized-abliterated-Q4_K.gguf",
+     "repo_path": "Huihui-gemma-4-31B-it-qat-q4_0-unquantized-abliterated-Q4_K.gguf",
+     "url": "https://huggingface.co/huihui-ai/Huihui-gemma-4-31B-it-qat-q4_0-unquantized-abliterated-GGUF/resolve/d88eed23c256f41cd4b58c582231c3fbb61014b2/Huihui-gemma-4-31B-it-qat-q4_0-unquantized-abliterated-Q4_K.gguf",
+     "bytes": 18687062272,
+     "sha256": "01fa18ad51c7d31ce738ec8206add7326a96d8a2db044a88f8df05c678c0f8c0",
+     "role": "main"
+    },
+    {
+     "name": "mmproj-model-bf16.gguf",
+     "repo_path": "mmproj-model-bf16.gguf",
+     "url": "https://huggingface.co/huihui-ai/Huihui-gemma-4-31B-it-qat-q4_0-unquantized-abliterated-GGUF/resolve/d88eed23c256f41cd4b58c582231c3fbb61014b2/mmproj-model-bf16.gguf",
+     "bytes": 1200726112,
+     "sha256": "fa3c584233a103b5fac2e0533b4054a6bc74ec91d836b804663d8e6f5e624afa",
+     "role": "mmproj"
+    },
+    {
+     "name": "mtp-ggml-model-bf16.gguf",
+     "repo_path": "mtp-ggml-model-bf16.gguf",
+     "url": "https://huggingface.co/huihui-ai/Huihui-gemma-4-31B-it-qat-q4_0-unquantized-abliterated-GGUF/resolve/d88eed23c256f41cd4b58c582231c3fbb61014b2/mtp-ggml-model-bf16.gguf",
+     "bytes": 954861056,
+     "sha256": "4aa111212c930e4850a960168eb08384eb7653e16a4d3def587f78caabc24db1",
+     "role": "mtp"
+    }
+   ],
+   "licence": {
+    "id": "Apache-2.0",
+    "name": "Apache License 2.0",
+    "url": "https://ai.google.dev/gemma/docs/gemma_4_license",
+    "prompt_line": "License: Apache-2.0. Google Gemma 4 31B, abliterated QAT build by Huihui.",
+    "note": "",
+    "verified_upstream": true
+   },
+   "default_status": "default",
+   "family_group": "gemma4-31b",
+   "download_enabled": true,
+   "disabled_reason": null,
+   "estimate_note": "Bubo has no memory estimate for this model yet."
+  },
+  {
+   "id": "diffusiongemma-26b-e38-abliterated-nvfp4",
+   "display_name": "DiffusionGemma 26B · E38 abliterated · NVFP4 (4-bit)",
+   "technical_name": "DiffusionGemma-26B-E38-Abliterated-NVFP4",
+   "about": "DiffusionGemma 26B is Google’s diffusion text model. Goodoldjam published this E38 abliterated version, which reduces refusal behavior. NVFP4 stores the expert weights in a 4-bit floating-point format; other weights keep higher precision. It is offered as a diffusion-model alternative with image input.",
+   "role": "supported",
+   "architecture": "diffusion_gemma",
+   "set": "uncensored",
+   "repository": "Goodoldjam/DiffusionGemma-26B-E38-Abliterated-NVFP4",
+   "commit": "3f007177bf67706bd335f8275a1bd2657cd4e686",
+   "files": [
+    {
+     "name": "model-00001-of-00002.safetensors",
+     "repo_path": "model-00001-of-00002.safetensors",
+     "url": "https://huggingface.co/Goodoldjam/DiffusionGemma-26B-E38-Abliterated-NVFP4/resolve/3f007177bf67706bd335f8275a1bd2657cd4e686/model-00001-of-00002.safetensors",
+     "bytes": 10002097536,
+     "sha256": "000f52469b9efe0167c5446ace8b6cf549c9fa27b0c1e65d044e0b72b98f0568",
+     "role": "main"
+    },
+    {
+     "name": "model-00002-of-00002.safetensors",
+     "repo_path": "model-00002-of-00002.safetensors",
+     "url": "https://huggingface.co/Goodoldjam/DiffusionGemma-26B-E38-Abliterated-NVFP4/resolve/3f007177bf67706bd335f8275a1bd2657cd4e686/model-00002-of-00002.safetensors",
+     "bytes": 8821758352,
+     "sha256": "6d2fab645f0e58ec48976315eae9b3f3ba92961248048ed98e19070746e8fc1d",
+     "role": "main"
+    },
+    {
+     "name": "config.json",
+     "repo_path": "config.json",
+     "url": "https://huggingface.co/Goodoldjam/DiffusionGemma-26B-E38-Abliterated-NVFP4/resolve/3f007177bf67706bd335f8275a1bd2657cd4e686/config.json",
+     "bytes": 14885,
+     "sha256": "209402d3420bb8ff3f4952ba7344b4db99b6a87ce121c775721c369bcbb6c886",
+     "role": "support"
+    },
+    {
+     "name": "generation_config.json",
+     "repo_path": "generation_config.json",
+     "url": "https://huggingface.co/Goodoldjam/DiffusionGemma-26B-E38-Abliterated-NVFP4/resolve/3f007177bf67706bd335f8275a1bd2657cd4e686/generation_config.json",
+     "bytes": 388,
+     "sha256": "e7929cf6d1163bfee88787c7ac0c7aa25dcecab43a096ba618cbae165d9c15ea",
+     "role": "support"
+    },
+    {
+     "name": "model.safetensors.index.json",
+     "repo_path": "model.safetensors.index.json",
+     "url": "https://huggingface.co/Goodoldjam/DiffusionGemma-26B-E38-Abliterated-NVFP4/resolve/3f007177bf67706bd335f8275a1bd2657cd4e686/model.safetensors.index.json",
+     "bytes": 4656360,
+     "sha256": "3a1f1d8b64daad31b33c63ac48edd1cb43f0c3b3edf7cddf625f74fff37ae4c0",
+     "role": "support"
+    },
+    {
+     "name": "tokenizer.json",
+     "repo_path": "tokenizer.json",
+     "url": "https://huggingface.co/Goodoldjam/DiffusionGemma-26B-E38-Abliterated-NVFP4/resolve/3f007177bf67706bd335f8275a1bd2657cd4e686/tokenizer.json",
+     "bytes": 32169626,
+     "sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+     "role": "support"
+    },
+    {
+     "name": "LICENSE",
+     "repo_path": "LICENSE",
+     "url": "https://huggingface.co/Goodoldjam/DiffusionGemma-26B-E38-Abliterated-NVFP4/resolve/3f007177bf67706bd335f8275a1bd2657cd4e686/LICENSE",
+     "bytes": 11358,
+     "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+     "role": "support"
+    },
+    {
+     "name": "mmproj-DiffusionGemma-E38-BF16.gguf",
+     "repository": "HaloForgeLabs/bubo-diffusiongemma-26b-e38-vision",
+     "commit": "1664bd063958f87082f20a787af38806a2721206",
+     "repo_path": "mmproj-DiffusionGemma-E38-BF16.gguf",
+     "url": "https://huggingface.co/HaloForgeLabs/bubo-diffusiongemma-26b-e38-vision/resolve/1664bd063958f87082f20a787af38806a2721206/mmproj-DiffusionGemma-E38-BF16.gguf",
+     "bytes": 1194827776,
+     "sha256": "b5cf1c3c50c97321393f525ef64f0303efb843bb3e3087958c852e2922475f43",
+     "role": "mmproj",
+     "licence_text": "License: Apache-2.0. Google DiffusionGemma vision weights, converted by HaloForge Labs."
+    },
+    {
+     "name": "VISION-NOTICE",
+     "licence_text": "License: Apache-2.0. Google DiffusionGemma vision weights; conversion notice by HaloForge Labs.",
+     "repository": "HaloForgeLabs/bubo-diffusiongemma-26b-e38-vision",
+     "commit": "1664bd063958f87082f20a787af38806a2721206",
+     "repo_path": "NOTICE",
+     "url": "https://huggingface.co/HaloForgeLabs/bubo-diffusiongemma-26b-e38-vision/resolve/1664bd063958f87082f20a787af38806a2721206/NOTICE",
+     "bytes": 554,
+     "sha256": "2f7a732b61045acf6fd98bafe11158619380d7ac4a79f81c3e9bae355bc8f32d",
+     "role": "support"
+    }
+   ],
+   "licence": {
+    "id": "Apache-2.0",
+    "name": "Apache License 2.0",
+    "url": "https://huggingface.co/Goodoldjam/DiffusionGemma-26B-E38-Abliterated-NVFP4/blob/3f007177bf67706bd335f8275a1bd2657cd4e686/LICENSE",
+    "prompt_line": "License: Apache-2.0. Google DiffusionGemma 26B, E38 abliterated NVFP4 build from Goodoldjam; vision conversion by HaloForge Labs.",
+    "note": "Vision conversion notice: https://huggingface.co/HaloForgeLabs/bubo-diffusiongemma-26b-e38-vision/blob/1664bd063958f87082f20a787af38806a2721206/NOTICE",
+    "verified_upstream": true
+   },
+   "default_status": "none",
+   "download_enabled": true,
+   "disabled_reason": null,
+   "packaging": "safetensors_folder",
+   "estimate_note": "Bubo has no memory estimate for this model yet."
+  }
+ ]
+}

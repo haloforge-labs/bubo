@@ -1,0 +1,8 @@
+node_modules/
+.vite/
+dist/
+src/generated/
+src/scenarios/
+wailsjs/
+src/fonts/
+package-lock.json

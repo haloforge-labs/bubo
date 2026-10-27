@@ -2,10 +2,12 @@
 #include <array>
 #include <charconv>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <future>
 #include <iostream>
 #include <latch>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -30,6 +32,111 @@ void RequireExact(std::span<const float> expected,
               std::memcmp(expected.data(), actual.data(),
                           expected.size_bytes()) == 0,
           message);
+}
+
+// The dense twin (engine.cpp reads GUFO_DENSE_TWIN_MODEL) and V2K
+// (executor.cpp, GUFO_EXPERT_V2K=1) pick kernels by batch rows, so different
+// batch compositions are not bit-identical while either is armed (non-exact by
+// design; the exact profile turns both off).
+bool NonExactDecodeArmed() {
+  const char* twin = std::getenv("GUFO_DENSE_TWIN_MODEL");
+  const char* v2k = std::getenv("GUFO_EXPERT_V2K");
+  return (twin != nullptr && *twin != '\0') ||
+         (v2k != nullptr && std::strcmp(v2k, "1") == 0);
+}
+
+// The multi-session twin (GUFO_DENSE_TWIN_BATCH=1) takes its batched IQ4 path
+// only when the model is loaded for several decode sessions, as serve loads it
+// for --sessions N; otherwise the model keeps the single-session default.
+std::uint32_t DecodeConcurrency() {
+  const char* batch = std::getenv("GUFO_DENSE_TWIN_BATCH");
+  return batch != nullptr && std::strcmp(batch, "1") == 0 ? 8 : 1;
+}
+
+// Bit-exact across batch compositions; with non-exact decode armed, the same
+// behaviour instead: finite logits and the same top-1 wherever the reference
+// is confident (top-1 minus top-2 probability >= 0.1), with the gap logged.
+void RequireSameBehaviour(std::span<const float> expected,
+                          std::span<const float> actual,
+                          const std::string& message) {
+  if (!NonExactDecodeArmed()) {
+    RequireExact(expected, actual, message);
+    return;
+  }
+  Require(expected.size() >= 2 && expected.size() == actual.size(),
+          message + " (vocabulary size)");
+  for (std::size_t i = 0; i < expected.size(); ++i)
+    Require(std::isfinite(expected[i]), message + " (non-finite reference)");
+  const auto softmax = [](std::span<const float> logits) {
+    const double peak = *std::max_element(logits.begin(), logits.end());
+    std::vector<double> p(logits.size());
+    double sum = 0;
+    for (std::size_t i = 0; i < logits.size(); ++i)
+      sum += p[i] = std::exp(static_cast<double>(logits[i]) - peak);
+    for (auto& value : p)
+      value /= sum;
+    return p;
+  };
+  for (std::size_t i = 0; i < actual.size(); ++i)
+    Require(std::isfinite(actual[i]), message + " (non-finite logit)");
+  const auto p = softmax(expected);
+  const auto q = softmax(actual);
+  std::size_t top = 0, second = 1, top_actual = 0;
+  double max_logit = 0, max_p = 0, kl = 0;
+  for (std::size_t i = 0; i < p.size(); ++i) {
+    if (p[i] > p[top]) {
+      second = top;
+      top = i;
+    } else if (i != top && p[i] > p[second]) {
+      second = i;
+    }
+    if (q[i] > q[top_actual])
+      top_actual = i;
+    max_logit = std::max(
+        max_logit, std::abs(static_cast<double>(expected[i]) - actual[i]));
+    max_p = std::max(max_p, std::abs(p[i] - q[i]));
+    if (p[i] > 0)
+      kl += p[i] * (std::log(p[i]) - std::log(std::max(q[i], 1e-300)));
+  }
+  const double margin = p[top] - p[second];
+  std::cout << "non-exact " << message << ": max|dlogit|=" << max_logit
+            << " top1=" << (top == top_actual ? "same" : "differs")
+            << " ref_margin=" << margin << " max|dp|=" << max_p << " kl=" << kl
+            << "\n";
+  Require(top == top_actual || margin < 0.1,
+          message + " (top-1 changed where the reference is confident)");
+}
+
+// Non-exact replays whose logits were compared / skipped after a divergence.
+std::size_t non_exact_replays_compared = 0;
+std::size_t non_exact_replays_skipped = 0;
+
+// A sampled decode replayed in another batch composition: exact tokens, RNG
+// and logits. With non-exact decode armed the sampled tokens may diverge, so
+// the logits are compared by behaviour only when the replay matched.
+void RequireReplay(const qfn::Session::DecodeResult& reference,
+                   const sampling::SamplerState& reference_sampler,
+                   const qfn::Session::DecodeResult& actual,
+                   const sampling::SamplerState& actual_sampler,
+                   std::span<const float> reference_logits,
+                   std::span<const float> actual_logits,
+                   const std::string& what) {
+  const bool same = actual.tokens == reference.tokens &&
+                    actual_sampler.rng_state() == reference_sampler.rng_state();
+  if (!NonExactDecodeArmed()) {
+    Require(same, what + " changed sampling replay");
+    RequireExact(reference_logits, actual_logits, what + " changed logits");
+    return;
+  }
+  if (!same) {
+    ++non_exact_replays_skipped;
+    std::cout << "non-exact " << what
+              << ": sampled replay diverged; logits not compared\n";
+    return;
+  }
+  ++non_exact_replays_compared;
+  RequireSameBehaviour(reference_logits, actual_logits,
+                       what + " changed logits");
 }
 
 void CheckSnapshotDuringGraphCapture(const std::shared_ptr<qfn::Model>& model,
@@ -303,7 +410,12 @@ void CheckPrefillChunks(const std::shared_ptr<qfn::Model>& model) {
   for (const auto [length, boundary] :
        {std::pair{136U, 94U}, std::pair{136U, 103U}, std::pair{136U, 104U},
         std::pair{136U, 127U}, std::pair{136U, 128U}, std::pair{136U, 135U},
-        std::pair{2048U, 1025U}, std::pair{4096U, 2048U}}) {
+        std::pair{2048U, 1025U}, std::pair{4096U, 2048U},
+        // Sparse continuation frontiers past the 2048-key selection budget:
+        // only multiples of 4 are split-invariant (the compact union list
+        // groups four launch-relative queries), as in the exact profile.
+        std::pair{2056U, 2052U},
+        std::pair{4104U, 4096U}}) {
     std::vector<std::int32_t> tokens(length);
     for (std::size_t i = 0; i < tokens.size(); ++i)
       tokens[i] = pattern[i % pattern.size()];
@@ -466,8 +578,8 @@ void CheckBatchFailureIsolation(const std::shared_ptr<qfn::Model>& model) {
     Require(!outcomes[0].completed && !outcomes[0].error.empty() &&
                 outcomes[1].completed && second->IsValid() && !first->IsValid(),
             "cancellation must invalidate only the partially executed session");
-    RequireExact(expected, second->Logits(),
-                 "cancelled peer changed target logits");
+    RequireSameBehaviour(expected, second->Logits(),
+                         "cancelled peer changed target logits");
     first->SetCancellationCheck({});
     Require(first->RestoreSnapshot(*snapshot, &error) &&
                 second->RestoreSnapshot(*snapshot, &error),
@@ -478,8 +590,9 @@ void CheckBatchFailureIsolation(const std::shared_ptr<qfn::Model>& model) {
     Require(!qfn::Session::EvaluateBatch(invalid, &error) && first->IsValid() &&
                 second->IsValid() && outcomes[1].completed,
             "invalid preparation poisoned a peer or the untouched session");
-    RequireExact(expected, second->Logits(),
-                 "invalid peer changed target logits");
+    // The invalid row is dropped at preparation, so the target runs alone here.
+    RequireSameBehaviour(expected, second->Logits(),
+                         "invalid peer changed target logits");
     Require(first->RestoreSnapshot(*snapshot, &error) &&
                 second->RestoreSnapshot(*snapshot, &error),
             error);
@@ -497,12 +610,10 @@ void CheckBatchFailureIsolation(const std::shared_ptr<qfn::Model>& model) {
         qfn::Session::DecodeRequest{second.get(), 3, &b, &actual, false,
                                     &outcomes[1]}};
     Require(!qfn::Session::DecodeBatch(invalid_decode, &error) &&
-                first->IsValid() && outcomes[1].completed &&
-                actual.tokens == reference.tokens &&
-                b.rng_state() == control.rng_state(),
-            "invalid decode peer changed sampling replay");
-    RequireExact(speculative_logits, second->Logits(),
-                 "invalid decode peer changed logits");
+                first->IsValid() && outcomes[1].completed,
+            "invalid decode peer poisoned the target");
+    RequireReplay(reference, control, actual, b, speculative_logits,
+                  second->Logits(), "invalid decode peer");
     if (mode == gufo::core::SessionMode::kSpeculative) {
       Require(first->RestoreSnapshot(*snapshot, &error) &&
                   second->RestoreSnapshot(*snapshot, &error),
@@ -518,15 +629,20 @@ void CheckBatchFailureIsolation(const std::shared_ptr<qfn::Model>& model) {
                                       &outcomes[1]}};
       Require(!qfn::Session::DecodeBatch(mtp_cancel, &error) &&
                   !outcomes[0].completed && outcomes[1].completed &&
-                  second->IsValid() && actual.tokens == reference.tokens &&
-                  b.rng_state() == control.rng_state(),
-              "cancelled MTP peer changed sampling replay");
-      RequireExact(speculative_logits, second->Logits(),
-                   "cancelled MTP peer changed logits");
+                  second->IsValid(),
+              "cancelled MTP peer poisoned the target");
+      RequireReplay(reference, control, actual, b, speculative_logits,
+                    second->Logits(), "cancelled MTP peer");
     }
   }
   std::cout << "batch preparation and mid-execution cancellation isolate peers "
                "and sampling replay\n";
+  if (NonExactDecodeArmed()) {
+    std::cout << "non-exact replays compared=" << non_exact_replays_compared
+              << " skipped=" << non_exact_replays_skipped << "\n";
+    Require(non_exact_replays_compared > 0,
+            "every non-exact replay diverged; no logits were compared");
+  }
 }
 
 void CheckBatchedSessions(const std::shared_ptr<qfn::Model>& model) {
@@ -591,10 +707,19 @@ void CheckBatchedSessions(const std::shared_ptr<qfn::Model>& model) {
       }
       Require(qfn::Session::EvaluateBatch(advances, &error), error);
       for (std::size_t i = 0; i < width; ++i) {
-        RequireExact(serial[i]->Logits(), batched[i]->Logits(),
-                     "batched AR frontier differs at C" +
-                         std::to_string(width) + " row " + std::to_string(i));
+        RequireSameBehaviour(serial[i]->Logits(), batched[i]->Logits(),
+                             "batched AR frontier differs at C" +
+                                 std::to_string(width) + " row " +
+                                 std::to_string(i));
       }
+    }
+    // Free-running decode below lets serial and batched rows pick their own
+    // tokens; with non-exact decode armed they diverge by design, so only the
+    // teacher-forced frontier above is compared.
+    if (NonExactDecodeArmed()) {
+      std::cout << "batch C" << width
+                << " non-exact decode armed: decode cycles skipped\n";
+      continue;
     }
     // Different budgets create ragged chains and include ordinary one-token
     // decoding in the same batch as speculative verification.
@@ -663,6 +788,8 @@ void CheckBatchedSessions(const std::shared_ptr<qfn::Model>& model) {
     std::cout << "batch C" << width << " AR_MTP_logits_RNG_exact=1\n"
               << std::flush;
   }
+  if (NonExactDecodeArmed())
+    return;
   Require(
       sampled_acceptances > 0 && sampled_rejections > 0,
       "batch test must exercise sampled acceptance and residual correction");
@@ -751,6 +878,10 @@ void CheckExecutionModes(const std::shared_ptr<qfn::Model>& model,
   Require(step.tokens.size() == 1 && ar->Statistics().drafted == 0,
           "AR session with a resident sidecar executed speculative decoding");
   const std::vector<float> expected(ar->Logits().begin(), ar->Logits().end());
+  // The anchor above ran as a 2-row batch, the resume below runs it alone, and
+  // both resumes take the same 1-row path, so they must match each other.
+  std::vector<float> first_resume;
+  std::vector<std::int32_t> first_tokens;
   for (bool serialized : {false, true}) {
     if (serialized) {
       std::vector<std::uint8_t> bytes(ar_snapshot->SizeBytes());
@@ -763,11 +894,24 @@ void CheckExecutionModes(const std::shared_ptr<qfn::Model>& model,
     sampling::SamplerState replay(config);
     qfn::Session::DecodeResult resumed;
     Require(ar->DecodeStep(8, replay, &resumed, &error, false), error);
-    Require(resumed.tokens == step.tokens &&
-                replay.rng_state() == sampler.rng_state(),
+    Require(replay.rng_state() == sampler.rng_state() &&
+                (NonExactDecodeArmed() || resumed.tokens == step.tokens),
             "AR frontier changed sampled replay");
-    RequireExact(expected, ar->Logits(),
-                 "AR frontier changed resumed target logits");
+    if (resumed.tokens == step.tokens)
+      RequireSameBehaviour(expected, ar->Logits(),
+                           "AR frontier changed resumed target logits");
+    else
+      std::cout << "non-exact AR frontier: resumed token differs from the "
+                   "batched step; logits not compared\n";
+    if (!serialized) {
+      first_resume.assign(ar->Logits().begin(), ar->Logits().end());
+      first_tokens = resumed.tokens;
+    } else {
+      Require(resumed.tokens == first_tokens,
+              "serialized AR frontier changed sampled replay");
+      RequireExact(first_resume, ar->Logits(),
+                   "serialized AR frontier changed resumed target logits");
+    }
   }
   Require(!mtp->RestoreSnapshot(*ar_snapshot, &error) &&
               !ar->RestoreSnapshot(*mtp_snapshot, &error),
@@ -779,6 +923,11 @@ void CheckExecutionModes(const std::shared_ptr<qfn::Model>& model,
 }
 
 void CheckServingEos(const std::shared_ptr<qfn::Model>& model) {
+  // Token sequences compared across batch compositions (scalar vs batched).
+  if (NonExactDecodeArmed()) {
+    std::cout << "serving_eos skipped: non-exact decode armed\n";
+    return;
+  }
   namespace server = gufo::server;
   using Backend = server::InferenceBackend;
   Backend backend;
@@ -870,6 +1019,11 @@ void CheckServingEos(const std::shared_ptr<qfn::Model>& model) {
 }
 
 void CheckServingSampling(const std::shared_ptr<qfn::Model>& model) {
+  // Token sequences compared across direct, serial and concurrent serving.
+  if (NonExactDecodeArmed()) {
+    std::cout << "serving sampling skipped: non-exact decode armed\n";
+    return;
+  }
   namespace server = gufo::server;
   using Backend = server::InferenceBackend;
   Backend ar, mtp;
@@ -1011,6 +1165,19 @@ void CheckServingSampling(const std::shared_ptr<qfn::Model>& model) {
 }
 
 int main(int argc, char** argv) {
+  // The rollback checks assert the default memory contract: a reset or a
+  // restore frees the scratch rows. Tuning::keep_rollback_rows (on by default
+  // on Windows) deliberately keeps them for graph reuse, so pin it off here
+  // before the tuning is first read. A caller's own list still applies.
+#ifdef _WIN32
+  {
+    const char* tuning = std::getenv("GUFO_PLATFORM_TUNING");
+    const std::string spec = std::string(tuning != nullptr ? tuning : "") +
+                             (tuning != nullptr && *tuning ? "," : "") +
+                             "-keep_rollback_rows";
+    _putenv_s("GUFO_PLATFORM_TUNING", spec.c_str());
+  }
+#endif
   const bool execution_only =
       argc == 7 && std::string_view(argv[5]) == "--execution-only";
   std::uint32_t execution_tokens = 4096;
@@ -1048,7 +1215,8 @@ int main(int argc, char** argv) {
         argv[2],
         {.max_context = execution_only ? execution_tokens + 16 : 6145,
          .mtp_model_path = argv[4],
-         .max_draft_tokens = 7},
+         .max_draft_tokens = 7,
+         .decode_concurrency = DecodeConcurrency()},
         &error);
     Require(model != nullptr, error);
     if (execution_only) {
@@ -1062,6 +1230,13 @@ int main(int argc, char** argv) {
     if (cache_only) {
       CheckMtpCacheReplay(model);
       return 0;
+    }
+    if (NonExactDecodeArmed()) {
+      std::cout << "non-exact decode armed (twin or V2K): coverage reduced; "
+                   "batch-composition checks compare behaviour, the AR/MTP "
+                   "frontier is teacher-forced and compared by behaviour, "
+                   "batched decode cycles and the serving token suites are "
+                   "skipped; the exact configuration remains the gate\n";
     }
     CheckSnapshotDuringGraphCapture(model, false);
     CheckSnapshotDuringGraphCapture(model, true);
@@ -1125,6 +1300,11 @@ int main(int argc, char** argv) {
                                                    prefix.end());
       for (std::size_t c = 0; c < configs.size(); ++c) {
         const bool sampled = configs[c].uses_random_sampling();
+        // With non-exact decode armed, n=1 AR rows and the verify-width MTP
+        // rows run different kernels, so free-running greedy tokens may
+        // diverge: the AR session is teacher-forced on the MTP tokens and the
+        // frontier is compared by behaviour.
+        const bool non_exact = NonExactDecodeArmed();
         auto ar = model->CreateSession(gufo::core::SessionMode::kAutoregressive,
                                        6145, &error);
         auto mtp = model->CreateSession(
@@ -1154,7 +1334,7 @@ int main(int argc, char** argv) {
           candidate.insert(candidate.end(), decoded.tokens.begin(),
                            decoded.tokens.end());
           while (reference.size() < candidate.size()) {
-            if (sampled) {
+            if (sampled || non_exact) {
               // Independent target replay checks every committed token's
               // recurrent/cache state, including residual corrections.
               const auto token = candidate[reference.size()];
@@ -1199,10 +1379,18 @@ int main(int argc, char** argv) {
                   "AR/MTP token mismatch at depth " + std::to_string(depth) +
                       " config " + std::to_string(c) + " token " +
                       std::to_string(reference.size()));
-          Require(max_diff == 0.0F, "AR/MTP frontier logits differ");
-          if (!sampled) {
-            Require(a.rng_state() == b.rng_state(),
-                    "greedy AR/MTP RNG mismatch");
+          if (non_exact) {
+            RequireSameBehaviour(ar->Logits(), mtp->Logits(),
+                                 "AR/MTP frontier at depth " +
+                                     std::to_string(depth) + " config " +
+                                     std::to_string(c) + " token " +
+                                     std::to_string(reference.size()));
+          } else {
+            Require(max_diff == 0.0F, "AR/MTP frontier logits differ");
+            if (!sampled) {
+              Require(a.rng_state() == b.rng_state(),
+                      "greedy AR/MTP RNG mismatch");
+            }
           }
           Require(ar->Position() == mtp->Position(),
                   "AR/MTP position mismatch");
@@ -1247,7 +1435,10 @@ int main(int argc, char** argv) {
     model.reset();
     model = qfn::Model::Load(
         argv[2],
-        {.max_context = 6145, .mtp_model_path = argv[4], .max_draft_tokens = 7},
+        {.max_context = 6145,
+         .mtp_model_path = argv[4],
+         .max_draft_tokens = 7,
+         .decode_concurrency = DecodeConcurrency()},
         &error);
     Require(model != nullptr, error);
     std::reverse(replays.begin(), replays.end());
@@ -1287,17 +1478,30 @@ int main(int argc, char** argv) {
           tokens.insert(tokens.end(), decoded.tokens.begin(),
                         decoded.tokens.end());
         }
-        Require(tokens == saved.tokens,
-                "fresh load or draft width changed tokens");
-        RequireExact(saved.final_logits, session->Logits(),
-                     "fresh load or draft width changed final logits");
-        if (!sampled || speculative) {
-          Require(sampler.rng_state() == saved.rng,
-                  "fresh load or draft width changed RNG");
+        // Draft width changes the verify rows, so with non-exact decode armed
+        // the tokens may diverge; matching replays are compared by behaviour.
+        const bool exact = !NonExactDecodeArmed();
+        if (exact) {
+          Require(tokens == saved.tokens,
+                  "fresh load or draft width changed tokens");
+          RequireExact(saved.final_logits, session->Logits(),
+                       "fresh load or draft width changed final logits");
+          if (!sampled || speculative) {
+            Require(sampler.rng_state() == saved.rng,
+                    "fresh load or draft width changed RNG");
+          }
+        } else if (tokens == saved.tokens) {
+          RequireSameBehaviour(
+              saved.final_logits, session->Logits(),
+              "fresh load or draft width changed final logits");
+        } else {
+          std::cout << "non-exact fresh_load depth=" << saved.depth
+                    << ": tokens diverged across draft widths\n";
         }
         std::cout << "fresh_load depth=" << saved.depth
                   << " config=" << saved.config << " mtp=" << speculative
-                  << " tokens=" << tokens.size() << " bitwise_exact=1\n"
+                  << " tokens=" << tokens.size()
+                  << " bitwise_exact=" << (exact ? 1 : 0) << "\n"
                   << std::flush;
       }
     }

@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "operation_id": "11111111111111111111111111111111",
+  "seq": 1,
+  "time": "2026-10-13T18:00:00Z",
+  "product": {
+    "name": "bubo",
+    "version": "0.1.0",
+    "revision": "3ff74dce",
+    "engine_version": "0.1.0"
+  },
+  "type": "plan",
+  "payload": {
+    "component": "model",
+    "ready": false,
+    "sources": [],
+    "licenses": [],
+    "paths": {},
+    "volumes": [
+      {
+        "name": "fixture-volume",
+        "free_bytes": 1000,
+        "required_bytes": 2147483848,
+        "safety_margin_bytes": 2147483648,
+        "bytes_to_write": 200,
+        "free_after_download_bytes": 800
+      }
+    ],
+    "plan_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "record_kind": "volume",
+    "part": 0,
+    "parts": 5
+  }
+}

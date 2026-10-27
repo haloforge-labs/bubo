@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <iterator>
 #include <map>
@@ -19,10 +20,12 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 #include "src/cli/serve/behaviour_options.hpp"
+#include "src/cli/serve/debug_request.hpp"
 #include "src/cli/serve/debug_settings.hpp"
 #include "src/cli/serve/release_profile.hpp"
 #include "src/core/json.hpp"
@@ -43,6 +46,17 @@ void Expect(bool condition, std::string_view message) {
   }
 }
 
+bool Accepts(const gufo::sampling::JsonConstraint& grammar,
+             std::string_view text) {
+  auto state = grammar.Start();
+  for (const unsigned char byte : text) {
+    state = grammar.Advance(state, byte);
+    if (state.empty())
+      return false;
+  }
+  return grammar.Complete(state);
+}
+
 /// Streaming splits deltas differently from the buffered path, so content that
 /// differs only in surrounding whitespace is the same response.
 std::string Trimmed(const std::string& value) {
@@ -61,10 +75,12 @@ public:
   ProgressRequest(std::shared_ptr<GenerationRequest> inner,
                   std::vector<Backend::PromptProgress> progress,
                   std::optional<gufo::sampling::JsonConstraint::ToolFormat>
-                      tool_format = {})
+                      tool_format = {},
+                  std::function<Backend::ReasoningEnd()> reasoning_end = {})
       : inner_(std::move(inner)),
         progress_(std::move(progress)),
-        tool_format_(tool_format) {}
+        tool_format_(tool_format),
+        reasoning_end_(std::move(reasoning_end)) {}
 
   Backend::Result Wait(const Backend::TokenCallback& on_token,
                        const Backend::ProgressCallback& on_progress,
@@ -78,6 +94,9 @@ public:
     return inner_->Wait(on_token, on_progress, on_start);
   }
   void Cancel() noexcept override { inner_->Cancel(); }
+  Backend::ReasoningEnd CurrentReasoningEnd() const override {
+    return reasoning_end_ ? reasoning_end_() : inner_->CurrentReasoningEnd();
+  }
   std::optional<gufo::sampling::JsonConstraint::ToolFormat> ToolFormat()
       const override {
     return tool_format_;
@@ -87,6 +106,7 @@ private:
   std::shared_ptr<GenerationRequest> inner_;
   std::vector<Backend::PromptProgress> progress_;
   const std::optional<gufo::sampling::JsonConstraint::ToolFormat> tool_format_;
+  const std::function<Backend::ReasoningEnd()> reasoning_end_;
 };
 
 class FakeBackend final : public gufo::server::TextGenerationBackend {
@@ -109,11 +129,13 @@ public:
                ? InitialOutputState::kReasoning
                : InitialOutputState::kContent;
   }
+  [[nodiscard]] OutputMarkup output_markup() const override { return markup; }
 
   Result complete(std::string_view, std::size_t,
                   const gufo::sampling::SamplingConfig&,
                   const CancellationCheck&, const TokenCallback&,
-                  std::string_view, const std::vector<std::string>&) override {
+                  std::string_view, const std::vector<std::string>&,
+                  bool) override {
     return {};
   }
 
@@ -148,13 +170,23 @@ public:
     result.execution_plan = "serial-fallback";
     result.cache_hit = cache_miss_reason.empty();
     result.cache_miss_reason = cache_miss_reason;
+    result.cache_snapshots_skipped = snapshots_skipped;
+    result.cache_snapshot_skip_reason = snapshot_skip_reason;
     if (!result.cache_hit) {
       result.cached_prompt_tokens = 0;
       result.prefill_tokens = result.prompt_tokens;
       result.cache_common_prefix_tokens = 2;
       result.cache_checkpoint_tokens = 5;
     }
+    // Like the scheduler: the generated tag token's offset is known before
+    // its piece reaches the consumer.
+    result.reasoning_end.tracked = track_reasoning_end;
+    live_reasoning_end_byte.store(kNoReasoningEnd);
     for (const std::string& piece : pieces) {
+      if (track_reasoning_end && reasoning_end_piece == result.tokens.size()) {
+        result.reasoning_end.byte = result.text.size();
+        live_reasoning_end_byte.store(result.text.size());
+      }
       if ((is_cancelled && is_cancelled()) || (on_token && !on_token(piece))) {
         result.cancelled = true;
         result.finish_reason = FinishReason::kCancelled;
@@ -176,6 +208,7 @@ public:
     }
     result.completion_tokens = result.tokens.size();
     result.finish_reason = finish_reason;
+    result.termination_cause = termination_cause;
     result.stop_sequence = stop_sequence;
     completed.store(true);
     return result;
@@ -192,12 +225,25 @@ public:
     return std::make_shared<ProgressRequest>(
         TextGenerationBackend::start_chat(request, max_tokens, sampling,
                                           is_cancelled, stream_output),
-        progress, tool_format);
+        progress, tool_format, [this] { return CurrentReasoningEnd(); });
+  }
+
+  [[nodiscard]] ReasoningEnd CurrentReasoningEnd() const {
+    const auto byte = live_reasoning_end_byte.load();
+    return {.tracked = track_reasoning_end,
+            .byte = byte == kNoReasoningEnd ? std::nullopt
+                                            : std::optional<std::size_t>(byte)};
   }
 
   [[nodiscard]] std::size_t count_tokens(std::string_view text) const override {
     return text.size();
   }
+  [[nodiscard]] std::optional<std::size_t> count_chat_tokens(
+      const gufo::server::ChatRequest&) const override {
+    return 7;  // The fixed prompt-token count reported by chat().
+  }
+  [[nodiscard]] bool supports_images() const override { return image_support; }
+  bool image_support{true};
 
   bool WaitForFirstPiece() {
     std::unique_lock<std::mutex> lock(mutex);
@@ -213,10 +259,19 @@ public:
   }
 
   std::vector<std::string> pieces;
+  /// Token-level reasoning end (L-REL-8): when tracked, the piece at this
+  /// index is the generated tag token; other tag text is ordinary text.
+  bool track_reasoning_end{false};
+  std::optional<std::size_t> reasoning_end_piece;
+  static constexpr std::size_t kNoReasoningEnd = static_cast<std::size_t>(-1);
+  std::atomic<std::size_t> live_reasoning_end_byte{kNoReasoningEnd};
   std::vector<PromptProgress> progress;
   std::optional<gufo::sampling::JsonConstraint::ToolFormat> tool_format;
   std::string cache_miss_reason;
+  std::size_t snapshots_skipped = 0;
+  std::string snapshot_skip_reason;
   FinishReason finish_reason{FinishReason::kStop};
+  TerminationCause termination_cause{TerminationCause::kNone};
   std::string stop_sequence;
   bool block_after_first_piece{false};
   std::atomic<bool> completed{false};
@@ -225,6 +280,7 @@ public:
   SamplingDefaults defaults;
   gufo::ReasoningOptions reasoning_defaults_value;
   std::optional<InitialOutputState> initial_output_state_override;
+  OutputMarkup markup;
   std::size_t last_max_tokens{0};
   std::size_t reasoning_tokens{0};
   float last_temperature{0.0F};
@@ -249,6 +305,127 @@ gufo::server::HttpRequest Request(
       .headers = std::move(headers),
       .is_cancelled = {},
   };
+}
+
+void DebugHooksRawOutputTest() {
+  using gufo::json::Value;
+  for (const auto* value : {"null", "1", "\"true\"", "[]", "{}"}) {
+    bool timeline = false, raw = false;
+    const auto body = gufo::json::parse(
+        std::string("{\"debug\":{\"raw_output\":") + value + "}}");
+    Expect(gufo::server::ParseDebugRequest(body, true, &timeline, true, &raw)
+               .has_value(),
+           "raw_output accepts only booleans");
+  }
+  for (const bool enabled : {false, true}) {
+    bool timeline = false, raw = false;
+    const auto body = gufo::json::parse(R"({"debug":{"raw_output":true}})");
+    Expect(!gufo::server::ParseDebugRequest(body, enabled, &timeline, true,
+                                            &raw) &&
+               raw == enabled,
+           "raw_output requires debug hooks");
+    Expect(gufo::server::ParseDebugRequest(body, true, &timeline, false, &raw)
+               .has_value(),
+           "raw_output requires loopback");
+    Expect(gufo::server::ParseDebugRequest(body, true, &timeline).has_value(),
+           "other endpoints do not accept raw_output");
+  }
+
+  const std::string unfinished =
+      "<tool_call>\n<function=read>\n<parameter=path>\ncaf\xC3\xA9.txt";
+  const std::string complete =
+      "<tool_call>\n<function=read>\n<parameter=path>\nx.txt\n"
+      "</parameter>\n</function>\n</tool_call>";
+  struct Case {
+    std::string text;
+    std::size_t calls;
+    std::size_t dropped;
+    std::size_t content_chars;
+  };
+  for (const auto& item :
+       {Case{"Visible\n" + unfinished, 0, unfinished.size(), 8},
+        Case{complete, 1, 0, 0},
+        Case{complete + "\n" + unfinished, 1, unfinished.size(), 1},
+        Case{"Visible", 0, 0, 7}}) {
+    for (const bool stream : {false, true}) {
+      for (const bool include_usage : {false, true}) {
+        auto body = gufo::json::parse(R"({
+          "model":"test-model","messages":[{"role":"user","content":"Read"}],
+          "tools":[{"type":"function","function":{"name":"read",
+            "parameters":{"type":"object","properties":{
+              "path":{"type":"string"}},"required":["path"]}}}],
+          "max_tokens":4096,"reasoning_effort":"high"})");
+        body["stream"] = stream;
+        body["stream_options"]["include_usage"] = include_usage;
+        const std::string raw = "Réfléchir</think>\n\n" + item.text;
+        const auto run = [&](bool hooks, int diagnostic) {
+          FakeBackend backend;
+          backend.tool_format =
+              gufo::sampling::JsonConstraint::ToolFormat::kQwen;
+          backend.finish_reason = FakeBackend::FinishReason::kLength;
+          // Include split UTF-8, reasoning delimiters and call tags.
+          for (const char byte : raw)
+            backend.pieces.emplace_back(1, byte);
+          auto input = body;
+          if (diagnostic >= 0)
+            input["debug"]["raw_output"] = diagnostic != 0;
+          auto request = Request(input.dump());
+          request.debug_hooks = hooks;
+          auto response = gufo::server::HandleOpenAiChat(request, backend);
+          Expect(response.status == 200, "raw output request succeeds");
+          std::vector<Value> events;
+          std::string bytes;
+          if (stream) {
+            response.streaming_body([&](std::string_view chunk) {
+              bytes += chunk;
+              if (chunk.starts_with("data: ") &&
+                  !chunk.substr(6).starts_with("[DONE]"))
+                events.push_back(gufo::json::parse(chunk.substr(6)));
+              return true;
+            });
+          } else {
+            bytes = response.body;
+            events.push_back(gufo::json::parse(bytes));
+          }
+          // IDs and creation seconds are intentionally different per request.
+          bytes = std::regex_replace(bytes, std::regex("chatcmpl-[^\"]+"),
+                                     "chatcmpl-ID");
+          bytes =
+              std::regex_replace(bytes, std::regex("call_[^\"]+"), "call_ID");
+          bytes = std::regex_replace(bytes, std::regex("\"created\":[0-9]+"),
+                                     "\"created\":0");
+          return std::pair{bytes, events};
+        };
+        const auto baseline = run(false, -1);
+        Expect(run(true, -1).first == baseline.first &&
+                   run(true, 0).first == baseline.first &&
+                   run(false, 1).first == baseline.first,
+               "absent, false or disabled raw_output leaves response bytes "
+               "unchanged");
+        const auto output = run(true, 1);
+        const auto& last = output.second.back();
+        const auto* debug = last.find("gufo_debug");
+        Expect(debug && (!stream || last.contains("usage")),
+               "raw_output is on the final usage chunk or buffered top level");
+        const auto* diagnostic = debug->find("raw_output");
+        Expect(
+            diagnostic && diagnostic->member_str("text") == raw &&
+                diagnostic->member_size("tokens") == raw.size() &&
+                diagnostic->member_str("finish_reason") == "length",
+            "raw_output retains exactly the decoded parser input and finish");
+        const auto* parse = diagnostic->find("parse");
+        Expect(
+            parse && parse->member_size("reasoning_chars") == 9 &&
+                parse->member_size("content_chars") == item.content_chars &&
+                parse->member_size("parsed_tool_calls") == item.calls &&
+                parse->member_size("unfinished_call_bytes") == item.dropped,
+            "parse counts Unicode characters, calls and dropped suffix bytes");
+        for (std::size_t i = 0; i + 1 < output.second.size(); ++i)
+          Expect(!output.second[i].contains("gufo_debug"),
+                 "intermediate chunks do not contain raw_output");
+      }
+    }
+  }
 }
 
 void TestPrefillDiagnosticUsage() {
@@ -279,6 +456,65 @@ void TestPrefillDiagnosticUsage() {
                  diagnostic->member_size("expert_bytes") == 192,
              "API retains additive measured totals");
     }
+  }
+}
+
+void TestReasoningTokensInUsage() {
+  for (const bool stream : {false, true}) {
+    for (const std::size_t reasoning_tokens : {std::size_t{0}, std::size_t{3}}) {
+      FakeBackend backend;
+      backend.pieces = {"a", "b", "c", "d"};
+      backend.reasoning_tokens = reasoning_tokens;
+      auto response = gufo::server::HandleOpenAiChat(
+          Request(std::string(R"({"model":"test-model","messages":[{"role":"user","content":"hello"}],"stream":)") +
+                  (stream ? "true" : "false") +
+                  R"(,"stream_options":{"include_usage":true}})"),
+          backend);
+      Expect(response.status == 200, "reasoning usage request succeeds");
+      gufo::json::Value usage = gufo::json::Value::object();
+      if (stream) {
+        response.streaming_body([&](std::string_view chunk) {
+          if (chunk.starts_with("data: ") &&
+              !chunk.substr(6).starts_with("[DONE]")) {
+            const auto event = gufo::json::parse(chunk.substr(6));
+            if (const auto* found = event.find("usage"))
+              usage = *found;
+          }
+          return true;
+        });
+      } else {
+        usage = *gufo::json::parse(response.body).find("usage");
+      }
+      const auto* details = usage.find("completion_tokens_details");
+      Expect(details != nullptr &&
+                 details->member_size("reasoning_tokens") == reasoning_tokens,
+             "Chat usage reports completion_tokens_details.reasoning_tokens "
+             "in buffered and streamed responses");
+    }
+  }
+}
+
+void AppendToolDeltas(std::vector<gufo::json::Value>& calls,
+                      const gufo::json::Value& deltas, bool stream) {
+  for (const auto& delta : deltas.items()) {
+    if (!stream) {
+      calls.push_back(delta);
+      continue;
+    }
+    const auto index = delta.member_size("index");
+    Expect(index <= calls.size(), "tool indexes have no gaps");
+    if (index == calls.size())
+      calls.push_back(gufo::json::Value::object());
+    auto& call = calls[index];
+    if (!delta.member_str("id").empty()) {
+      Expect(call.member_str("id").empty(), "tool ID is sent once");
+      call["id"] = delta.member_str("id");
+      call["type"] = delta.member_str("type");
+    }
+    if (const auto* function = delta.find("function"))
+      for (const auto* key : {"name", "arguments"})
+        call["function"][key] =
+            call["function"].member_str(key) + function->member_str(key);
   }
 }
 
@@ -420,15 +656,17 @@ void TestCachePromptOption() {
               (stream ? "true" : "false") + R"(,"cache_prompt":)" + value +
               "}"),
           backend);
+      // As in llama-server, null keeps the default.
       const bool valid = std::string_view(value) == "true" ||
-                         std::string_view(value) == "false";
+                         std::string_view(value) == "false" ||
+                         std::string_view(value) == "null";
       Expect(response.status == (valid ? 200 : 400),
-             "cache_prompt accepts only JSON booleans");
+             "cache_prompt accepts only JSON booleans or null");
       if (valid) {
         if (response.streaming_body)
           response.streaming_body([](std::string_view) { return true; });
         Expect(backend.last_request.cache_prompt ==
-                   (std::string_view(value) == "true"),
+                   (std::string_view(value) != "false"),
                "cache_prompt reaches both buffered and streaming backends");
       }
     }
@@ -574,6 +812,19 @@ void TestCachedPrefillMetrics() {
              metrics->member_size("cache_common_prefix_tokens") == 2 &&
              metrics->member_size("cache_checkpoint_tokens") == 5,
          "Usage explains cache misses without exposing prompt text");
+  Expect(metrics->find("cache_snapshots_skipped") == nullptr, "no skipped copies: the fields are absent");
+  // GitHub #9: a dropped checkpoint and the copies this request was refused are named in usage.gufo.
+  backend.cache_miss_reason = "evicted_byte_capacity";
+  backend.snapshots_skipped = 2;
+  backend.snapshot_skip_reason = "skipped_capacity";
+  const auto dropped = gufo::server::HandleOpenAiChat(
+      Request(R"({"model":"test-model","messages":[{"role":"user","content":"again"}]})"), backend);
+  const auto dropped_body = gufo::json::parse(dropped.body);
+  const auto* dropped_metrics = dropped_body.find("usage") ? dropped_body.find("usage")->find("gufo") : nullptr;
+  Expect(dropped_metrics && dropped_metrics->member_str("cache_miss_reason") == "evicted_byte_capacity" &&
+             dropped_metrics->member_size("cache_snapshots_skipped") == 2 &&
+             dropped_metrics->member_str("cache_snapshot_skip_reason") == "skipped_capacity",
+         "Usage reports the true miss reason and the request's skipped snapshot copies with their reason");
 }
 
 void TestToolCallsAreStructured() {
@@ -688,6 +939,123 @@ void TestToolParameterCompatibility() {
   }
 }
 
+void TestToolArgumentLoopStopOutput() {
+  using Backend = gufo::server::TextGenerationBackend;
+  const std::string open =
+      "<tool_call>\n<function=execute_bash>\n<parameter=command>\n";
+  const std::string period = "</function>\n</tool_call>\n" + open;
+  const std::string complete = open + "printf ok\n</parameter>\n</function>\n</tool_call>\n";
+  for (const bool stream : {false, true}) {
+    for (const int choice : {0, 1, 2}) {
+      for (const bool preceding_call : {false, true}) {
+        for (const bool loop_cause : {false, true}) {
+          FakeBackend backend;
+          backend.finish_reason = Backend::FinishReason::kStop;
+          backend.termination_cause = loop_cause ? Backend::TerminationCause::kToolArgumentLoop
+                                                : Backend::TerminationCause::kNone;
+          backend.tool_format = gufo::sampling::JsonConstraint::ToolFormat::kQwen;
+          backend.pieces = {"Before.\n"};
+          if (preceding_call) backend.pieces.push_back(complete);
+          backend.pieces.push_back(open);
+          for (int repeat = 0; repeat < 16; ++repeat) backend.pieces.push_back(period);
+          auto body = gufo::json::parse(R"({
+            "model":"test-model","messages":[{"role":"user","content":"run a command"}],
+            "tools":[{"type":"function","function":{"name":"execute_bash",
+              "parameters":{"type":"object","properties":{"command":{"type":"string"}},
+                "required":["command"],"additionalProperties":false}}}],
+            "parallel_tool_calls":true,"chat_template_kwargs":{"enable_thinking":false}
+          })");
+          body["stream"] = stream;
+          body["tool_choice"] = choice == 2
+              ? gufo::json::parse(R"({"type":"function","function":{"name":"execute_bash"}})")
+              : gufo::json::Value(choice == 1 ? "required" : "auto");
+          const auto response = gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+          if (!loop_cause && choice != 0 && !preceding_call) {
+            // Ordinary EOS must still enforce required / forced-name tools.
+            std::string wire = response.body;
+            if (stream) response.streaming_body([&](std::string_view chunk) { wire += chunk; return true; });
+            Expect(response.status == (stream ? 200 : 502) && wire.find("tool_choice_unsatisfied") != std::string::npos,
+                   "ordinary EOS still rejects an unsatisfied required tool choice");
+            continue;
+          }
+          Expect(response.status == 200, "loop stop succeeds for auto, required, forced name and parallel calls");
+          std::string content, finish, error_code, error_message;
+          std::size_t calls = 0;
+          // Streamed calls arrive as deltas; the call cut by the stop is sent
+          // before the stop is known, so it stays as an unfinished prefix.
+          std::vector<gufo::json::Value> streamed_calls;
+          const auto inspect = [&](const gufo::json::Value& output) {
+            if (const auto* error = output.find("error")) {
+              error_code = error->member_str("code");
+              error_message = error->member_str("message");
+              return;
+            }
+            if (output.find("choices")->items().empty()) return;
+            const auto& selected = output.find("choices")->items().front();
+            if (const auto* reason = selected.find("finish_reason"); reason && reason->is_string()) finish = reason->str();
+            const auto* message = selected.find(stream ? "delta" : "message");
+            if (const auto* emitted = message->find("tool_calls")) {
+              if (stream) {
+                AppendToolDeltas(streamed_calls, *emitted, true);
+              } else {
+                calls += emitted->size();
+                for (const auto& call : emitted->items()) {
+                  const auto* function = call.find("function");
+                  Expect(function && function->member_str("name") == "execute_bash" &&
+                             gufo::json::parse(function->member_str("arguments")).member_str("command") == "printf ok",
+                         "only the preceding complete call survives parsing");
+                }
+              }
+            }
+            if (const auto* text = message->find("content"); text && text->is_string()) content += text->str();
+          };
+          if (stream) {
+            response.streaming_body([&](std::string_view chunk) {
+              const auto start = chunk.find("data: ");
+              if (start != std::string_view::npos && chunk.substr(start + 6).starts_with("{"))
+                inspect(gufo::json::parse(chunk.substr(start + 6)));
+              return true;
+            });
+          } else inspect(gufo::json::parse(response.body));
+          if (stream) {
+            // A call cut after part of its arguments was streamed cannot be
+            // reported as a successful turn. Ordinary EOS and the loop stop
+            // both end with the same error and no finish reason. The loop stop
+            // uses a fixed message. TestToolArgumentLoopStopClosesStreamedCall
+            // pins the streamed loop stop without a partial call on the wire.
+            Expect(error_code == "generation_failed" && finish.empty(),
+                   "a cut streamed call fails instead of finishing the turn");
+            if (loop_cause)
+              Expect(error_message ==
+                         "generation stopped: the tool call repeated its arguments (loop breaker)",
+                     "the loop stop error carries the fixed message");
+            // Complete preceding calls stay delivered exactly as streamed.
+            Expect(streamed_calls.size() >= static_cast<std::size_t>(preceding_call),
+                   "complete preceding calls were streamed before the error");
+            for (std::size_t i = 0; i < static_cast<std::size_t>(preceding_call); ++i)
+              Expect(gufo::json::parse(streamed_calls[i].find("function")->member_str("arguments"))
+                             .member_str("command") == "printf ok",
+                     "the preceding complete call is intact");
+            continue;
+          }
+          Expect(error_code.empty(), "tool-argument loop has no response error");
+          Expect(finish == (loop_cause || !preceding_call ? "stop" : "tool_calls"),
+                 "loop cause returns stop before has-tool-calls; ordinary EOS retains its finish contract");
+          Expect(calls == static_cast<std::size_t>(preceding_call), "unfinished call is dropped and previous calls are kept");
+          // The unchanged parser retains the newline after a preceding complete
+          // call, in addition to the newline before it. Buffered ordinary EOS
+          // reaches this check with the same bytes, so the loop cause cannot
+          // alter content parsing.
+          Expect(content == (preceding_call ? "Before.\n\n" : "Before.\n"), "content before the unfinished call is returned: stream=" +
+                 std::to_string(stream) + " choice=" + std::to_string(choice) +
+                 " preceding=" + std::to_string(preceding_call) + " loop=" + std::to_string(loop_cause) +
+                 " actual=" + gufo::json::Value(content).dump());
+        }
+      }
+    }
+  }
+}
+
 void TestInvalidToolsFailBeforeGeneration() {
   const char* invalid[] = {
       "null",
@@ -763,6 +1131,35 @@ void TestResponsesClientCompatTolerances() {
                chat.tools[0].definition_json.find("\"strict\":true") !=
                    std::string::npos,
            "Namespace function tools are flattened with their definitions");
+    // #643: a Responses function tool without `strict` (or with null) keeps its
+    // schema as sent. Optional properties stay optional; nothing is forced
+    // into `required` and no `strict` key is added.
+    for (const char* strict : {"", R"(,"strict":null)"}) {
+      gufo::server::ChatRequest optional;
+      const auto schema =
+          std::string(R"({"type":"object","properties":{"path":{"type":"string"},)"
+                      R"("limit":{"type":"integer"}},"required":["path"]})");
+      Expect(!gufo::server::ParseOpenAiResponseControls(
+                 gufo::json::parse(R"({"tools":[{"type":"function","name":"read",)"
+                                   R"("parameters":)" +
+                                   schema + strict + "}]}"),
+                 &optional) &&
+                 optional.tools.size() == 1,
+             "Responses tool without strict parses");
+      const auto parameters =
+          gufo::json::parse(optional.tools[0].parameters_json);
+      const auto* required = parameters.find("required");
+      std::string required_names;
+      if (required && required->is_array())
+        for (const auto& name : required->items())
+          required_names += name.get_str() + ";";
+      Expect(required_names == "path;" &&
+                 !parameters.contains("additionalProperties"),
+             "Responses tool without strict keeps optional properties optional");
+      Expect(optional.tools[0].definition_json.find("\"strict\":true") ==
+                 std::string::npos,
+             "Responses tool without strict is not made strict");
+    }
     // Rejected parses leave the request untouched, so every case parses into
     // fresh state instead of inheriting tools from a previous parse.
     gufo::server::ChatRequest ambiguous;
@@ -1241,8 +1638,7 @@ void TestQwenToolBoundariesAndSchema() {
               continue;
             const auto* delta = choices->items()[0].find("delta");
             if (const auto* found = delta ? delta->find("tool_calls") : nullptr)
-              calls.insert(calls.end(), found->items().begin(),
-                           found->items().end());
+              AppendToolDeltas(calls, *found, stream);
             if (item.calls && delta)
               Expect(delta->member_str("reasoning_content").find('<') ==
                          std::string::npos,
@@ -1871,14 +2267,16 @@ void TestBehaviourRequestOptions() {
 #endif
     }
     EnvironmentScope() {
-      for (const auto* name : {
-               "GUFO_THINK_EOG_GUARD", "GUFO_THINK_GUARD_ESCALATE", "GUFO_EOG_BOUNDARY",
-               "GUFO_EOG_MIN_PROB_EXACT", "GUFO_EOG_MIN_PROB",
-               "GUFO_EOG_DEFER_P", "GUFO_SPEC_EOG_STOP", "GUFO_LOOP_BREAKER",
-               "GUFO_LOOP_BREAKER_EOG_CLOSE", "GUFO_LOOP_BREAKER_TRANSITION",
-               "GUFO_REASONING_BUDGET", "GUFO_LOGIT_BIAS",
-               "GUFO_THINK_MARKER_BIAS", "GUFO_THINK_MARKER_BIAS_BY_EFFORT",
-               "GUFO_PRODUCTION_SAMPLING", "GUFO_MODEL_SUPPRESS_TOKENS"}) {
+      for (const auto* name :
+           {"GUFO_THINK_EOG_GUARD", "GUFO_THINK_GUARD_ESCALATE",
+            "GUFO_EOG_BOUNDARY", "GUFO_EOG_MIN_PROB_EXACT", "GUFO_EOG_MIN_PROB",
+            "GUFO_EOG_DEFER_P", "GUFO_SPEC_EOG_STOP", "GUFO_LOOP_BREAKER",
+            "GUFO_LOOP_BREAKER_EOG_CLOSE", "GUFO_LOOP_BREAKER_TOOL_ARGS",
+            "GUFO_LOOP_BREAKER_TRANSITION", "GUFO_REASONING_BUDGET",
+            "GUFO_LOGIT_BIAS", "GUFO_THINK_MARKER_BIAS",
+            "GUFO_THINK_MARKER_BIAS_BY_EFFORT",
+            "GUFO_THINK_MARKER_ENTROPY_GATE", "GUFO_PRODUCTION_SAMPLING",
+            "GUFO_MODEL_SUPPRESS_TOKENS"}) {
         const char* value = std::getenv(name);
         previous.emplace_back(name, value ? std::optional<std::string>(value)
                                           : std::nullopt);
@@ -1907,6 +2305,16 @@ void TestBehaviourRequestOptions() {
   Expect(parse("{}") == nullptr, "all unset switches preserve native sampling");
   Expect(gufo::server::ThinkGuardEscalate() == 16,
          "unset guard escalation defaults to sixteen");
+  EnvironmentScope::Set("GUFO_LOOP_BREAKER", "1");
+  Expect(parse("{}")->loop_tool_args, "unset tool-argument kill switch defaults on");
+  EnvironmentScope::Set("GUFO_LOOP_BREAKER_TOOL_ARGS", "0");
+  Expect(!parse("{}")->loop_tool_args, "tool-argument kill switch disables only TOOL");
+  EnvironmentScope::Set("GUFO_LOOP_BREAKER_TOOL_ARGS", "1");
+  Expect(parse("{}")->loop_tool_args, "tool-argument kill switch accepts one");
+  EnvironmentScope::Set("GUFO_LOOP_BREAKER_TOOL_ARGS", "bad");
+  invalid("{}");
+  EnvironmentScope::Set("GUFO_LOOP_BREAKER_TOOL_ARGS", nullptr);
+  EnvironmentScope::Set("GUFO_LOOP_BREAKER", nullptr);
   EnvironmentScope::Set("GUFO_THINK_EOG_GUARD", "1");
   for (const auto* value : {"0", "1", "16", "2147483647"}) {
     EnvironmentScope::Set("GUFO_THINK_GUARD_ESCALATE", value);
@@ -2096,17 +2504,31 @@ void DebugHooksSettingsTest() {
   for (const auto* name : {"GUFO_EVAL_API_KEY", "PATH", "TEMP"})
     Expect(!raw->contains(name),
            std::string("settings exclude unsafe environment: ") + name);
-  for (const auto* name : gufo::server::kDebugSettingsEnvironment)
-    Expect(raw->find(name) && raw->find(name)->is_null(),
-           std::string("unset environment is visible: ") + name);
+  for (const auto* name : gufo::server::kDebugSettingsEnvironment) {
+    if (std::string_view(name) == "GUFO_THINK_MARKER_ENTROPY_GATE")
+      Expect(!raw->contains(name),
+             "unset entropy gate has no raw environment key");
+    else
+      Expect(raw->find(name) && raw->find(name)->is_null(),
+             std::string("unset environment is visible: ") + name);
+  }
   const auto* values = unset.find("resolved");
   Expect(values && values->member_size("ram_bytes") == 1234,
          "settings retain the owning component's resolved auto budget");
   const auto* behaviour = values->find("behaviour");
   Expect(behaviour && !behaviour->find("enabled")->as_bool() &&
+             !behaviour->contains("marker_entropy_gate") &&
              behaviour->member_double("eog_min_prob") == -1.0 &&
              behaviour->member_size("think_guard_escalate") == 16,
          "disabled behaviour uses its parser's actual minimum default");
+  const auto unset_request =
+      BuildEffectiveSettings(unset, gufo::sampling::SamplingConfig{}, false);
+  Expect(!unset_request.find("resolved")
+                 ->find("behaviour")
+                 ->contains("marker_entropy_gate") &&
+             !unset_request.find("environment")
+                  ->contains("GUFO_THINK_MARKER_ENTROPY_GATE"),
+         "unset request settings retain the prior key shape");
   const auto* tuning = values->find("platform_tuning");
   for (const auto& field : gufo::platform::detail::kTuningFields) {
     const auto* value = tuning->find(std::string(field.name));
@@ -2124,21 +2546,27 @@ void DebugHooksSettingsTest() {
   EnvironmentScope::Set("GUFO_THINK_GUARD_ESCALATE", "7");
   EnvironmentScope::Set("GUFO_EOG_MIN_PROB", "0.25");
   EnvironmentScope::Set("GUFO_THINK_MARKER_BIAS_BY_EFFORT", "low:0.5,xhigh:2");
+  EnvironmentScope::Set("GUFO_THINK_MARKER_ENTROPY_GATE", "0.75");
   EnvironmentScope::Set("GUFO_MTP_TRACE", "01");
   EnvironmentScope::Set("GUFO_DISK_BOUNDARY_ALIGN", "128");
   const auto configured = BuildEffectiveSettings(resolved, "v", "r", "b");
   const auto* effective = configured.find("resolved");
   behaviour = effective->find("behaviour");
-  Expect(behaviour->find("think_eog_guard")->as_bool() &&
-             behaviour->member_double("eog_min_prob") == 0.25 &&
-             behaviour->member_size("think_guard_escalate") == 7 &&
-             behaviour->find("marker_bias_by_effort")->member_double("high") == 2.0 &&
-             behaviour->find("marker_bias_by_effort")->member_double("minimal") == 0.5,
-         "settings return parsed numeric values and resolved effort aliases");
+  Expect(
+      behaviour->find("think_eog_guard")->as_bool() &&
+          behaviour->member_double("eog_min_prob") == 0.25 &&
+          behaviour->member_size("think_guard_escalate") == 7 &&
+          behaviour->member_double("marker_entropy_gate") == 0.75 &&
+          behaviour->find("marker_bias_by_effort")->member_double("high") ==
+              2.0 &&
+          behaviour->find("marker_bias_by_effort")->member_double("minimal") ==
+              0.5,
+      "settings return parsed numeric values and resolved effort aliases");
   gufo::sampling::SamplingConfig request_policy;
   auto request_behaviour = std::make_shared<gufo::sampling::BehaviourConfig>();
   request_behaviour->think_eog_guard = true;
   request_behaviour->think_guard_escalate = 3;
+  request_behaviour->marker_entropy_gate = 0.25;
   request_policy.behaviour = request_behaviour;
   const auto request_settings =
       BuildEffectiveSettings(configured, request_policy, true);
@@ -2146,6 +2574,27 @@ void DebugHooksSettingsTest() {
                  ->find("behaviour")
                  ->member_size("think_guard_escalate") == 3,
          "request settings echo the actual guard escalation policy");
+  Expect(request_settings.find("resolved")
+                     ->find("behaviour")
+                     ->member_double("marker_entropy_gate") == 0.25 &&
+             configured.find("environment")
+                     ->member_str("GUFO_THINK_MARKER_ENTROPY_GATE") == "0.75",
+         "settings show the raw gate env and actual request threshold");
+  request_behaviour->marker_entropy_gate.reset();
+  const auto ungated_request =
+      BuildEffectiveSettings(configured, request_policy, true);
+  Expect(!ungated_request.find("resolved")
+              ->find("behaviour")
+              ->contains("marker_entropy_gate"),
+         "request without a gate removes a cached process threshold");
+  EnvironmentScope::Set("GUFO_THINK_MARKER_ENTROPY_GATE", nullptr);
+  const auto unconfigured = BuildEffectiveSettings(resolved, "v", "r", "b");
+  Expect(!unconfigured.find("environment")
+                 ->contains("GUFO_THINK_MARKER_ENTROPY_GATE") &&
+             !unconfigured.find("resolved")
+                  ->find("behaviour")
+                  ->contains("marker_entropy_gate"),
+         "unsetting the gate removes both process keys");
   Expect(!effective->find("mtp_trace")->as_bool(),
          "MTP trace accepts only the literal one");
   Expect(effective->member_size("disk_boundary_align") == 128,
@@ -2156,6 +2605,141 @@ void DebugHooksSettingsTest() {
          "MTP trace literal one is enabled");
   Expect(gufo::server::DebugSettingsListsEnvironment("NO_COLOR"),
          "irrelevant environment has an explicit documented allowance");
+}
+
+// Raw stderr gate. An allowance is keyed by file, exact call text and the
+// 1-based occurrence among identical call texts in that file, in source order.
+// Line numbers are not part of the key, so edits that only move code do not
+// break the gate. A new call, a changed call and a deleted call all still fail.
+const std::regex& StderrCallRegex() {
+  static const std::regex calls(
+      R"scan((?:std::)?\bfprintf\s*\(\s*stderr\s*,[\s\S]*?;|(?:std::)?\bfputs\s*\([^;]*?\bstderr\s*\)[\s\S]*?;|std::(?:cerr|clog)\s*(?:<<|\.write\s*\()[\s\S]*?;|(?:::)?\bwrite\s*\(\s*STDERR_FILENO\s*,[\s\S]*?;)scan");
+  return calls;
+}
+
+std::string StderrSiteKey(const std::string& file, std::size_t occurrence,
+                          const std::string& call) {
+  return file + "\n" + std::to_string(occurrence) + "\n" + call;
+}
+
+/// Every raw stderr call in `source`, as (key, call) in source order.
+std::vector<std::pair<std::string, std::string>> FindStderrSites(
+    const std::string& file, const std::string& source) {
+  std::vector<std::pair<std::string, std::string>> sites;
+  std::map<std::string, std::size_t> seen;
+  for (std::sregex_iterator m(source.begin(), source.end(), StderrCallRegex()),
+       end;
+       m != end; ++m) {
+    const auto call = m->str();
+    sites.emplace_back(StderrSiteKey(file, ++seen[call], call), call);
+  }
+  return sites;
+}
+
+/// Allowance table from the allow-list JSON. Problems are appended to `out`.
+std::map<std::string, std::string> ParseStderrAllowlist(
+    const gufo::json::Value& allowance, std::vector<std::string>& out) {
+  std::map<std::string, std::string> table;
+  const auto* sites = allowance.find("sites");
+  if (!sites || !sites->is_array()) {
+    out.push_back("stderr allow-list has no sites array");
+    return table;
+  }
+  for (const auto& site : sites->items()) {
+    const auto file = site.member_str("file");
+    const auto call = site.member_str("call");
+    const auto occurrence = site.member_str("occurrence");
+    const bool digits =
+        !occurrence.empty() &&
+        occurrence.find_first_not_of("0123456789") == std::string::npos &&
+        std::stoull(occurrence) >= 1;
+    if (file.empty() || call.empty() || !digits ||
+        site.member_str("reason").empty()) {
+      out.push_back("stderr allowance needs file, call, occurrence (>= 1) and "
+                    "reason: " + file + " / " + call);
+      continue;
+    }
+    if (!table.emplace(StderrSiteKey(file, std::stoull(occurrence), call),
+                       site.member_str("reason"))
+             .second)
+      out.push_back(file + ": duplicate stderr allowance, occurrence " +
+                    occurrence + ": " + call);
+  }
+  return table;
+}
+
+/// Checks sources (file -> text) against the allowance table. Returns one
+/// message per unreviewed call (with file and call text) and per stale entry.
+std::vector<std::string> StderrGateProblems(
+    const std::map<std::string, std::string>& sources,
+    std::map<std::string, std::string> allowed) {
+  std::vector<std::string> problems;
+  for (const auto& [file, source] : sources)
+    for (const auto& [key, call] : FindStderrSites(file, source))
+      if (allowed.erase(key) != 1)
+        problems.push_back(file + ": unreviewed raw stderr call: " + call);
+  for (const auto& entry : allowed) {
+    const auto first = entry.first.find('\n');
+    const auto second = entry.first.find('\n', first + 1);
+    problems.push_back(entry.first.substr(0, first) +
+                       ": stale stderr allowance, occurrence " +
+                       entry.first.substr(first + 1, second - first - 1) +
+                       ": " + entry.first.substr(second + 1));
+  }
+  return problems;
+}
+
+void TestStderrGateIsLineIndependent() {
+  const std::string call_a = "std::fprintf(stderr, \"a\\n\");";
+  const std::string call_b = "std::cerr << \"b\";";
+  const std::string source =
+      "void f() {\n  " + call_a + "\n  " + call_b + "\n  " + call_a + "\n}\n";
+  const auto sites = FindStderrSites("x.cpp", source);
+  Expect(sites.size() == 3, "stderr gate finds all three calls");
+  Expect(sites[0].first != sites[2].first &&
+             sites[0].first == StderrSiteKey("x.cpp", 1, call_a) &&
+             sites[2].first == StderrSiteKey("x.cpp", 2, call_a) &&
+             sites[1].first == StderrSiteKey("x.cpp", 1, call_b),
+         "identical calls get distinct 1-based occurrence indices");
+  const std::map<std::string, std::string> allowed = {
+      {StderrSiteKey("x.cpp", 1, call_a), "r"},
+      {StderrSiteKey("x.cpp", 2, call_a), "r"},
+      {StderrSiteKey("x.cpp", 1, call_b), "r"}};
+  Expect(StderrGateProblems({{"x.cpp", source}}, allowed).empty(),
+         "the complete allowance passes");
+  const std::string shifted = "// one\n// two\n// three\n\n\n" + source;
+  Expect(StderrGateProblems({{"x.cpp", shifted}}, allowed).empty(),
+         "shifting lines does not fail the gate");
+  const std::string added = source + "void g() { std::fputs(\"n\", stderr); }\n";
+  auto problems = StderrGateProblems({{"x.cpp", added}}, allowed);
+  Expect(problems.size() == 1 &&
+             problems[0].find("x.cpp: unreviewed raw stderr call: "
+                              "std::fputs(\"n\", stderr);") == 0,
+         "a new raw stderr call fails with file and call text");
+  const std::string third = source + "void g() { " + call_a + " }\n";
+  problems = StderrGateProblems({{"x.cpp", third}}, allowed);
+  Expect(problems.size() == 1 &&
+             problems[0].find("unreviewed raw stderr call: " + call_a) !=
+                 std::string::npos,
+         "a third copy of an allowed call is a new call");
+  const std::string deleted =
+      "void f() {\n  " + call_a + "\n  " + call_b + "\n}\n";
+  problems = StderrGateProblems({{"x.cpp", deleted}}, allowed);
+  Expect(problems.size() == 1 &&
+             problems[0].find("x.cpp: stale stderr allowance, occurrence 2: " +
+                              call_a) == 0,
+         "a deleted call leaves a reported stale entry");
+  std::vector<std::string> parse_problems;
+  const auto table = ParseStderrAllowlist(
+      gufo::json::parse(R"({"schema":2,"sites":[
+        {"file":"x.cpp","call":"c","reason":"r","occurrence":"1"},
+        {"file":"x.cpp","call":"c","reason":"r","occurrence":"2"},
+        {"file":"x.cpp","call":"c","reason":"r","occurrence":"2"},
+        {"file":"x.cpp","call":"c","reason":"r"},
+        {"file":"x.cpp","call":"c","reason":"r","occurrence":"0"}]})"),
+      parse_problems);
+  Expect(table.size() == 2 && parse_problems.size() == 3,
+         "allow-list parser rejects duplicate, missing and zero occurrence");
 }
 
 void DebugHooksSettingsEnvironmentTest() {
@@ -2279,27 +2863,13 @@ void DebugHooksSettingsEnvironmentTest() {
     text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
     return text;
   };
-  const auto allowance = gufo::json::parse(
-      read_source(root / "tools/ci/log_stderr_allowlist.json"));
-  const auto* allowed = allowance.find("sites");
-  Expect(allowed && allowed->is_array(),
-         "stderr allow-list has reviewed sites");
-  std::map<std::string, std::string> exceptions;
-  for (const auto& site : allowed->items()) {
-    const auto path = site.member_str("file");
-    const auto call = site.member_str("call");
-    const auto line = site.member_str("line");
-    Expect(!path.empty() && !call.empty() && !line.empty() &&
-               !site.member_str("reason").empty(),
-           "each stderr allowance names an exact call and a reason");
-    Expect(exceptions
-               .emplace(path + "\n" + line + "\n" + call,
-                        site.member_str("reason"))
-               .second,
-           "stderr allowances are unique");
-  }
-  const std::regex stderr_calls(
-      R"scan((?:std::)?\bfprintf\s*\(\s*stderr\s*,[\s\S]*?;|(?:std::)?\bfputs\s*\([^;]*?\bstderr\s*\)[\s\S]*?;|std::(?:cerr|clog)\s*(?:<<|\.write\s*\()[\s\S]*?;|(?:::)?\bwrite\s*\(\s*STDERR_FILENO\s*,[\s\S]*?;)scan");
+  std::vector<std::string> allowlist_problems;
+  const auto exceptions = ParseStderrAllowlist(
+      gufo::json::parse(read_source(root / "tools/ci/log_stderr_allowlist.json")),
+      allowlist_problems);
+  Expect(allowlist_problems.empty(),
+         allowlist_problems.empty() ? "" : allowlist_problems.front());
+  std::map<std::string, std::string> stderr_sources;
   for (const char* name :
        {"src/models/qwen38_flash_next/kernels/rocm/executor.cpp",
         "src/models/qwen38_flash_next/engine.cpp",
@@ -2313,19 +2883,30 @@ void DebugHooksSettingsEnvironmentTest() {
         "src/cli/serve/continuation_disk_store.cpp",
         "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_ggml_stubs.hip.cpp",
         "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_ggml_stubs.h",
-        "src/cli/serve/serve.cpp", "src/cli/serve/logging.cpp"}) {
-    const auto source = read_source(root / name);
-    for (std::sregex_iterator m(source.begin(), source.end(), stderr_calls),
-         end;
-         m != end; ++m) {
-      const auto line =
-          1 + std::count(source.begin(), source.begin() + m->position(), '\n');
-      const auto key =
-          std::string(name) + "\n" + std::to_string(line) + "\n" + m->str();
-      Expect(exceptions.erase(key) == 1,
-             std::string(name) + ": unreviewed raw stderr call: " + m->str());
-    }
-  }
+        "src/cli/serve/serve.cpp", "src/cli/serve/serve_command.cpp",
+        "src/cli/serve/logging.cpp"})
+    stderr_sources[name] = read_source(root / name);
+  // Unreviewed calls and stale entries both fail, each with file and call text.
+  const auto stderr_problems = StderrGateProblems(stderr_sources, exceptions);
+  for (const auto& problem : stderr_problems)
+    std::cerr << problem << "\n";
+  Expect(stderr_problems.empty(),
+         "raw stderr calls match the allow-list (see the lines above)");
+  // Five lines inserted at the top of serve.cpp (in memory, the real file stays
+  // untouched) move every call and must not change the result.
+  const std::string serve_file = "src/cli/serve/serve.cpp";
+  std::map<std::string, std::string> serve_allowed;
+  for (const auto& [key, reason] : exceptions)
+    if (key.compare(0, serve_file.size() + 1, serve_file + "\n") == 0)
+      serve_allowed.emplace(key, reason);
+  Expect(serve_allowed.size() > 10, "serve.cpp has reviewed stderr allowances");
+  Expect(StderrGateProblems(
+             {{serve_file,
+               "// shift 1\n// shift 2\n// shift 3\n// shift 4\n// shift 5\n" +
+                   stderr_sources[serve_file]}},
+             serve_allowed)
+             .empty(),
+         "five inserted lines in serve.cpp do not break the stderr gate");
   for (const char* name :
        {"src/models/qwen38_flash_next/kernels/rocm/mmq/mmq.hpp",
         "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_ggml_stubs.hip.cpp",
@@ -2343,7 +2924,7 @@ void DebugHooksSettingsEnvironmentTest() {
           std::string(name) + ": fatal print must have a bounded prefix drain");
     }
   }
-  Expect(exceptions.empty(), "stderr allow-list contains no stale exceptions");
+  const auto& stderr_calls = StderrCallRegex();
   const std::string new_site = "std::fprintf ( stderr, \"new site\\n\" );";
   Expect(std::regex_search(new_site, stderr_calls),
          "stderr scan detects a new call with whitespace");
@@ -2815,8 +3396,19 @@ void TestWrongModelIsRejected() {
   Expect(response.status == 404, "Unknown model is rejected");
   Expect(response.body.find("model_not_found") != std::string::npos,
          "Unknown model returns a stable error code");
+  Expect(response.body.find("this process serves 'test-model'") !=
+             std::string::npos,
+         "Unknown model names the model being served");
+  Expect(response.body.find("is not served: this process serves") !=
+             std::string::npos,
+         "Unknown model remedy survives the log punctuation filter");
   Expect(backend.chat_calls.load() == 0,
          "Rejected request never reaches the backend");
+  const auto alias = gufo::server::HandleOpenAiChat(Request(R"({
+        "model":"bubo", "messages":[{"role":"user","content":"hello"}]
+      })"),
+                                                    backend);
+  Expect(alias.status == 200, "Bubo alias reaches the served model");
 }
 
 void TestClientIdentityReachesBackend() {
@@ -2889,6 +3481,26 @@ void TestImagePartsRetainOrderAndIdentity() {
        R"({"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"file:///tmp/image.png"}}]}]})"}) {
     Expect(gufo::server::HandleOpenAiChat(Request(body), backend).status == 400,
            "unsupported image role, policy and URL are rejected");
+  }
+}
+
+void TestTextOnlyBackendRefusesImagesBeforeReading() {
+  FakeBackend backend;
+  backend.image_support = false;
+  // An unresolvable HTTPS host would fail differently if it were fetched, and
+  // a data URL would fail differently if it were decoded.
+  for (const auto* url : {"https://image-fetch-must-not-happen.invalid/x.png",
+                          "data:image/png;base64,!!!not-base64!!!"}) {
+    const auto body =
+        std::string(R"({"model":"test-model","messages":[{"role":"user",)"
+                    R"("content":[{"type":"image_url","image_url":{"url":")") +
+        url + R"("}}]}]})";
+    const auto response =
+        gufo::server::HandleOpenAiChat(Request(body), backend);
+    Expect(response.status == 400 &&
+               response.body.find("does not support image input") !=
+                   std::string::npos,
+           "a text-only model refuses images before reading them");
   }
 }
 
@@ -3044,6 +3656,22 @@ void TestStopSequencesAndDefaultFields() {
   using gufo::json::Value;
   const auto base = gufo::json::parse(
       R"({"model":"test-model","messages":[{"role":"user","content":"hello"}]})");
+  for (const auto& [field, value, message] :
+       {std::tuple{"model", "5", "'model' must be a string"},
+        std::tuple{"model", "{}", "'model' must be a string"},
+        std::tuple{"model", "[]", "'model' must be a string"},
+        std::tuple{"model", "true", "'model' must be a string"},
+        std::tuple{"reasoning_effort", "\"bogus\"",
+                   "reasoning_effort must be none, minimal"}}) {
+    auto invalid = base;
+    invalid[field] = gufo::json::parse(value);
+    FakeBackend backend;
+    const auto response =
+        gufo::server::HandleOpenAiChat(Request(invalid.dump()), backend);
+    Expect(response.status == 400 &&
+               response.body.find(message) != std::string::npos,
+           "validation errors describe the accepted values");
+  }
   for (const auto* stop : {"null", "[]", "\"END\"", "[\"END\",\"終\"]"}) {
     auto body = base;
     body["stop"] = gufo::json::parse(stop);
@@ -3110,6 +3738,38 @@ void TestStopSequencesAndDefaultFields() {
              backend.last_sampling.presence_penalty ==
                  backend.defaults.sampling.presence_penalty,
          "null sampling fields retain server defaults");
+  for (const std::string field : {"max_tokens", "max_completion_tokens"}) {
+    for (const char* value : {"0", "-2", "1.5", "4294967296", "\"2\""}) {
+      auto invalid = base;
+      invalid[field] = gufo::json::parse(value);
+      const auto response =
+          gufo::server::HandleOpenAiChat(Request(invalid.dump()), backend);
+      Expect(
+          response.status == 400 &&
+              response.body.find("'" + field + "' must be a positive integer") !=
+                  std::string::npos,
+          "an invalid token limit names the field that carried it");
+    }
+    // -1 (llama.cpp: no limit) leaves the configured default in place, like null (v0.1.1 HTTP fix).
+    auto unset = base;
+    unset[field] = gufo::json::parse("-1");
+    const auto accepted =
+        gufo::server::HandleOpenAiChat(Request(unset.dump()), backend);
+    Expect(accepted.status == 200 &&
+               backend.last_max_tokens == backend.defaults.max_tokens,
+           "-1 leaves the configured token limit in place");
+  }
+  {
+    auto invalid = base;
+    invalid["max_completion_tokens"] = Value();
+    invalid["max_tokens"] = 0;
+    const auto response =
+        gufo::server::HandleOpenAiChat(Request(invalid.dump()), backend);
+    Expect(response.status == 400 &&
+               response.body.find("'max_tokens' must be a positive integer") !=
+                   std::string::npos,
+           "a null completion limit names the fallback max_tokens field");
+  }
   body["logprobs"] = false;
   body["top_logprobs"] = 0;
   body["logit_bias"] = Value::object();
@@ -3236,6 +3896,56 @@ void TestStructuredResponseFormat() {
     }
     Expect(answer == literal && reasoning == "Consider <tool_call> as text.",
            "only the reasoning delimiter changes structured-output phase");
+  }
+  // #580: as in llama.cpp, response schemas that omit additionalProperties
+  // are admitted and keep declared objects closed; additionalProperties true
+  // or a schema admits extra keys. Strict tool parameters keep requiring
+  // explicitly closed objects.
+  {
+    auto open = gufo::json::parse(
+        R"({"model":"test-model","messages":[{"role":"user","content":"Who?"}],
+            "response_format":{"type":"json_schema","json_schema":{
+              "name":"person","strict":true,"schema":{"type":"object",
+              "properties":{"name":{"type":"string"},
+                "born":{"type":"integer","description":"birth year"}},
+              "required":["name","born"]}}}})");
+    for (const bool stream : {false, true}) {
+      open["stream"] = stream;
+      const auto response =
+          gufo::server::HandleOpenAiChat(Request(open.dump()), backend);
+      Expect(response.status == 200 && backend.last_request.response_format,
+             "response schemas without additionalProperties are admitted");
+      Expect(
+          Accepts(*backend.last_request.response_format,
+                  R"({"name":"Nostradamus","born":1503})") &&
+              !Accepts(*backend.last_request.response_format,
+                       R"({"name":"Nostradamus","born":1503,"note":"seer"})") &&
+              !Accepts(*backend.last_request.response_format,
+                       R"({"name":"Nostradamus"})"),
+          "omitted additionalProperties keeps declared objects closed");
+    }
+    open["stream"] = false;
+    open["tools"] = gufo::json::parse(
+        R"([{"type":"function","function":{"name":"f","strict":true,
+            "parameters":{"type":"object","properties":{"x":{"type":"string"}},
+            "required":["x"]}}}])");
+    const auto calls = backend.chat_calls.load();
+    const auto rejected =
+        gufo::server::HandleOpenAiChat(Request(open.dump()), backend);
+    Expect(rejected.status == 400 && backend.chat_calls == calls &&
+               rejected.body.find("invalid_tools") != std::string::npos,
+           "strict tools still require closed parameter objects");
+    gufo::server::ChatRequest responses;
+    Expect(!gufo::server::ParseOpenAiResponseControls(
+               gufo::json::parse(R"({"text":{"format":{"type":"json_schema",
+                 "name":"person","strict":true,"schema":{"type":"object",
+                 "properties":{"name":{"type":"string"}},"required":["name"],
+                 "additionalProperties":{"type":"integer"}}}}})"),
+               &responses) &&
+               responses.response_format &&
+               Accepts(*responses.response_format, R"({"name":"a","b":1})") &&
+               !Accepts(*responses.response_format, R"({"name":"a","b":"1"})"),
+           "Responses text.format admits typed additional properties");
   }
   body["stop"] = "END";
   Expect(gufo::server::HandleOpenAiChat(Request(body.dump()), backend).status ==
@@ -3631,7 +4341,7 @@ void TestNativeToolImplicitReasoningEnd() {
                    "implicit native tool request succeeds");
             gufo::json::Value result;
             std::string streamed_reasoning, streamed_content;
-            bool streamed_tool = false;
+            std::string streamed_arguments, finish;
             if (!stream)
               result = gufo::json::parse(response.body);
             else
@@ -3650,13 +4360,19 @@ void TestNativeToolImplicitReasoningEnd() {
                       event.member_str("type") == "response.incomplete")
                     result = *event.find("response");
                 } else if (const auto* choices = event.find("choices")) {
-                  for (const auto& choice : choices->items())
+                  for (const auto& choice : choices->items()) {
+                    if (!choice.member_str("finish_reason").empty())
+                      finish = choice.member_str("finish_reason");
                     if (const auto* delta = choice.find("delta")) {
                       streamed_reasoning +=
                           delta->member_str("reasoning_content");
                       streamed_content += delta->member_str("content");
-                      streamed_tool |= delta->contains("tool_calls");
+                      if (const auto* tools = delta->find("tool_calls"))
+                        for (const auto& tool : tools->items())
+                          streamed_arguments +=
+                              tool.find("function")->member_str("arguments");
                     }
+                  }
                 }
                 return true;
               });
@@ -3664,7 +4380,10 @@ void TestNativeToolImplicitReasoningEnd() {
             std::size_t calls = 0;
             if (responses) {
               for (const auto& item : result.find("output")->items()) {
-                calls += item.member_str("type") == "function_call";
+                if (item.member_str("type") == "function_call") {
+                  calls += item.member_str("status") == "completed";
+                  streamed_arguments = item.member_str("arguments");
+                }
                 for (const auto* field : {"summary", "content"})
                   if (const auto* parts = item.find(field))
                     for (const auto& part : parts->items())
@@ -3682,10 +4401,13 @@ void TestNativeToolImplicitReasoningEnd() {
             } else {
               reasoning = streamed_reasoning;
               content = streamed_content;
-              calls = streamed_tool;
+              calls = finish == "tool_calls";
             }
             Expect(calls == (interrupted ? 0u : 1u),
                    "only a complete unquoted native call is invoked");
+            if (stream && interrupted)
+              Expect(streamed_arguments == R"({"path":"file)",
+                     "an interrupted call retains only its unfinished prefix");
             Expect(content.empty() && reasoning == expected_thought,
                    "implicit call markup is not leaked into either output "
                    "channel");
@@ -3832,7 +4554,7 @@ void TestToolMarkersInsideConstrainedReasoning() {
                   content += message->member_str("content");
                   if (const auto* tools = message->find("tool_calls"))
                     for (const auto& tool : tools->items()) {
-                      ++calls;
+                      calls += !stream || !tool.member_str("id").empty();
                       emitted_arguments +=
                           tool.find("function")->member_str("arguments");
                     }
@@ -4059,7 +4781,7 @@ void TestNativeToolTransports() {
                     reasoning += message->member_str("reasoning_content");
                     if (const auto* tools = message->find("tool_calls"))
                       for (const auto& tool : tools->items()) {
-                        ++call_count;
+                        call_count += !stream || !tool.member_str("id").empty();
                         arguments +=
                             tool.find("function")->member_str("arguments");
                       }
@@ -4170,8 +4892,7 @@ void TestJsonToolStringOwnership() {
                   continue;
                 content += message->member_str("content");
                 if (const auto* found = message->find("tool_calls"))
-                  calls.insert(calls.end(), found->items().begin(),
-                               found->items().end());
+                  AppendToolDeltas(calls, *found, stream);
               }
           };
           if (stream) {
@@ -4378,9 +5099,15 @@ void TestNativeToolDialectSelection() {
                 const auto* message = choice.find(stream ? "delta" : "message");
                 content += message->member_str("content");
                 if (const auto* calls = message->find("tool_calls"))
-                  for (const auto& item : calls->items())
-                    arguments.push_back(
-                        item.find("function")->member_str("arguments"));
+                  for (const auto& item : calls->items()) {
+                    const auto index =
+                        stream ? item.member_size("index") : arguments.size();
+                    if (index == arguments.size())
+                      arguments.emplace_back();
+                    Expect(index < arguments.size(), "tool index is stable");
+                    arguments[index] +=
+                        item.find("function")->member_str("arguments");
+                  }
               }
             }
           };
@@ -4429,7 +5156,8 @@ void TestNativeToolDialectSelection() {
           const auto* message = choice.find(stream ? "delta" : "message");
           content += message->member_str("content");
           if (const auto* found = message->find("tool_calls"))
-            calls += found->size();
+            for (const auto& call : found->items())
+              calls += !stream || !call.member_str("id").empty();
         }
       };
       if (stream) {
@@ -4685,6 +5413,7 @@ void TestNativeToolTextOutsideEnvelopes() {
           backend.tool_format.reset();
           std::string text, deltas;
           std::vector<std::string> paths;
+          std::vector<Value> chat_calls;
           const auto call = [&](const Value& function) {
             Expect(function.member_str("name") == "read",
                    "only the declared intended call is returned");
@@ -4713,8 +5442,7 @@ void TestNativeToolTextOutsideEnvelopes() {
                 const auto* message = choice.find(stream ? "delta" : "message");
                 text += message->member_str("content");
                 if (const auto* calls = message->find("tool_calls"))
-                  for (const auto& tool : calls->items())
-                    call(*tool.find("function"));
+                  AppendToolDeltas(chat_calls, *calls, stream);
               }
             }
           };
@@ -4729,6 +5457,8 @@ void TestNativeToolTextOutsideEnvelopes() {
             });
           else
             collect(gufo::json::parse(response.body));
+          for (const auto& tool : chat_calls)
+            call(*tool.find("function"));
           Expect(backend.last_request.constrained_tools && backend.completed,
                  "tool request uses constrained generation");
           Expect(paths == fixture.paths,
@@ -4883,10 +5613,15 @@ void TestNativeArgumentTypingMatrix() {
         body["stream"] = stream;
         FakeBackend backend;
         backend.tool_format = gufo::sampling::JsonConstraint::ToolFormat::kQwen;
-        backend.pieces = {std::string("<tool_call>\n<function=record>\n"
-                                      "<parameter=v>\n") +
-                          item.raw +
-                          "\n</parameter>\n</function>\n</tool_call>"};
+        const auto raw = std::string(
+                             "<tool_call>\n<function=record>\n"
+                             "<parameter=v>\n") +
+                         item.raw + "\n</parameter>\n</function>\n</tool_call>";
+        if (stream)
+          for (const char byte : raw)
+            backend.pieces.emplace_back(1, byte);
+        else
+          backend.pieces = {raw};
         const auto response =
             gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
         if (response.status != 200)
@@ -5293,6 +6028,107 @@ void TestResponsesOutput() {
   }
 }
 
+void TestGemmaNativeToolCalls() {
+  using Backend = gufo::server::TextGenerationBackend;
+  FakeBackend backend;
+  backend.markup = {
+      .reasoning_start = "<|channel>thought\n",
+      .reasoning_end = "<channel|>",
+      .tool_syntax = Backend::OutputMarkup::ToolSyntax::kGemma4,
+  };
+  const std::string body = R"({
+        "model":"test-model",
+        "messages":[{"role":"user","content":"weather in Rome"}],
+        "tools":[{
+          "type":"function",
+          "function":{
+            "name":"get_weather",
+            "parameters":{
+              "type":"object",
+              "properties":{"city":{"type":"string"}},
+              "required":["city"]
+            }
+          }
+        }]
+      })";
+  const auto expect_call = [](const gufo::server::HttpResponse& response,
+                              std::string_view message) {
+    Expect(
+        response.status == 200 &&
+            response.body.find("tool_calls") != std::string::npos &&
+            response.body.find(R"(\"city\":\"Rome\")") != std::string::npos &&
+            response.body.find("call:") == std::string::npos,
+        message);
+  };
+  backend.pieces = {"<|tool_call>call:get_weather{city:<|\"|>Rome<|\"|>}",
+                    "<tool_call|>"};
+  auto response = gufo::server::HandleOpenAiChat(Request(body), backend);
+  Expect(backend.last_request.constrained_tools,
+         "Gemma 4 calls are constrained like other models' native calls");
+  expect_call(response, "Constrained native Gemma 4 calls are parsed");
+
+  // With thinking on, the output may open the thought channel before a call.
+  backend.initial_output_state_override = Backend::InitialOutputState::kAuto;
+  backend.pieces = {"<|channel>thought\nUse the tool.<channel|>",
+                    "<|tool_call>call:get_weather{city:<|\"|>Rome<|\"|>}",
+                    "<tool_call|>"};
+  for (const bool stream : {false, true}) {
+    auto request = gufo::json::parse(body);
+    request["stream"] = stream;
+    request["tool_choice"] = "required";
+    response = gufo::server::HandleOpenAiChat(Request(request.dump()), backend);
+    const auto output = stream ? std::string() : response.body;
+    std::string streamed;
+    if (stream)
+      response.streaming_body([&](std::string_view chunk) {
+        streamed += chunk;
+        return true;
+      });
+    const auto& text = stream ? streamed : output;
+    Expect(text.find("Use the tool.") != std::string::npos &&
+               text.find(R"("reasoning_content")") != std::string::npos &&
+               text.find("<|channel>") == std::string::npos &&
+               text.find("call:") == std::string::npos &&
+               text.find(R"(\"city\":\"Rome\")") != std::string::npos,
+           "A Gemma 4 thought before a required call stays reasoning");
+  }
+
+  // An agent turn: automatic, streamed token by token. Gemma 4 opens an empty
+  // thought channel after tool responses even without thinking.
+  backend.initial_output_state_override = Backend::InitialOutputState::kAuto;
+  const std::string call =
+      "<|channel>thought\n<channel|><|tool_call>call:get_weather{city:<|\"|>"
+      "Rome<|\"|>,note:<|\"|>a, "
+      "{b}: \"c\"\n<|\"|>}<tool_call|>";
+  backend.pieces.clear();
+  for (std::size_t i = 0; i < call.size(); i += 3)
+    backend.pieces.push_back(call.substr(i, 3));
+  auto request = gufo::json::parse(body);
+  request["stream"] = true;
+  request["parallel_tool_calls"] = false;
+  response = gufo::server::HandleOpenAiChat(Request(request.dump()), backend);
+  std::string streamed;
+  response.streaming_body([&](std::string_view chunk) {
+    streamed += chunk;
+    return true;
+  });
+  std::string arguments;
+  for (std::size_t at = streamed.find("data: {"); at != std::string::npos;
+       at = streamed.find("data: {", at + 1)) {
+    const auto end = streamed.find("\n\n", at);
+    const auto event = gufo::json::parse(streamed.substr(at + 6, end - at - 6));
+    if (const auto* choices = event.find("choices"))
+      for (const auto& choice : choices->items())
+        if (const auto* calls = choice.find("delta")->find("tool_calls"))
+          for (const auto& call : calls->items())
+            arguments += call.find("function")->member_str("arguments");
+  }
+  Expect(streamed.find("error") == std::string::npos &&
+             streamed.find("channel") == std::string::npos &&
+             arguments == R"({"city":"Rome","note":"a, {b}: \"c\"\n"})",
+         "A streamed Gemma 4 call is parsed: " + streamed);
+}
+
 void TestResponsesLiveAndCancellation() {
   FakeBackend backend;
   backend.pieces = {"<tool_call>first", "second"};
@@ -5569,13 +6405,17 @@ void TestToolClosingFraming() {
               if (part == "data: [DONE]\n\n")
                 return true;
               const auto event = gufo::json::parse(part.substr(6));
+              if (event.contains("error"))
+                std::cerr << "Framing input: " << item.text
+                          << "\nStream error: " << event.dump() << '\n';
+              Expect(!event.contains("error"),
+                     "quoted examples do not start tentative tool calls");
               for (const auto& choice : event.find("choices")->items()) {
                 finish += choice.member_str("finish_reason");
                 if (const auto* delta = choice.find("delta")) {
                   content += delta->member_str("content");
                   if (const auto* found = delta->find("tool_calls"))
-                    calls.insert(calls.end(), found->items().begin(),
-                                 found->items().end());
+                    AppendToolDeltas(calls, *found, stream);
                 }
               }
               return true;
@@ -5892,8 +6732,7 @@ void TestProseAboutTheDialectIsNotACall() {
             continue;
           content += delta->member_str("content");
           if (const auto* found = delta->find("tool_calls"))
-            calls.insert(calls.end(), found->items().begin(),
-                         found->items().end());
+            AppendToolDeltas(calls, *found, stream);
         }
       }
       if (calls.empty() && Trimmed(content) != Trimmed(message))
@@ -5969,16 +6808,938 @@ void TestBracketDenseContent() {
   }
 }
 
+struct ToolBoundaryOutput {
+  std::string content, reasoning, finish, error_message;
+  std::vector<std::string> arguments, names;
+  std::size_t incomplete_items{0};  // Responses streams: items closed as incomplete
+  bool failed{false};
+};
+
+/// Token-level reasoning end for a fixture: untracked (the text rule), or the
+/// index of the piece that is the generated tag token (none: never closed).
+struct TokenReasoningEnd {
+  bool tracked{false};
+  std::optional<std::size_t> piece;
+};
+
+// Exercise public serializers with independent fixtures. Validate event
+// ownership too: a delta cannot precede its header or follow its block's close.
+ToolBoundaryOutput ToolBoundaryRequest(
+    const std::vector<std::string>& pieces,
+    gufo::sampling::JsonConstraint::ToolFormat format, int api, bool stream,
+    FakeBackend::InitialOutputState initial =
+        FakeBackend::InitialOutputState::kContent,
+    FakeBackend::FinishReason finish = FakeBackend::FinishReason::kStop,
+    FakeBackend::TerminationCause cause = FakeBackend::TerminationCause::kNone,
+    const TokenReasoningEnd& token_end = {}, int shape = 0) {
+  using gufo::json::Value;
+  FakeBackend backend;
+  backend.pieces = pieces;
+  backend.track_reasoning_end = token_end.tracked;
+  backend.reasoning_end_piece = token_end.piece;
+  backend.tool_format = format;
+  backend.initial_output_state_override = initial;
+  backend.finish_reason = finish;
+  backend.termination_cause = cause;
+  backend.stop_sequence = "HALT";
+  auto body = gufo::json::parse(R"({
+    "model":"test-model","messages":[{"role":"user","content":"test framing"}],
+    "tool_choice":"auto","tools":[
+      {"type":"function","function":{"name":"record","parameters":{
+        "type":"object","properties":{"text":{"type":"string"},
+          "data":{"type":"object"}},"additionalProperties":false}}},
+      {"type":"function","function":{"name":"noop","parameters":{
+        "type":"object","properties":{},"additionalProperties":false}}}
+    ]})");
+  body["stream"] = stream;
+  body["reasoning_effort"] =
+      initial == FakeBackend::InitialOutputState::kContent ? "none" : "low";
+  // Shape 1: no tools (the unconstrained parser); 2: a JSON response format.
+  if (shape != 0) {
+    body.erase_member("tools");
+    body.erase_member("tool_choice");
+  }
+  if (shape == 2)
+    body["response_format"] = gufo::json::parse(R"({"type":"json_schema",
+      "json_schema":{"name":"answer","strict":true,"schema":{"type":"object",
+      "properties":{"a":{"type":"integer"}},"required":["a"],
+      "additionalProperties":false}}})");
+  gufo::server::HttpResponse response;
+  if (api == 0)
+    response = gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+  else {
+    gufo::server::ChatRequest chat;
+    Expect(!gufo::server::ParseOpenAiResponseControls(body, &chat),
+           "tag boundary controls parse");
+    response = api == 1 ? gufo::server::CreateOpenAiResponse(
+                              Request("{}"), backend, chat, 4096, {}, stream)
+                        : gufo::server::CreateAnthropicMessage(
+                              Request("{}"), backend, chat, 4096, {}, stream);
+  }
+  Expect(response.status == 200, "tag boundary request is accepted");
+  ToolBoundaryOutput out;
+  std::vector<Value> chat_calls;
+  std::map<std::size_t, bool> open;
+  std::map<std::size_t, std::size_t> tools;
+  bool terminal = false;
+  const auto header = [&](std::size_t index, const Value& item) {
+    Expect(!tools.contains(index), "tool header occurs once");
+    Expect(!item.member_str("call_id", item.member_str("id")).empty(),
+           "tool header has an ID");
+    tools[index] = out.arguments.size();
+    out.arguments.emplace_back();
+    out.names.push_back(item.member_str("name"));
+  };
+  const auto item = [&](const Value& value) {
+    const auto type = value.member_str("type");
+    if (type == "function_call" || type == "tool_use") {
+      out.names.push_back(value.member_str("name"));
+      out.arguments.push_back(type == "function_call"
+                                  ? value.member_str("arguments")
+                                  : value.find("input")->dump());
+    } else if (type == "thinking")
+      out.reasoning += value.member_str("thinking");
+    else if (type == "text")
+      out.content += value.member_str("text");
+    else
+      for (const auto* key : {"summary", "content"})
+        if (const auto* parts = value.find(key))
+          for (const auto& part : parts->items())
+            (std::string_view(key) == "summary" ? out.reasoning
+                                                : out.content) +=
+                part.member_str("text");
+  };
+  const auto collect = [&](const Value& event) {
+    const auto type = event.member_str("type");
+    const auto* error = event.find("error");
+    if ((error && !error->is_null()) || type == "response.failed") {
+      out.failed = true;
+      if (error && error->is_object())
+        out.error_message = error->member_str("message");
+      else if (const auto* response_error =
+                   event.find("response") ? event.find("response")->find("error")
+                                          : nullptr)
+        out.error_message = response_error->member_str("message");
+      return;
+    }
+    if (api == 0) {
+      for (const auto& choice : event.find("choices")->items()) {
+        const auto* message = choice.find(stream ? "delta" : "message");
+        out.content += message->member_str("content");
+        out.reasoning += message->member_str("reasoning_content");
+        if (const auto* calls = message->find("tool_calls")) {
+          Expect(!terminal, "tool deltas precede the terminal event");
+          AppendToolDeltas(chat_calls, *calls, stream);
+        }
+        if (!choice.member_str("finish_reason").empty()) {
+          Expect(!terminal, "one terminal choice");
+          terminal = true;
+          out.finish = choice.member_str("finish_reason");
+        }
+      }
+    } else if (!stream) {
+      for (const auto& value :
+           event.find(api == 1 ? "output" : "content")->items())
+        item(value);
+      out.finish = event.member_str(api == 1 ? "status" : "stop_reason");
+      terminal = true;
+    } else {
+      const auto index = event.member_size(api == 1 ? "output_index" : "index");
+      if (type == "response.output_item.added" ||
+          type == "content_block_start") {
+        if (terminal || open.contains(index)) {
+          std::cerr << "duplicate block api=" << api
+                    << " event=" << event.dump() << "\nraw=";
+          for (const auto& piece : pieces)
+            std::cerr << piece;
+          std::cerr << '\n';
+        }
+        Expect(!terminal && !open.contains(index),
+               "each output block starts exactly once");
+        open[index] = true;
+        const auto& value = *event.find(api == 1 ? "item" : "content_block");
+        if (value.member_str("type") == "function_call" ||
+            value.member_str("type") == "tool_use")
+          header(index, value);
+      } else if (type == "response.output_item.done" ||
+                 type == "content_block_stop") {
+        Expect(open.contains(index) && open[index],
+               "each output block closes exactly once");
+        if (api == 1 && tools.contains(index))
+          Expect(event.find("item")->member_str("arguments") ==
+                     out.arguments[tools.at(index)],
+                 "done tool item equals its accumulated deltas");
+        if (api == 1 && event.find("item")->member_str("status") == "incomplete")
+          ++out.incomplete_items;
+        open[index] = false;
+      } else if (type == "response.function_call_arguments.delta" ||
+                 type == "content_block_delta") {
+        Expect(!terminal && open.contains(index) && open[index],
+               "deltas belong to an open block");
+        const auto* delta = event.find("delta");
+        if (api == 1 || delta->member_str("type") == "input_json_delta") {
+          Expect(tools.contains(index), "arguments follow their tool header");
+          out.arguments[tools.at(index)] +=
+              api == 1 ? event.member_str("delta")
+                       : delta->member_str("partial_json");
+        } else if (delta->member_str("type") == "thinking_delta")
+          out.reasoning += delta->member_str("thinking");
+        else if (delta->member_str("type") == "text_delta")
+          out.content += delta->member_str("text");
+      } else if (type == "response.function_call_arguments.done") {
+        Expect(
+            open.contains(index) && open[index] && tools.contains(index) &&
+                event.member_str("arguments") == out.arguments[tools.at(index)],
+            "argument done event matches its live tool");
+      } else if (type == "response.output_text.delta")
+        out.content += event.member_str("delta");
+      else if (type == "response.reasoning_summary_text.delta")
+        out.reasoning += event.member_str("delta");
+      else if (type == "response.completed" || type == "response.incomplete" ||
+               type == "message_delta") {
+        Expect(!terminal, "one terminal event");
+        terminal = true;
+        for (const auto& [_, active] : open)
+          Expect(!active, "all blocks close before the terminal event");
+        out.finish = api == 1 ? event.find("response")->member_str("status")
+                              : event.find("delta")->member_str("stop_reason");
+      }
+    }
+  };
+  if (stream)
+    response.streaming_body([&](std::string_view chunk) {
+      if (chunk != "data: [DONE]\n\n")
+        collect(gufo::json::parse(chunk.substr(chunk.find("data: ") + 6)));
+      return true;
+    });
+  else
+    collect(gufo::json::parse(response.body));
+  for (const auto& call : chat_calls) {
+    Expect(!call.member_str("id").empty(), "Chat tools have stable identities");
+    out.names.push_back(call.find("function")->member_str("name"));
+    out.arguments.push_back(call.find("function")->member_str("arguments"));
+  }
+  Expect(terminal || out.failed, "stream terminates or reports its error");
+  return out;
+}
+
+// L-REL-8: reasoning ends at the tag the model generated as its tag token. The
+// same characters written as ordinary text tokens (a model quoting code that
+// contains "</think>") stay inside reasoning, on every route and transport.
+void TestTokenLevelReasoningEnd() {
+  using Initial = FakeBackend::InitialOutputState;
+  struct Case {
+    const char* name;
+    std::vector<std::string> pieces;
+    TokenReasoningEnd end;
+    Initial initial;
+    std::string reasoning, content;
+    std::vector<std::string> names{};
+    // 0: with tools (Chat's structured parser), 1: without tools
+    // (the unconstrained parser), 2: a JSON response format (Chat only).
+    std::vector<int> shapes{0, 1};
+  };
+  const std::vector<Case> cases = {
+      {"tag token, then a tool call",
+       {"Plan.", "</think>",
+        "\n\n<tool_call>\n<function=noop>\n</function>\n</tool_call>"},
+       {true, 1}, Initial::kReasoning, "Plan.", "", {"noop"}, {0}},
+      {"quoted tag, then a tool call with no tag token",
+       {"Pass \"", "</think>", "\" on.\n\n",
+        "<tool_call>\n<function=noop>\n</function>\n</tool_call>"},
+       {true, std::nullopt}, Initial::kReasoning, "Pass \"</think>\" on.", "",
+       {"noop"}, {0}},
+      // The JSON grammar's gate ends at the first textual tag and then masks
+      // the tag token, so a response format keeps the text rule (L-REL-8b).
+      {"response format keeps the text rule",
+       {"Quote ", "</think>", "{\"a\":1}"}, {true, std::nullopt},
+       Initial::kReasoning, "Quote", "{\"a\":1}", {}, {2}},
+      {"quoted tag, then the tag token",
+       {"Pass the literal \"", "</think>", "\" through.", "</think>",
+        "\n\nDone."},
+       {true, 3}, Initial::kReasoning,
+       "Pass the literal \"</think>\" through.", "Done."},
+      // An invalid byte decodes to U+FFFD (three bytes), so the tracked offset
+      // lands two bytes before the tag in the decoded text.
+      {"invalid byte before a quoted tag and the tag token",
+       {"Bad \xFF byte, quoted ", "</think>", " text.", "</think>",
+        "\n\nDone."},
+       {true, 3}, Initial::kReasoning,
+       "Bad \xEF\xBF\xBD byte, quoted </think> text.", "Done."},
+      {"quoted tag split over pieces",
+       {"Write ", "</th", "ink>", " as text.", "</think>", "\n\nDone."},
+       {true, 4}, Initial::kReasoning, "Write </think> as text.", "Done."},
+      {"tag token only (unchanged)",
+       {"Short plan.", "</think>", "\n\nDone."}, {true, 1},
+       Initial::kReasoning, "Short plan.", "Done."},
+      {"quoted tag, no tag token: reasoning stays open",
+       {"Quote ", "</think>", " here."}, {true, std::nullopt},
+       Initial::kReasoning, "Quote </think> here.", ""},
+      {"model-opened reasoning, quoted tag, then the tag token",
+       {"<think>", "Use ", "</think>", " verbatim.", "</think>", "\n\nDone."},
+       {true, 4}, Initial::kAuto, "Use </think> verbatim.", "Done."},
+      {"untracked backend keeps the text rule",
+       {"Quote ", "</think>", " here."}, {false, std::nullopt},
+       Initial::kReasoning, "Quote", "here."},
+  };
+  for (const auto& item : cases)
+    for (const int shape : item.shapes)
+      for (const int api : {0, 1, 2})
+        for (const bool stream : {false, true}) {
+          if (shape == 2 && api != 0)
+            continue;
+          const auto out = ToolBoundaryRequest(
+              item.pieces, gufo::sampling::JsonConstraint::ToolFormat::kQwen,
+              api, stream, item.initial, FakeBackend::FinishReason::kStop,
+              FakeBackend::TerminationCause::kNone, item.end, shape);
+          const bool ok = !out.failed &&
+                          Trimmed(out.reasoning) == item.reasoning &&
+                          Trimmed(out.content) == item.content &&
+                          out.names == item.names;
+          if (!ok)
+            std::cerr << "case=" << item.name << " shape=" << shape
+                      << " api=" << api << " stream=" << stream
+                      << " reasoning=[" << out.reasoning << "] content=["
+                      << out.content << "] calls=" << out.names.size() << "\n";
+          Expect(ok, "reasoning ends at the generated tag token");
+        }
+}
+
+void TestToolTagBoundaries() {
+  using Format = gufo::sampling::JsonConstraint::ToolFormat;
+  using Initial = FakeBackend::InitialOutputState;
+  using Finish = FakeBackend::FinishReason;
+  const auto bytewise = [](const std::string& raw) {
+    std::vector<std::string> pieces;
+    for (const char byte : raw)
+      pieces.emplace_back(1, byte);
+    return pieces;
+  };
+  for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
+    const bool qwen = format == Format::kQwen;
+    for (const auto initial : {Initial::kReasoning, Initial::kAuto})
+      for (const auto finish : {Finish::kLength, Finish::kStopSequence}) {
+        const std::string phase = "<think>Check.</think>\n";
+        for (const int api : {0, 1, 2})
+          for (std::size_t cut = 0; cut <= phase.size(); ++cut) {
+            const auto raw = phase.substr(0, cut);
+            const auto buffered =
+                ToolBoundaryRequest({raw}, format, api, false, initial, finish);
+            const auto streamed = ToolBoundaryRequest(
+                bytewise(raw), format, api, true, initial, finish);
+            Expect(
+                !streamed.failed && !buffered.failed &&
+                    streamed.arguments.empty() &&
+                    streamed.content == buffered.content &&
+                    streamed.reasoning == buffered.reasoning &&
+                    streamed.reasoning.find("<think>") == std::string::npos &&
+                    streamed.reasoning.find("</think>") == std::string::npos,
+                "interruption within a thinking tag preserves the admitted "
+                "phase without opening a tool");
+          }
+      }
+    for (const std::string frame : {"\n", "\r\n"}) {
+      if (!qwen && frame == "\r\n")
+        continue;
+      const std::string opening =
+          qwen ? "<tool_call>\n<function=record>\n<parameter=text>" + frame
+               : "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"record\">\n"
+                 "<｜DSML｜parameter name=\"text\" string=\"true\">";
+      const std::string closing =
+          qwen ? frame + "</parameter>" + frame + "</function>\n</tool_call>"
+               : "</｜DSML｜parameter>\n</｜DSML｜invoke>\n</"
+                 "｜DSML｜tool_calls>";
+      for (const std::string value :
+           {"", "\r", "\n", " \t\r\n", "café 🍵 \"quoted\" \\",
+            "literal <think></think> <tool_call></tool_call> <|im_end|>",
+            "line\n</parameter> is data\n</parameter>\rX\nlast"}) {
+        const auto raw = opening + value + closing;
+        auto expected = gufo::json::Value::object();
+        expected["text"] = value;
+        for (const int api : {0, 1, 2}) {
+          const auto buffered = ToolBoundaryRequest({raw}, format, api, false);
+          if (buffered.failed ||
+              buffered.arguments != std::vector<std::string>{expected.dump()} ||
+              !buffered.content.empty() || !buffered.reasoning.empty()) {
+            std::cerr << "buffered boundary api=" << api << " raw=" << raw
+                      << " content=" << buffered.content
+                      << " reasoning=" << buffered.reasoning << '\n';
+            for (const auto& argument : buffered.arguments)
+              std::cerr << "arguments=" << argument << '\n';
+          }
+          Expect(!buffered.failed &&
+                     buffered.arguments ==
+                         std::vector<std::string>{expected.dump()} &&
+                     buffered.content.empty() && buffered.reasoning.empty(),
+                 "buffered fixture retains the independent literal value");
+          // Every two-piece split, plus a stream that splits every byte.
+          for (std::size_t cut = 0; cut <= raw.size() + 1; ++cut) {
+            const auto streamed = ToolBoundaryRequest(
+                cut > raw.size() ? bytewise(raw)
+                                 : std::vector<std::string>{raw.substr(0, cut),
+                                                            raw.substr(cut)},
+                format, api, true);
+            if (streamed.failed || streamed.arguments != buffered.arguments)
+              std::cerr << "tag split format=" << qwen << " api=" << api
+                        << " cut=" << cut << " raw=" << raw << '\n';
+            Expect(!streamed.failed &&
+                       streamed.arguments == buffered.arguments &&
+                       streamed.names == buffered.names &&
+                       streamed.content.empty() && streamed.reasoning.empty(),
+                   "all tag splits preserve values and hide native framing");
+          }
+        }
+      }
+      const std::string call = opening + "value" + closing;
+      const std::string noop =
+          qwen ? "<tool_call>\n<function=noop>\n</function>\n</tool_call>"
+               : "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"noop\">\n"
+                 "</｜DSML｜invoke>\n</｜DSML｜tool_calls>";
+      for (const auto initial :
+           {Initial::kContent, Initial::kReasoning, Initial::kAuto})
+        for (const bool implicit : {false, true}) {
+          if (implicit && initial != Initial::kReasoning)
+            continue;
+          const auto prefix =
+              initial == Initial::kContent ? std::string{}
+              : implicit                   ? std::string("Check tags.\n\n")
+                         : (initial == Initial::kAuto ? "<think>" : "") +
+                               std::string("Check tags.</think>\n");
+          const auto raw = prefix + call + "\n" + noop;
+          for (const int api : {0, 1, 2}) {
+            const auto buffered =
+                ToolBoundaryRequest({raw}, format, api, false, initial);
+            for (std::size_t cut = 0; cut <= raw.size(); ++cut) {
+              const auto streamed =
+                  ToolBoundaryRequest({raw.substr(0, cut), raw.substr(cut)},
+                                      format, api, true, initial);
+              if (streamed.failed || streamed.arguments != buffered.arguments ||
+                  Trimmed(streamed.reasoning) != Trimmed(buffered.reasoning))
+                std::cerr << "phase split api=" << api << " cut=" << cut
+                          << " initial=" << static_cast<int>(initial)
+                          << " implicit=" << implicit << " raw=" << raw
+                          << "\nstreamed reasoning=" << streamed.reasoning
+                          << "\nbuffered reasoning=" << buffered.reasoning
+                          << '\n';
+              Expect(
+                  !streamed.failed && !buffered.failed &&
+                      streamed.arguments == buffered.arguments &&
+                      streamed.names ==
+                          std::vector<std::string>{"record", "noop"} &&
+                      Trimmed(streamed.reasoning) ==
+                          Trimmed(buffered.reasoning) &&
+                      Trimmed(streamed.reasoning) ==
+                          (initial == Initial::kContent ? "" : "Check tags.") &&
+                      streamed.content == buffered.content &&
+                      Trimmed(streamed.content).empty(),
+                  "reasoning boundaries and successive calls agree across "
+                  "transports");
+            }
+          }
+        }
+      for (const int api : {0, 1, 2})
+        for (const bool enabled : {false, true}) {
+          const auto raw = "<think>Check tags.</think>\n" + call;
+          const auto initial =
+              enabled ? Initial::kReasoning : Initial::kContent;
+          for (const bool stream : {false, true}) {
+            const auto output = ToolBoundaryRequest(bytewise(raw), format, api,
+                                                    stream, initial);
+            Expect(!output.failed &&
+                       Trimmed(output.reasoning) ==
+                           (enabled ? "Check tags." : "") &&
+                       output.content ==
+                           (enabled ? "" : "<think>Check tags.</think>\n") &&
+                       output.arguments ==
+                           std::vector<std::string>{R"({"text":"value"})"},
+                   "an opening think tag follows the admitted initial phase");
+          }
+        }
+      // Stop/length at every byte of both calls, including their opening and
+      // closing tags. A partial JSON prefix must never be repaired into a call.
+      for (const auto finish : {Finish::kLength, Finish::kStopSequence})
+        for (const int api : {0, 1, 2})
+          for (std::size_t cut = 0; cut <= call.size(); ++cut) {
+            const auto raw =
+                "Check.</think>\n" + noop + "\n" + call.substr(0, cut);
+            const auto buffered = ToolBoundaryRequest(
+                {raw}, format, api, false, Initial::kReasoning, finish);
+            const auto streamed = ToolBoundaryRequest(
+                bytewise(raw), format, api, true, Initial::kReasoning, finish);
+            Expect(!streamed.failed && !buffered.failed &&
+                       streamed.arguments.size() >= buffered.arguments.size() &&
+                       streamed.arguments.size() <=
+                           buffered.arguments.size() + 1 &&
+                       streamed.content == buffered.content &&
+                       Trimmed(streamed.reasoning) == "Check.",
+                   "interrupted tags retain preceding calls and reasoning");
+            for (std::size_t i = 0; i < buffered.arguments.size(); ++i)
+              Expect(streamed.arguments[i] == buffered.arguments[i],
+                     "calls completed before interruption remain unchanged");
+            if (streamed.arguments.size() > buffered.arguments.size()) {
+              bool invalid = false;
+              try {
+                (void)gufo::json::parse(streamed.arguments.back());
+              } catch (const std::exception&) {
+                invalid = true;
+              }
+              Expect(invalid, "an interrupted prefix is not executable JSON");
+            }
+          }
+    }
+  }
+}
+
+void TestStreamingQuotedAndMalformedTools() {
+  using Format = gufo::sampling::JsonConstraint::ToolFormat;
+  for (const auto format : {Format::kQwen, Format::kDeepSeek}) {
+    const bool qwen = format == Format::kQwen;
+    const std::string opening =
+        qwen ? "<tool_call>\n<function=record>\n"
+             : "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"record\">\n";
+    const auto parameter = [&](const std::string& value) {
+      return qwen ? "<parameter=text>\n" + value + "\n</parameter>\n"
+                  : "<｜DSML｜parameter name=\"text\" string=\"true\">" +
+                        value + "</｜DSML｜parameter>\n";
+    };
+    const std::string closing =
+        qwen ? "</function>\n</tool_call>"
+             : "</｜DSML｜invoke>\n</｜DSML｜tool_calls>";
+    const auto call = opening + parameter("value") + closing;
+    for (const int api : {0, 1, 2}) {
+      {
+        const std::string data =
+            R"({"literal":"</parameter></｜DSML｜parameter>","phase":"<think></think>","nested":"<tool_call><function=noop>"})";
+        const auto raw =
+            opening +
+            (qwen ? "<parameter=data>\n" + data + "\n</parameter>\n"
+                  : "<｜DSML｜parameter name=\"data\" string=\"false\">" +
+                        data + "</｜DSML｜parameter>\n") +
+            closing;
+        std::vector<std::string> pieces;
+        for (const char byte : raw)
+          pieces.emplace_back(1, byte);
+        const auto output = ToolBoundaryRequest(pieces, format, api, true);
+        auto expected = gufo::json::Value::object();
+        expected["data"] = gufo::json::parse(data);
+        Expect(
+            !output.failed &&
+                output.arguments == std::vector<std::string>{expected.dump()} &&
+                output.content.empty() && output.reasoning.empty(),
+            "JSON string delimiters inside typed parameters remain argument "
+            "data");
+      }
+      {
+        const auto raw = opening + parameter("unmatched ` in data") + closing +
+                         "\n" + opening + parameter("later ` in data") +
+                         closing;
+        std::vector<std::string> pieces;
+        for (const char byte : raw)
+          pieces.emplace_back(1, byte);
+        for (const bool stream : {false, true}) {
+          const auto output = ToolBoundaryRequest(pieces, format, api, stream);
+          Expect(
+              !output.failed && Trimmed(output.content).empty() &&
+                  output.reasoning.empty() &&
+                  output.arguments ==
+                      std::vector<std::string>{
+                          R"({"text":"unmatched ` in data"})",
+                          R"({"text":"later ` in data"})"},
+              "backticks inside arguments cannot quote a subsequent tool call");
+        }
+      }
+      for (const auto& quote : {std::string("`"), std::string("```\n")}) {
+        const auto example = "Example: " + quote + call + quote + "\n";
+        for (const bool reasoning : {false, true}) {
+          const auto raw = example + (reasoning ? "</think>\n" : "") + call;
+          std::vector<std::string> pieces;
+          for (const char byte : raw)
+            pieces.emplace_back(1, byte);
+          const auto initial = reasoning
+                                   ? FakeBackend::InitialOutputState::kReasoning
+                                   : FakeBackend::InitialOutputState::kContent;
+          const auto buffered =
+              ToolBoundaryRequest({raw}, format, api, false, initial);
+          const auto streamed =
+              ToolBoundaryRequest(pieces, format, api, true, initial);
+          Expect(!streamed.failed && !buffered.failed &&
+                     streamed.names == std::vector<std::string>{"record"} &&
+                     streamed.arguments ==
+                         std::vector<std::string>{R"({"text":"value"})"} &&
+                     streamed.content == buffered.content &&
+                     Trimmed(streamed.reasoning) == Trimmed(buffered.reasoning),
+                 "closing quotes never turn a streamed example into a phantom "
+                 "call");
+        }
+      }
+      // An EMPTY value shares the frame's newline with the closing delimiter
+      // ("<parameter=text>\n</parameter>\n"). A partial parse must hold back
+      // the delimiter there too: streaming "</", "</parameter>" as argument
+      // data (production, 10-21 Stage 1b, args {"command":"</parameter>) ends
+      // the stream with "streamed tool call did not complete safely".
+      if (qwen) {
+        const auto empty_call =
+            opening + "<parameter=text>\n</parameter>\n" + closing;
+        std::vector<std::string> bytes;
+        for (const char byte : empty_call)
+          bytes.emplace_back(1, byte);
+        const auto cut =
+            opening.size() +
+            std::string("<parameter=text>\n</parameter>").size();
+        const std::vector<std::string> split = {empty_call.substr(0, cut),
+                                                empty_call.substr(cut)};
+        for (const auto& pieces : {bytes, split}) {
+          const auto streamed = ToolBoundaryRequest(pieces, format, api, true);
+          Expect(!streamed.failed &&
+                     streamed.arguments ==
+                         std::vector<std::string>{R"({"text":""})"} &&
+                     streamed.content.empty(),
+                 "an empty parameter value never streams its closing tag as "
+                 "argument data");
+        }
+      }
+      // Keep existing duplicate-parameter semantics. Once conflicting bytes
+      // have been streamed, report failure instead of completing an unsafe
+      // call.
+      for (const bool conflicting : {false, true}) {
+        const auto raw = opening + parameter("value") +
+                         parameter(conflicting ? "changed" : "value") + closing;
+        std::vector<std::string> pieces;
+        for (const char byte : raw)
+          pieces.emplace_back(1, byte);
+        const auto streamed = ToolBoundaryRequest(pieces, format, api, true);
+        if (!conflicting) {
+          Expect(!streamed.failed &&
+                     streamed.arguments ==
+                         std::vector<std::string>{R"({"text":"value"})"},
+                 "identical duplicate parameters do not duplicate argument "
+                 "deltas");
+        } else {
+          Expect(streamed.failed && streamed.finish.empty() &&
+                     !streamed.arguments.empty(),
+                 "conflicting parameters fail without a successful terminal "
+                 "event");
+          bool invalid = false;
+          try {
+            (void)gufo::json::parse(streamed.arguments.back());
+          } catch (const std::exception&) {
+            invalid = true;
+          }
+          Expect(
+              invalid,
+              "conflicting tool data is never completed into executable JSON");
+        }
+      }
+    }
+  }
+}
+
+// A tool-argument loop stop (fix (b)) ends the request while a call is open.
+// Arguments stream before the stop is known. When part of the cut call's
+// arguments is already on the wire, the client cannot take it back, so every
+// streamed route ends exactly like an ordinary EOS inside a started call: an
+// error with a fixed message and no stop, completed, end_turn or tool_use
+// terminal event. Without such a delta, and without streaming, the request
+// ends with the normal stop and the cut call is dropped.
+void TestToolArgumentLoopStopClosesStreamedCall() {
+  using Format = gufo::sampling::JsonConstraint::ToolFormat;
+  using Cause = FakeBackend::TerminationCause;
+  using Finish = FakeBackend::FinishReason;
+  const std::string open = "<tool_call>\n<function=record>\n<parameter=text>\n";
+  const std::string complete =
+      open + "first\n</parameter>\n</function>\n</tool_call>\n";
+  const std::string period = "</function>\n</tool_call>\n" + open;
+  for (const bool preceding : {false, true}) {
+    std::string raw = preceding ? complete : std::string();
+    raw += open;
+    for (int repeat = 0; repeat < 16; ++repeat)
+      raw += period;
+    std::vector<std::string> pieces;
+    for (const char byte : raw)
+      pieces.emplace_back(1, byte);
+    const std::size_t complete_calls = preceding ? 1 : 0;
+    for (const int api : {0, 1, 2}) {
+      // (a) Streamed, with deltas of the cut call already sent: the error
+      // ending, the fixed message, and no terminal event of a normal stop.
+      const auto stopped = ToolBoundaryRequest(
+          pieces, Format::kQwen, api, true,
+          FakeBackend::InitialOutputState::kContent, Finish::kStop,
+          Cause::kToolArgumentLoop);
+      Expect(stopped.failed && stopped.finish.empty(),
+             "a loop stop inside streamed arguments ends with an error and no stop");
+      Expect(stopped.error_message ==
+                 "generation stopped: the tool call repeated its arguments (loop breaker)",
+             "the loop stop error carries the fixed message");
+      Expect(stopped.incomplete_items == 0,
+             "no item is closed as incomplete by the error ending");
+      Expect(stopped.names.size() >= complete_calls &&
+                 stopped.arguments.size() == stopped.names.size() &&
+                 stopped.names.size() <= complete_calls + 1,
+             "only the complete call and the cut call were streamed");
+      if (preceding)
+        Expect(stopped.arguments.front() == R"({"text":"first"})",
+               "the call before the loop stays complete as streamed");
+      if (stopped.arguments.size() > complete_calls) {
+        Expect(stopped.arguments.back().starts_with(R"({"text":")"),
+               "the cut call streamed its argument prefix");
+        bool executable = true;
+        try {
+          (void)gufo::json::parse(stopped.arguments.back());
+        } catch (const std::exception&) {
+          executable = false;
+        }
+        Expect(!executable, "the call cut by the loop stop is not executable JSON");
+      }
+
+      // (c) Without streaming the cut call is dropped and the turn stops.
+      const std::string expected = api == 0   ? "stop"
+                                   : api == 1 ? "completed"
+                                   : preceding ? "tool_use"
+                                               : "end_turn";
+      const auto buffered = ToolBoundaryRequest(
+          {raw}, Format::kQwen, api, false,
+          FakeBackend::InitialOutputState::kContent, Finish::kStop,
+          Cause::kToolArgumentLoop);
+      Expect(!buffered.failed && buffered.finish == expected,
+             "a buffered loop stop ends with a normal stop on every route");
+      Expect(buffered.names ==
+                     std::vector<std::string>(complete_calls, "record") &&
+                 buffered.arguments.size() == complete_calls,
+             "the buffered loop stop drops the cut call and keeps complete calls");
+      Expect(Trimmed(buffered.content).empty() && buffered.reasoning.empty(),
+             "tool markup of the cut call does not leak into buffered content");
+
+      // (b) Streamed, with no partial call on the wire: the normal endings.
+      // Complete calls only, then text only.
+      const std::string only_complete = preceding ? complete : "Hello.";
+      std::vector<std::string> clean;
+      for (const char byte : only_complete)
+        clean.emplace_back(1, byte);
+      const auto clean_stop = ToolBoundaryRequest(
+          clean, Format::kQwen, api, true,
+          FakeBackend::InitialOutputState::kContent, Finish::kStop,
+          Cause::kToolArgumentLoop);
+      Expect(!clean_stop.failed,
+             "a loop stop without a partial call on the wire is not an error");
+      Expect(clean_stop.finish == expected,
+             "a loop stop without a partial call ends with the normal stop");
+      Expect(clean_stop.incomplete_items == 0,
+             "no item is incomplete when no partial call was sent");
+      if (preceding)
+        Expect(clean_stop.names == std::vector<std::string>{"record"} &&
+                   clean_stop.arguments.front() == R"({"text":"first"})",
+               "the complete call is delivered before the normal stop");
+      else
+        Expect(Trimmed(clean_stop.content) == "Hello." &&
+                   clean_stop.names.empty(),
+               "plain text is delivered before the normal stop");
+
+      const auto ordinary = ToolBoundaryRequest(
+          pieces, Format::kQwen, api, true,
+          FakeBackend::InitialOutputState::kContent, Finish::kStop,
+          Cause::kNone);
+      Expect(ordinary.failed && ordinary.finish.empty(),
+             "ordinary EOS inside a streamed call is not reported as a stop");
+    }
+  }
+}
+
+void TestIncrementalToolArguments() {
+  using gufo::json::Value;
+  using Format = gufo::sampling::JsonConstraint::ToolFormat;
+  const std::string value =
+      "first line\nliteral </parameter> is data\n"
+      "<tool_call> and <|im_end|> stay literal; \"quoted\" \\ café";
+  for (const auto format : {Format::kQwen, Format::kDeepSeek})
+    for (const int api : {0, 1, 2})
+      for (const bool reasoning : {false, true}) {
+        FakeBackend backend;
+        backend.tool_format = format;
+        backend.block_after_first_piece = true;
+        const bool qwen = format == Format::kQwen;
+        const std::string opening =
+            qwen ? "<tool_call>\n<function=record>\n<parameter=text>\n"
+                 : "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"record\">\n"
+                   "<｜DSML｜parameter name=\"text\" string=\"true\">";
+        const std::string closing =
+            qwen ? "\n</parameter>\n</function>\n</tool_call>"
+                 : "</｜DSML｜parameter>\n</｜DSML｜invoke>\n"
+                   "</｜DSML｜tool_calls>";
+        backend.pieces = {(reasoning ? "Check briefly.</think>\n" : "") +
+                          opening + value.substr(0, 10)};
+        // Exercise every byte boundary, including UTF-8 and escaped JSON.
+        for (const char byte : value.substr(10) + closing)
+          backend.pieces.emplace_back(1, byte);
+        auto body = gufo::json::parse(R"({
+          "model":"test-model","stream":true,
+          "messages":[{"role":"user","content":"record the literal text"}],
+          "tools":[{"type":"function","function":{"name":"record",
+            "parameters":{"type":"object","properties":{"text":{"type":"string"}},
+              "required":["text"],"additionalProperties":false}}}],
+          "tool_choice":"required"})");
+        if (reasoning)
+          body["reasoning_effort"] = "low";
+        gufo::server::HttpResponse response;
+        if (api == 0) {
+          response =
+              gufo::server::HandleOpenAiChat(Request(body.dump()), backend);
+        } else {
+          gufo::server::ChatRequest chat;
+          Expect(!gufo::server::ParseOpenAiResponseControls(body, &chat),
+                 "stream fixture controls parse");
+          chat.reasoning.enabled = reasoning;
+          response = api == 1
+                         ? gufo::server::CreateOpenAiResponse(
+                               Request("{}"), backend, chat, 512, {}, true)
+                         : gufo::server::CreateAnthropicMessage(
+                               Request("{}"), backend, chat, 512, {}, true);
+        }
+        std::mutex mutex;
+        std::condition_variable condition;
+        std::string arguments, name, id, content;
+        std::size_t fragments = 0, headers = 0;
+        bool failed = false;
+        std::jthread writer([&] {
+          response.streaming_body([&](std::string_view chunk) {
+            if (chunk == "data: [DONE]\n\n")
+              return true;
+            const auto event =
+                gufo::json::parse(chunk.substr(chunk.find("data: ") + 6));
+            const std::lock_guard lock(mutex);
+            failed |= event.contains("error") ||
+                      event.member_str("type") == "response.failed";
+            const auto append = [&](std::string piece) {
+              if (!piece.empty()) {
+                arguments += piece;
+                ++fragments;
+              }
+            };
+            const auto header = [&](const Value& item) {
+              name = item.member_str("name");
+              id = item.member_str("call_id", item.member_str("id"));
+              ++headers;
+            };
+            if (api == 0) {
+              if (const auto* choices = event.find("choices"))
+                for (const auto& choice : choices->items()) {
+                  const auto* delta = choice.find("delta");
+                  content += delta->member_str("content");
+                  if (const auto* calls = delta->find("tool_calls"))
+                    for (const auto& call : calls->items()) {
+                      Expect(call.member_size("index") == 0,
+                             "argument deltas keep their tool index");
+                      if (!call.member_str("id").empty()) {
+                        id = call.member_str("id");
+                        name = call.find("function")->member_str("name");
+                        ++headers;
+                      }
+                      append(call.find("function")->member_str("arguments"));
+                    }
+                }
+            } else if (api == 1) {
+              if (event.member_str("type") == "response.output_item.added" &&
+                  event.find("item")->member_str("type") == "function_call")
+                header(*event.find("item"));
+              if (event.member_str("type") ==
+                  "response.function_call_arguments.delta")
+                append(event.member_str("delta"));
+              if (event.member_str("type") == "response.output_text.delta")
+                content += event.member_str("delta");
+            } else {
+              if (event.member_str("type") == "content_block_start" &&
+                  event.find("content_block")->member_str("type") == "tool_use")
+                header(*event.find("content_block"));
+              if (const auto* delta = event.find("delta")) {
+                if (delta->member_str("type") == "input_json_delta")
+                  append(delta->member_str("partial_json"));
+                if (delta->member_str("type") == "text_delta")
+                  content += delta->member_str("text");
+              }
+            }
+            condition.notify_all();
+            return true;
+          });
+        });
+        Expect(backend.WaitForFirstPiece(), "model reaches the partial call");
+        bool live = false;
+        {
+          std::unique_lock lock(mutex);
+          live = condition.wait_for(lock, 2s, [&] {
+            return arguments.find("first line") != std::string::npos;
+          });
+          Expect(!backend.completed, "generation is still blocked");
+        }
+        backend.Release();
+        writer.join();
+        Expect(live, "tool argument bytes arrive before generation completes");
+        Expect(!failed, "fragmented tool stream completes without an error");
+        Expect(headers == 1 && !id.empty() && name == "record",
+               "one stable tool header is emitted");
+        Expect(fragments > 2, "arguments arrive incrementally");
+        Expect(gufo::json::parse(arguments).member_str("text") == value,
+               "fragment assembly preserves literal argument bytes");
+        Expect(content.empty(), "tool markup does not leak into content");
+        // Disconnect while the same backend is still producing arguments.
+        // The compatibility serializers must propagate a failed writer too.
+        backend.completed = false;
+        backend.block_after_first_piece = false;
+        gufo::server::ChatRequest cancelled_chat;
+        Expect(
+            !gufo::server::ParseOpenAiResponseControls(body, &cancelled_chat),
+            "cancelled tool controls parse");
+        cancelled_chat.reasoning.enabled = reasoning;
+        auto cancelled_response =
+            api == 0
+                ? gufo::server::HandleOpenAiChat(Request(body.dump()), backend)
+            : api == 1
+                ? gufo::server::CreateOpenAiResponse(
+                      Request("{}"), backend, cancelled_chat, 512, {}, true)
+                : gufo::server::CreateAnthropicMessage(
+                      Request("{}"), backend, cancelled_chat, 512, {}, true);
+        bool disconnected = false;
+        cancelled_response.streaming_body([&](std::string_view chunk) {
+          if (chunk == "data: [DONE]\n\n")
+            return true;
+          const auto event =
+              gufo::json::parse(chunk.substr(chunk.find("data: ") + 6));
+          if (const auto* choices = event.find("choices"))
+            for (const auto& choice : choices->items())
+              disconnected |= choice.find("delta")->contains("tool_calls");
+          disconnected |= event.member_str("type") ==
+                          "response.function_call_arguments.delta";
+          if (const auto* delta = event.find("delta");
+              delta && delta->is_object())
+            disconnected |= delta->member_str("type") == "input_json_delta";
+          return !disconnected;
+        });
+        Expect(disconnected && !backend.completed,
+               "disconnecting a partial tool cancels backend generation");
+      }
+}
+
 int main(int argc, char** argv) {
+  if (argc == 2 && std::string_view(argv[1]) == "--tool-loop-stop") {
+    TestToolArgumentLoopStopOutput();
+    TestToolArgumentLoopStopClosesStreamedCall();
+    std::cout << "Tool-loop API tests passed\n";
+    return 0;
+  }
   if (argc == 2 && std::string_view(argv[1]) == "--debug-hooks") {
+    DebugHooksRawOutputTest();
     DebugHooksSettingsTest();
     DebugHooksSettingsEnvironmentTest();
     return 0;
   }
 
+  DebugHooksRawOutputTest();
   DebugHooksSettingsTest();
   DebugHooksSettingsEnvironmentTest();
+  TestStderrGateIsLineIndependent();
   TestToolCallRenderParseRoundTrip();
+  TestToolTagBoundaries();
+  TestTokenLevelReasoningEnd();
+  TestStreamingQuotedAndMalformedTools();
+  TestIncrementalToolArguments();
   TestHistoricalTypedArgumentsUseTojson();
   TestHistoricalNumberArgumentsKeepSourceText();
   TestBehaviourRequestOptions();
@@ -6007,10 +7768,12 @@ int main(int argc, char** argv) {
   TestNativeUnionToolTypes();
   TestNativeArgumentTypingMatrix();
   TestToolMetadataAndFraming();
+  TestGemmaNativeToolCalls();
   TestResponsesLiveAndCancellation();
   TestCachePromptOption();
   TestToolChoiceEnforcement();
   TestPrefillDiagnosticUsage();
+  TestReasoningTokensInUsage();
   TestStreamingIsLive();
   TestLessThanProseStreamsBeforeCompletion();
   TestStreamingWithoutUsage();
@@ -6032,6 +7795,8 @@ int main(int argc, char** argv) {
   TestConflictingReasoningControlsAreRejected();
   TestToolCallsAreStructured();
   TestToolParameterCompatibility();
+  TestToolArgumentLoopStopOutput();
+  TestToolArgumentLoopStopClosesStreamedCall();
   TestInvalidToolsFailBeforeGeneration();
   TestResponsesClientCompatTolerances();
   TestMidConversationSystemMessagesKeepOrder();
@@ -6048,6 +7813,7 @@ int main(int argc, char** argv) {
   TestClientIdentityReachesBackend();
   TestStreamingOverloadIsRejectedBeforeHeaders();
   TestImagePartsRetainOrderAndIdentity();
+  TestTextOnlyBackendRefusesImagesBeforeReading();
   TestImageCountAndByteBudget();
   TestToolImagesRetainOrderAndIdentity();
   std::cout << "All OpenAI chat protocol tests passed\n";

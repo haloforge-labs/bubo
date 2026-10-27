@@ -1,0 +1,149 @@
+{
+  "plan": {
+    "id": "huihui-qwen38-flash-next-lowmemory-v1",
+    "kind": "download",
+    "plan_digest": "518750622c08627254cf6150408f58780006735d5abffdd79bdb4d9ef2ee29b3",
+    "ready": false,
+    "files": [
+      {
+        "file_id": "main_1",
+        "url": "https://huggingface.co/HaloForgeLabs/bubo-qwen3.8-flash-next-lower-memory/resolve/2f4f068840c7d85c7b0d8ac044db9e410687d636/Qwen3.8-Flash-Next-Huihui-LowMemory-00001-of-00004.gguf",
+        "size": 10947264,
+        "sha256": "d9a9945bf6c622a5725156f4d3f23ba56006e597012edbfee851ffcbaa874d30",
+        "repository": "HaloForgeLabs/bubo-qwen3.8-flash-next-lower-memory",
+        "revision": "2f4f068840c7d85c7b0d8ac044db9e410687d636",
+        "path": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\lower-memory-plan\\models\\huihui-qwen38-flash-next-lowmemory-v1\\Qwen3.8-Flash-Next-Huihui-LowMemory-00001-of-00004.gguf",
+        "license_id": "qwen-community-1.0",
+        "state": "download",
+        "replaces": ""
+      },
+      {
+        "file_id": "main_2",
+        "url": "https://huggingface.co/HaloForgeLabs/bubo-qwen3.8-flash-next-lower-memory/resolve/2f4f068840c7d85c7b0d8ac044db9e410687d636/Qwen3.8-Flash-Next-Huihui-LowMemory-00002-of-00004.gguf",
+        "size": 42270514496,
+        "sha256": "a27c6eaff43a7f46970efa4382c01ae758747fcf4469576cbeb12d0ead5a6e7b",
+        "repository": "HaloForgeLabs/bubo-qwen3.8-flash-next-lower-memory",
+        "revision": "2f4f068840c7d85c7b0d8ac044db9e410687d636",
+        "path": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\lower-memory-plan\\models\\huihui-qwen38-flash-next-lowmemory-v1\\Qwen3.8-Flash-Next-Huihui-LowMemory-00002-of-00004.gguf",
+        "license_id": "qwen-community-1.0",
+        "state": "download",
+        "replaces": ""
+      },
+      {
+        "file_id": "main_3",
+        "url": "https://huggingface.co/HaloForgeLabs/bubo-qwen3.8-flash-next-lower-memory/resolve/2f4f068840c7d85c7b0d8ac044db9e410687d636/Qwen3.8-Flash-Next-Huihui-LowMemory-00003-of-00004.gguf",
+        "size": 33568858464,
+        "sha256": "5587334e6b35795fc7259a889b958b401d53a613a649d1dec4e023a8028b92fb",
+        "repository": "HaloForgeLabs/bubo-qwen3.8-flash-next-lower-memory",
+        "revision": "2f4f068840c7d85c7b0d8ac044db9e410687d636",
+        "path": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\lower-memory-plan\\models\\huihui-qwen38-flash-next-lowmemory-v1\\Qwen3.8-Flash-Next-Huihui-LowMemory-00003-of-00004.gguf",
+        "license_id": "qwen-community-1.0",
+        "state": "download",
+        "replaces": ""
+      },
+      {
+        "file_id": "main_4",
+        "url": "https://huggingface.co/HaloForgeLabs/bubo-qwen3.8-flash-next-lower-memory/resolve/2f4f068840c7d85c7b0d8ac044db9e410687d636/Qwen3.8-Flash-Next-Huihui-LowMemory-00004-of-00004.gguf",
+        "size": 8758754880,
+        "sha256": "42c2450068305ef710375b043a42dc3a7ce42de490f11a8cf154c00eaf6ca67b",
+        "repository": "HaloForgeLabs/bubo-qwen3.8-flash-next-lower-memory",
+        "revision": "2f4f068840c7d85c7b0d8ac044db9e410687d636",
+        "path": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\lower-memory-plan\\models\\huihui-qwen38-flash-next-lowmemory-v1\\Qwen3.8-Flash-Next-Huihui-LowMemory-00004-of-00004.gguf",
+        "license_id": "qwen-community-1.0",
+        "state": "download",
+        "replaces": ""
+      },
+      {
+        "file_id": "mtp",
+        "url": "https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/resolve/766911a6b7369840a91dbcd95f9f997acaab6cd6/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+        "size": 2786568256,
+        "sha256": "5ff54097406a905cf3a724c709124ceb0e3e10235ee862298969e91c96fa96e6",
+        "repository": "unsloth/Qwen3.8-Flash-Next-GGUF",
+        "revision": "766911a6b7369840a91dbcd95f9f997acaab6cd6",
+        "path": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\lower-memory-plan\\models\\huihui-qwen38-flash-next-lowmemory-v1\\mtp/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+        "license_id": "qwen-community-1.0",
+        "state": "download",
+        "replaces": ""
+      },
+      {
+        "file_id": "mmproj",
+        "url": "https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/resolve/766911a6b7369840a91dbcd95f9f997acaab6cd6/mmproj-BF16.gguf",
+        "size": 907542944,
+        "sha256": "2e788f8c511d8093c7b43cb87b2fd7e14228340318057f8fb20c86df2efe2355",
+        "repository": "unsloth/Qwen3.8-Flash-Next-GGUF",
+        "revision": "766911a6b7369840a91dbcd95f9f997acaab6cd6",
+        "path": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\lower-memory-plan\\models\\huihui-qwen38-flash-next-lowmemory-v1\\mmproj/mmproj-Qwen3.8-Flash-Next-BF16.gguf",
+        "license_id": "qwen-community-1.0",
+        "state": "download",
+        "replaces": ""
+      },
+      {
+        "file_id": "twin",
+        "url": "https://huggingface.co/HaloForgeLabs/bubo-qwen3.8-flash-next/resolve/bb72204d4f9bdd1568c225cce3bf878673009780/twin/iq4-nofullattn-nohc.gguf",
+        "size": 1230788768,
+        "sha256": "18e0831234551a4d14a0407c24598fb02fdb1fe83a20a4fcff23f410399c66c2",
+        "repository": "HaloForgeLabs/bubo-qwen3.8-flash-next",
+        "revision": "bb72204d4f9bdd1568c225cce3bf878673009780",
+        "path": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\lower-memory-plan\\models\\huihui-qwen38-flash-next-lowmemory-v1\\twin/iq4-nofullattn-nohc.gguf",
+        "license_id": "qwen-community-1.0",
+        "state": "download",
+        "replaces": ""
+      },
+      {
+        "file_id": "draft_head",
+        "url": "https://huggingface.co/HaloForgeLabs/bubo-qwen3.8-flash-next/resolve/bb72204d4f9bdd1568c225cce3bf878673009780/draft_head/draft-out-q4k.gguf",
+        "size": 357581248,
+        "sha256": "6867948dc9f5c467818daa4281c4878dc64b53cd1bba9d16970fd77cd1656777",
+        "repository": "HaloForgeLabs/bubo-qwen3.8-flash-next",
+        "revision": "bb72204d4f9bdd1568c225cce3bf878673009780",
+        "path": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\lower-memory-plan\\models\\huihui-qwen38-flash-next-lowmemory-v1\\draft_head/draft-out-q4k.gguf",
+        "license_id": "qwen-community-1.0",
+        "state": "download",
+        "replaces": ""
+      }
+    ],
+    "licences": [
+      {
+        "path": "LICENSE",
+        "text": "Qwen Community License 1.0\r\n\r\nCopyright (c) 2026 Qwen\r\n\r\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software, including the model weights, parameters, configuration files, inference code and associated documentation files (collectively, the \"Software\"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, sell, deploy, host, fine-tune, and create derivative works from (collectively, \"Use\" or \"Using\") copies of the Software; and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\r\n\r\n1. The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software. If the Software (or any derivative works thereof) is Used for any of the licensee's commercial products or services that have more than 100,000,000 monthly active users or US$ 20,000,000 (or equivalent in other currencies) monthly revenue, respective model name must be prominently displayed on the user interface of such product or service; and,\r\n\r\n2. If the licensee or any of its affiliates conducts a Model as a Service or AI Work Assistant business, the licensee shall obtain a separate license from Qwen before Using the Software or its derivative works for any commercial purpose. The foregoing requirement shall not apply to the licensee's internal Use of the Software, provided that such Use does not make the Software, its outputs, or its underlying model capabilities available to any third party.\r\n\r\n\"Model as a Service\" means giving a third party access to language model inference or fine-tuning (e.g., via API or a hosted endpoint) in a manner that allows such third parties to exercise meaningful control over the inputs, parameters, or training data. This does not include the mere relaying of requests to models hosted by other third parties. \r\n“AI Work Assistant” means an independent AI-powered product primarily designed for AI-assisted coding or office productivity (e.g., Qoder and QwenWork). It does not include: (a) a single-purpose AI tool (such as an AI translation tool); (b) an AI assistant primarily designed for a domain other than coding or office productivity (such as Taobao AI Shopping Assistant or AMap AI Chat); or (c) an AI assistant that is a feature of a product whose primary purpose is not AI-assisted coding or office productivity.\r\n\r\nTHE SOFTWARE AND ANY OUTPUT AND RESULTS THEREFROM ARE PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL QWEN, ITS AFFILIATES OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE. THE USE OF THE SOFTWARE MUST COMPLY WITH APPLICABLE LAWS AND REGULATIONS, AND MUST NOT INFRINGE THE INTELLECTUAL PROPERTY RIGHTS OF ANY THIRD PARTY.\r\n\r\nFor any questions regarding this license, please contact model-business@notice.qwencloud.com.",
+        "sha256": "a0dc422560841fd68e06d974907f8b4c709bca44a67daad2b528437bdf676c08"
+      },
+      {
+        "path": "NOTICE",
+        "text": "Copyright (c) 2026 Qwen. These files are derived from Qwen/Qwen3.8-Flash-Next.\n\nDense tensors: taken from huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF (revision 73e9eb7c69fdbf667def63e233e70845e7d5ac0b), which is derived from Qwen/Qwen3.8-Flash-Next, using the importance matrix of unsloth/Qwen3.8-Flash-Next-GGUF.\n\nRouted expert tensors: taken from ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF (revision ed59f92082b1e93c0e96d60a8b11aab089b52f09) by the Deep Algorithms and Systems Lab, Institute of Science and Technology Austria. They are made with GSQ and RCO:\n  GSQ: arXiv:2604.18556\n  RCO: arXiv:2605.00649\nThat repository says that its quantized weights inherit the licence of the base model.\n\nModifications by HaloForge Labs: the dense tensors and the expert tensors are composed into one set of GGUF files. The tensors are copied unchanged. The file metadata (name, quantizer, repository address, file type) is replaced, and keys that name the two sources are added. compose-manifest.json lists the source and the checksum of every tensor.\n\nThe Qwen Community License 1.0 applies to these files. See LICENSE.\nThese files are not licensed under the MIT licence.\n",
+        "sha256": "76ca2a43af1ec76d88a0369d5385309b8bc03cf276c11df9fd42915a5acc897b"
+      },
+      {
+        "path": "PROVENANCE.md",
+        "text": "# Provenance of the lower-memory model files\n\nThis local composition replaces only the four main GGUF shards. The pinned\ncomposition manifest records 1,080 tensors from the Huihui source and 144\nexpert tensors from the ISTA source. The composition manifest itself lists\nno MTP, mmproj, twin, or draft-head files.\n\nThe catalogue retains the Huihui set's MTP, mmproj, twin and draft-head pins\nunchanged. In particular, the twin is the Huihui twin, not the original set's\ntwin-base. This is the declared package recipe; the composition manifest does\nnot independently attest these auxiliary files.\n\nThe four main sizes and whole-file SHA-256 values were measured from the local\ncomposed files. Their canonical pins and the manifest digest are in\n`src/core/prepare/lowmemory_data.hpp`. `prepare_fingerprints` generates their GGUF\nfingerprint tables and local-composition evidence. Auxiliary provenance is the\nsame immutable HF evidence used by the Huihui set.\n\nThe four shards are uploaded to the private repository\n`HaloForgeLabs/bubo-qwen3.8-flash-next-lower-memory`, final revision\n`2f4f068840c7d85c7b0d8ac044db9e410687d636`, which includes README.md, NOTICE and\nLICENSE. The shards and composition manifest are unchanged. The repository\nis access controlled. Bubo accepts matching local files\nand refuses downloads while the separate publication flag is false.\n\nUploaded names use `Qwen3.8-Flash-Next-Huihui-LowMemory-0000N-of-00004.gguf`.\nThe local sources retain\n`Qwen3.8-Flash-Next-Hybrid-GSQ-RCO-Q4KXL-0000N-of-00004.gguf` (N = 1..4).\nThe data and generated local evidence record this mapping.\n\nLICENSE and NOTICE are byte-for-byte copies of the files in the pinned\nmodel repository revision named above.\nLICENSE is the Qwen Community License 1.0 text. NOTICE names Qwen, Huihui,\nUnsloth, ISTA-DASLab and HaloForge Labs, and describes the composition.\nThis bundle does not authorize publication.\n\nSHA-256 of the copied bytes:\n\n- LICENSE: `a0dc422560841fd68e06d974907f8b4c709bca44a67daad2b528437bdf676c08`\n- NOTICE: `76ca2a43af1ec76d88a0369d5385309b8bc03cf276c11df9fd42915a5acc897b`\n",
+        "sha256": "75b952ff5eb65f356b13c35d8ff415eaa498f8f7ffd9f38dcefd3c0517a4f71d"
+      }
+    ],
+    "paths": {
+      "model": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\lower-memory-plan\\models\\huihui-qwen38-flash-next-lowmemory-v1"
+    },
+    "volumes": [
+      {
+        "name": "\\\\?\\Volume{326d5ea2-f5ef-4687-94b8-470d25581188}\\",
+        "free_bytes": 57620787200,
+        "required_bytes": 92041143676,
+        "bytes_to_write": 89893660028,
+        "safety_margin_bytes": 2147483648,
+        "free_after_download_bytes": 0
+      }
+    ],
+    "required_bytes": 92041143676,
+    "free_bytes": 57620787200,
+    "drive": "\\\\?\\Volume{326d5ea2-f5ef-4687-94b8-470d25581188}\\",
+    "enough_space": false,
+    "licence": {
+      "id": "qwen-community-1.0",
+      "name": "Qwen Community License 1.0",
+      "url": "https://huggingface.co/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/tree/73e9eb7c69fdbf667def63e233e70845e7d5ac0b",
+      "prompt_line": "License: Qwen Community License 1.0. It is not MIT. Prepare shows the full text before it downloads.",
+      "note": null,
+      "verified_upstream": true
+    }
+  },
+  "approval": null
+}

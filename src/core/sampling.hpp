@@ -96,6 +96,7 @@ struct BehaviourStage {
 struct BehaviourDistribution {
   std::vector<BehaviourStage> stages;
   bool defer_stop{false}, close_eog{false}, random{false};
+  std::optional<ThinkMarkerRow> think_marker_row;
 };
 
 /// Builds the exact distribution from prompt and request-generated tokens.
@@ -127,6 +128,10 @@ public:
   [[nodiscard]] SamplerState WithoutConstraint() const;
   [[nodiscard]] SamplerState WithoutBehaviour() const;
   [[nodiscard]] bool BehaviourEnabled() const noexcept;
+  /// Accepted TOOL terminal event; tentative draws alone cannot set it.
+  [[nodiscard]] bool ToolArgumentLoopDetected() const noexcept {
+    return BehaviourEnabled() && behaviour_state_.loop.stopped_tools != 0;
+  }
   [[nodiscard]] std::vector<std::string> BehaviourSummary() const;
   void RecordSpecEogStop(std::size_t skipped);
   void ObserveBehaviour(const SamplingDistribution& distribution,
@@ -142,6 +147,9 @@ public:
   /// A lazy tool grammar can admit the entire vocabulary before a call.
   /// Retain ordinary CPU/GPU sampling while its mask makes no restriction.
   [[nodiscard]] bool NeedsConstraintMask() const;
+  [[nodiscard]] const JsonConstraint::State& constraint_state() const noexcept {
+    return constraint_state_;
+  }
   [[nodiscard]] std::span<const TokenId> history() const noexcept;
   [[nodiscard]] std::span<const TokenPenalty> penalties() const noexcept {
     return penalty_counts_;
@@ -177,6 +185,12 @@ public:
   /// before temperature or truncation. Does not draw or accept a token.
   [[nodiscard]] TokenLogprob RawLogprobs(std::span<const float> logits,
                                        TokenId token, std::size_t top_n) const;
+  /// The RawLogprobs implementation from before L-REL-6 (a SamplerState copy,
+  /// a vocabulary-sized candidate vector, a partial sort). Test oracle only:
+  /// RawLogprobs must return bit-identical values.
+  [[nodiscard]] TokenLogprob RawLogprobsReference(std::span<const float> logits,
+                                                  TokenId token,
+                                                  std::size_t top_n) const;
   /// Compact logits use token_ids for penalties; returned IDs index logits.
   [[nodiscard]] SamplingDistribution Distribution(
       std::span<const float> logits, std::span<const TokenId> token_ids) const;
@@ -206,12 +220,16 @@ public:
   [[nodiscard]] double Uniform();
 
 private:
+  [[nodiscard]] bool ToolArgumentStopping() const;
   [[nodiscard]] SamplerState BehaviourWithoutIntervention(std::string_view name) const;
   [[nodiscard]] SamplingDistribution BehaviourDistributionFor(
       std::span<const float> logits, std::span<const TokenId> ids = {},
-      std::size_t vocab = 0) const;
-  [[nodiscard]] bool BehaviourTopSafe(std::span<const float> values,
-      std::span<const TokenId> ids, std::size_t vocab) const;
+      std::size_t vocab = 0,
+      std::optional<ThinkMarkerRow> think_marker_row = {}) const;
+  void ObserveThinkMarker(const ThinkMarkerRow& row, TokenId actual);
+  [[nodiscard]] bool BehaviourTopSafe(
+      std::span<const float> values, std::span<const TokenId> ids,
+      std::size_t vocab, std::optional<ThinkMarkerRow>& think_marker_row) const;
   mutable BehaviourState behaviour_state_;
   bool observe_behaviour_{true};
   [[nodiscard]] std::vector<float> ConstrainedLogits(

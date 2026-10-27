@@ -2,7 +2,9 @@
 [CmdletBinding(DefaultParameterSetName='Folder')]
 param(
   [Parameter(Mandatory, ParameterSetName='Folder')][string]$PackageFolder,
-  [Parameter(Mandatory, ParameterSetName='Zip')][string]$PackageZip
+  [Parameter(Mandatory, ParameterSetName='Zip')][string]$PackageZip,
+  [switch]$RequireGUI,
+  [string]$Go = 'go'
 )
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\pe-imports.ps1"
@@ -11,6 +13,15 @@ $shippedDeny = @(Get-Content -LiteralPath "$PSScriptRoot\nonredist-shipped.json"
 $runtimeRows = Get-Content -LiteralPath "$PSScriptRoot\runtime-members.tsv" | Select-Object -Skip 1
 $amdFiles = @($runtimeRows | ForEach-Object { ($_ -split "`t")[2] })
 $errors = [Collections.Generic.List[string]]::new()
+$layout = $null
+if ($RequireGUI) {
+  Push-Location (Join-Path $PSScriptRoot '..\..\gui\updater')
+  try {
+    $layoutJSON = & $Go run ./cmd/bubo-release -PackageInfo
+    if ($LASTEXITCODE) { throw 'Cannot read updater package layout' }
+    $layout = $layoutJSON | ConvertFrom-Json
+  } finally { Pop-Location }
+}
 function Test-ShippedPath([string]$Path) {
   $parts = $Path -split '[\\/]'
   foreach ($part in $parts) {
@@ -31,12 +42,25 @@ if ($PackageZip) {
   $archive = [IO.Compression.ZipFile]::OpenRead((Resolve-Path -LiteralPath $PackageZip).Path)
   try {
     foreach ($entry in $archive.Entries) { Test-ShippedPath $entry.FullName }
+    if ($RequireGUI) {
+      $top = ($archive.Entries[0].FullName -split '/')[0]
+      foreach ($required in @($layout.cli, $layout.gui, $layout.helper)) {
+        if (-not @($archive.Entries | Where-Object { $_.FullName -ceq "$top/$required" -and $_.Length -gt 0 }).Count) { $errors.Add("package is missing $required") }
+      }
+    }
     if ($errors.Count) { $errors | ForEach-Object { Write-Output "FAIL: $_" }; exit 1 }
     Write-Output "PASS: release ZIP shipped-file gate ($($archive.Entries.Count) entries)"
   } finally { $archive.Dispose() }
   exit 0
 }
 $packageRoot = (Resolve-Path -LiteralPath $PackageFolder).Path
+if ($RequireGUI) {
+  Push-Location (Join-Path $PSScriptRoot '..\..\gui\updater')
+  try {
+    & $Go run ./cmd/bubo-release -CheckFolder $packageRoot
+    if ($LASTEXITCODE) { throw 'Updater package executable contract failed' }
+  } finally { Pop-Location }
+}
 $files = @(Get-ChildItem -LiteralPath $packageRoot -Recurse -File |
   Where-Object { $_.Extension -in @('.exe', '.dll') })
 if (-not $files.Count) { throw "No release binaries in $PackageFolder" }
@@ -46,7 +70,7 @@ foreach ($file in Get-ChildItem -LiteralPath $PackageFolder -Recurse -File) {
 foreach ($file in $files) {
   if ($file.Name -in @('bubo.exe', 'bubo-engine.dll')) {
     $imageText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($file.FullName))
-    if ($imageText -match 'Run(Model|Runtime|All)ForTesting|RuntimeReadyErrorForTesting|LoadModelPackageForTesting|test_loopback|origin_override|synthetic_disclosure|http,https') {
+    if ($imageText -match 'Run(Model|Runtime|All)ForTesting|RuntimeReadyErrorForTesting|LoadModelPackageForTesting|test_loopback|origin_override|synthetic_disclosure|http,https|FakeServeBackend|BUBO_SERVE_TESTING|fake-backend|fake-hang-stop|fake-load-delay-ms|fake-stop-delay-ms|fake-event-burst|fake-log-burst|bubo-test-only-fake') {
       $errors.Add("$($file.FullName): fixture override symbol in release binary")
     }
   }

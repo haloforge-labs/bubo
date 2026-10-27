@@ -703,6 +703,65 @@ void TestDebugHooksLogprobsPreserveSeededDraws() {
   }
 }
 
+void TestGreedyToolWinnerDoesNotBuildVocabularyMask() {
+  using namespace gufo::sampling;
+  using Format = JsonConstraint::ToolFormat;
+  const auto schema = gufo::json::parse(
+      R"({"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false})");
+  const auto grammar = JsonConstraint::WithTools(
+      nullptr, {{"f", JsonConstraint::ToolParameters(schema, false, Format::kQwen)}},
+      false, true, Format::kQwen);
+  const auto binding = [&] {
+    auto c = std::make_shared<TokenConstraint>();
+    c->grammar = grammar;
+    c->vocabulary = std::make_shared<ConstraintVocabulary>(257, [](std::uint32_t i) {
+      return ConstraintVocabulary::Piece{
+          i < 256 ? std::string(1, static_cast<char>(i)) : "", i == 256};
+    });
+    return c;
+  };
+  auto policy = std::make_shared<BehaviourConfig>();
+  policy->eog_boundary = true;
+  policy->eog_min_prob = .01;
+  policy->eog_ids = {256};
+  const std::string prefix = "<tool_call>\n<function=f>\n<parameter=text>\n";
+  for (bool illegal_raw_winner : {false, true}) {
+    auto c = binding();
+    SamplingConfig config;
+    config.constraint = c;
+    config.behaviour = policy;
+    SamplerState sampler(config);
+    for (unsigned char ch : prefix)
+      sampler.Accept(ch);
+    Expect(c->CachedMaskCount() == 0, "setup has no materialized masks");
+    Expect(!c->vocabulary->Allows(*grammar, sampler.constraint_state(), 256),
+           "unfinished tool call forbids EOG and proves a restrictive grammar");
+    std::vector<float> row(257, -INFINITY);
+    row['a'] = row['b'] = 2;
+    row[256] = illegal_raw_winner ? 9 : -8;
+    // Independent full-mask oracle; this does not populate TokenConstraint's cache.
+    const auto mask = c->vocabulary->Allowed(*grammar, sampler.constraint_state());
+    std::uint32_t expected = 0;
+    float best = -INFINITY;
+    for (std::uint32_t id = 0; id < row.size(); ++id)
+      if (mask[id] && row[id] > best) { best = row[id]; expected = id; }
+    if (!illegal_raw_winner) {
+      Expect(sampler.CanSelectArgmax('a', true), "legal GPU winner remains eligible");
+      Expect(c->CachedMaskCount() == 0, "winner eligibility avoids full mask");
+    }
+    const auto before = sampler.rng_state();
+    const auto distribution = sampler.Distribution(row);
+    Expect(distribution.best_token() == expected, "lazy greedy equals full-mask oracle");
+    Expect(sampler.Sample(row) == expected && sampler.rng_state() == before,
+           "lazy greedy preserves selected token, token-ID ties and RNG");
+    if (!illegal_raw_winner) {
+      Expect(c->CachedMaskCount() == 0, "legal anchor avoids full mask");
+      Expect(distribution.behaviour() && distribution.behaviour()->stages.empty(),
+             "restrictive grammar keeps EOG interventions inactive");
+    }
+  }
+}
+
 void TestDebugHooksBiasAndGrammarLogprobs() {
   using namespace gufo::sampling;
   const std::array<std::string, 5> pieces{"x", "{", " ", "[", "\""};
@@ -901,6 +960,7 @@ int main(int argc, char** argv) {
   TestGreedySelectsFiniteArgmaxWithoutAdvancingRng();
   TestDefaultConfigPreservesGreedyDecoding();
   TestExternalArgmaxRequiresAppliedPenalties();
+  TestGreedyToolWinnerDoesNotBuildVocabularyMask();
   TestTemperatureSamplingIsDeterministicAndNonGreedy();
   TestTopKFiltersTheCandidateSet();
   TestTopPFiltersByCumulativeProbability();

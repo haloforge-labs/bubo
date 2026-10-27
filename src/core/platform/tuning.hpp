@@ -29,8 +29,8 @@ struct Tuning {
   /// Small host<->device and device<->device copies as kernels instead of
   /// hipMemcpyAsync (a copy-engine hand-off per graph node on Windows).
   bool copy_kernels;
-  /// Decode-sized passes wait on a completion flag in coherent pinned memory
-  /// instead of hipStreamSynchronize (~0.4 ms sooner after a large graph).
+
+
   bool flag_waits;
   /// Submit queued launches (hipStreamQuery) before blocking on n-gram rows:
   /// HIP on Windows batches launches until a flush.

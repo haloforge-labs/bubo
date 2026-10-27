@@ -1,0 +1,100 @@
+{
+  "revision": "d7cc0a53b055c7a1c127f53977b2da101f97f481",
+  "directory": "C:\\bubo\\run\\app\\bin\\bubo-b4-d7cc0a53",
+  "binary_sha256": {
+    "bubo-engine.dll": "ad05d1f3ccfad64a73b89add2a5a849419665ec77f0d71f8de78d2b09f89298d",
+    "jpeg62.dll": "4bcebb840485215a7c5ae17cd8bb4ba687dba6fd8ee6e162e7c968124c2abe19",
+    "libwebp.dll": "969f81437eb489e6c463930f8f1e33a2bc03bdd9f3fd0ac83217f6bde2f63c9e",
+    "libsharpyuv.dll": "fee2648b33e3a2763ee6105efaf7053b67f22d103bf403e7e8e87dc7ec38c970",
+    "libpng16.dll": "3bcf80b5e699803a9d1dc30e08670a19970b73ff803f7fcd8f293dd6880d08e8",
+    "z.dll": "9361407a5b618e4818e3bbbb7d2c1c7c407692c64dd817f769b70903aa95903c",
+    "icuuc78.dll": "bb8c3f3c2bcab9b2ff735ed827378422e7c0f1b68cf24928a4199e7b6d4b3f38",
+    "icudt78.dll": "2e793cd9637eb7c6e068da74092eabd8e538d7c42729161e8fd4e1b88ab02c58",
+    "libcrypto-3-x64.dll": "35bdf9d189ed8e7bacfbc6ae9a69ad48aaf79fa101307bcc44887fa2d6cbb753",
+    "libcurl.dll": "1b38cb0c7b6d35ca7814dace364c4b9ff7e2051b780bb951c32c20dfbe3c26bf",
+    "bubo.exe": "370b44cd9c4804cc9c103cdd815ee5801386953c6b09e49d0ff6d05a44043802"
+  },
+  "environment": {
+    "LOCALAPPDATA": "C:\\bubo\\run\\app\\proof\\G5\\record-state\\local",
+    "PATH": "C:\\Windows/System32;C:\\Windows",
+    "BUBO_*/GUFO_*": "removed"
+  },
+  "captures": [
+    {
+      "file": "status.json",
+      "command": [
+        "C:\\bubo\\run\\app\\bin\\bubo-b4-d7cc0a53\\bubo.exe",
+        "status",
+        "--json"
+      ],
+      "started": "2026-10-15T01:53:04-0400",
+      "finished": "2026-10-15T01:53:05-0400",
+      "exit": 0,
+      "records": 1,
+      "sha256": "bf25b2ab1916f6f25a0060ce5a2473a563966709bab76887f6f6796f3f0d95c3"
+    },
+    {
+      "file": "switches.json",
+      "command": [
+        "C:\\bubo\\run\\app\\bin\\bubo-b4-d7cc0a53\\bubo.exe",
+        "serve",
+        "--list-switches",
+        "--json"
+      ],
+      "started": "2026-10-15T01:53:05-0400",
+      "finished": "2026-10-15T01:53:05-0400",
+      "exit": 0,
+      "records": 1,
+      "sha256": "e4626e6394b86195283b343f581ebd4669b5fceef31dc178cfe12b1d096ee414"
+    },
+    {
+      "file": "models.json",
+      "command": [
+        "C:\\bubo\\run\\app\\bin\\bubo-b4-d7cc0a53\\bubo.exe",
+        "models",
+        "list",
+        "--json"
+      ],
+      "started": "2026-10-15T01:53:05-0400",
+      "finished": "2026-10-15T01:53:05-0400",
+      "exit": 0,
+      "records": 1,
+      "sha256": "fefee8861891abe1dbc1d128642a96f22c71e1a49863be74e1cc67e3c88b9c9c"
+    },
+    {
+      "file": "prepare.jsonl",
+      "command": [
+        "C:\\bubo\\run\\app\\bin\\bubo-b4-d7cc0a53\\bubo.exe",
+        "prepare",
+        "model",
+        "--model-set",
+        "huihui",
+        "--plan",
+        "--jsonl",
+        "--output",
+        "C:\\bubo\\run\\app\\proof\\G5\\record-state\\models"
+      ],
+      "started": "2026-10-15T01:53:05-0400",
+      "finished": "2026-10-15T01:53:05-0400",
+      "exit": 0,
+      "records": 17,
+      "sha256": "0f400aeac70c4cc9c8c8a479477ca027b5506ae20c9626cb669e23fecec22cf8"
+    }
+  ],
+  "inherited_fixtures": [
+    {
+      "file": "page-facts-false.json",
+      "source": "C:\\bubo\\evidence\\capture-03\\B4\\captures\\captured-page-facts-False.json",
+      "sha256": "35e14718a1b7103afde79ad6f1befeb6fcaf301391d3c714d0d0bf199a18fe90",
+      "_source": "fixture",
+      "producer": "B4 CPU fake-control test; no real model/server"
+    },
+    {
+      "file": "page-facts-true.json",
+      "source": "C:\\bubo\\evidence\\capture-03\\B4\\captures\\captured-page-facts-True.json",
+      "sha256": "18d3dc181b291b0ab4aa4266d34035ea30343bd8a000ccb77484bc8a6d7f9938",
+      "_source": "fixture",
+      "producer": "B4 CPU fake-control test; no real model/server"
+    }
+  ]
+}

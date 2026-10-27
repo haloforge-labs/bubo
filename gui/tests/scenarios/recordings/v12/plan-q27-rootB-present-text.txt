@@ -1,0 +1,27 @@
+Bubo will prepare these files.
+Qwen3.8-27B-UD-Q4_K_XL.gguf | huggingface.co |
+https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/4ca720788d1e01f1bff70c03
+3e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf | 17559178144 bytes | 16.353 GiB |
+3f227079003a | 3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e
+| Apache-2.0 |
+S:\bubo-walk\E21\rootB\models\qwen38-27b-ud-q4-k-xl\Qwen3.8-27B-UD-Q4_K_XL.gguf
+| reuse
+mmproj-BF16.gguf | huggingface.co |
+https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/4ca720788d1e01f1bff70c03
+3e0d0028fd02e502/mmproj-BF16.gguf | 931146432 bytes | 0.867 GiB | 83ee4f4f205f |
+83ee4f4f205fa514161778c41df1ea14144faa0f713510893b63c2395f5c2d53 | Apache-2.0 |
+S:\bubo-walk\E21\rootB\models\qwen38-27b-ud-q4-k-xl\mmproj-BF16.gguf | reuse
+Total file size: 18490324576 bytes (17.220 GiB).
+Total download size: 0 bytes (0.000 GiB).
+Free space: 549339901952 bytes. Required space: 2149580800 bytes. Volume:
+\\?\Volume{d7c2482c-2642-49e4-bfc7-8989208094fc}\.
+License: Apache-2.0. Qwen3.8-27B by Alibaba Qwen, GGUF by Unsloth.
+Licence: Apache License 2.0 (Apache-2.0)
+Licence link: https://huggingface.co/Qwen/Qwen3.8-27B/blob/main/LICENSE
+Model: Qwen3.8 27B original (Unsloth UD-Q4_K_XL)
+A copy is saved in S:\bubo-walk\E21\rootB\models\qwen38-27b-ud-q4-k-xl\licenses
+after the download.
+Estimated download time: unknown; download speed is not known.
+Bubo checks each download's full SHA-256 while it receives the file.
+Downloads can redirect to allowed hosts under huggingface.co or hf.co.
+Bubo will not build a model on this computer.

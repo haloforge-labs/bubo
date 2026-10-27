@@ -93,7 +93,7 @@ with tempfile.TemporaryDirectory() as directory:
     MODULE.atomic_json(target, descriptor)
     check(json.loads(target.read_text(encoding="utf-8")) == descriptor, "atomic JSON")
 
-completed = MODULE.subprocess.Popen(["true"], start_new_session=True)
+completed = MODULE.subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
 completed.wait()
 MODULE.stop_process_group(completed)
 

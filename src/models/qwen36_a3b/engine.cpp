@@ -17,9 +17,12 @@
 #include <thread>
 
 #include "qfn_mmq.h"
+#include "src/core/quant/ggml_dequant.hpp"
+#include "src/core/session_state_bytes.hpp"
 #include "src/models/qwen/vision/device_input.hpp"
 #include "src/models/qwen36_a3b/attention.hpp"
 #include "src/models/qwen36_a3b/kernels.hpp"
+#include "src/models/qwen36_a3b/weight_format.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
 namespace gufo::models::qwen36_a3b {
@@ -28,7 +31,6 @@ namespace {
 namespace fn = gufo::models::qwen38_flash_next::rocm;
 using core::GgmlType;
 
-constexpr std::string_view kArch = "qwen35moe";
 constexpr std::uint32_t kAttnSplits = 8;
 
 void Fail(std::string* error, std::string message) {
@@ -212,60 +214,8 @@ bool Engine::Bind(std::string* error) {
     Fail(error, "GGUF architecture is not qwen35moe");
     return false;
   }
-  bool ok = true;
-  const auto u32 = [&](std::string_view key) {
-    const auto v =
-        g.GetMetadataUint32(std::string(kArch) + "." + std::string(key));
-    if (!v) {
-      Fail(error, "missing GGUF key " + std::string(key));
-      ok = false;
-    }
-    return v.value_or(0);
-  };
-  const auto f32 = [&](std::string_view key) {
-    const auto v =
-        g.GetMetadataFloat32(std::string(kArch) + "." + std::string(key));
-    if (!v) {
-      Fail(error, "missing GGUF key " + std::string(key));
-      ok = false;
-    }
-    return v.value_or(0.0F);
-  };
-  c_.layers = u32("block_count");
-  c_.hidden = u32("embedding_length");
-  c_.heads = u32("attention.head_count");
-  c_.kv_heads = u32("attention.head_count_kv");
-  c_.head_dim = u32("attention.key_length");
-  c_.rotary_dim = u32("rope.dimension_count");
-  c_.rope_theta = f32("rope.freq_base");
-  c_.eps = f32("attention.layer_norm_rms_epsilon");
-  c_.full_attention_interval = u32("full_attention_interval");
-  c_.ssm_conv_kernel = u32("ssm.conv_kernel");
-  c_.ssm_head_dim = u32("ssm.state_size");
-  c_.ssm_k_heads = u32("ssm.group_count");
-  c_.ssm_v_heads = u32("ssm.time_step_rank");
-  c_.experts = u32("expert_count");
-  c_.experts_used = u32("expert_used_count");
-  c_.expert_ff = u32("expert_feed_forward_length");
-  c_.shared_ff = u32("expert_shared_feed_forward_length");
-  if (!ok)
+  if (!ReadConfig(g, c_, error))
     return false;
-  // MTP files append their nextn block(s) after the trunk.
-  c_.nextn = g.GetMetadataUint32(std::string(kArch) + ".nextn_predict_layers")
-                 .value_or(0);
-  if (c_.nextn >= c_.layers) {
-    Fail(error, "bad nextn_predict_layers");
-    return false;
-  }
-  c_.layers -= c_.nextn;
-  // The FN kernels this runtime borrows fix these geometry points.
-  if (c_.head_dim != 256 || c_.ssm_head_dim != 128 || c_.ssm_conv_kernel != 4 ||
-      c_.heads % c_.kv_heads != 0 || c_.ssm_v_heads % c_.ssm_k_heads != 0 ||
-      c_.experts > 512 || c_.full_attention_interval == 0 ||
-      c_.hidden % 32 != 0) {
-    Fail(error, "unsupported qwen35moe geometry");
-    return false;
-  }
   return true;
 }
 
@@ -288,9 +238,13 @@ bool Engine::Get(const std::string& name, Tensor* out, std::string* error) {
   }
   const auto type = t->type;
   if (type != GgmlType::kF32 && type != GgmlType::kQ8_0 &&
-      type != GgmlType::kBF16) {
+      type != GgmlType::kBF16 && !IsKQuant(type)) {
     Fail(error, "unsupported type " + std::string(core::ToString(type)) +
                     " for " + name + " (this build handles F32/Q8_0/BF16)");
+    return false;
+  }
+  if (IsKQuant(type) && t->dimensions[0] % 256 != 0) {
+    Fail(error, "K-quant columns must be a multiple of 256 for " + name);
     return false;
   }
   out->data = Device(*t);
@@ -552,9 +506,13 @@ bool Engine::Allocate(std::string* error) {
   act_q_ = static_cast<Q8_1Block*>(
       alloc(B * (U + 1) * (ff / 32) * sizeof(Q8_1Block)));
   ids_ = static_cast<std::int32_t*>(alloc(B * U * sizeof(std::int32_t)));
+  zero_ids_ = static_cast<std::int32_t*>(alloc(B * sizeof(std::int32_t)));
   tokens_dev_ = static_cast<std::int32_t*>(alloc(B * sizeof(std::int32_t)));
   pos_dev_ = static_cast<std::uint32_t*>(alloc(sizeof(std::uint32_t)));
   if (!ok)
+    return false;
+  if (!Ok(hipMemsetAsync(zero_ids_, 0, B * sizeof(std::int32_t), stream_),
+          "head expert ids", error))
     return false;
   if (!Ok(hipHostMalloc(reinterpret_cast<void**>(&tokens_host_),
                         B * sizeof(std::int32_t)),
@@ -572,19 +530,19 @@ bool Engine::Allocate(std::string* error) {
   std::size_t state_bytes = 0;
   for (std::uint32_t i = 0; i < c_.layers; ++i) {
     if (layers_[i].linear) {
-      const std::size_t conv = (c_.ssm_conv_kernel - 1) * ch;
-      const std::size_t st = static_cast<std::size_t>(c_.ssm_v_heads) *
-                             c_.ssm_head_dim * c_.ssm_head_dim;
+      const std::size_t conv = core::A3bConvElements(c_.ssm_conv_kernel, ch);
+      const std::size_t st =
+          core::A3bRecurrentElements(c_.ssm_v_heads, c_.ssm_head_dim);
       conv_state_[i] = f32(conv);
       ssm_state_[i] = f32(st);
       state_bytes += (conv + st) * sizeof(float);
     } else {
       const std::size_t kv =
-          static_cast<std::size_t>(options_.max_context) * c_.KvDim();
+          core::A3bKvPlaneElements(options_.max_context, c_.KvDim());
       k_cache_[i] = static_cast<__half*>(alloc(kv * sizeof(__half)));
       v_cache_[i] = static_cast<__half*>(alloc(kv * sizeof(__half)));
       vt_cache_[i] = static_cast<__half*>(alloc(kv * sizeof(__half)));
-      state_bytes += 3 * kv * sizeof(__half);
+      state_bytes += core::kA3bKvPlanes * kv * sizeof(__half);
     }
   }
   std::fprintf(stderr,
@@ -597,6 +555,9 @@ bool Engine::Allocate(std::string* error) {
   // Weight bytes each phase reads per decoded token (routed experts at
   // used/experts of their size).
   const auto bytes = [](const Tensor& t) {
+    if (IsKQuant(t.type))
+      return double(quant::QuantizedRowBytes(t.type, t.cols)) * t.rows *
+             t.experts;
     const double n = double(t.rows) * t.cols * t.experts;
     switch (t.type) {
       case GgmlType::kQ8_0:
@@ -732,9 +693,7 @@ bool Engine::BuildDraftHead(std::vector<std::int32_t> ids, std::string* error) {
     return false;
   }
   const std::size_t row_bytes =
-      gguf_->FindTensor("output.weight") != nullptr
-          ? gguf_->FindTensor("output.weight")->size_bytes / c_.vocab
-          : gguf_->FindTensor("token_embd.weight")->size_bytes / c_.vocab;
+      quant::EncodedSizeBytes(output_.type, output_.cols);
   draft_vocab_ = static_cast<std::uint32_t>(ids.size());
   void* head = nullptr;
   void* map = nullptr;
@@ -798,6 +757,15 @@ void Engine::Dense(const Tensor& w, const float* x, float* out, std::uint32_t n,
     (void)qfn_mmq_q8_0_dense_vec_preq(
         w.data, nullptr, xq, out, static_cast<int>(w.rows), static_cast<int>(n),
         static_cast<int>(w.cols), stream_);
+    return;
+  }
+  if (IsKQuant(w.type)) {
+    if (xq == nullptr)
+      xq = Quantize(x, n, w.cols);
+    (void)qfn_mmq_dense_vec_preq(static_cast<int>(w.type), w.data, xq,
+                                 zero_ids_, out, static_cast<int>(w.rows),
+                                 static_cast<int>(n), static_cast<int>(w.cols),
+                                 stream_);
     return;
   }
   fn::SmallGemm(w.data, Small(w.type), x, out, n, w.rows, w.cols, stream_);
@@ -909,7 +877,7 @@ void Engine::Moe(const Layer& l, std::uint32_t n) {
   // Routed experts.
   const auto experts = [&](const Tensor& w, const float* x, float* out,
                            std::uint32_t rows, std::uint32_t used) {
-    if (w.type == GgmlType::kQ8_0) {
+    if (w.type == GgmlType::kQ8_0 || IsKQuant(w.type)) {
       (void)qfn_mmq_moe_vec(static_cast<int>(w.type), w.data, x, ids_, out,
                             static_cast<int>(w.rows), static_cast<int>(w.cols),
                             static_cast<int>(rows), static_cast<int>(E),
@@ -921,10 +889,11 @@ void Engine::Moe(const Layer& l, std::uint32_t n) {
   const std::uint32_t ff = l.gate_exps.rows;
   Mark(kPhGateUp);
   if (Skip(kPhGateUp)) {
-  } else if (l.gate_exps.type == GgmlType::kQ8_0 &&
-             l.up_exps.type == GgmlType::kQ8_0) {
+  } else if ((l.gate_exps.type == GgmlType::kQ8_0 ||
+              IsKQuant(l.gate_exps.type)) &&
+             l.up_exps.type == l.gate_exps.type) {
     (void)qfn_mmq_moe_gated_vec(
-        static_cast<int>(GgmlType::kQ8_0), l.gate_exps.data, l.up_exps.data,
+        static_cast<int>(l.gate_exps.type), l.gate_exps.data, l.up_exps.data,
         xn_, ids_, e_act_, static_cast<int>(ff), static_cast<int>(H),
         static_cast<int>(n), static_cast<int>(E), static_cast<int>(U), stream_);
   } else {
@@ -1168,6 +1137,13 @@ void Engine::FusedAttention(const Layer& l, __half* k_cache, __half* v_cache,
 }
 
 void Engine::FusedMoe(const Layer& l, float* res, std::uint32_t n) {
+  if (IsKQuant(l.gate_exps.type) || IsKQuant(l.up_exps.type) ||
+      IsKQuant(l.down_exps.type)) {
+    // Preserve the fused Q8/BF16 kernels; K-quants use typed vendor MMVQ.
+    Moe(l, n);
+    AddInPlace(res, blk_, static_cast<std::size_t>(n) * c_.hidden, stream_);
+    return;
+  }
   const std::uint32_t E = c_.experts;
   const std::uint32_t U = c_.experts_used;
   const std::uint32_t H = c_.hidden;
@@ -1247,10 +1223,14 @@ void Engine::BodyFused(std::uint32_t n, std::uint32_t rows,
     fn::CopyDevice(xn_, target_h_, static_cast<std::size_t>(n) * H, stream_);
   if (rows > 0 && !Skip(kPhHead)) {
     const std::uint32_t skip = normed - rows;
-    const GemvSeg seg{output_.data,  nullptr,          logits_, output_.rows,
-                      Kind(output_), GemvMode::kStore, c_.vocab};
-    MultiGemv(&seg, 1, aq_ + static_cast<std::size_t>(skip) * (H / 32),
-              xn_ + static_cast<std::size_t>(skip) * H, rows, H, stream_);
+    if (IsKQuant(output_.type)) {
+      Dense(output_, xn_ + static_cast<std::size_t>(skip) * H, logits_, rows);
+    } else {
+      const GemvSeg seg{output_.data,  nullptr,          logits_, output_.rows,
+                        Kind(output_), GemvMode::kStore, c_.vocab};
+      MultiGemv(&seg, 1, aq_ + static_cast<std::size_t>(skip) * (H / 32),
+                xn_ + static_cast<std::size_t>(skip) * H, rows, H, stream_);
+    }
   }
   Mark(kPhCount);  // end sentinel
 }
@@ -1293,7 +1273,14 @@ void Engine::MtpPass(const std::int32_t* tokens, const float* hidden,
                      Kind(output_),
                      GemvMode::kStore,
                      vocab};
-  MultiGemv(&head, 1, aq_, mtp_hn_, 1, H, stream_);
+  if (IsKQuant(output_.type)) {
+    Tensor weight = output_;
+    weight.data = head.w;
+    weight.rows = vocab;
+    Dense(weight, mtp_hn_, logits_m_, 1);
+  } else {
+    MultiGemv(&head, 1, aq_, mtp_hn_, 1, H, stream_);
+  }
   if (draft_out != nullptr) {
     fn::Argmax(logits_m_, static_cast<fn::ArgmaxCandidate*>(argmax_scratch_),
                draft_out, 1, vocab, stream_);

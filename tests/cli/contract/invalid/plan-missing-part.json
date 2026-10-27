@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "operation_id": "11111111111111111111111111111111",
+  "seq": 1,
+  "time": "2026-10-13T18:00:00Z",
+  "product": {
+    "name": "bubo",
+    "version": "0.1.0",
+    "revision": "3ff74dce",
+    "engine_version": "0.1.0"
+  },
+  "type": "plan",
+  "payload": {
+    "component": "model",
+    "ready": false,
+    "sources": [],
+    "licenses": [],
+    "paths": {},
+    "volumes": [],
+    "plan_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "record_kind": "plan",
+    "parts": 5
+  }
+}

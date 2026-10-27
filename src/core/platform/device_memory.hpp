@@ -32,6 +32,8 @@ inline hipError_t DeviceMemoryInfo(std::size_t* free_bytes,
 struct DeviceMemorySplit {
   bool valid{false};
   std::size_t local_used{0}, local_budget{0}, nonlocal_used{0}, nonlocal_budget{0};
+  /// DXGI_ADAPTER_DESC.DedicatedVideoMemory: the BIOS carve-out (UMA) or VRAM; the LOCAL budget can exceed it by a slice of system RAM.
+  std::size_t dedicated{0};
 };
 #ifdef _WIN32
 DeviceMemorySplit QueryDeviceMemorySplit() noexcept;

@@ -44,6 +44,13 @@ public:
   [[nodiscard]] static std::shared_ptr<Encoder> Open(
       const std::filesystem::path& target, const std::filesystem::path& sidecar,
       std::uint32_t output_width);
+  /// `--no-vision` (disabled) wins over Open's discovery of a sidecar beside the model: nothing is opened and no encoder is returned.
+  /// Open cannot tell an explicit "image input off" from "no sidecar given", so every caller that has the switch goes through here.
+  [[nodiscard]] static std::shared_ptr<Encoder> OpenUnlessDisabled(
+      bool disabled, const std::filesystem::path& target,
+      const std::filesystem::path& sidecar, std::uint32_t output_width) {
+    return disabled ? std::shared_ptr<Encoder>{} : Open(target, sidecar, output_width);
+  }
   ~Encoder();
   Encoder(const Encoder&) = delete;
   Encoder& operator=(const Encoder&) = delete;

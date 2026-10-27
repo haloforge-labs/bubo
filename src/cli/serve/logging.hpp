@@ -3,9 +3,12 @@
 
 #include <chrono>
 #include <cstdint>
+#include <exception>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <typeinfo>
 
 namespace gufo::server {
 
@@ -31,6 +34,11 @@ class AsyncLogSink;
 
 class Logger {
 public:
+  // Configure once before serving. The existing bounded async queue writes
+  // this sink. Each file is at most max_bytes; keep at most retained backups.
+  static void SetLogFile(const std::filesystem::path& path,
+                         std::uint64_t max_bytes = 8 * 1024 * 1024,
+                         unsigned retained = 3);
   /// Sets the process-wide verbosity threshold. Call once during startup,
   /// before any loader, scheduler or HTTP work starts: logging is shared by
   /// every modality, so a per-backend copy would only create a second source
@@ -115,6 +123,22 @@ public:
     Log(LogLevel::kError, component, message);
   }
 };
+
+/// The type of a caught exception as one log token (for example
+/// `std::length_error`). Logs name the type, never what(): an exception's text
+/// can quote request or model content, and prompt text is never logged.
+inline std::string ExceptionTypeTag(const std::exception& error) {
+  std::string name = typeid(error).name();
+  for (const std::string_view prefix : {"class ", "struct "}) {
+    if (name.compare(0, prefix.size(), prefix) == 0)
+      name.erase(0, prefix.size());
+  }
+  for (char& c : name) {
+    if (c == ' ' || c == '"' || c == '\\' || static_cast<unsigned char>(c) < 32)
+      c = '_';
+  }
+  return name;
+}
 
 }  // namespace gufo::server
 

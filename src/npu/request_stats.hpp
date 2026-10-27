@@ -8,6 +8,9 @@
 #include <cstdio>
 #include <string>
 
+#include "fault_telemetry.hpp"
+#include "runtime_status.hpp"
+
 namespace gufo::npu {
 struct RequestStats {
   std::atomic<std::uint64_t> finish_calls{0};
@@ -74,8 +77,10 @@ inline std::string TakeRequestLine() {
     lane_blocked[i] = s.lane_blocked[i].exchange(0);
   }
   s.last_layer.store(-1);
-  if (lin == 0 && proj == 0)
+  if (lin == 0 && proj == 0) {
+    PublishNpuRuntimeStatus();  // request end; cheap without a publisher
     return {};
+  }
   char text[640];
   std::snprintf(
       text, sizeof(text),
@@ -99,6 +104,9 @@ inline std::string TakeRequestLine() {
       static_cast<unsigned long long>(lane_blocked[0]),
       static_cast<unsigned long long>(lane_blocked[1]),
       static_cast<unsigned long long>(lane_blocked[2]));
-  return text;
+  // Fields appended at the end so existing parsers keep working.
+  auto line = std::string(text) + TakeRequestTelemetrySuffix();
+  PublishNpuRuntimeStatus();  // request end; cheap without a publisher
+  return line;
 }
 }  // namespace gufo::npu

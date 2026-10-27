@@ -1,0 +1,66 @@
+{
+  "type": "object",
+  "properties": {
+    "providers": {
+      "type": "object",
+      "properties": {
+        "bubo": {
+          "type": "object",
+          "properties": {
+            "baseUrl": {
+              "type": "string",
+              "pattern": "^http://(127\\.0\\.0\\.1|\\[::1\\]):[0-9]+/v1$"
+            },
+            "api": {
+              "const": "openai-completions"
+            },
+            "apiKey": {
+              "enum": [
+                "bubo-loopback",
+                "BUBO_API_KEY"
+              ]
+            },
+            "models": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 1,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "contextWindow": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "id",
+                  "name",
+                  "contextWindow"
+                ]
+              }
+            }
+          },
+          "required": [
+            "baseUrl",
+            "api",
+            "apiKey",
+            "models"
+          ]
+        }
+      },
+      "required": [
+        "bubo"
+      ]
+    }
+  },
+  "required": [
+    "providers"
+  ]
+}

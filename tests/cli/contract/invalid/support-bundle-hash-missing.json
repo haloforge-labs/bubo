@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "type": "support_bundle",
+  "operation_id": "cca03717e346430eae464aeaae2c2b73",
+  "seq": 1,
+  "time": "2026-10-14T03:44:45Z",
+  "product": {
+    "name": "bubo",
+    "version": "0.1.0",
+    "revision": "7670503d",
+    "engine_version": "0.10.0"
+  },
+  "payload": {
+    "schema_version": 1,
+    "saved": false,
+    "zip_bytes": 4546,
+    "files": [
+      "versions.json",
+      "settings.json",
+      "status.json",
+      "diagnose.json",
+      "history.json",
+      "logs.json",
+      "manifest.json"
+    ],
+    "text_preview": {
+      "versions.json": "{\"schema_version\":1,\"product\":\"bubo\",\"product_version\":\"0.1.0\",\"engine_version\":\"0.10.0\",\"revision\":\"7670503d\",\"binary_sha256\":{\"bootstrap\":\"ee2769e91920baddc0aace4bdac726b9bfb75982ae7d92cd0b842e581d662472\",\"engine\":null}}\n",
+      "settings.json": "{\"available\":true,\"version\":1,\"port\":8080,\"context\":262144,\"sessions\":2,\"start_gui_at_login\":false,\"profile\":\"default\",\"last_error_code\":\"device_lost\"}\n",
+      "status.json": "{\"available\":true,\"prepared\":false,\"selection_required\":false,\"phase\":\"not_prepared\",\"readiness\":{\"runtime\":false,\"model\":false},\"last_error_code\":\"runtime_missing\"}\n",
+      "diagnose.json": "{\"available\":true,\"source\":\"persisted_state\",\"status\":\"WARN\",\"checks\":[{\"name\":\"gpu\",\"status\":\"WARN\"}]}\n",
+      "history.json": "[{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}},{\"type\":\"diagnose\",\"state\":{\"available\":true,\"status\":\"PASS\",\"checks\":[]}}]\n",
+      "logs.json": "{\"entries\":[{\"event\":\"ready\",\"level\":\"info\",\"count\":2}],\"dropped_lines\":2}\n",
+      "manifest.json": "{\"schema_version\":1,\"files\":[{\"name\":\"versions.json\",\"bytes\":223,\"sha256\":\"7ac8137be5bdf384bdaef7ac102fc4d35abda71910aa60d8e5b7942cbf4703c9\"},{\"name\":\"settings.json\",\"bytes\":152,\"sha256\":\"039bb34a9d5b9249458c4a7fdc28d4e649f639e05dc393572369fbcb4d1aea43\"},{\"name\":\"status.json\",\"bytes\":166,\"sha256\":\"ed8d498ac8f53e0136d4dacce2f3a67ee5e44622b915b143be00eeaddecef607\"},{\"name\":\"diagnose.json\",\"bytes\":104,\"sha256\":\"b41c5c172a2d0e1a6a0abdb16eee55226b6c74d8182a035f917735983a0f318f\"},{\"name\":\"history.json\",\"bytes\":2402,\"sha256\":\"ead797f4afaa63e6d86ed67c0def76503c45fbb594b74cd858f8853ce9ebae22\"},{\"name\":\"logs.json\",\"bytes\":75,\"sha256\":\"47515c25e41194f60c4cb7e8bf32eba35ad251499b10b8b3906bde88a4594e9a\"}]}\n"
+    },
+    "sha256": {
+      "versions.json": "7ac8137be5bdf384bdaef7ac102fc4d35abda71910aa60d8e5b7942cbf4703c9",
+      "settings.json": "039bb34a9d5b9249458c4a7fdc28d4e649f639e05dc393572369fbcb4d1aea43",
+      "status.json": "ed8d498ac8f53e0136d4dacce2f3a67ee5e44622b915b143be00eeaddecef607",
+      "diagnose.json": "b41c5c172a2d0e1a6a0abdb16eee55226b6c74d8182a035f917735983a0f318f",
+      "history.json": "ead797f4afaa63e6d86ed67c0def76503c45fbb594b74cd858f8853ce9ebae22",
+      "logs.json": "47515c25e41194f60c4cb7e8bf32eba35ad251499b10b8b3906bde88a4594e9a",
+      "manifest.json": "f54603868a2cf128ad9e90db1faafe6e26703bfcd5054794494ee83c89e7f983"
+    }
+  }
+}

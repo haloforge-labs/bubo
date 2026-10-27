@@ -20,6 +20,9 @@ struct Control {
   unsigned char expected_b = 0;
   int devices = 0, allocations = 0, starts = 0, waits = 0, live_bos = 0;
   long long wait_ms = 0;
+  // Fake device addresses handed to new BOs (4 KiB aligned, back to back).
+  unsigned long long next_address = 0x2D000000ULL, address_gap = 0;
+  bool address_zero = false, address_throw = false;
   std::vector<std::string> calls;
   std::function<void(const std::string&)> on_call;
 };

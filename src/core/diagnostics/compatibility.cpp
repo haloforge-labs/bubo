@@ -32,6 +32,8 @@ std::string_view ToString(CompatibilityVerdict verdict) {
       return "unsupported";
     case CompatibilityVerdict::kUnknown:
       return "unknown";
+    case CompatibilityVerdict::kNotApplicable:
+      return "not_applicable";
   }
   return "unknown";
 }
@@ -60,7 +62,7 @@ CompatibilityReport EvaluateCompatibility(const SystemInventory& inventory,
     } else {
       platform_item.verdict = CompatibilityVerdict::kUnsupported;
       platform_item.remediation_hint =
-          "gufo only supports Linux or Windows x86-64";
+          "Bubo only supports Linux or Windows x86-64";
       overall = CompatibilityVerdict::kUnsupported;
     }
     report.items.push_back(std::move(platform_item));
@@ -79,7 +81,7 @@ CompatibilityReport EvaluateCompatibility(const SystemInventory& inventory,
     } else {
       gpu_item.verdict = CompatibilityVerdict::kUnsupported;
       gpu_item.remediation_hint =
-          "gufo requires AMD Strix Halo gfx1151 GPU (Radeon 8060S / "
+          "Bubo requires AMD Strix Halo gfx1151 GPU (Radeon 8060S / "
           "8050S). Detected: " +
           inventory.gpu.architecture;
       overall = CompatibilityVerdict::kUnsupported;
@@ -94,7 +96,14 @@ CompatibilityReport EvaluateCompatibility(const SystemInventory& inventory,
     driver_item.detected_value = "amdgpu: " + inventory.toolchain.amdgpu_status;
     driver_item.required_value = "amdgpu: loaded";
     driver_item.evidence = "/sys/class/drm";
-    if (inventory.toolchain.amdgpu_status == "loaded") {
+    if (inventory.toolchain.amdgpu_status.starts_with("not applicable")) {
+      // The Linux kernel driver does not exist on Windows. The GPU item above
+      // already checks the architecture through the HIP runtime.
+      driver_item.verdict = CompatibilityVerdict::kNotApplicable;
+      driver_item.required_value = "not applicable on this operating system";
+      driver_item.evidence = "host operating system";
+      driver_item.remediation_hint = "None";
+    } else if (inventory.toolchain.amdgpu_status == "loaded") {
       driver_item.verdict = CompatibilityVerdict::kSupported;
       driver_item.remediation_hint = "None";
     } else {

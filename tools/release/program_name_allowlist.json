@@ -85,7 +85,7 @@
   },
   {
     "file": ".devops/nix/package.nix",
-    "line": "    description = \"Bubo \u2014 gufo engine: local inference runtime for AMD Strix Halo (gfx1151 GPU)\";",
+    "line": "    description = \"Bubo — gufo engine: local inference runtime for AMD Strix Halo (gfx1151 GPU)\";",
     "count": 1,
     "category": "engine",
     "reason": "Nix metadata or library diagnostic identifies the unchanged engine."
@@ -504,76 +504,6 @@
     "reason": "Existing upstream engine-brand build option is preserved; release defaults to Bubo."
   },
   {
-    "file": "README.md",
-    "line": "  <img src=\"assets/gufo-logo.jpg\" alt=\"Bubo logo\" width=\"180\">",
-    "count": 1,
-    "reason": "Existing engine tool/resource/artifact path is retained independently of the product executable.",
-    "category": "resource-path"
-  },
-  {
-    "file": "README.md",
-    "line": "  ghcr.io/gufo-org/toolboxes/gufo-runtime:latest \\",
-    "count": 1,
-    "reason": "Upstream source/container URL retains its repository identity.",
-    "category": "upstream-url"
-  },
-  {
-    "file": "README.md",
-    "line": "  system turn, so Gufo moves them there. The request that introduces one is",
-    "count": 1,
-    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
-    "category": "engine"
-  },
-  {
-    "file": "README.md",
-    "line": "> This tree combines upstream v0.6.0 with the **[Windows port](https://github.com/pixmaate/gufo)**. **[Gufo RDMA for Dual Strix Halo](https://github.com/neuhaus/gufo)** is a separate variant.",
-    "count": 1,
-    "reason": "Upstream source/container URL retains its repository identity.",
-    "category": "upstream-url"
-  },
-  {
-    "file": "README.md",
-    "line": "Bubo uses the gufo vertical local inference engine specifically built and optimized for the AMD Strix Halo hardware:",
-    "count": 1,
-    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
-    "category": "engine"
-  },
-  {
-    "file": "README.md",
-    "line": "Gufo's original code is [MIT licensed](LICENSE). Adapted code and dependencies",
-    "count": 1,
-    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
-    "category": "engine"
-  },
-  {
-    "file": "README.md",
-    "line": "See the [changelog](CHANGELOG.md) and [GitHub Releases](https://github.com/gufo-org/gufo/releases)",
-    "count": 1,
-    "reason": "Upstream source/container URL retains its repository identity.",
-    "category": "upstream-url"
-  },
-  {
-    "file": "README.md",
-    "line": "The default profile follows upstream gufo practice: fast output that is not byte-exact.",
-    "count": 1,
-    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
-    "category": "engine"
-  },
-  {
-    "file": "README.md",
-    "line": "and `licenses/`, installed under `share/licenses/gufo`. Model weights are not",
-    "count": 1,
-    "reason": "Installed engine model, evaluation or license resource keeps its existing path.",
-    "category": "resource-path"
-  },
-  {
-    "file": "README.md",
-    "line": "podman pull ghcr.io/gufo-org/toolboxes/gufo-runtime:latest",
-    "count": 1,
-    "reason": "Upstream source/container URL retains its repository identity.",
-    "category": "upstream-url"
-  },
-  {
     "file": "cmake/Checks.cmake",
     "line": "  DEPENDS gufo ${gufo_pr_targets} cache_disk_faults",
     "count": 1,
@@ -646,13 +576,6 @@
   {
     "file": "docs/FLAGS.md",
     "line": "The default profile follows upstream gufo practice: fast output that is not byte-exact.",
-    "count": 1,
-    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
-    "category": "engine"
-  },
-  {
-    "file": "docs/FLAGS.md",
-    "line": "| `GPU_MAX_HW_QUEUES` | Set the hardware queue cap. | gufo sets | The engine manages this queue cap; a real environment value wins. | any; generic; any |",
     "count": 1,
     "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
     "category": "engine"
@@ -931,41 +854,6 @@
     "category": "engine"
   },
   {
-    "file": "docs/WINDOWS.md",
-    "line": "  - NTFS serializes direct reads of a file that is also mapped, and Gufo maps",
-    "count": 1,
-    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
-    "category": "engine"
-  },
-  {
-    "file": "docs/WINDOWS.md",
-    "line": "  per GiB allocated), which made Gufo refuse to size its sessions.",
-    "count": 1,
-    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
-    "category": "engine"
-  },
-  {
-    "file": "docs/WINDOWS.md",
-    "line": "- `compat/win32/include` shadows the POSIX headers Gufo uses (`unistd.h`,",
-    "count": 1,
-    "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
-    "category": "engine"
-  },
-  {
-    "file": "docs/WINDOWS.md",
-    "line": "Choices are kept in `%LOCALAPPDATA%\\gufo\\launcher.json`.",
-    "count": 1,
-    "reason": "Retain the existing per-user cache/config location so saved state remains readable.",
-    "category": "cache-config"
-  },
-  {
-    "file": "docs/WINDOWS.md",
-    "line": "Choices are kept in `%LOCALAPPDATA%\\gufo\\start.json` (never the API key);",
-    "count": 1,
-    "reason": "Retain the existing per-user cache/config location so saved state remains readable.",
-    "category": "cache-config"
-  },
-  {
     "file": "docs/cache-redesign/RFC.md",
     "line": "- **Disk** ([diskbench.py](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/diskbench.py), NVMe under dm-crypt):",
     "count": 1,
@@ -974,7 +862,7 @@
   },
   {
     "file": "docs/cache-redesign/RFC.md",
-    "line": "- **GPU copies** ([copybench.hip](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/copybench.hip), 56 MiB\u201310 GiB):",
+    "line": "- **GPU copies** ([copybench.hip](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/copybench.hip), 56 MiB–10 GiB):",
     "count": 1,
     "reason": "Upstream source/container URL retains its repository identity.",
     "category": "upstream-url"
@@ -1317,21 +1205,21 @@
   },
   {
     "file": "docs/cache-redesign/RFC.md",
-    "line": "| Assembling a session from chunks in memory | 106 GB/s for 4 MiB pieces, 88 GB/s for 1 MiB, vs 103 GB/s for one copy | [chunkcopy.hip](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/chunkcopy.hip), 8 GiB as many device copies | Per-layer pieces of a 2,048-token chunk are an estimated 1\u20134 MiB |",
+    "line": "| Assembling a session from chunks in memory | 106 GB/s for 4 MiB pieces, 88 GB/s for 1 MiB, vs 103 GB/s for one copy | [chunkcopy.hip](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/chunkcopy.hip), 8 GiB as many device copies | Per-layer pieces of a 2,048-token chunk are an estimated 1–4 MiB |",
     "count": 1,
     "reason": "Upstream source/container URL retains its repository identity.",
     "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
-    "line": "| Device copy (device to device) | 104\u2013110 GB/s | [copybench.hip](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/copybench.hip) | Real RAM restores: 27B 33k tokens (2.4 GB) in 25 ms, 96 GB/s |",
+    "line": "| Device copy (device to device) | 104–110 GB/s | [copybench.hip](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/copybench.hip) | Real RAM restores: 27B 33k tokens (2.4 GB) in 25 ms, 96 GB/s |",
     "count": 1,
     "reason": "Upstream source/container URL retains its repository identity.",
     "category": "upstream-url"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
-    "line": "| Disk write + fsync, raw | 0.58\u20130.60 GB/s at every size | [diskbench.py](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/diskbench.py) | \u2014 |",
+    "line": "| Disk write + fsync, raw | 0.58–0.60 GB/s at every size | [diskbench.py](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/diskbench.py) | — |",
     "count": 1,
     "reason": "Upstream source/container URL retains its repository identity.",
     "category": "upstream-url"
@@ -1345,14 +1233,14 @@
   },
   {
     "file": "docs/cache-redesign/RFC.md",
-    "line": "| Incremental delivery through Gufo PRs | \ud83d\udfe2 Package, backing, RAM, disk, adapters | \ud83d\udfe2 Smaller execution changes | \ud83d\udfe1 Wider allocator/execution changes | \ud83d\udfe1 Wider allocator/kernel changes | \ud83d\udfe2 Existing implementation |",
+    "line": "| Incremental delivery through Gufo PRs | 🟢 Package, backing, RAM, disk, adapters | 🟢 Smaller execution changes | 🟡 Wider allocator/execution changes | 🟡 Wider allocator/kernel changes | 🟢 Existing implementation |",
     "count": 1,
     "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
     "category": "engine"
   },
   {
     "file": "docs/cache-redesign/RFC.md",
-    "line": "| Prefill N tokens on D cached | Flash-Next 0.36 s + 0.79 ms/token + small depth term; 27B 0.52 s + 2.66 ms/token + 16.5 ns \u00d7 N \u00d7 (D + N/2) | [fit_prefill.py](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/fit_prefill.py), 150 requests each; median error 9.8% and 3.9% | Simulated prefill time matches measured within 3\u20138% (E7) |",
+    "line": "| Prefill N tokens on D cached | Flash-Next 0.36 s + 0.79 ms/token + small depth term; 27B 0.52 s + 2.66 ms/token + 16.5 ns × N × (D + N/2) | [fit_prefill.py](https://github.com/gufo-org/gufo/blob/b9ca6b4e18abe50d4d446f5460823b7bcb4cdb33/docs/cache-redesign/scripts/fit_prefill.py), 150 requests each; median error 9.8% and 3.9% | Simulated prefill time matches measured within 3–8% (E7) |",
     "count": 1,
     "reason": "Upstream source/container URL retains its repository identity.",
     "category": "upstream-url"
@@ -1882,7 +1770,7 @@
   },
   {
     "file": "docs/models/qwen-image-2.1/README.md",
-    "line": "The official repository recommends 2048\u00b2; Gufo follows the pinned Diffusers",
+    "line": "The official repository recommends 2048²; Gufo follows the pinned Diffusers",
     "count": 1,
     "reason": "Identifies upstream engine behavior or identity independently of the product executable.",
     "category": "engine"
@@ -1922,7 +1810,7 @@
   },
   {
     "file": "docs/models/qwen3-tts/BENCHMARKS.md",
-    "line": "Short seed-42 control, \u201cHello from Gufo.\u201d: warm complete WAV latency is",
+    "line": "Short seed-42 control, “Hello from Gufo.”: warm complete WAV latency is",
     "count": 1,
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
@@ -2281,7 +2169,7 @@
   },
   {
     "file": "docs/models/qwen3.8-flash-next/BENCHMARKS.md",
-    "line": "Gufo pp/tg, concurrency and memory: October 8\u20139, 2026, production Nix build.",
+    "line": "Gufo pp/tg, concurrency and memory: October 8–9, 2026, production Nix build.",
     "count": 1,
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
@@ -2365,7 +2253,7 @@
   },
   {
     "file": "docs/models/qwen3.8-flash-next/QUALITY.md",
-    "line": "Gufo pp/tg, concurrency and memory refreshed October 8\u20139, 2026 using the production",
+    "line": "Gufo pp/tg, concurrency and memory refreshed October 8–9, 2026 using the production",
     "count": 1,
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
@@ -2609,7 +2497,7 @@
   },
   {
     "file": "src/cli/README.md",
-    "line": "  4. Add the source files to `CMakeLists.txt` under `add_executable(gufo ...)` and write unit tests in `tests/cli/`.",
+    "line": "  4. Before the code, write the ways the command can fail and an end-to-end test that runs the real `bubo.exe` (`tests/cli/`). Then add the source files to `CMakeLists.txt` under `add_executable(gufo ...)`.",
     "count": 1,
     "reason": "Developer instructions refer to the unchanged C++ namespace or CMake engine target.",
     "category": "build-target"
@@ -2683,13 +2571,6 @@
     "count": 1,
     "reason": "Legacy engine-brand build routing is conditional and is absent from Bubo packages.",
     "category": "compatibility"
-  },
-  {
-    "file": "src/cli/prompt/prompt.cpp",
-    "line": "        << \"gufo prompt: prompt received: \\\"\" << opt.prompt_text << \"\\\"\\n\"",
-    "count": 1,
-    "reason": "Existing informational engine log bytes are preserved by owner instruction.",
-    "category": "logging"
   },
   {
     "file": "src/cli/serve/audio_asr_api.cpp",
@@ -2784,14 +2665,14 @@
   },
   {
     "file": "src/cli/serve/http_server.cpp",
-    "line": "          value[\"response\"][\"gufo\"][\"settings\"] = *settings;",
+    "line": "              value[\"response\"][\"gufo\"][\"settings\"] = *settings;",
     "count": 1,
     "reason": "Existing request/response API key remains accepted or emitted for client compatibility.",
     "category": "api"
   },
   {
     "file": "src/cli/serve/http_server.cpp",
-    "line": "        value[\"gufo\"][\"settings\"] = *settings;",
+    "line": "            value[\"gufo\"][\"settings\"] = *settings;",
     "count": 1,
     "reason": "Existing request/response API key remains accepted or emitted for client compatibility.",
     "category": "api"
@@ -2811,16 +2692,9 @@
     "category": "api"
   },
   {
-    "file": "src/cli/serve/http_server.cpp",
-    "line": "    model[\"owned_by\"] = \"gufo\";",
-    "count": 1,
-    "reason": "Existing model owner value is a client-visible compatibility contract.",
-    "category": "api-contract"
-  },
-  {
     "file": "src/cli/serve/inference_backend.cpp",
     "line": "  identity << \"schema=gufo-text-continuation-v2\\n\"",
-    "count": 3,
+    "count": 4,
     "reason": "Versioned output or persistence schema retains its compatibility identifier.",
     "category": "schema"
   },
@@ -3089,5 +2963,194 @@
     "count": 1,
     "category": "build-target",
     "reason": "Retained CMake target identity; production Bubo builds require the prepare pin/evidence gate."
+  },
+  {
+    "file": "README.md",
+    "line": "## Reasoning check against gufo (pixmaate’s Windows port)",
+    "count": 1,
+    "category": "engine",
+    "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
+  },
+  {
+    "file": "README.md",
+    "line": "- [gufo](https://github.com/gufo-org/gufo)",
+    "count": 1,
+    "category": "upstream-url",
+    "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
+  },
+  {
+    "file": "README.md",
+    "line": "1. Download `bubo-v0.1.0-windows-x64-gfx1151.zip` from the [Bubo release page](https://github.com/haloforge-labs/bubo/releases/tag/v0.1.0). The file is 44,096,931 bytes. Its SHA-256 value is `d1c92dacf68e8e379b8e02c8d68ba18ba102b2fd22784e25cb06b0757fac1306`. `bubo --version` prints `bubo 0.1.0 (3ff74dce), engine gufo 0.10.0`.",
+    "count": 1,
+    "category": "upstream-url",
+    "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
+  },
+  {
+    "file": "README.md",
+    "line": "Bubo is open source under the MIT license, the same license as gufo. The code is copyright HaloForge Labs and the gufo contributors. Read [LICENSE](LICENSE) and [NOTICE](NOTICE).",
+    "count": 1,
+    "category": "engine",
+    "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
+  },
+  {
+    "file": "README.md",
+    "line": "Bubo is tuned for Qwen3.8 Flash Next. The other models run with upstream gufo settings.",
+    "count": 1,
+    "category": "engine",
+    "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
+  },
+  {
+    "file": "README.md",
+    "line": "Credit goes to the gufo contributors and pixmaate/gufo `windows-port`.",
+    "count": 1,
+    "category": "engine",
+    "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
+  },
+  {
+    "file": "README.md",
+    "line": "Gufo provides the engine. The Windows layer comes from [pixmaate/gufo, branch `windows-port`](https://github.com/pixmaate/gufo/tree/windows-port).",
+    "count": 1,
+    "category": "upstream-url",
+    "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
+  },
+  {
+    "file": "README.md",
+    "line": "Halowin Bubo is a native Windows fork of [gufo](https://github.com/gufo-org/gufo), from HaloForge Labs.",
+    "count": 1,
+    "category": "upstream-url",
+    "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
+  },
+  {
+    "file": "README.md",
+    "line": "The base is gufo v0.10.0 plus main commit `97b8645f`.",
+    "count": 1,
+    "category": "engine",
+    "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
+  },
+  {
+    "file": "README.md",
+    "line": "| DeepSeek V4 Flash | Flash 0731 mixed IQ2/Q2/Q8 GGUF. Text. | [Usage](https://github.com/gufo-org/gufo/blob/97b8645f/docs/models/deepseek-v4-flash/README.md) |",
+    "count": 1,
+    "category": "upstream-url",
+    "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
+  },
+  {
+    "file": "README.md",
+    "line": "| MiniMax H3 FL2VA | Pinned safetensors. Text to audio and video. | [Usage](https://github.com/gufo-org/gufo/blob/97b8645f/docs/models/minimax-h3/README.md) |",
+    "count": 1,
+    "category": "upstream-url",
+    "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
+  },
+  {
+    "file": "README.md",
+    "line": "| Qwen-Image-2.1 | BF16 safetensors. Image generation and edits. | [Usage](https://github.com/gufo-org/gufo/blob/97b8645f/docs/models/qwen-image-2.1/README.md) |",
+    "count": 1,
+    "category": "upstream-url",
+    "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
+  },
+  {
+    "file": "README.md",
+    "line": "| Qwen3-ASR 1.7B | BF16 safetensors. Audio to text. | [Usage](https://github.com/gufo-org/gufo/blob/97b8645f/docs/models/qwen3-asr/README.md) |",
+    "count": 1,
+    "category": "upstream-url",
+    "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
+  },
+  {
+    "file": "README.md",
+    "line": "| Qwen3-TTS 12Hz 1.7B | BF16 safetensors. Text and reference audio to speech. | [Usage](https://github.com/gufo-org/gufo/blob/97b8645f/docs/models/qwen3-tts/README.md) |",
+    "count": 1,
+    "category": "upstream-url",
+    "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
+  },
+  {
+    "file": "README.md",
+    "line": "| Qwen3.6 35B-A3B | Q8 GGUF (`qwen35moe`) and fine-tunes. Text. | [Usage](https://github.com/gufo-org/gufo/blob/97b8645f/docs/models/qwen3.6-35b-a3b/README.md) |",
+    "count": 1,
+    "category": "upstream-url",
+    "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
+  },
+  {
+    "file": "README.md",
+    "line": "| Qwen3.8 27B | Q4/Q8 GGUF. Text and images. | [Usage](https://github.com/gufo-org/gufo/blob/97b8645f/docs/models/qwen3.8-27b/README.md) |",
+    "count": 1,
+    "category": "upstream-url",
+    "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
+  },
+  {
+    "file": "README.md",
+    "line": "| Qwen3.8 Flash-Next | Sharded Q4 GGUF. Text and images. | [Usage](https://github.com/gufo-org/gufo/blob/97b8645f/docs/models/qwen3.8-flash-next/README.md) |",
+    "count": 1,
+    "category": "upstream-url",
+    "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
+  },
+  {
+    "file": "README.md",
+    "line": "| Set | Halowin Bubo correct | gufo (pixmaate’s Windows port) correct |",
+    "count": 1,
+    "category": "engine",
+    "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
+  },
+  {
+    "file": "README.md",
+    "line": "| `stock` | Plain gufo settings. | No Bubo profile defaults. Existing flags and environment values still apply. |",
+    "count": 1,
+    "category": "engine",
+    "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
+  },
+  {
+    "file": "docs/WINDOWS.md",
+    "line": "Choices are kept in `%LOCALAPPDATA%\\gufo\\start.json` (never the API key);",
+    "count": 1,
+    "category": "engine",
+    "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
+  },
+  {
+    "file": "docs/install.md",
+    "line": "1. Download `bubo-v0.1.0-windows-x64-gfx1151.zip` from the [Bubo release page](https://github.com/haloforge-labs/bubo/releases/tag/v0.1.0). The file is 44,096,931 bytes. Its SHA-256 value is `d1c92dacf68e8e379b8e02c8d68ba18ba102b2fd22784e25cb06b0757fac1306`. After you extract it, `bubo --version` prints `bubo 0.1.0 (3ff74dce), engine gufo 0.10.0`.",
+    "count": 1,
+    "category": "upstream-url",
+    "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
+  },
+  {
+    "file": "docs/install.md",
+    "line": "Gufo and the pixmaate Windows layer retain the MIT license.",
+    "count": 1,
+    "category": "engine",
+    "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
+  },
+  {
+    "file": "docs/npu.md",
+    "line": "The NPU kernel and design come from mikealanni/gufo (`tools/npu`, MIT) and are derived from AMD mlir-aie programming examples (Apache-2.0 WITH LLVM-exception, Copyright (C) 2026 Advanced Micro Devices, Inc.). The license texts are in the `licenses` folder.",
+    "count": 1,
+    "category": "engine",
+    "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
+  },
+  {
+    "file": "docs/options.md",
+    "line": "Bubo is tuned for Qwen3.8 Flash Next. The other models run with upstream gufo settings.",
+    "count": 1,
+    "category": "engine",
+    "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
+  },
+  {
+    "file": "docs/profiles.md",
+    "line": "Bubo is tuned for Qwen3.8 Flash Next. The other models run with upstream gufo settings.",
+    "count": 1,
+    "category": "engine",
+    "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
+  },
+  {
+    "file": "docs/profiles.md",
+    "line": "Plain gufo behavior needs an environment without Bubo tuning overrides.",
+    "count": 1,
+    "category": "engine",
+    "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
+  },
+  {
+    "file": "docs/profiles.md",
+    "line": "| Purpose | Normal use | Plain gufo | Reproducible-output mode | Concurrent agent requests |",
+    "count": 1,
+    "category": "engine",
+    "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
   }
 ]

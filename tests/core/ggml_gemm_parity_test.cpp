@@ -306,7 +306,8 @@ int main() {
   // (4) IsSupported boundaries.
   if (!gufo::quant::IsSupported(gufo::core::GgmlType::kF32) ||
       !gufo::quant::IsSupported(gufo::core::GgmlType::kQ8_K) ||
-      gufo::quant::IsSupported(gufo::core::GgmlType::kQ4_0) ||
+      !gufo::quant::IsSupported(gufo::core::GgmlType::kQ4_0) ||
+      gufo::quant::IsSupported(gufo::core::GgmlType::kQ2_K) ||
       gufo::quant::IsSupported(static_cast<gufo::core::GgmlType>(65535))) {
     std::printf("IsSupported: FAIL\n");
     return 1;

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Capture an independent production-shape MiniMax H3 block-0 oracle.
 
-The raw BF16 tensors remain operator-owned beside the accepted checkpoint.
+The raw BF16 tensors remain privately held beside the accepted checkpoint.
 Only this reproducible teacher and content hashes belong in the repository.
 """
 

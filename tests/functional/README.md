@@ -4,7 +4,7 @@ See [server debug hooks and logprobs](../../docs/SERVER.md#optional-debug-hooks-
 for capability flags, timeline fields, scoring semantics and current limits.
 The CPU regression registrations are `debug_hooks_settings_test`,
 `debug_hooks_timeline_test`, `debug_hooks_logprobs_test` and
-`debug_hooks_http_test`. Operator validation must additionally compare OFF
+`debug_hooks_http_test`. user validation must additionally compare OFF
 response/token dumps and run short GPU timing ABBA arms; syntax checking alone
 does not establish byte identity or performance. Cache inspection remains
 stopped rather than reporting incomplete hit history.
@@ -102,11 +102,13 @@ RAM, disk and restart settings once their contracts pass.
 | `auto-tools` | Focused subset for optional tool calls |
 | `tool-edges` | Referenced argument types, literal CR, unusual keys, named Responses metadata, foreign tool markers in prose and parallel calls (no DeepSeek text after the call block) |
 | `tool-reasoning` | Quoted tags, exact literal arguments, early stops, disabled tools, envelope framing, completed tool-result continuations and warm replay of contaminated history; Chat/Responses |
+| `tool-streaming` | Incremental argument arrival and exact assembly in Chat/Responses/Messages; stable IDs, literal framing, thinking, stopped/limited calls and successful retries |
 | `reasoning-separator` | No leading separator newlines after reasoning in Chat/Responses, plain/tools/JSON; exact streamed/buffered text, warm retry, continuation and thinking-off paragraph breaks |
 | `tool-agent` | Ordinary nested agent schemas, edit/read/finish turns, no protocol switch, limits, stops/retry, images and sampled peers |
 | `tool-agent-loop` | Bounded autonomous read/edit/verify loop; each turn checks cache reuse and detects repeated actions |
 | `tool-history` | Legacy names, result pairing, current-tool constraints, images, cached retry, stops/limits and sampled peers |
 | `messages-tools` | Messages `tool_use` call, `tool_result` replay with cache reuse, buffered and streamed events, and an uncached Chat control of the same prompt |
+| `messages-count-tokens` | Counts match complete Messages prompt usage with system/history, Unicode, all tool choices and thinking; cold/warm cache counts, no inference side effects, over-context sizing and request errors |
 | `tool-untyped` | Open/typed tools, refs and finite values: framing, arguments, streaming, turns, limits, stops/retry and sampled peers |
 | `tool-mixed` | JSON-only neighbors, annotated refs, extra keys, URI and nullable arguments across Chat/Responses; images, stops/retry and sampled peers; a union neighbor keeps native calls, so a replayed reasoning/call turn is reused in full |
 | `tool-native-schemas` | opencode's tool set beside each schema family that used to force a JSON envelope (pattern, oneOf, allOf, not, open objects), auto and required, strict: native calls, no prompt instruction, typed arguments and full reuse of the generated call; Chat/Responses |
@@ -220,6 +222,19 @@ the previous prompt plus generated tokens; transcripts
 and phase timings are retained. No synthetic system-padding counts as growth.
 If Pi omits a reasoning-only reply, the report identifies that history change
 and verifies reuse through the measured pre-generation boundary instead.
+Use `--resume PREVIOUS_OUTPUT` to continue either client's retained session,
+including after a server restart. To test cancellation, add `--interrupt tool`
+or `--interrupt thinking` to a resumed run. The harness sends SIGINT only after
+observing that phase in a live stream and records the interruption separately.
+Then resume that output directory without `--interrupt`. The harness preserves
+the unfinished task and its files, and requires successful tool execution and
+state/digest checks without repeating committed changes. An interrupted run
+alone is not a pass. Resume prompts distinguish completed calls for this task
+from earlier transactions; the checks still require the file read and catalog
+query, even when the model could infer their contents from earlier tasks.
+Use `--interrupt-after-tools 5` with `--complex-tools --interrupt tool` to
+interrupt the receipt after the transaction has committed. Resuming must
+preserve the committed revision and finish the receipt without another apply.
 
 `opencode_agent.py` runs real opencode (`--opencode PATH`, default on `PATH`)
 against a local server with `--base-url`, `--model` and a fresh `--output`.
@@ -354,7 +369,7 @@ parity. Sampled DSpark may differ across concurrency levels; fixed-path replay
 and greedy equality remain checked. API behavior and references are in
 [SERVER.md](../../docs/SERVER.md).
 
-Round-2 operator gate (never run during a build/timing exclusion window):
+Round-2 user gate (never run during a build/timing exclusion window):
 `pwsh -NoProfile -File scripts/debug-hooks-gate.ps1 -RuntimeDir <candidate-runtime>
 -BaseRuntimeDir <35c386a-runtime> -ModelPath <target.gguf> -MtpModelPath <mtp.gguf>
 -OutputDirectory <evidence-directory>`.
@@ -370,5 +385,5 @@ Round 3 debug timeline schema and unavailable counter limits are documented in
 [SERVER.md](../../docs/SERVER.md#optional-debug-hooks-and-logprobs). The CPU alias
 `debug_hooks_timeline_test` includes mixed-source/policy, RAM/disk/live restore,
 in-pass capture/restore, reconciliation, OFF omission, and cycle-cap cases.
-These cases are written and syntax-checked only; run them in the operator build
+These cases are written and syntax-checked only; run them in the user build
 window before treating the enriched timeline as runtime-validated.

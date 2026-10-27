@@ -4,8 +4,10 @@
 #include <array>
 #include <cassert>
 #include <cmath>
+#include <iomanip>
 #include <limits>
 #include <random>
+#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -235,6 +237,8 @@ bool SamplerState::CanSelectArgmax(TokenId token,
     const auto& b=*config_.behaviour;
     const auto& st=behaviour_state_;
     const auto fail=[&](const char* reason){behaviour_state_.Fallback("candidate_path",reason);return false;};
+    if (st.thinking && b.marker_entropy_gate)
+      return fail("think_marker_entropy_needs_full_row");
     const bool eog=std::ranges::find(b.eog_ids,token)!=b.eog_ids.end();
     if(st.forcing() && token!=st.forced[st.force_pos])return fail("forced_greedy_choice_needs_full_row");
     if(b.production_sampling && (b.native_temperature!=config_.temperature ||
@@ -251,10 +255,17 @@ bool SamplerState::CanSelectArgmax(TokenId token,
     if(b.loop_breaker&&st.loop.nudging())return fail("loop_nudge_needs_probability_row");
     if(!st.forcing() && eog && st.thinking && (b.think_eog_guard||
        eog_closes_think(b,st)))return fail("thinking_eog_greedy_needs_full_row");
-    if(!st.thinking && !st.forcing() && !NeedsConstraintMask()) {
-      if(st.boundary.deferred_stop && !eog)return fail("deferred_eog_greedy_needs_full_row");
-      if(eog && ((b.eog_boundary&&!st.boundary.allowed())||b.eog_min_prob>0))
-        return fail("answer_eog_greedy_needs_full_row");
+    if (!st.thinking && !st.forcing()) {
+      // Only an EOG intervention needs the global grammar-mask predicate.
+      // Ordinary winners are checked individually below; asking for the mask
+      // here could traverse the full vocabulary after every accepted token.
+      const bool deferred = st.boundary.deferred_stop && !eog;
+      const bool guarded =
+          eog && ((b.eog_boundary && !st.boundary.allowed()) || b.eog_min_prob > 0);
+      if ((deferred || guarded) && !NeedsConstraintMask()) {
+        return fail(deferred ? "deferred_eog_greedy_needs_full_row"
+                             : "answer_eog_greedy_needs_full_row");
+      }
     }
   }
   if (pending_sample_ || config_.temperature != 0.0F ||
@@ -535,6 +546,12 @@ bool SamplerState::NeedsConstraintMask() const {
   return constraint_restricts_;
 }
 
+bool SamplerState::ToolArgumentStopping() const {
+  return BehaviourEnabled() && config_.behaviour->loop_breaker &&
+      config_.behaviour->loop_tool_args && behaviour_state_.forcing() &&
+      behaviour_state_.force_reason == "tool_argument_loop";
+}
+
 std::vector<float> SamplerState::ConstrainedLogits(
     std::span<const float> logits, std::span<const TokenId> ids) const {
   const auto mask = config_.constraint->Allowed(constraint_state_);
@@ -583,6 +600,7 @@ void SamplerState::CopyDrawStateFrom(const SamplerState& other) {
   behaviour_state_.deferred_at = other.behaviour_state_.deferred_at;
   behaviour_state_.close_at = other.behaviour_state_.close_at;
   behaviour_state_.guard_blocked_at = other.behaviour_state_.guard_blocked_at;
+  behaviour_state_.think_markers = other.behaviour_state_.think_markers;
 }
 
 void SamplerState::ResetHistory(std::span<const TokenId> tokens) {
@@ -612,9 +630,16 @@ void SamplerState::Accept(std::span<const TokenId> tokens) {
   // O/common/sampling.cpp:940/965: lazy tool grammar is suspended in think,
   // and the end sequence is replayed so a closing sequence can own a trigger.
   for(auto token:tokens) {
+    // Terminal EOG is an engine stop, not a byte accepted by the unfinished
+    // tool grammar. Engines normally test IsStopToken before Accept.
+    if (ToolArgumentStopping() && token == behaviour_state_.forced[behaviour_state_.force_pos]) continue;
     const bool before_think=BehaviourEnabled()&&behaviour_state_.thinking;
+    const bool tool_enabled = BehaviourEnabled() && config_.behaviour->loop_breaker &&
+        config_.behaviour->loop_tool_args && config_.behaviour->loop_exempt && config_.constraint;
+    const bool tool_active = tool_enabled && !before_think &&
+        config_.constraint->grammar->InsideToolCall(constraint_state_);
     if(BehaviourEnabled())behaviour_state_.Accept(*config_.behaviour,token,
-      config_.constraint!=nullptr||config_.behaviour->loop_exempt);
+      config_.constraint!=nullptr||config_.behaviour->loop_exempt, tool_active);
     const bool after_think=BehaviourEnabled()&&behaviour_state_.thinking;
     if(!config_.constraint||!BehaviourEnabled())continue;
     auto next=constraint_state_;
@@ -624,6 +649,14 @@ void SamplerState::Accept(std::span<const TokenId> tokens) {
       for(auto end_token:behaviour_state_.matched_end)
         next=config_.constraint->vocabulary->Accept(*config_.constraint->grammar,next,end_token);
     if(next!=constraint_state_) {constraint_state_=std::move(next);constraint_mask_.reset();}
+    if (tool_enabled) {
+      auto& state = behaviour_state_;
+      const bool open = !after_think && config_.constraint->grammar->InsideToolCall(constraint_state_);
+      if (open != state.tool_call_open) {
+        state.tool_call_open = open;
+        state.loop.tool = {};
+      }
+    }
   }
   if (config_.frequency_penalty != 0 || config_.presence_penalty != 0 ||
       (BehaviourEnabled() && config_.behaviour->production_sampling)) {
@@ -704,8 +737,10 @@ std::optional<SamplingDistribution> SamplerState::DistributionFromTop(
     std::span<const float> values, std::span<const TokenId> ids,
     std::size_t vocab) const {
   if (BehaviourEnabled()) {
-    if (!BehaviourTopSafe(values,ids,vocab)) return std::nullopt;
-    return BehaviourDistributionFor(values,ids,vocab);
+    std::optional<ThinkMarkerRow> think_marker_row;
+    if (!BehaviourTopSafe(values, ids, vocab, think_marker_row))
+      return std::nullopt;
+    return BehaviourDistributionFor(values, ids, vocab, think_marker_row);
   }
   if (values.size() != ids.size() || values.empty() ||
       config_.temperature == 0 || config_.top_k <= 0 ||
@@ -809,6 +844,9 @@ TokenId SamplerState::Sample(std::span<const float> logits) {
       static_cast<std::size_t>(std::numeric_limits<TokenId>::max())) {
     throw std::invalid_argument("logit distribution exceeds token ID range");
   }
+  // A draw deferred before the last committed token cannot override a stop
+  // detected on that token. The forced row below supplies the terminal EOG.
+  if (ToolArgumentStopping()) pending_sample_.reset();
   if (pending_sample_) {
     if (*pending_sample_ >= logits.size()) {
       throw std::invalid_argument("pending sample exceeds vocabulary");
@@ -842,8 +880,13 @@ TokenId SamplerState::SampleResidual(
     std::span<const float> target_logits,
     std::span<const TokenId> candidate_ids,
     std::span<const float> candidate_probabilities) {
-  return Distribution(target_logits)
-      .SampleResidual(candidate_ids, candidate_probabilities, &rng_state_);
+  const auto distribution = Distribution(target_logits);
+  const auto token = distribution.SampleResidual(
+      candidate_ids, candidate_probabilities, &rng_state_);
+  if (const auto& metadata = distribution.behaviour();
+      metadata && metadata->think_marker_row)
+    ObserveThinkMarker(*metadata->think_marker_row, token);
+  return token;
 }
 
 double SamplerState::Uniform() {
@@ -1183,12 +1226,41 @@ std::optional<SamplingDistribution> SamplerState::InertEogDistribution(
     std::span<const float> logits, SamplerState& native) const {
   const auto& b = *config_.behaviour;
   const auto& st = behaviour_state_;
+  // Exact greedy proof for an unfinished constrained call: one forbidden EOG
+  // proves that the grammar is restrictive. TransformBehaviour then disables
+  // the answer EOG interventions. If its unrestricted winner is legal, masking
+  // any other tokens cannot change that winner or its token-ID tie break.
+  // This path returns the same empty intervention journal as the general path.
+  if (config_.temperature == 0.0F && config_.constraint &&
+      !config_.penalties_enabled() && !b.production_sampling &&
+      (!b.logit_bias_enabled || b.logit_bias.empty()) &&
+      (!b.model_suppress_tokens || b.suppress_ids.empty()) &&
+      !st.thinking && !st.forcing() && !(b.loop_breaker && st.loop.nudging())) {
+    const auto& constraint = *config_.constraint;
+    if (constraint.vocabulary->size() == logits.size()) {
+      const bool restrictive = std::ranges::any_of(b.eog_ids, [&](TokenId token) {
+        return token < logits.size() &&
+               !constraint.vocabulary->Allows(*constraint.grammar,
+                                               constraint_state_, token);
+      });
+      if (restrictive) {
+        const auto winner = native.SampleGreedy(logits);
+        if (constraint.vocabulary->Allows(*constraint.grammar,
+                                         constraint_state_, winner)) {
+          SamplingDistribution current({{winner, 1.0}}, 1.0);
+          current.behaviour_ = std::make_shared<BehaviourDistribution>();
+          return current;
+        }
+      }
+    }
+  }
   // Only EOG masks can be active here. Keep the general path for active masks,
   // penalties, bias, forcing, close rewrites and sampling-profile changes.
   if (NeedsConstraintMask() || config_.penalties_enabled() ||
       b.production_sampling ||
       (b.logit_bias_enabled && !b.logit_bias.empty()) ||
       (b.model_suppress_tokens && !b.suppress_ids.empty()) || st.forcing() ||
+      (st.thinking && b.marker_entropy_gate) ||
       (st.thinking && b.marker_bias != 0 && !b.marker_ids.empty()) ||
       (b.loop_breaker && st.loop.nudging()) ||
       (st.thinking && eog_closes_think(b, st)) || st.boundary.deferred_stop ||
@@ -1299,6 +1371,30 @@ std::vector<std::string> SamplerState::BehaviourSummary() const {
   auto lines=behaviour_state_.Summary();
   if(!BehaviourEnabled()) return lines;
   const auto& b=*config_.behaviour;
+  if (b.marker_entropy_gate) {
+    const ThinkMarkerCounts empty;
+    const auto& counts = behaviour_state_.think_markers
+                             ? *behaviour_state_.think_markers
+                             : empty;
+    std::ostringstream line;
+    line << std::setprecision(std::numeric_limits<double>::max_digits10)
+         << "THINK_MARKERS tau=" << *b.marker_entropy_gate
+         << " bias=" << b.marker_bias << " think_tokens=" << counts.think_tokens
+         << " markers=" << counts.markers << " gate_rows=" << counts.gate_rows
+         << " gate_open=" << counts.gate_open;
+    const auto histogram = [&](const char* name, const auto& bins) {
+      line << ' ' << name << '=';
+      for (std::size_t i = 0; i < bins.size(); ++i) {
+        if (i)
+          line << ',';
+        line << bins[i];
+      }
+    };
+    histogram("hist_all", counts.hist_all);
+    histogram("hist_marker", counts.hist_marker);
+    line << " scope=request";
+    lines.push_back(line.str());
+  }
   lines.push_back("BEHAVIOUR_ENGAGE name=guard_escalation taken="+std::string(behaviour_state_.guard_escalation_taken?"1":"0")+
     " fallback=0 reason="+(behaviour_state_.guard_escalation_taken?"blocked_attempts_reached_k":"none")+" scope=request");
   std::vector<std::pair<std::string,bool>> enabled={
@@ -1311,7 +1407,8 @@ std::vector<std::string> SamplerState::BehaviourSummary() const {
     {"production_sampling",b.production_sampling},{"model_suppress_tokens",b.model_suppress_tokens}};
   for(const auto& [name,on]:enabled) {
     if(!on) continue;
-    const bool seen=std::ranges::any_of(behaviour_state_.counters,[&](const auto& kv){return kv.first.first==name;});
+    const bool seen=std::ranges::any_of(behaviour_state_.counters,[&](const auto& kv){return kv.first.first==name;}) ||
+      (name=="loop_breaker" && behaviour_state_.loop.stopped_tools);
     if(!seen) {
       const bool exempt=(config_.constraint||b.loop_exempt)&&
         (name=="loop_breaker"||name=="loop_transition"||name=="loop_eog_close");
@@ -1368,16 +1465,58 @@ struct BehaviourLogits : BehaviourScratch {
   std::vector<Stage> stages;
   float temperature{0};
   bool defer{false};
+  std::optional<ThinkMarkerRow> think_marker_row;
 };
+// Canonical descending raw finite top-k, irrespective of IDs, temperature,
+// min_keep, EOG exact mode, or any subsequent logit transform. Equal values
+// contribute identical double terms, so tie order cannot change the entropy.
+double RawTopKEntropy(std::span<const float> raw, int top_k) {
+  BehaviourScratch scratch;
+  auto& values = scratch.logits;
+  values.assign(raw.begin(), raw.end());
+  std::erase_if(values, [](float v) { return !std::isfinite(v); });
+  if (top_k > 0 && values.size() > static_cast<std::size_t>(top_k)) {
+    std::partial_sort(values.begin(), values.begin() + top_k, values.end(),
+                      std::greater<>{});
+    values.resize(top_k);
+  } else
+    std::ranges::sort(values, std::greater<>{});
+  // A mandatory force may rescue a row with no raw finite support.
+  if (values.empty())
+    return 0;
+  const double maximum = values.front();
+  std::vector<double> weights;
+  weights.reserve(values.size());
+  double sum = 0;
+  for (const float value : values) {
+    const double weight = std::exp(static_cast<double>(value) - maximum);
+    weights.push_back(weight);
+    sum += weight;
+  }
+  double mean = 0;
+  for (std::size_t i = 0; i < values.size(); ++i)
+    mean += (weights[i] / sum) * (static_cast<double>(values[i]) - maximum);
+  // Clamp the mathematical lower bound for tau=0 and histogram indexing.
+  return std::max(0.0, std::log(sum) - mean);
+}
 // O/common/sampling.cpp:1096-1188: raw T1 canonical top-k denominator,
 // explicit EOG bias exemptions, grammar/channel exemptions and deferred stop.
-BehaviourLogits TransformBehaviour(std::span<const float> raw,
-    std::span<const TokenId> ids,const SamplingConfig& c,
-    const BehaviourState& st,bool grammar_active) {
+BehaviourLogits TransformBehaviour(
+    std::span<const float> raw, std::span<const TokenId> ids,
+    const SamplingConfig& c, const BehaviourState& st, bool grammar_active,
+    std::optional<ThinkMarkerRow> think_marker_row = {}) {
   const auto& b=*c.behaviour;
   BehaviourLogits result;
   auto& current = result.logits;
   current.assign(raw.begin(), raw.end());
+  if (st.thinking && b.marker_entropy_gate) {
+    if (!think_marker_row) {
+      const double entropy = RawTopKEntropy(raw, c.top_k);
+      think_marker_row =
+          ThinkMarkerRow{entropy, entropy >= *b.marker_entropy_gate};
+    }
+    result.think_marker_row = think_marker_row;
+  }
   float temperature=c.temperature;
   const auto id=[&](std::size_t i){return ids.empty()?static_cast<TokenId>(i):ids[i];};
   const auto stage = [&](std::string name, std::string reason, bool identical = false) {
@@ -1405,7 +1544,7 @@ BehaviourLogits TransformBehaviour(std::span<const float> raw,
   auto& denom = denominator.logits;
   bool denominator_ready = false;
   double maximum = -INFINITY, sum = 0;
-  // Nothing else consumes this raw denominator. Preserve its arithmetic and
+  // EOG queries alone consume this denominator. Preserve its arithmetic and
   // ordering, but materialize it only on the first finite probability query.
   const auto ensure_denominator = [&] {
     if (denominator_ready) return;
@@ -1487,7 +1626,10 @@ BehaviourLogits TransformBehaviour(std::span<const float> raw,
     for(auto token:b.suppress_ids)mask(token);
     stage("model_suppress_tokens","gguf_model_suppressed_token_changed_choice");
   }
-  if(st.thinking&&b.marker_bias!=0&&!b.marker_ids.empty()&&!st.forcing()) {
+  const bool gate_open =
+      !result.think_marker_row || result.think_marker_row->gate_open;
+  if (st.thinking && b.marker_bias != 0 && !b.marker_ids.empty() &&
+      !st.forcing() && gate_open) {
     if (ids.empty()) {
       // The request builder creates this list from a std::set: once per token.
       assert(std::unordered_set<TokenId>(b.marker_ids.begin(), b.marker_ids.end()).size() ==
@@ -1557,7 +1699,10 @@ BehaviourLogits TransformBehaviour(std::span<const float> raw,
   if(st.forcing()) {
     const auto forced=st.forced[st.force_pos];
     for(std::size_t i=0;i<current.size();++i)current[i]=id(i)==forced?0.0F:-INFINITY;
-    stage(st.force_reason,"forced_transition_token_"+std::to_string(forced));
+    // TOOL detections are counted on accepted history in Summary, including
+    // speculative commit replay. Counting draws would duplicate that event.
+    if (st.force_reason != "tool_argument_loop")
+      stage(st.force_reason,"forced_transition_token_"+std::to_string(forced));
   }
   result.temperature=temperature;
   return result;
@@ -1567,10 +1712,100 @@ TokenLogprob SamplerState::RawLogprobs(std::span<const float> logits,
                                      TokenId token, std::size_t top_n) const {
   if (logits.empty() || token >= logits.size() || top_n > 20)
     throw std::invalid_argument("invalid logprob vocabulary or top_logprobs");
+  // The old code scored a WithoutBehaviour() copy of this state. The copy
+  // differs only in config_.behaviour, which neither the penalty lookup nor
+  // the constraint mask reads, except that an open think block or a tool-
+  // argument loop stop drops the constraint. Reading this state directly gives
+  // the same values with no O(history) copy per row.
+  std::optional<BehaviourLogits> transformed;
+  bool constraint_active = true;
+  if (BehaviourEnabled()) {
+    if (behaviour_state_.thinking || ToolArgumentStopping())
+      constraint_active = false;
+    transformed.emplace(TransformBehaviour(logits, {}, config_, behaviour_state_,
+                                           NeedsConstraintMask()));
+    logits = transformed->logits;
+  }
+  const auto mask = constraint_active && config_.constraint
+                        ? config_.constraint->Allowed(constraint_state_)
+                        : nullptr;
+  if (mask && mask->size() != logits.size())
+    throw std::invalid_argument("JSON constraint vocabulary differs from logits");
+  // Visit the finite, unmasked entries in vocabulary order. The sparse
+  // penalties are sorted too, so one cursor replaces a binary search per entry
+  // and yields the value AdjustedLogit would return.
+  const auto for_each_score = [&](auto&& visit) {
+    auto penalty = penalty_counts_.begin();
+    for (std::size_t i = 0; i < logits.size(); ++i) {
+      if (!std::isfinite(logits[i]) || (mask && !(*mask)[i]))
+        continue;
+      while (penalty != penalty_counts_.end() && penalty->token < i)
+        ++penalty;
+      const double value =
+          penalty != penalty_counts_.end() && penalty->token == i
+              ? Penalize(logits[i], config_, *penalty)
+              : static_cast<double>(logits[i]);
+      if (!std::isfinite(value))
+        throw std::runtime_error(
+            "sampling penalties produced a non-finite logit");
+      visit(static_cast<TokenId>(i), value);
+    }
+  };
+  // Pass 1: the peak and the selected token's value. The sum below needs the
+  // peak first; an online rescaled sum would change the low bits.
+  double maximum = -std::numeric_limits<double>::infinity();
+  double selected = -std::numeric_limits<double>::infinity();
+  std::size_t count = 0;
+  for_each_score([&](TokenId id, double value) {
+    maximum = std::max(maximum, value);
+    if (id == token)
+      selected = value;
+    ++count;
+  });
+  if (count == 0)
+    throw std::runtime_error("logit distribution contains no finite values");
+  // Pass 2: the sum in vocabulary order, and the best entries in a small heap.
+  // IsBetterProbability is a strict total order (value, then token ID), so the
+  // kept set and its order match a full partial_sort.
+  const std::size_t keep = std::min(top_n, count);
+  std::vector<Probability> best;
+  best.reserve(keep);
+  double sum = 0;
+  for_each_score([&](TokenId id, double value) {
+    sum += std::exp(value - maximum);
+    if (keep == 0)
+      return;
+    const Probability entry{id, value};
+    if (best.size() < keep) {
+      best.push_back(entry);
+      std::push_heap(best.begin(), best.end(), IsBetterProbability);
+    } else if (IsBetterProbability(entry, best.front())) {
+      std::pop_heap(best.begin(), best.end(), IsBetterProbability);
+      best.back() = entry;
+      std::push_heap(best.begin(), best.end(), IsBetterProbability);
+    }
+  });
+  // Subtract the peak first to preserve small logprobs on large logit rows.
+  const double normalization = std::log(sum);
+  TokenLogprob result{token, selected - maximum - normalization, {}};
+  if (keep != 0) {
+    std::sort_heap(best.begin(), best.end(), IsBetterProbability);
+    for (auto& score : best)
+      score.value = score.value - maximum - normalization;
+    result.top_logprobs = std::move(best);
+  }
+  return result;
+}
+
+TokenLogprob SamplerState::RawLogprobsReference(std::span<const float> logits,
+                                              TokenId token,
+                                              std::size_t top_n) const {
+  if (logits.empty() || token >= logits.size() || top_n > 20)
+    throw std::invalid_argument("invalid logprob vocabulary or top_logprobs");
   auto native = WithoutBehaviour();
   std::optional<BehaviourLogits> transformed;
   if (BehaviourEnabled()) {
-    if (behaviour_state_.thinking)
+    if (behaviour_state_.thinking || ToolArgumentStopping())
       native.config_.constraint.reset();
     transformed.emplace(TransformBehaviour(logits, {}, config_, behaviour_state_,
                                            NeedsConstraintMask()));
@@ -1642,6 +1877,9 @@ SamplerState SamplerState::BehaviourWithoutIntervention(std::string_view name) c
   else if(name=="reasoning_budget")disabled->reasoning_budget_enabled=false;
   else if(name=="loop_breaker") {
     disabled->loop_breaker=false;variant.behaviour_state_.loop.nudge_left=0;
+    if (variant.behaviour_state_.force_reason == "tool_argument_loop") {
+      variant.behaviour_state_.forced.clear();variant.behaviour_state_.force_pos=0;
+    }
   } else if(name=="loop_transition")disabled->loop_transition=0;
   if(variant.behaviour_state_.forcing()&&variant.behaviour_state_.force_reason==name) {
     if(name=="loop_transition")variant.behaviour_state_.Force(b.budget_forced,"loop_breaker");
@@ -1651,12 +1889,15 @@ SamplerState SamplerState::BehaviourWithoutIntervention(std::string_view name) c
   return variant;
 }
 SamplingDistribution SamplerState::BehaviourDistributionFor(
-    std::span<const float> logits,std::span<const TokenId> ids,std::size_t vocab) const {
+    std::span<const float> logits, std::span<const TokenId> ids,
+    std::size_t vocab, std::optional<ThinkMarkerRow> think_marker_row) const {
   if(logits.empty()||(!ids.empty()&&logits.size()!=ids.size()))
     throw std::invalid_argument("invalid behaviour sampling row");
   const bool global=!ids.empty()&&vocab>0;
   auto native=WithoutBehaviour();
-  if(behaviour_state_.thinking)native.config_.constraint.reset();
+  // Bypass the grammar only for this mandatory terminal row. Keep the actual
+  // request grammar and its partial-call state intact for rollback/acceptance.
+  if(behaviour_state_.thinking || ToolArgumentStopping())native.config_.constraint.reset();
   if (ids.empty() && observe_behaviour_)
     if (auto inert = InertEogDistribution(logits, native)) return std::move(*inert);
   const auto build_with=[&](SamplerState working,std::span<const float> row){
@@ -1679,7 +1920,10 @@ SamplingDistribution SamplerState::BehaviourDistributionFor(
   };
   auto metadata=std::make_shared<BehaviourDistribution>();
   const auto& b=*config_.behaviour;
-  const auto transforms=TransformBehaviour(logits,ids,config_,behaviour_state_,NeedsConstraintMask());
+  const auto transforms =
+      TransformBehaviour(logits, ids, config_, behaviour_state_,
+                         NeedsConstraintMask(), think_marker_row);
+  metadata->think_marker_row = transforms.think_marker_row;
   // Filtering is applied once to FINAL transformed logits. Intermediates can
   // legitimately have empty support that a later mandatory force rescues.
   auto current=build(transforms.logits,transforms.temperature);
@@ -1734,7 +1978,8 @@ SamplingDistribution SamplerState::BehaviourDistributionFor(
       }
       auto variant=BehaviourWithoutIntervention(stage.name);
       try {
-        stage.before=variant.BehaviourDistributionFor(logits,ids,vocab);
+        stage.before = variant.BehaviourDistributionFor(
+            logits, ids, vocab, transforms.think_marker_row);
         stage.before_random=stage.before.behaviour()->random;
         stage.before.behaviour_.reset();
       } catch(const std::runtime_error& error) {
@@ -1750,15 +1995,18 @@ SamplingDistribution SamplerState::BehaviourDistributionFor(
   } else metadata->stages.clear();
   current.behaviour_=std::move(metadata);return current;
 }
-bool SamplerState::BehaviourTopSafe(std::span<const float> values,
-    std::span<const TokenId> ids,std::size_t vocab) const {
+bool SamplerState::BehaviourTopSafe(
+    std::span<const float> values, std::span<const TokenId> ids,
+    std::size_t vocab, std::optional<ThinkMarkerRow>& think_marker_row) const {
   const auto fail=[&](std::string reason){behaviour_state_.Fallback("candidate_path",std::move(reason));return false;};
   if(values.size()!=ids.size()||values.empty()||config_.top_k<=0||config_.temperature<=0||
      (observe_behaviour_&&config_.penalties_enabled()))return fail("native_candidate_policy_not_applicable");
   if(NeedsConstraintMask())return fail("grammar_mask_needs_full_row");
   const auto& b=*config_.behaviour;
   if(observe_behaviour_) {
-    const auto transforms=TransformBehaviour(values,ids,config_,behaviour_state_,false);
+    const auto transforms = TransformBehaviour(
+        values, ids, config_, behaviour_state_, false, think_marker_row);
+    think_marker_row = transforms.think_marker_row;
     std::vector<std::string> names;
     for(const auto& stage:transforms.stages)names.push_back(stage.name);
     if(b.production_sampling)names.push_back("production_sampling");
@@ -1766,7 +2014,7 @@ bool SamplerState::BehaviourTopSafe(std::span<const float> values,
       names.push_back("loop_eog_close");
     for(const auto& name:names) {
       auto variant=BehaviourWithoutIntervention(name);
-      if(!variant.BehaviourTopSafe(values,ids,vocab))
+      if (!variant.BehaviourTopSafe(values, ids, vocab, think_marker_row))
         return fail("counterfactual_"+name+"_topk_not_proven");
     }
   }
@@ -1832,7 +2080,8 @@ bool SamplerState::BehaviourTopSafe(std::span<const float> values,
     for(auto token:b.marker_ids)if(!Contains(ids,token))return fail("positive_bias_token_not_in_device_candidates");
     // All marker IDs are represented, so unseen marker boost is also zero.
   }
-  const auto transformed=TransformBehaviour(values,ids,config_,behaviour_state_,false);
+  const auto transformed = TransformBehaviour(
+      values, ids, config_, behaviour_state_, false, think_marker_row);
   auto ranked_float=transformed.logits;
   std::vector<double> ranked(ranked_float.begin(),ranked_float.end());
   double unseen=raw.back()+unseen_extra;
@@ -1852,10 +2101,34 @@ bool SamplerState::BehaviourTopSafe(std::span<const float> values,
   if(!complete&&(ranked.size()<keep||!(ranked[keep-1]>unseen)))return fail("transformed_topk_not_proven");
   return true;
 }
+void SamplerState::ObserveThinkMarker(const ThinkMarkerRow& row,
+                                      TokenId actual) {
+  if (!config_.behaviour || !config_.behaviour->marker_entropy_gate ||
+      !behaviour_state_.thinking)
+    return;
+  auto& optional = behaviour_state_.think_markers;
+  if (!optional)
+    optional.emplace();
+  auto& counts = *optional;
+  // Follow Taken: observed worker rows still count if a later stop cuts tokens.
+  // CopyDrawStateFrom publishes totals; receiver Accept replay adds nothing.
+  ++counts.think_tokens;
+  ++counts.gate_rows;
+  if (row.gate_open)
+    ++counts.gate_open;
+  const auto bin = static_cast<std::size_t>(std::min(30.0, row.entropy * 10));
+  ++counts.hist_all[bin];
+  if (Contains(config_.behaviour->marker_ids, actual)) {
+    ++counts.markers;
+    ++counts.hist_marker[bin];
+  }
+}
 void SamplerState::ObserveBehaviour(const SamplingDistribution& distribution,
     TokenId actual,std::uint64_t rng_before,std::span<const TokenId> proposal_ids,
     std::span<const float> proposal_probabilities,TokenId proposed,double q) {
   const auto& metadata=distribution.behaviour();if(!metadata)return;
+  if (metadata->think_marker_row)
+    ObserveThinkMarker(*metadata->think_marker_row, actual);
   const auto decide=[&](const SamplingDistribution& d,bool random){
     auto rng=rng_before;
     if(q>0) {

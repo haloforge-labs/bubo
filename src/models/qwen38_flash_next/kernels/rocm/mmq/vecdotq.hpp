@@ -70,6 +70,9 @@ static __device__ __forceinline__ uint32_t unpack_ksigns(const uint8_t v) {
 #define VDR_Q1_0_Q8_1_MMVQ 1  // Process one 32-element chunk at a time for parallelism
 #define VDR_Q1_0_Q8_1_MMQ  4  // Q1_0 has 128 bits (4 ints) per block
 
+#define VDR_Q2_0_Q8_1_MMVQ 1  // Process one 32-element chunk at a time for parallelism
+#define VDR_Q2_0_Q8_1_MMQ  2  // Q2_0 group 64: 128 bits (4 ints) per block, 2 32-element chunks
+
 #define VDR_Q4_0_Q8_1_MMVQ 2
 #define VDR_Q4_0_Q8_1_MMQ  4
 
@@ -672,6 +675,54 @@ static __device__ __forceinline__ float vec_dot_q1_0_q8_1(
     return d1 * d8 * sumi;
 }
 
+// Q2_0 (ggml-org/llama.cpp bec4772f, CUDA vec dot of 9b2a0888): 64 values with ONE fp16 scale, two bits per value (four per byte, low bits first),
+// code c decodes to (c - 1) * d. Q8_1 has 32 values per block, so iqs selects one of the two 32-value halves.
+static __device__ __forceinline__ float vec_dot_q2_0_q8_1(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+
+    const block_q2_0 * bq2_0 = (const block_q2_0 *) vbq + kbx;
+
+    const float d2 = bq2_0->d;
+
+    const block_q8_1 * bq8_1_chunk = bq8_1 + iqs;
+
+    // Load 64 bits (8 bytes) of codes for this half: bytes [8*iqs, 8*iqs + 8)
+    const int offset = iqs * 8;
+    const int v0 = bq2_0->qs[offset + 0] | (bq2_0->qs[offset + 1] << 8) |
+                   (bq2_0->qs[offset + 2] << 16) | (bq2_0->qs[offset + 3] << 24);
+    const int v1 = bq2_0->qs[offset + 4] | (bq2_0->qs[offset + 5] << 8) |
+                   (bq2_0->qs[offset + 6] << 16) | (bq2_0->qs[offset + 7] << 24);
+
+    // Unpack 32 two-bit codes into 8 ints, each holding 4 signed int8 values in {-1, 0, 1, 2}.
+    int vi_bytes[8];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        const int codes0 = (v0 >> (j * 8)) & 0xFF;
+        const int codes1 = (v1 >> (j * 8)) & 0xFF;
+        const int a0 = ((codes0 >> 0) & 0x3) - 1;
+        const int a1 = ((codes0 >> 2) & 0x3) - 1;
+        const int a2 = ((codes0 >> 4) & 0x3) - 1;
+        const int a3 = ((codes0 >> 6) & 0x3) - 1;
+        const int b0 = ((codes1 >> 0) & 0x3) - 1;
+        const int b1 = ((codes1 >> 2) & 0x3) - 1;
+        const int b2 = ((codes1 >> 4) & 0x3) - 1;
+        const int b3 = ((codes1 >> 6) & 0x3) - 1;
+        vi_bytes[j]     = (a0 & 0xFF) | ((a1 & 0xFF) << 8) | ((a2 & 0xFF) << 16) | ((a3 & 0xFF) << 24);
+        vi_bytes[4 + j] = (b0 & 0xFF) | ((b1 & 0xFF) << 8) | ((b2 & 0xFF) << 16) | ((b3 & 0xFF) << 24);
+    }
+
+    int sumi = 0;
+#pragma unroll
+    for (int j = 0; j < 8; ++j) {
+        const int u = get_int_b4(bq8_1_chunk->qs, j);
+        sumi = ggml_hip_dp4a(vi_bytes[j], u, sumi);
+    }
+
+    // Apply Q2_0's single scale and this half's Q8_1 scale
+    const float d8 = __low2float(bq8_1_chunk->ds);
+    return d2 * d8 * sumi;
+}
+
 static __device__ __forceinline__ float vec_dot_q4_0_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
 
@@ -847,6 +898,26 @@ static __device__ __forceinline__ float vec_dot_q3_K_q8_1(
     return vec_dot_q3_K_q8_1_impl_mmvq(vl, vh, u, bq3_K->scales, scale_offset, d, d8);
 }
 
+// The 6-bit scale and min of sub-blocks 2j and 2j + 1 (j in 0..3) of a Q4_K
+// block. The twelve scale bytes are read as three words by every lane, and
+// both packings are formed before a select: with a branch on j, the third
+// word's load was sunk into the j >= 2 side, whose wait then covered every
+// load the wave had in flight. The 16-bit words and masks are the usual ones.
+static __device__ __forceinline__ void q4_K_scale_pair(
+    const block_q4_K * __restrict__ b, const int j, uint16_t * __restrict__ aux) {
+    const uint32_t * words = (const uint32_t *)b->scales;
+    const int shift = 16*(j & 1);
+    const uint32_t lo  = (words[0] >> shift) & 0xffff; // scales[j % 2]
+    const uint32_t mid = (words[1] >> shift) & 0xffff; // scales[j % 2 + 2]
+    const uint32_t hi  = (words[2] >> shift) & 0xffff; // scales[j % 2 + 4]
+    const uint32_t low0  = lo  & 0x3f3f;
+    const uint32_t low1  = mid & 0x3f3f;
+    const uint32_t high0 = ((hi >> 0) & 0x0f0f) | ((lo  & 0xc0c0) >> 2);
+    const uint32_t high1 = ((hi >> 4) & 0x0f0f) | ((mid & 0xc0c0) >> 2);
+    aux[0] = j < 2 ? low0 : high0;
+    aux[1] = j < 2 ? low1 : high1;
+}
+
 static __device__ __forceinline__ float vec_dot_q4_K_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
 
@@ -868,16 +939,8 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1(
     v[0] = q4[0];
     v[1] = q4[4];
 
-    const uint16_t * scales = (const uint16_t *)bq4_K->scales;
     uint16_t aux[2];
-    const int j = bq8_offset/2;
-    if (j < 2) {
-        aux[0] = scales[j+0] & 0x3f3f;
-        aux[1] = scales[j+2] & 0x3f3f;
-    } else {
-        aux[0] = ((scales[j+2] >> 0) & 0x0f0f) | ((scales[j-2] & 0xc0c0) >> 2);
-        aux[1] = ((scales[j+2] >> 4) & 0x0f0f) | ((scales[j-0] & 0xc0c0) >> 2);
-    }
+    q4_K_scale_pair(bq4_K, bq8_offset/2, aux);
     const uint8_t * sc = (const uint8_t *)aux;
     const uint8_t * m  = sc + 2;
 
@@ -1318,17 +1381,7 @@ struct Q4MoeFragment {
     v[0] = q[0];
     v[1] = q[4];
     dm = w->dm;
-    const auto* scales = reinterpret_cast<const uint16_t*>(w->scales);
-    const int j = offset / 2;
-    if (j < 2) {
-      aux[0] = scales[j] & 0x3f3f;
-      aux[1] = scales[j + 2] & 0x3f3f;
-    } else {
-      aux[0] = ((scales[j + 2] >> 0) & 0x0f0f) |
-               ((scales[j - 2] & 0xc0c0) >> 2);
-      aux[1] = ((scales[j + 2] >> 4) & 0x0f0f) |
-               ((scales[j] & 0xc0c0) >> 2);
-    }
+    q4_K_scale_pair(w, offset / 2, aux);
   }
 
   __device__ __forceinline__ float Dot(const block_q8_1* x, int iqs) const {

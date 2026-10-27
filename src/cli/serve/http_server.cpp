@@ -1,4 +1,5 @@
 #include "src/cli/serve/http_server.hpp"
+#include "src/core/platform/memory_guard.hpp"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -38,10 +39,12 @@
 #include "src/cli/serve/audio_websocket.hpp"
 #include "src/cli/serve/debug_request.hpp"
 #include "src/cli/serve/debug_response.hpp"
+#include "src/cli/serve/diffusion_read_api.hpp"
 #include "src/cli/serve/image_api.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/logprobs.hpp"
 #include "src/cli/serve/openai_chat.hpp"
+#include "src/cli/serve/release_profile.hpp"
 #include "src/cli/serve/sampling_request.hpp"
 #include "src/cli/serve/scored_stream.hpp"
 #include "src/cli/serve/stop_sequences.hpp"
@@ -350,6 +353,11 @@ void TraceResponse(std::string_view request_id, int status,
   Trace::Write(record);
 }
 
+/// The stable error codes of the memory guard: request rows report outcome "refused" for them.
+bool IsMemoryGuardCode(std::string_view code) {
+  return code == "insufficient_memory" || code == "insufficient_memory_permanent" || code == "memory_pressure";
+}
+
 bool IsEventStream(const HttpResponse& response) {
   return std::ranges::any_of(response.headers, [](const auto& header) {
     return ToLower(header.first) == "content-type" &&
@@ -375,7 +383,8 @@ std::string BuildResponseHead(const HttpResponse& resp,
   if (!resp.omit_cors) {
     out += "Access-Control-Allow-Origin: *\r\n";
     out += "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n";
-    out += "Access-Control-Allow-Headers: Content-Type, Authorization, Range\r\n";
+    out +=
+        "Access-Control-Allow-Headers: Content-Type, Authorization, Range\r\n";
   }
   for (const auto& [name, value] : resp.headers) {
     out += name;
@@ -471,6 +480,132 @@ HttpResponse Err(int status, const char* reason, const char* message,
   return {.status = status, .reason = reason, .body = e.dump()};
 }
 
+/// Browser preflight (item 1): echo the headers the page asks to send, so SDK headers (x-stainless-*, x-api-key, anthropic-version, ...) pass. Only
+/// header-name characters are echoed; anything else, or no request header, gets the fixed list. OPTIONS only, nothing on a request path.
+HttpResponse PreflightResponse(const HttpRequest& request) {
+  std::string allowed = "Content-Type, Authorization, Range";
+  const std::string asked = request.header("access-control-request-headers");
+  const bool names_only = !asked.empty() && asked.size() <= 1024 &&
+                          std::ranges::all_of(asked, [](unsigned char c) { return std::isalnum(c) || c == '-' || c == '_' || c == ',' || c == ' '; });
+  if (names_only)
+    allowed = asked;
+  HttpResponse response{.status = 204, .reason = "No Content", .omit_cors = true};
+  response.headers.emplace_back("Access-Control-Allow-Origin", "*");
+  response.headers.emplace_back("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+  response.headers.emplace_back("Access-Control-Allow-Headers", allowed);
+  response.headers.emplace_back("Access-Control-Max-Age", "600");
+  return response;
+}
+
+/// Item 3: /v1/messages clients (the Anthropic SDK, Claude Code) read {"type":"error","error":{"type":..,"message":..}}. The handlers and the
+/// transport build the OpenAI shape for every route; this rewrites an error body for the two Messages routes only. A body that is not an OpenAI
+/// error object is left alone.
+bool IsAnthropicRoute(std::string_view path) {
+  return path == "/v1/messages" || path == "/v1/messages/count_tokens";
+}
+
+std::string_view AnthropicErrorType(int status) {
+  switch (status) {
+    case 400: return "invalid_request_error";
+    case 401: return "authentication_error";
+    case 403: return "permission_error";
+    case 404: return "not_found_error";
+    case 413: return "request_too_large";
+    case 429: return "rate_limit_error";
+    case 503: return "overloaded_error";
+    default: return status >= 500 ? "api_error" : "invalid_request_error";
+  }
+}
+
+void ConvertToAnthropicError(HttpResponse* response, std::string_view request_id) {
+  if (response->status < 400 || response->streaming_body || response->websocket)
+    return;
+  try {
+    const auto parsed = json::parse(response->body);
+    const auto* error = parsed.find("error");
+    if (error == nullptr || !error->is_object() || parsed.find("type") != nullptr)
+      return;
+    const auto* message = error->find("message");
+    json::Value detail = json::Value::object();
+    detail["type"] = std::string(AnthropicErrorType(response->status));
+    detail["message"] = message != nullptr && message->is_string() ? message->str() : std::string(response->reason);
+    // The stable OpenAI-side code stays as an extra field (SDKs ignore it; logs and tests key on it).
+    if (const auto* code = error->find("code"); code != nullptr && code->is_string())
+      detail["code"] = code->str();
+    json::Value body = json::Value::object();
+    body["type"] = "error";
+    body["error"] = std::move(detail);
+    body["request_id"] = std::string(request_id);
+    response->body = body.dump();
+  } catch (const std::exception&) {
+    // not JSON: nothing to rewrite
+  }
+}
+
+/// `--debug-hooks` only (loopback listener): replace or clear the memory guard's OS readings, so a gate test can force a refusal, the
+/// low-memory back-off or a recovery through the HTTP API. POST {"ram_available_mib": N, "gpu_local_free_mib": N, "gpu_nonlocal_free_mib": N,
+/// "low_memory": true|false} overrides the named readings (the others keep their real values); POST {"clear": true} restores the OS readings.
+/// GET and every POST return the guard state. Applies to every client of the listener: a test-only surface.
+HttpResponse DebugMemory(const HttpRequest& request, TextGenerationBackend&) {
+  if (!request.debug_hooks || !request.debug_loopback)
+    return Err(404, "Not Found", "no route for this path", "not_found", "not_found");
+  auto* guard = gufo::platform::ProcessMemoryGuard();
+  if (guard == nullptr)
+    return Err(404, "Not Found", "the memory guard is off", "not_found", "memory_guard_off");
+  try {
+    if (request.method == "POST") {
+      const auto body = json::parse(request.body);
+      const auto* clear = body.find("clear");
+      if (clear != nullptr && clear->as_bool()) {
+        guard->ClearOverride();
+        guard->SetDebugNeed(0);
+      } else {
+        if (const auto* extra = body.find("extra_need_mib"); extra != nullptr && extra->is_number())
+          guard->SetDebugNeed(static_cast<std::uint64_t>(extra->as_double(0.0)) << 20);
+        auto readings = guard->Read();
+        readings.ram_ok = true;
+        const auto set_mib = [&](const char* key, std::uint64_t& field) {
+          if (const auto* value = body.find(key); value != nullptr && value->is_number())
+            field = static_cast<std::uint64_t>(value->as_double(0.0)) << 20;
+        };
+        set_mib("ram_available_mib", readings.ram_available);
+        set_mib("ram_total_mib", readings.ram_total);
+        set_mib("commit_available_mib", readings.commit_available);
+        set_mib("process_ram_private_mib", readings.process_ram_private);
+        if (body.find("gpu_local_free_mib") != nullptr || body.find("gpu_nonlocal_free_mib") != nullptr)
+          readings.gpu_ok = true;
+        set_mib("gpu_local_free_mib", readings.gpu_local_free);
+        set_mib("gpu_nonlocal_free_mib", readings.gpu_nonlocal_free);
+        if (body.find("gpu_carve_free_mib") != nullptr) {
+          readings.gpu_carve_known = true;
+          set_mib("gpu_carve_free_mib", readings.gpu_carve_free);
+        }
+        set_mib("gpu_budget_total_mib", readings.gpu_budget_total);
+        if (const auto* low = body.find("low_memory"); low != nullptr && low->is_bool())
+          readings.low_memory_signal = low->as_bool();
+        guard->SetOverride(readings);
+      }
+    }
+    const auto readings = guard->Read();
+    const auto counters = guard->counters();
+    json::Value state = json::Value::object();
+    state["level"] = gufo::platform::GuardLevelName(guard->level());
+    state["overridden"] = guard->overridden();
+    state["floor_mib"] = guard->floor_bytes() >> 20;
+    state["ram_available_mib"] = readings.ram_available >> 20;
+    state["gpu_free_mib"] = (readings.gpu_local_free + readings.gpu_nonlocal_free) >> 20;
+    state["low_memory_signal"] = readings.low_memory_signal;
+    state["extra_need_mib"] = guard->debug_need() >> 20;
+    state["refused_transient"] = counters.refused_transient;
+    state["refused_permanent"] = counters.refused_permanent;
+    state["trimmed_mib"] = counters.trimmed_bytes >> 20;
+    state["cancelled"] = counters.cancelled;
+    return Ok(state);
+  } catch (const std::exception&) {
+    return Err(400, "Bad Request", "expected a JSON object", "invalid_request_error", "invalid_json");
+  }
+}
+
 // Health, readiness and generation share one body once the device is lost:
 // `status` matches the health/readiness shape and `error` the API error shape.
 HttpResponse DeviceLost() {
@@ -537,9 +672,10 @@ bool ReadTextContent(const json::Value* content, std::string* out,
 
 bool ReadTextMessages(const json::Value* input,
                       std::vector<tokenization::ChatMessage>* messages,
-                      bool responses = false,
+                      bool images_supported, bool responses = false,
                       std::string* parse_error = nullptr) {
   core::ImageReadBudget image_budget;
+  image_budget.accepts_images = images_supported;
   if (input == nullptr || !input->is_array() || input->empty())
     return false;
   // Responses replays one assistant turn as several reasoning, message and
@@ -691,18 +827,27 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
   if (const auto* model = body.find("model"); model != nullptr) {
     if (!model->is_string())
       return InvalidCompatibilityRequest("'model' must be a string");
-    if (model->str() != backend.model_id())
-      return Err(404, "Not Found", "requested model is not loaded",
+    if (!AcceptsServedModel(model->str(), backend.model_id()))
+      return Err(404, "Not Found",
+                 ("requested model is not loaded: this process serves '" +
+                  backend.model_id() + "'")
+                     .c_str(),
                  "invalid_request_error", "model_not_found");
   }
   for (const std::string field : {"stream", "echo", "store", "background"}) {
-    if (const auto* value = body.find(field);
-        value != nullptr &&
-        (!value->is_bool() ||
-         (value->as_bool() && !(allowances.stream && field == "stream") &&
-          !(allowances.scored_completion && field == "echo")))) {
-      return InvalidCompatibilityRequest("'" + field + "' must be false");
+    const auto* value = body.find(field);
+    if (value == nullptr)
+      continue;
+    if (field == "stream" && allowances.stream) {
+      // As on Chat Completions, null leaves streaming off.
+      if (!value->is_null() && !value->is_bool())
+        return InvalidCompatibilityRequest("'stream' must be a boolean");
+      continue;
     }
+    if (!value->is_bool() ||
+        (value->as_bool() &&
+         !(allowances.scored_completion && field == "echo")))
+      return InvalidCompatibilityRequest("'" + field + "' must be false");
   }
   for (const std::string field : {"n", "best_of"}) {
     if (const auto* value = body.find(field);
@@ -761,10 +906,14 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
   }
   const auto defaults = backend.sampling_defaults();
   *max_tokens = defaults.max_tokens;
-  if (const auto error = detail::ReadSamplingInteger(
-          body, token_field, allowances.scored_completion ? std::size_t{0} : std::size_t{1},
-          std::size_t{std::numeric_limits<std::uint32_t>::max()}, max_tokens)) {
-    return InvalidCompatibilityRequest(error->message);
+  if (!detail::UnsetTokenLimit(body, token_field)) {
+    if (const auto error = detail::ReadSamplingInteger(
+            body, token_field,
+            allowances.scored_completion ? std::size_t{0} : std::size_t{1},
+            std::size_t{std::numeric_limits<std::uint32_t>::max()},
+            max_tokens)) {
+      return InvalidCompatibilityRequest(error->message);
+    }
   }
   if (const auto error = ParseSamplingConfig(body, defaults.Resolve(thinking),
                                              sampling_config)) {
@@ -781,7 +930,8 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
 HttpResponse ListModels(TextGenerationBackend* backend,
                         const VideoJobService* video_jobs,
                         const TtsService* tts, const AsrService* asr,
-                        const ImageService* images, const json::Value* settings = nullptr) {
+                        const ImageService* images,
+                        const json::Value* settings = nullptr) {
   json::Value resp = json::Value::object();
   resp["object"] = "list";
   json::Value data = json::Value::array();
@@ -790,12 +940,16 @@ HttpResponse ListModels(TextGenerationBackend* backend,
     model["id"] = backend->model_id();
     model["object"] = "model";
     model["created"] = Now();
-    model["owned_by"] = "gufo";
+    model["owned_by"] = "bubo";
     if (settings)
       model["gufo"]["settings"] = *settings;
-    if (backend->max_context() > 0)
+    if (backend->max_context() > 0) {
       model["context_length"] =
           static_cast<std::size_t>(backend->max_context());
+      // Names that llama-server and vLLM clients read for the context size.
+      model["max_model_len"] = static_cast<std::size_t>(backend->max_context());
+      model["meta"]["n_ctx"] = static_cast<std::size_t>(backend->max_context());
+    }
     json::Value input_modalities = json::Value::array();
     input_modalities.push_back("text");
     if (backend->supports_images())
@@ -803,7 +957,11 @@ HttpResponse ListModels(TextGenerationBackend* backend,
     json::Value architecture = json::Value::object();
     architecture["input_modalities"] = std::move(input_modalities);
     model["architecture"] = std::move(architecture);
-    data.push_back(std::move(model));
+    data.push_back(model);
+    if (backend->model_id() != ServedModelAlias()) {
+      model["id"] = std::string(ServedModelAlias());
+      data.push_back(std::move(model));
+    }
   }
   if (video_jobs != nullptr && video_jobs->ready()) {
     json::Value root_model = json::Value::object();
@@ -874,45 +1032,64 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
   if (debug_timeline && !b.supports_timeline())
     return InvalidCompatibilityRequest(
         "timeline is not supported for this model");
+  DiffusionReadOptions diffusion;
+  if (const auto error = ParseDiffusionReadOptions(body, b, true, &diffusion))
+    return InvalidCompatibilityRequest(*error);
   std::int32_t requested_logprobs = -1;
   if (const auto* value = body.find("logprobs");
-      value && !value->is_null() && b.supports_logprobs()) {
+      value && !value->is_null() &&
+      (b.supports_logprobs() || b.supports_diffusion_reads())) {
     if (!value->is_number() || !std::isfinite(value->as_double()) ||
         value->as_double() < 0 || value->as_double() > 20 ||
         value->as_double() != std::floor(value->as_double()))
-      return InvalidCompatibilityRequest("'logprobs' must be an integer in [0,20]");
+      return InvalidCompatibilityRequest(
+          "'logprobs' must be an integer in [0,20]");
     requested_logprobs = static_cast<std::int32_t>(value->as_double());
   }
   std::size_t max_tokens = 0;
   sampling::SamplingConfig sampling_config;
-  if (auto error = ReadCompatibilityOptions(body, b, "max_tokens", &max_tokens,
-                                            &sampling_config,
-                                            b.reasoning_defaults().enabled,
-                                            {
-                                                .stop_field = "stop",
-                                                .stream = true,
-                                                .stream_options = true,
-                                                .ignore_eos = true,
-                                                .scored_completion = requested_logprobs >= 0,
-                                            })) {
+  if (auto error = ReadCompatibilityOptions(
+          body, b, "max_tokens", &max_tokens, &sampling_config,
+          b.reasoning_defaults().enabled,
+          {
+              .stop_field = "stop",
+              .stream = true,
+              .stream_options = true,
+              .ignore_eos = true,
+              .scored_completion = requested_logprobs >= 0,
+          })) {
     return std::move(*error);
   }
   sampling_config.logprobs = requested_logprobs;
+  if (diffusion.params && diffusion.params->read_only) {
+    const auto width = diffusion.params->canvas_length;
+    max_tokens = std::min(max_tokens == 0 ? width : max_tokens, width);
+  }
   const bool echo = body.find("echo") && body.find("echo")->as_bool();
   const bool prompt_score = echo && max_tokens == 0 && requested_logprobs >= 0;
-  if (requested_logprobs >= 0 && !b.supports_logprobs())
+  if (requested_logprobs >= 0 && !b.supports_logprobs() &&
+      !b.supports_diffusion_reads())
     return InvalidCompatibilityRequest(
         prompt_score ? "prompt logprobs are not supported for this model"
                      : "token logprobs are not supported for this model");
   if (requested_logprobs >= 0 && max_tokens == 0 && !prompt_score &&
       body.contains("max_tokens"))
-    return InvalidCompatibilityRequest("'max_tokens' must be a positive integer");
+    return InvalidCompatibilityRequest(
+        "'max_tokens' must be a positive integer");
   if (echo && !prompt_score)
-    return InvalidCompatibilityRequest("echo with logprobs requires max_tokens=0");
+    return InvalidCompatibilityRequest(
+        "echo with logprobs requires max_tokens=0");
   if (prompt_score && debug_timeline)
-    return InvalidCompatibilityRequest("timeline is not supported for prompt scoring");
+    return InvalidCompatibilityRequest(
+        "timeline is not supported for prompt scoring");
   const auto* stream_field = body.find("stream");
   const bool stream = stream_field != nullptr && stream_field->as_bool();
+  if (stream && diffusion.params && diffusion.params->read_only)
+    return InvalidCompatibilityRequest(
+        "streaming diffusion reads are not supported");
+  if (stream && diffusion.return_tokens_as_token_ids)
+    return InvalidCompatibilityRequest(
+        "streaming token-ID responses are not supported");
   bool include_usage = false;
   if (const auto* options = body.find("stream_options")) {
     if (!stream || !options->is_object())
@@ -938,28 +1115,66 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
       return InvalidCompatibilityRequest("'return_progress' must be a boolean");
     return_progress = value->as_bool();
   }
+  bool cache_prompt = true;
+  if (const auto* value = body.find("cache_prompt");
+      value != nullptr && !value->is_null()) {
+    if (!value->is_bool())
+      return InvalidCompatibilityRequest("'cache_prompt' must be a boolean");
+    cache_prompt = value->as_bool();
+  }
   std::vector<std::string> stop_sequences;
   if (const auto error = ParseStopSequences(
           body.find("stop"), StopSequenceFormat::kOpenAi, &stop_sequences))
     return InvalidCompatibilityRequest(*error);
   if (requested_logprobs >= 0 && !stop_sequences.empty())
-    return InvalidCompatibilityRequest("logprobs with stop sequences are not supported");
+    return InvalidCompatibilityRequest(
+        "logprobs with stop sequences are not supported");
 
   const auto* input = body.find("prompt");
-  if (input == nullptr || !input->is_string()) {
-    return InvalidCompatibilityRequest("'prompt' must be a single string");
+  std::string prompt;
+  TokenCompletionRequest token_request;
+  const bool token_prompt = input && input->is_array();
+  if (token_prompt) {
+    if (!b.supports_diffusion_reads())
+      return InvalidCompatibilityRequest(
+          "this model does not support diffusion reads");
+    if (auto error = DiffusionTokenIds(*input, "prompt", b.vocab_size(),
+                                       &token_request.prompt))
+      return InvalidCompatibilityRequest(*error);
+    token_request.diffusion_read = diffusion.params;
+    token_request.stop_token_ids = std::move(diffusion.stop_token_ids);
+    token_request.client_id = req.client_id;
+    token_request.cache_prompt = cache_prompt;
+    if (stream)
+      return InvalidCompatibilityRequest(
+          "streaming token-ID completions are not supported");
+  } else if (input && input->is_string()) {
+    prompt = input->str();
+    if (diffusion.params || body.contains("stop_token_ids"))
+      return InvalidCompatibilityRequest(
+          "diffusion fields require a token-ID prompt on completions");
+  } else {
+    return InvalidCompatibilityRequest(
+        "'prompt' must be a single string or a list of token ids");
   }
-  const std::string prompt = input->str();
-  if (prompt.empty()) {
+  if ((token_prompt && token_request.prompt.empty()) ||
+      (!token_prompt && prompt.empty())) {
     return Err(400, "Bad Request", "'prompt' is required",
                "invalid_request_error", "missing_prompt");
   }
+  if (token_prompt && prompt_score)
+    return InvalidCompatibilityRequest("prompt scoring needs a string prompt");
 
-  auto generation = prompt_score
-      ? b.start_score(prompt, sampling_config, req.max_score_tokens, req.is_cancelled)
-      : b.start_complete(
-      prompt, max_tokens, sampling_config, req.is_cancelled, stream, ignore_eos,
-      req.client_id, stop_sequences, return_progress, debug_timeline);
+  auto generation =
+      prompt_score ? b.start_score(prompt, sampling_config,
+                                   req.max_score_tokens, req.is_cancelled)
+      : token_prompt
+          ? b.start_complete_tokens(token_request, max_tokens, sampling_config,
+                                    req.is_cancelled, false)
+          : b.start_complete(prompt, max_tokens, sampling_config,
+                             req.is_cancelled, stream, ignore_eos,
+                             req.client_id, stop_sequences, return_progress,
+                             debug_timeline, cache_prompt);
   const std::string id = "cmpl-" + RandomId();
   const long long created = Now();
   const std::string model = b.model_id();
@@ -968,13 +1183,15 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
                               UsageJson);
   if (stream && requested_logprobs >= 0) {
     auto stream_log = std::make_shared<HttpResponse::StreamLog>();
-    return {.status = 200,
-            .reason = "OK",
-            .body = {},
-            .headers = {{"Content-Type", "text/event-stream"},
-                        {"Cache-Control", "no-cache"}},
-            .streaming_body = [generation, &b, id, created, model, prompt,
-                               prompt_score, stream_log](const HttpResponse::BodyWriter& writer) {
+    return {
+        .status = 200,
+        .reason = "OK",
+        .body = {},
+        .headers = {{"Content-Type", "text/event-stream"},
+                    {"Cache-Control", "no-cache"}},
+        .streaming_body =
+            [generation, &b, id, created, model, prompt, prompt_score,
+             stream_log](const HttpResponse::BodyWriter& writer) {
               const auto result = generation->Wait();
               if (result.cancelled)
                 return;
@@ -990,11 +1207,15 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
               const LogprobTokenText decode = [&b](sampling::TokenId token) {
                 return b.token_piece(token);
               };
-              choice["logprobs"] = prompt_score
-                  ? LegacyLogprobs(result.tokens, result.prompt_logprobs, decode)
-                  : LegacyLogprobs(result.logprobs, decode);
-              choice["finish_reason"] = result.finish_reason ==
-                  TextGenerationBackend::FinishReason::kLength ? "length" : "stop";
+              choice["logprobs"] =
+                  prompt_score ? LegacyLogprobs(result.tokens,
+                                                result.prompt_logprobs, decode)
+                               : LegacyLogprobs(result.logprobs, decode);
+              choice["finish_reason"] =
+                  result.finish_reason ==
+                          TextGenerationBackend::FinishReason::kLength
+                      ? "length"
+                      : "stop";
               chunk["choices"].push_back(std::move(choice));
               chunk["usage"] = UsageJson(result);
               chunk["timings"] = GenerationTimings(result);
@@ -1004,8 +1225,8 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
               if (writer("data: " + chunk.dump() + "\n\n"))
                 (void)writer("data: [DONE]\n\n");
             },
-            .stream_log = std::move(stream_log),
-            .defer_stream_headers = true};
+        .stream_log = std::move(stream_log),
+        .defer_stream_headers = true};
   }
   if (stream) {
     auto stream_log = std::make_shared<HttpResponse::StreamLog>();
@@ -1139,7 +1360,17 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
     };
   }
 
-  const auto res = generation->Wait();
+  auto res = generation->Wait();
+  const bool read_only = diffusion.params && diffusion.params->read_only;
+  std::vector<sampling::TokenLogprob> read_scores;
+  if (read_only) {
+    if (!res.diffusion_rows)
+      throw std::invalid_argument("diffusion read returned no canvas rows");
+    read_scores = MergeDiffusionRows(
+        *res.diffusion_rows, *diffusion.params,
+        static_cast<std::size_t>(std::max(requested_logprobs, 0)));
+    res.completion_tokens = read_scores.size();
+  }
 
   json::Value resp = json::Value::object();
   resp["id"] = id;
@@ -1148,21 +1379,28 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
   resp["model"] = model;
   json::Value choices = json::Value::array();
   json::Value c = json::Value::object();
-  c["text"] = prompt_score ? prompt : core::Utf8Decoder{}.Push(res.text, true);
+  c["text"] = read_only      ? ""
+              : prompt_score ? prompt
+                             : core::Utf8Decoder{}.Push(res.text, true);
   c["index"] = 0;
   c["logprobs"] = json::Value();
-  if (requested_logprobs >= 0) {
-    if (!prompt_score)
+  if (requested_logprobs >= 0 || read_only) {
+    if (!prompt_score && !read_only)
       ValidateGeneratedLogprobs(res);
-    const LogprobTokenText decode = [&b](sampling::TokenId token) {
-      return b.token_piece(token);
-    };
-    c["logprobs"] = prompt_score
-        ? LegacyLogprobs(res.tokens, res.prompt_logprobs, decode)
-        : LegacyLogprobs(res.logprobs, decode);
+    const LogprobTokenText decode =
+        diffusion.return_tokens_as_token_ids
+            ? LogprobTokenText(DiffusionTokenText)
+            : LogprobTokenText([&b](sampling::TokenId token) {
+                return b.token_piece(token);
+              });
+    c["logprobs"] =
+        read_only      ? LegacyLogprobs(read_scores, decode)
+        : prompt_score ? LegacyLogprobs(res.tokens, res.prompt_logprobs, decode)
+                       : LegacyLogprobs(res.logprobs, decode);
   }
   c["finish_reason"] =
-      res.finish_reason == TextGenerationBackend::FinishReason::kLength
+      read_only ||
+              res.finish_reason == TextGenerationBackend::FinishReason::kLength
           ? "length"
           : "stop";
   choices.push_back(std::move(c));
@@ -1196,6 +1434,9 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
   chat.reasoning = b.reasoning_defaults();
   if (auto error = ParseOpenAiResponseControls(body, &chat))
     return std::move(*error);
+  if (chat.response_format && !b.supports_response_format())
+    return Err(400, "Bad Request", "text.format is not supported by this model",
+               "invalid_request_error", "unsupported_response_format");
   std::size_t max_tokens = 0;
   sampling::SamplingConfig sampling_config;
   if (auto error = ReadCompatibilityOptions(
@@ -1213,12 +1454,14 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
   bool output_logprobs = false;
   if (include && include->is_array()) {
     for (const auto& item : include->items())
-      output_logprobs |= item.is_string() && item.str() == "message.output_text.logprobs";
+      output_logprobs |=
+          item.is_string() && item.str() == "message.output_text.logprobs";
   }
   // Base accepts and ignores include on runners without this capability.
   if ((output_logprobs || top_logprobs) && b.supports_logprobs()) {
     if (!include || !include->is_array())
-      return InvalidCompatibilityRequest("logprobs require 'include' to be an array");
+      return InvalidCompatibilityRequest(
+          "logprobs require 'include' to be an array");
     for (const auto& item : include->items()) {
       if (!item.is_string())
         return InvalidCompatibilityRequest("'include' entries must be strings");
@@ -1230,18 +1473,22 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
           name != "file_search_call.results" &&
           name != "message.input_image.image_url" &&
           name != "web_search_call.action.sources")
-        return InvalidCompatibilityRequest("unsupported Responses include: " + name);
+        return InvalidCompatibilityRequest("unsupported Responses include: " +
+                                           name);
     }
     if (!output_logprobs)
       return InvalidCompatibilityRequest(
           "'top_logprobs' requires include 'message.output_text.logprobs'");
     sampling_config.logprobs = 0;
     if (top_logprobs) {
-      if (!top_logprobs->is_number() || !std::isfinite(top_logprobs->as_double()) ||
+      if (!top_logprobs->is_number() ||
+          !std::isfinite(top_logprobs->as_double()) ||
           top_logprobs->as_double() != std::floor(top_logprobs->as_double()) ||
           top_logprobs->as_double() < 0 || top_logprobs->as_double() > 20)
-        return InvalidCompatibilityRequest("'top_logprobs' must be an integer in [0,20]");
-      sampling_config.logprobs = static_cast<std::int32_t>(top_logprobs->as_double());
+        return InvalidCompatibilityRequest(
+            "'top_logprobs' must be an integer in [0,20]");
+      sampling_config.logprobs =
+          static_cast<std::int32_t>(top_logprobs->as_double());
     }
   }
 
@@ -1259,7 +1506,8 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
       "items, function calls or function outputs";
   if (input != nullptr && input->is_string() && !input->str().empty()) {
     messages.push_back({tokenization::ChatRole::kUser, input->str(), "", ""});
-  } else if (!ReadTextMessages(input, &messages, true, &input_error)) {
+  } else if (!ReadTextMessages(input, &messages, b.supports_images(), true,
+                               &input_error)) {
     return InvalidCompatibilityRequest(input_error);
   }
 
@@ -1337,42 +1585,36 @@ std::optional<HttpResponse> ReadMessagesOutputConfig(
   return {};
 }
 
-HttpResponse AnthropicMessages(const HttpRequest& req,
-                               TextGenerationBackend& b) try {
-  json::Value body;
-  try {
-    body = json::parse(req.body);
-  } catch (const std::exception& e) {
-    return Err(400, "Bad Request", e.what(), "invalid_request_error",
-               "parse_error");
-  }
+// The request fields Messages and count_tokens share, including Bubo's
+// debug-hook guard and the backend's reasoning defaults.
+std::optional<HttpResponse> ReadAnthropicChat(
+    const HttpRequest& req, const json::Value& body, TextGenerationBackend& b,
+    ChatRequest* chat, std::size_t* max_tokens,
+    sampling::SamplingConfig* sampling_config) {
   if (req.debug_hooks && body.contains("debug"))
     return InvalidCompatibilityRequest(
         req.debug_loopback ? "debug is not supported on this endpoint"
                            : "debug hooks require a loopback listener");
 
-  ChatRequest chat;
-  chat.reasoning = b.reasoning_defaults();
+  chat->reasoning = b.reasoning_defaults();
   if (body.is_object()) {
-    if (auto error = ReadThinking(body, &chat.reasoning))
-      return std::move(*error);
-    if (auto error = ReadMessagesOutputConfig(body, &chat.reasoning))
-      return std::move(*error);
+    if (auto error = ReadThinking(body, &chat->reasoning))
+      return error;
+    if (auto error = ReadMessagesOutputConfig(body, &chat->reasoning))
+      return error;
   }
-  std::size_t max_tokens = 0;
-  sampling::SamplingConfig sampling_config;
   if (auto error =
-          ReadCompatibilityOptions(body, b, "max_tokens", &max_tokens,
-                                   &sampling_config, chat.reasoning.enabled,
+          ReadCompatibilityOptions(body, b, "max_tokens", max_tokens,
+                                   sampling_config, chat->reasoning.enabled,
                                    {.stop_field = "stop_sequences",
                                     .stream = true,
                                     .thinking = true,
                                     .output_config = true,
                                     .tools = true})) {
-    return std::move(*error);
+    return error;
   }
-  if (auto error = ParseAnthropicToolControls(body, &chat))
-    return std::move(*error);
+  if (auto error = ParseAnthropicToolControls(body, chat))
+    return error;
 
   std::vector<tokenization::ChatMessage> messages;
   if (const auto* system = body.find("system")) {
@@ -1386,20 +1628,70 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
   std::string messages_error =
       "'messages' must contain text, thinking, tool_use or tool_result "
       "blocks; use /v1/chat/completions for images";
-  if (!ReadTextMessages(body.find("messages"), &messages, false,
-                        &messages_error)) {
+  if (!ReadTextMessages(body.find("messages"), &messages, b.supports_images(),
+                        false, &messages_error)) {
     return InvalidCompatibilityRequest(messages_error);
   }
 
-  chat.messages = std::move(messages);
-  chat.client_id = req.client_id;
+  chat->messages = std::move(messages);
   if (const auto error = ParseStopSequences(body.find("stop_sequences"),
                                             StopSequenceFormat::kAnthropic,
-                                            &chat.stop_sequences))
+                                            &chat->stop_sequences))
     return InvalidCompatibilityRequest(*error);
+  return std::nullopt;
+}
+
+HttpResponse AnthropicMessages(const HttpRequest& req,
+                               TextGenerationBackend& b) try {
+  json::Value body;
+  try {
+    body = json::parse(req.body);
+  } catch (const std::exception& e) {
+    return Err(400, "Bad Request", e.what(), "invalid_request_error",
+               "parse_error");
+  }
+  ChatRequest chat;
+  std::size_t max_tokens = 0;
+  sampling::SamplingConfig sampling_config;
+  if (auto error =
+          ReadAnthropicChat(req, body, b, &chat, &max_tokens, &sampling_config))
+    return std::move(*error);
+  chat.client_id = req.client_id;
   return CreateAnthropicMessage(
       req, b, chat, max_tokens, sampling_config,
       body.find("stream") != nullptr && body.find("stream")->as_bool());
+} catch (const std::length_error& error) {
+  return Err(400, "Bad Request", error.what(), "invalid_request_error",
+             "context_length_exceeded");
+} catch (const std::invalid_argument& error) {
+  return Err(400, "Bad Request", error.what(), "invalid_request_error",
+             "invalid_prompt");
+}
+
+// The prompt size a Messages request would have, without generating.
+HttpResponse AnthropicCountTokens(const HttpRequest& req,
+                                  TextGenerationBackend& b) try {
+  json::Value body;
+  try {
+    body = json::parse(req.body);
+  } catch (const std::exception& e) {
+    return Err(400, "Bad Request", e.what(), "invalid_request_error",
+               "parse_error");
+  }
+  ChatRequest chat;
+  std::size_t max_tokens = 0;
+  sampling::SamplingConfig sampling_config;
+  if (auto error =
+          ReadAnthropicChat(req, body, b, &chat, &max_tokens, &sampling_config))
+    return std::move(*error);
+  if (body.find("stream") != nullptr && body.find("stream")->as_bool())
+    return InvalidCompatibilityRequest("'stream' must be false");
+  const auto tokens = b.count_chat_tokens(chat);
+  if (!tokens)
+    return NotImplemented(req, b);
+  json::Value resp = json::Value::object();
+  resp["input_tokens"] = *tokens;
+  return Ok(resp);
 } catch (const std::length_error& error) {
   return Err(400, "Bad Request", error.what(), "invalid_request_error",
              "context_length_exceeded");
@@ -1440,9 +1732,17 @@ HttpResponse LlamaCompletion(const HttpRequest& req,
           body.find("stop"), StopSequenceFormat::kOpenAi, &stop_sequences))
     return InvalidCompatibilityRequest(*error);
 
+  bool cache_prompt = true;
+  if (const auto* value = body.find("cache_prompt");
+      value != nullptr && !value->is_null()) {
+    if (!value->is_bool())
+      return InvalidCompatibilityRequest("'cache_prompt' must be a boolean");
+    cache_prompt = value->as_bool();
+  }
+
   const auto res =
       b.complete(prompt, max_tokens, sampling_config, req.is_cancelled, {},
-                 req.client_id, stop_sequences);
+                 req.client_id, stop_sequences, cache_prompt);
 
   json::Value resp = json::Value::object();
   resp["content"] = core::Utf8Decoder{}.Push(res.text, true);
@@ -1471,17 +1771,25 @@ HttpResponse LlamaCompletion(const HttpRequest& req,
              "invalid_prompt");
 }
 
-HttpResponse LlamaProps(const HttpRequest& req, TextGenerationBackend&) {
-  const std::string model = req.query_param("model");
-  if (model.empty()) {
-    return Err(400, "Bad Request", "'model' query parameter is required",
-               "invalid_request_error", "missing_model");
-  }
+HttpResponse LlamaProps(const HttpRequest& req, TextGenerationBackend& b) {
+  // Without `?model=` the answer describes the model this server serves, as
+  // llama-server clients expect. A named model is echoed as before.
+  std::string model = req.query_param("model");
+  if (model.empty())
+    model = b.model_id();
   json::Value resp = json::Value::object();
   resp["model"] = model;
   resp["template"] = "";
   json::Value model_info = json::Value::object();
   resp["model_info"] = std::move(model_info);
+  json::Value settings = json::Value::object();
+  settings["n_ctx"] = static_cast<std::size_t>(b.max_context());
+  resp["default_generation_settings"] = std::move(settings);
+  resp["total_slots"] =
+      std::max<std::size_t>(b.session_states().size(), std::size_t{1});
+  json::Value modalities = json::Value::object();
+  modalities["vision"] = b.supports_images();
+  resp["modalities"] = std::move(modalities);
   return Ok(resp);
 }
 
@@ -1703,74 +2011,83 @@ void HttpServer::register_routes() {
       add("POST", path, std::move(handler));
       return;
     }
-    add("POST", path, [handler = std::move(handler), settings = options_.debug_settings]
-        (const HttpRequest& request, TextGenerationBackend& backend) {
-      auto response = handler(request, backend);
-      if (response.status != 200)
-        return response;
-      const auto echo = [settings](json::Value& value) {
-        value["gufo"]["settings"] = *settings;
-        if (const auto* nested = value.find("response"); nested && nested->is_object())
-          value["response"]["gufo"]["settings"] = *settings;
-      };
-      if (!response.streaming_body) {
-        auto value = json::parse(response.body);
-        echo(value);
-        response.body = value.dump();
-      } else {
-        auto stream = std::move(response.streaming_body);
-        response.streaming_body = [stream = std::move(stream), echo](
-                                      const HttpResponse::BodyWriter& writer) {
-          bool echoed = false;
-          stream([&](std::string_view frame) {
-            if (echoed)
-              return writer(frame);
-            const auto begin = frame.find("data: ");
-            if (begin == std::string_view::npos)
-              return writer(frame);
-            const auto payload_start = begin + 6;
-            const auto end = frame.find('\n', payload_start);
-            const auto payload = frame.substr(payload_start, end - payload_start);
-            if (payload == "[DONE]" || payload.empty())
-              return writer(frame);
-            json::Value value;
-            try {
-              value = json::parse(payload);
-            } catch (const std::exception&) {
-              return writer(frame);
-            }
+    add("POST", path,
+        [handler = std::move(handler), settings = options_.debug_settings](
+            const HttpRequest& request, TextGenerationBackend& backend) {
+          auto response = handler(request, backend);
+          if (response.status != 200)
+            return response;
+          const auto echo = [settings](json::Value& value) {
+            value["gufo"]["settings"] = *settings;
+            if (const auto* nested = value.find("response");
+                nested && nested->is_object())
+              value["response"]["gufo"]["settings"] = *settings;
+          };
+          if (!response.streaming_body) {
+            auto value = json::parse(response.body);
             echo(value);
-            echoed = true;
-            std::string output(frame.substr(0, payload_start));
-            output += value.dump();
-            if (end != std::string_view::npos)
-              output.append(frame.substr(end));
-            return writer(output);
-          });
-        };
-      }
-      return response;
-    });
+            response.body = value.dump();
+          } else {
+            auto stream = std::move(response.streaming_body);
+            response.streaming_body =
+                [stream = std::move(stream),
+                 echo](const HttpResponse::BodyWriter& writer) {
+                  bool echoed = false;
+                  stream([&](std::string_view frame) {
+                    if (echoed)
+                      return writer(frame);
+                    const auto begin = frame.find("data: ");
+                    if (begin == std::string_view::npos)
+                      return writer(frame);
+                    const auto payload_start = begin + 6;
+                    const auto end = frame.find('\n', payload_start);
+                    const auto payload =
+                        frame.substr(payload_start, end - payload_start);
+                    if (payload == "[DONE]" || payload.empty())
+                      return writer(frame);
+                    json::Value value;
+                    try {
+                      value = json::parse(payload);
+                    } catch (const std::exception&) {
+                      return writer(frame);
+                    }
+                    echo(value);
+                    echoed = true;
+                    std::string output(frame.substr(0, payload_start));
+                    output += value.dump();
+                    if (end != std::string_view::npos)
+                      output.append(frame.substr(end));
+                    return writer(output);
+                  });
+                };
+          }
+          return response;
+        });
   };
   add_text("/v1/completions", OpenAiCompletions);
   add_text("/v1/chat/completions", HandleOpenAiChat);
   add_text("/v1/responses", OpenAiResponses);
   if (options_.debug_hooks && DebugLoopbackListener(host_)) {
     add("POST", "/debug/prompt", InspectDebugPrompt);
+    add("GET", "/debug/memory", DebugMemory);
+    add("POST", "/debug/memory", DebugMemory);
     add("GET", "/debug/cache", [](const HttpRequest&, TextGenerationBackend&) {
       return InvalidCompatibilityRequest("cache inspection is not implemented");
     });
   }
   if (options_.debug_hooks && options_.debug_settings &&
       DebugLoopbackListener(host_)) {
-    add("GET", "/debug/settings", [settings = options_.debug_settings]
-        (const HttpRequest&, TextGenerationBackend&) { return Ok(*settings); });
+    add("GET", "/debug/settings",
+        [settings = options_.debug_settings](const HttpRequest&,
+                                             TextGenerationBackend&) {
+          return Ok(*settings);
+        });
   }
   add("POST", "/v1/embeddings", NotImplemented);
 
   // ---- Anthropic ----
   add("POST", "/v1/messages", AnthropicMessages);
-  add("POST", "/v1/messages/count_tokens", NotImplemented);
+  add("POST", "/v1/messages/count_tokens", AnthropicCountTokens);
 
   // ---- llama-server ----
   add("POST", "/v1/rerank", NotImplemented);
@@ -1814,12 +2131,14 @@ bool HttpServer::start(std::string* error) {
     ipv6->sin6_port = htons(static_cast<unsigned short>(port_));
   } else {
     if (error)
-      *error = "host must be an IPv4 address and port must be between 0 and 65535";
+      *error =
+          "host must be an IPv4 address and port must be between 0 and 65535";
     return false;
   }
   if (port_ < 0 || port_ > 65535) {
     if (error)
-      *error = "host must be an IPv4 address and port must be between 0 and 65535";
+      *error =
+          "host must be an IPv4 address and port must be between 0 and 65535";
     return false;
   }
   (void)::signal(SIGPIPE, SIG_IGN);
@@ -1855,7 +2174,7 @@ bool HttpServer::start(std::string* error) {
     listen_fd_ = -1;
     return false;
   }
-  if (port_ == 0) {
+  {
     sockaddr_storage bound{};
     socklen_t length = sizeof(bound);
     if (::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&bound),
@@ -1870,8 +2189,32 @@ bool HttpServer::start(std::string* error) {
     port_ = family == AF_INET
                 ? ntohs(reinterpret_cast<sockaddr_in*>(&bound)->sin_port)
                 : ntohs(reinterpret_cast<sockaddr_in6*>(&bound)->sin6_port);
+    char text[INET6_ADDRSTRLEN]{};
+    const void* address =
+        family == AF_INET
+            ? static_cast<const void*>(
+                  &reinterpret_cast<const sockaddr_in*>(&bound)->sin_addr)
+            : static_cast<const void*>(
+                  &reinterpret_cast<const sockaddr_in6*>(&bound)->sin6_addr);
+    if (!::inet_ntop(family, address, text, sizeof(text))) {
+      if (error)
+        *error = "cannot format bound address";
+      gufo::platform::CloseSocket(listen_fd_);
+      listen_fd_ = -1;
+      return false;
+    }
+    bound_host_ = text;
   }
   return true;
+}
+
+bool HttpServer::ready() {
+  return listen_fd_ >= 0 && !stopped_.load(std::memory_order_acquire) &&
+         !(backend_ && backend_->device_lost()) &&
+         ((backend_ != nullptr && backend_->ready()) ||
+          (video_jobs_ != nullptr && video_jobs_->ready()) ||
+          (tts_ != nullptr && tts_->ready()) ||
+          (asr_ != nullptr && asr_->ready()) || images_ != nullptr);
 }
 
 void HttpServer::run(bool handle_signals) {
@@ -1897,6 +2240,8 @@ void HttpServer::run(bool handle_signals) {
     if (handle_signals) {
       const int signal = shutdown_signal.load(std::memory_order_relaxed);
       if (signal != 0) {
+        if (options_.on_signal_stop)
+          options_.on_signal_stop();
         Logger::Info("server", "event=shutdown_requested signal=" +
                                    std::to_string(signal));
         Logger::FlushSync(std::chrono::milliseconds(0));
@@ -2028,11 +2373,7 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
                               req.path == "/readyz")) {
     if (device_lost())
       return DeviceLost();
-    const bool ready = (backend_ != nullptr && backend_->ready()) ||
-                       (video_jobs_ != nullptr && video_jobs_->ready()) ||
-                       (tts_ != nullptr && tts_->ready()) ||
-                       (asr_ != nullptr && asr_->ready()) || images_ != nullptr;
-    if (!ready) {
+    if (!ready()) {
       return Err(503, "Service Unavailable", "model service is not ready",
                  "server_error", "not_ready");
     }
@@ -2127,6 +2468,65 @@ bool HttpServer::device_lost() {
   return true;
 }
 
+namespace {
+
+/// Error text for a request log line, default deny. The text of a rejected
+/// request can echo request data, and prompt text must never reach the log.
+/// Only two kinds of error are logged:
+///  * codes whose messages are all fixed text or numbers (audited 2026-10-14
+///    in src/cli/serve): logged as they are, at most 120 bytes;
+///  * codes whose message names a request field, key or model (for example
+///    `model 'X' is not served: this process serves 'Y'`): logged at most
+///    100 bytes, and every byte outside a short name alphabet becomes '?'.
+/// Any other code logs no text (the line keeps its error_code). The result is
+/// one line: no quote, backslash or control byte survives.
+std::string LogErrorDetail(std::string_view code, std::string_view text) {
+  static constexpr std::string_view kFixed[] = {
+      "parse_error",          "missing_model",       "missing_messages",
+      "missing_prompt",       "context_length_exceeded", "invalid_max_tokens",
+      "invalid_stop",         "invalid_stream",      "invalid_stream_options",
+      "invalid_cache_prompt", "invalid_return_progress", "invalid_body",
+      "payload_too_large",    "not_found",           "not_ready",
+      "not_implemented",      "device_lost",         "unsupported_n",
+      "unsupported_logprobs", "unsupported_logprobs_format",
+      "invalid_logprobs",     "invalid_api_key"};
+  static constexpr std::string_view kNamed[] = {
+      "model_not_found", "unsupported_field", "invalid_response_format",
+      "invalid_reasoning", "unsupported_response_format"};
+  const auto listed = [code](const auto& list) {
+    return std::find(std::begin(list), std::end(list), code) != std::end(list);
+  };
+  const bool named = listed(kNamed);
+  if (!named && !listed(kFixed))
+    return {};
+  const std::size_t limit = named ? 100 : 120;
+  if (text.size() > limit) {
+    std::size_t size = limit;
+    while (size > 0 && (static_cast<unsigned char>(text[size]) & 0xC0) == 0x80)
+      --size;  // Do not cut inside a UTF-8 sequence.
+    text = text.substr(0, size);
+  }
+  std::string escaped;
+  for (const char c : text) {
+    const auto byte = static_cast<unsigned char>(c);
+    if (named) {
+      const bool allowed = (byte >= 'a' && byte <= 'z') ||
+                           (byte >= 'A' && byte <= 'Z') ||
+                           (byte >= '0' && byte <= '9') || c == '.' ||
+                           c == '_' || c == ':' || c == '/' || c == '@' ||
+                           c == '+' || c == '-' || c == ' ' || c == '\'';
+      escaped += allowed ? c : '?';
+    } else if (c == '"' || c == '\\') {
+      (escaped += '\\') += c;
+    } else {
+      escaped += byte < 32 ? ' ' : c;
+    }
+  }
+  return escaped;
+}
+
+}  // namespace
+
 void HttpServer::handle_connection(int client_fd) {
   constexpr std::chrono::seconds kSocketTimeout{120};
   gufo::platform::SetSocketTimeout(client_fd, SO_RCVTIMEO, kSocketTimeout);
@@ -2151,6 +2551,35 @@ void HttpServer::handle_connection(int client_fd) {
       req.client_id = peer_address;
   }
   req.request_id = "r" + std::to_string(next_request.fetch_add(1) + 1);
+  json::Value completion_metrics;
+  const HttpResultScope result_scope(completion_metrics);
+  std::string completion_outcome = "failed";
+  json::Value completion_refusal;  // memory guard: {code, needed_bytes, free_bytes} of a refused request
+  int completion_status = 0;            // HTTP status of the reply (R1: on every request row)
+  std::string completion_error_code;    // stable error code of a failed reply or stopped stream; empty when none
+  struct CompletionScope {
+    std::function<void()> finalize;
+    ~CompletionScope() {
+      try {
+        finalize();
+      } catch (...) {
+      }
+    }
+  } completion_scope{[&] {
+    if (req.method != "POST" ||
+        (req.path != "/v1/completions" && req.path != "/v1/chat/completions" &&
+         req.path != "/v1/responses" && req.path != "/v1/messages"))
+      return;
+    auto row = CompletedRequestRow(req.request_id, completion_metrics,
+                                   completion_outcome);
+    if (completion_refusal.is_object())
+      row["refusal"] = completion_refusal;
+    row["status"] = completion_status != 0 ? json::Value(completion_status) : json::Value();
+    row["error_code"] = completion_error_code.empty() ? json::Value() : json::Value(completion_error_code);
+    requests_.Record(row);
+    if (options_.on_request_completed)
+      options_.on_request_completed(std::move(row));
+  }};
   req.debug_hooks = options_.debug_hooks;
   req.debug_loopback = !options_.debug_hooks || DebugLoopbackListener(host_);
   req.max_score_tokens = options_.max_score_tokens;
@@ -2220,7 +2649,15 @@ void HttpServer::handle_connection(int client_fd) {
           const std::string_view header_line(headers.data() + cursor,
                                              line_end - cursor);
           const std::size_t colon = header_line.find(':');
-          if (colon != std::string_view::npos && colon > 0) {
+          // RFC 9112 5.1: reject whitespace before the colon and obsolete
+          // line folding instead of storing a name no lookup would match.
+          const auto token = [](char c) {
+            return std::isalnum(static_cast<unsigned char>(c)) != 0 ||
+                   std::string_view("!#$%&'*+-.^_`|~").find(c) !=
+                       std::string_view::npos;
+          };
+          if (colon != std::string_view::npos && colon > 0 &&
+              std::ranges::all_of(header_line.substr(0, colon), token)) {
             std::string name(header_line.substr(0, colon));
             std::string_view raw_value = header_line.substr(colon + 1);
             while (!raw_value.empty() &&
@@ -2285,7 +2722,7 @@ void HttpServer::handle_connection(int client_fd) {
 
     // Successful health/metrics polling and video status polling stay quiet at
     // the default level. Under --log-level=debug they become visible, because
-    // "is anything actually arriving?" is the first question an operator asks
+    // "is anything actually arriving?" is the first question a user asks
     // when a client reports a hang.
     const bool log_request =
         req.method == "POST" || req.method == "DELETE" ||
@@ -2311,7 +2748,7 @@ void HttpServer::handle_connection(int client_fd) {
       resp = Err(400, "Bad Request", "malformed request",
                  "invalid_request_error", "bad_request");
     } else if (req.method == "OPTIONS") {
-      resp = {.status = 204, .reason = "No Content"};
+      resp = PreflightResponse(req);
     } else {
       // A client without the API key cannot write into the trace.
       traced = Trace::Enabled() && IsTracedRoute(req) &&
@@ -2322,6 +2759,8 @@ void HttpServer::handle_connection(int client_fd) {
       resp = handle_request(req);
     }
 
+    if (IsAnthropicRoute(req.path))
+      ConvertToAnthropicError(&resp, req.request_id);
     resp.headers.emplace_back("X-Request-ID", req.request_id);
     response_status = resp.status;
     bool connected = true;
@@ -2384,12 +2823,19 @@ void HttpServer::handle_connection(int client_fd) {
                   std::chrono::steady_clock::now() >=
                       last_write + options_.sse_heartbeat_interval) {
                 // SSE comments carry bytes without changing the API event
-                // stream.
-                connected = chunked ? SendChunk(client_fd, ": ping\n\n")
-                                    : SendAll(client_fd, ": ping\n\n");
+                // stream. A response may name its own frame (a Responses
+                // stream sends an event, which is what clients that time
+                // out on events count as activity).
+                const std::string frame =
+                    resp.heartbeat_frame ? resp.heartbeat_frame()
+                                         : std::string(": ping\n\n");
+                if (!frame.empty()) {
+                  connected = chunked ? SendChunk(client_fd, frame)
+                                      : SendAll(client_fd, frame);
+                  if (traced && connected)
+                    traced_stream.append(frame);
+                }
                 last_write = std::chrono::steady_clock::now();
-                if (traced && connected)
-                  traced_stream.append(": ping\n\n");
               }
             }
           });
@@ -2417,16 +2863,42 @@ void HttpServer::handle_connection(int client_fd) {
         outcome = "stream_error";
         resp.log_details += " error_code=" + resp.stream_log->error_code;
       }
+      if (IsMemoryGuardCode(resp.stream_log->error_code)) {
+        completion_refusal = json::Value::object();   // a stopped stream: the code only, the numbers went with the logged line
+        completion_refusal["code"] = resp.stream_log->error_code;
+        completion_refusal["needed_bytes"] = json::Value();
+        completion_refusal["free_bytes"] = json::Value();
+      }
     }
+    std::string error_message;
+    completion_status = resp.status;
+    if (resp.stream_log && !resp.stream_log->error_code.empty())
+      completion_error_code = resp.stream_log->error_code;
     if (resp.status >= 400) {
       try {
         const auto body = json::parse(resp.body);
-        if (const auto* error = body.find("error"))
-          resp.log_details += " error_code=" + error->member_str("code");
+        if (const auto* error = body.find("error")) {
+          const std::string error_code = error->member_str("code");
+          completion_error_code = error_code;
+          resp.log_details += " error_code=" + error_code;
+          error_message = LogErrorDetail(error_code, error->member_str("message"));
+          if (IsMemoryGuardCode(error_code)) {
+            completion_refusal = json::Value::object();
+            completion_refusal["code"] = error_code;
+            const auto* numbers = error->find("refusal");
+            completion_refusal["needed_bytes"] = numbers && numbers->find("needed_bytes") ? *numbers->find("needed_bytes") : json::Value();
+            completion_refusal["free_bytes"] = numbers && numbers->find("free_bytes") ? *numbers->find("free_bytes") : json::Value();
+          }
+        }
       } catch (const std::exception&) {
         // The status remains useful for an endpoint returning a non-JSON error.
       }
     }
+    // New keys go last. `client` is the transport peer address.
+    resp.log_details += " client=" + req.client_id;
+    if (!error_message.empty())
+      resp.log_details += " error=\"" + error_message + "\"";
+    completion_outcome = completion_refusal.is_object() ? "refused" : resp.status >= 400 ? "failed" : outcome;
     if (Logger::Enabled(request_level) || resp.status >= 400 || !connected) {
       Logger::LogRequest(req.request_id, req.method, req.path, resp.status,
                          elapsed_ms(), resp.log_details, outcome,
@@ -2438,6 +2910,15 @@ void HttpServer::handle_connection(int client_fd) {
                     stream ? traced_stream : resp.body);
     }
   } catch (const TextGenerationError& exception) {
+    completion_outcome = exception.memory_guard() ? "refused" : response_started ? "stream_error" : "failed";
+    completion_status = response_started ? 200 : exception.http_status();
+    completion_error_code = exception.stable_code();
+    if (exception.memory_guard()) {
+      completion_refusal = json::Value::object();
+      completion_refusal["code"] = exception.stable_code();
+      completion_refusal["needed_bytes"] = exception.refusal() ? json::Value(exception.refusal()->needed_bytes) : json::Value();
+      completion_refusal["free_bytes"] = exception.refusal() ? json::Value(exception.refusal()->free_bytes) : json::Value();
+    }
     const auto duration_ms = std::chrono::duration<double, std::milli>(
                                  std::chrono::steady_clock::now() - start_time)
                                  .count();
@@ -2446,22 +2927,34 @@ void HttpServer::handle_connection(int client_fd) {
       reason = "Request Timeout";
     } else if (exception.http_status() == 429) {
       reason = "Too Many Requests";
+    } else if (exception.http_status() == 413) {
+      reason = "Payload Too Large";
+    } else if (exception.http_status() == 507) {
+      reason = "Insufficient Storage";
     }
     HttpResponse resp = Err(exception.http_status(), reason, exception.what(),
                             "server_error", exception.stable_code());
     resp.headers.emplace_back("X-Request-ID", req.request_id);
     if (exception.retryable()) {
-      resp.headers.emplace_back("Retry-After", "1");
+      resp.headers.emplace_back("Retry-After", std::to_string(exception.retry_after_seconds()));
     }
+    const std::string detail =
+        LogErrorDetail(exception.stable_code(), exception.what());
     Logger::LogRequest(req.request_id, req.method, req.path,
                        response_started ? response_status : resp.status,
                        duration_ms,
-                       std::string("error_code=") + exception.stable_code(),
+                       std::string("error_code=") + exception.stable_code() +
+                           " client=" + req.client_id +
+                           (detail.empty() ? std::string{}
+                                           : " error=\"" + detail + "\""),
                        response_started ? "stream_error" : "failed");
     trace_failure(resp);
     if (!response_started)
       (void)SendAll(client_fd, BuildResponse(resp));
   } catch (const std::exception& e) {
+    completion_outcome = response_started ? "stream_error" : "failed";
+    completion_status = response_started ? 200 : 500;
+    completion_error_code = "server_exception";
     const auto duration_ms = std::chrono::duration<double, std::milli>(
                                  std::chrono::steady_clock::now() - start_time)
                                  .count();
@@ -2469,20 +2962,23 @@ void HttpServer::handle_connection(int client_fd) {
                             *e.what() ? e.what() : "generation failed",
                             "internal_error", "server_exception");
     resp.headers.emplace_back("X-Request-ID", req.request_id);
-    // The exception text was not logged (10-09 L4 arm A: HTTP 500 at ~1 GB host memory left, cause invisible): add a control-free, 200-char copy.
-    std::string error_text = e.what();
-    for (char& c : error_text)
-      if (static_cast<unsigned char>(c) < 32) c = ' ';
-    if (error_text.size() > 200) error_text.resize(200);
+    // Name the exception type so the cause stays visible (10-09 L4 arm A:
+    // HTTP 500 at ~1 GB host memory left showed as std::bad_alloc), but never
+    // its text: what() can quote request content, and prompt text is never
+    // logged.
     Logger::LogRequest(req.request_id, req.method, req.path,
                        response_started ? response_status : resp.status,
                        duration_ms,
-                       std::string("error_code=server_exception error=\"") + error_text + "\"",
+                       "error_code=server_exception error_type=" +
+                           ExceptionTypeTag(e) + " client=" + req.client_id,
                        response_started ? "stream_error" : "failed");
     trace_failure(resp);
     if (!response_started)
       (void)SendAll(client_fd, BuildResponse(resp));
   } catch (...) {
+    completion_outcome = response_started ? "stream_error" : "failed";
+    completion_status = response_started ? 200 : 500;
+    completion_error_code = "server_exception";
     const auto duration_ms = std::chrono::duration<double, std::milli>(
                                  std::chrono::steady_clock::now() - start_time)
                                  .count();
@@ -2492,7 +2988,8 @@ void HttpServer::handle_connection(int client_fd) {
     resp.headers.emplace_back("X-Request-ID", req.request_id);
     Logger::LogRequest(req.request_id, req.method, req.path,
                        response_started ? response_status : resp.status,
-                       duration_ms, "error_code=server_exception",
+                       duration_ms,
+                       "error_code=server_exception client=" + req.client_id,
                        response_started ? "stream_error" : "failed");
     trace_failure(resp);
     if (!response_started)

@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <future>
+#include <iomanip>
 #include <limits>
 #include <mutex>
 #include <sstream>
@@ -16,6 +17,8 @@
 #include "src/cli/serve/continuation_disk_store.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/core/json.hpp"
+#include "src/core/platform/memory_guard.hpp"
+#include "src/core/platform/memory_readings.hpp"
 #include "src/npu/prefill_plan.hpp"
 
 namespace gufo::server {
@@ -37,7 +40,7 @@ std::optional<ChatRequest> ConstrainChatRequest(
   // Output parsing needs the model's dialect even without tool constraints
   // (for example Qwen's whitespace boundary after </think>).
   if (tool_format)
-    *tool_format = runner.ToolFormat();
+    *tool_format = runner.RequestToolFormat(request);
   if (!request.response_format &&
       (request.tools.empty() ||
        request.tool_choice == ChatRequest::ToolChoice::kNone))
@@ -51,7 +54,7 @@ std::optional<ChatRequest> ConstrainChatRequest(
     std::vector<sampling::JsonConstraint::Tool> tools;
     const bool required =
         request.tool_choice == ChatRequest::ToolChoice::kRequired;
-    auto format = runner.ToolFormat();
+    auto format = runner.RequestToolFormat(request);
     for (const auto& tool : request.tools) {
       const auto definition = tool.definition_json.empty()
                                   ? json::Value()
@@ -67,7 +70,8 @@ std::optional<ChatRequest> ConstrainChatRequest(
     grammar = sampling::JsonConstraint::WithTools(
         grammar, std::move(tools), required,
         !request.response_format && request.parallel_tool_calls, format);
-    if (format == sampling::JsonConstraint::ToolFormat::kJson)
+    if (format == sampling::JsonConstraint::ToolFormat::kJson &&
+        !runner.TemplateTeachesToolFormat())
       instruction +=
           "\nIf a tool is needed, respond using the JSON tool-call form "
           "<tool_call>{\"name\":\"function_name\",\"arguments\":{...}}</"
@@ -93,9 +97,15 @@ std::optional<ChatRequest> ConstrainChatRequest(
     constrained.messages.insert(constrained.messages.begin(),
                                 std::move(message));
   }
-  if (runner.InitialOutputState(request) ==
-      TextGenerationBackend::InitialOutputState::kReasoning)
-    grammar = sampling::JsonConstraint::WithReasoning(grammar);
+  const auto initial = runner.InitialOutputState(request);
+  if (initial == TextGenerationBackend::InitialOutputState::kReasoning)
+    grammar = sampling::JsonConstraint::WithReasoning(
+        grammar, runner.Markup().reasoning_end);
+  else if (initial == TextGenerationBackend::InitialOutputState::kAuto)
+    // Output that may open reasoning itself keeps that choice.
+    grammar = sampling::JsonConstraint::WithReasoning(
+        grammar, runner.Markup().reasoning_end,
+        runner.Markup().reasoning_start);
   sampling->constraint = runner.BindConstraint(grammar);
   return constrained;
 }
@@ -120,8 +130,6 @@ std::optional<std::uint64_t> MeminfoAvailableBytes(std::string_view meminfo) {
   return (*available_kib > cma_free_kib ? *available_kib - cma_free_kib : 0) *
          1024;
 }
-
-namespace {
 
 /// Host RAM still available, after cgroup limits. Unified-memory device
 /// allocations draw from the same RAM, so HIP's device capacity is not used.
@@ -161,12 +169,98 @@ std::uint64_t HostAvailableBytes() {
   return available;
 }
 
+namespace {
+
+/// Smallest memory.max over the process's cgroup and its ancestors.
+std::optional<std::uint64_t> CgroupMemoryMaxBytes() {
+  std::optional<std::uint64_t> smallest;
+  std::ifstream membership("/proc/self/cgroup");
+  for (std::string line; std::getline(membership, line);) {
+    if (!line.starts_with("0::/"))
+      continue;
+    const auto relative = std::filesystem::path(line.substr(4));
+    if (std::ranges::any_of(relative,
+                            [](const auto& part) { return part == ".."; }))
+      continue;
+    const std::filesystem::path root("/sys/fs/cgroup");
+    for (auto path = root / relative;; path = path.parent_path()) {
+      std::ifstream limit_file(path / "memory.max");
+      std::uint64_t limit = 0;
+      if (limit_file >> limit)
+        smallest = smallest ? std::min(*smallest, limit) : limit;
+      if (path == root)
+        break;
+    }
+    break;
+  }
+  return smallest;
+}
+
+std::uint64_t SaturatingAdd(std::uint64_t a, std::uint64_t b) {
+  return a > std::numeric_limits<std::uint64_t>::max() - b
+             ? std::numeric_limits<std::uint64_t>::max()
+             : a + b;
+}
+
+std::uint64_t SaturatingMul(std::uint64_t a, std::uint64_t b) {
+  return b != 0 && a > std::numeric_limits<std::uint64_t>::max() / b
+             ? std::numeric_limits<std::uint64_t>::max()
+             : a * b;
+}
+
 std::size_t ClampToSize(std::uint64_t bytes) {
   return static_cast<std::size_t>(
       std::min<std::uint64_t>(bytes, std::numeric_limits<std::size_t>::max()));
 }
 
 }  // namespace
+
+std::uint64_t HostTotalBytes() {
+  const long pages = sysconf(_SC_PHYS_PAGES);
+  const long page_size = sysconf(_SC_PAGESIZE);
+  if (pages <= 0 || page_size <= 0)
+    return 0;
+  auto total = std::uint64_t(pages) * page_size;
+  if (const auto limit = CgroupMemoryMaxBytes())
+    total = std::min(total, *limit);
+  return total;
+}
+
+std::uint64_t ParseHostFloorBytes(const char* text) {
+  if (text == nullptr || *text == '\0')
+    return kDefaultHostFloorMiB * 1024ull * 1024ull;
+  if (*text == '-')
+    return 0;
+  char* end = nullptr;
+  const auto mb = std::strtoull(text, &end, 10);
+  return end != text && *end == '\0'
+             ? static_cast<std::uint64_t>(mb) * 1024ull * 1024ull
+             : std::uint64_t{0};
+}
+
+void EnableProcessMemoryGuard() {
+  static bool done = false;   // called once from the server start, before any scheduler exists
+  if (done)
+    return;
+  done = true;
+  const char* raw = std::getenv("GUFO_CACHE_HOST_FLOOR_MB");
+  const std::uint64_t floor_bytes = ParseHostFloorBytes(raw);
+  // Leaked on purpose: the monitor thread of a scheduler may outlive static destruction order.
+  auto* source = gufo::platform::MakeSystemMemorySource().release();
+  auto* guard = new gufo::platform::MemoryGuard(source, floor_bytes);
+  const auto mib = [](std::uint64_t bytes) { return std::to_string(bytes >> 20); };
+  if (!guard->enabled()) {
+    Logger::Info("memory_guard", "event=memory_guard action=disabled floor_mib=" + mib(floor_bytes) + " source=" + (source ? "os" : "none") +
+                                     (raw != nullptr ? std::string(" raw=\"") + raw + "\"" : std::string()) +
+                                     " note=\"GUFO_CACHE_HOST_FLOOR_MB 0, negative or malformed turns the memory guard and the cache floor off\"");
+    return;
+  }
+  gufo::platform::SetProcessMemoryGuard(guard);
+  if (!gufo::platform::LowMemoryNotificationAvailable())
+    Logger::Warn("memory_guard", "event=memory_guard action=signal_unavailable signal=low_memory"
+                                     " note=\"admission and the RAM floor still work; the Windows low-memory event is ignored\"");
+  Logger::Info("memory_guard", "event=memory_guard action=enabled floor_mib=" + mib(floor_bytes));
+}
 
 std::size_t HostSnapshotBudgetBytes() {
   return ClampToSize(HostAvailableBytes() / 2);
@@ -188,6 +282,11 @@ struct ValidatedRunner {
   std::vector<TextExecutionPlan> plans;
   std::size_t snapshot_automatic_bytes{0};
   std::size_t snapshot_max_bytes{0};
+  std::size_t state_count{1};
+  /// Set by the capacity callback when the claim plans from totals.
+  bool capacity_planned{false};
+  SnapshotCapacityInputs capacity_inputs;
+  SnapshotCapacityPlan capacity_plan;
 };
 
 std::optional<std::size_t> PerStateReservationBytes(
@@ -203,6 +302,15 @@ std::optional<std::size_t> PerStateReservationBytes(
   }
   return *resources.per_request_state_bytes +
          *resources.temporary_scratch_bytes;
+}
+
+std::mutex& LastSessionsFitMutex() {
+  static std::mutex mutex;
+  return mutex;
+}
+std::optional<SessionsFitFailure>& LastSessionsFit() {
+  static std::optional<SessionsFitFailure> failure;
+  return failure;
 }
 
 ValidatedRunner ValidateRunner(std::shared_ptr<TextModelRunner> runner,
@@ -251,8 +359,46 @@ ValidatedRunner ValidateRunner(std::shared_ptr<TextModelRunner> runner,
     const std::size_t per_request = *per_state_reservation;
     const std::size_t capacity = *resources.state_capacity_bytes;
     if (per_request != 0 && state_count > capacity / per_request) {
-      throw std::invalid_argument(
-          "text runner request-state claim exceeds state capacity");
+      // Every runner reports free device memory after its weights as the
+      // capacity, so the refusal can name the numbers and the remedy.
+      const auto gib = [](std::size_t bytes) {
+        std::ostringstream text;
+        text << std::fixed << std::setprecision(1)
+             << static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0);
+        return text.str();
+      };
+      const long double needed =
+          static_cast<long double>(per_request) * state_count;
+      const std::size_t needed_bytes = needed > std::numeric_limits<std::size_t>::max() ? std::numeric_limits<std::size_t>::max()
+                                                                                     : static_cast<std::size_t>(needed);
+      const auto* guard = gufo::platform::ProcessMemoryGuard();
+      const std::uint64_t floor_bytes = guard != nullptr && guard->enabled() ? guard->floor_bytes() : 0;
+      SessionsFitFailure failure{.sessions = state_count, .context = descriptor.max_context, .per_session_bytes = per_request,
+                                 .needed_bytes = needed_bytes, .available_bytes = capacity, .floor_bytes = floor_bytes};
+      {
+        const std::lock_guard<std::mutex> lock(LastSessionsFitMutex());
+        LastSessionsFit() = failure;
+      }
+      throw SessionsDoNotFit(
+          std::to_string(state_count) + " sessions do not fit: each needs " +
+          gib(per_request) + " GiB of session state at this context (" + gib(needed_bytes) +
+          " GiB in all), and the machine has " + gib(capacity) + " GiB free after loading the model" +
+          (floor_bytes != 0 ? " (dedicated GPU memory plus all available RAM)" : std::string()) +
+          ". Lower --context or --sessions.",
+          failure);
+    }
+    // Fits, but only with part of the session state in system RAM: start, and say so.
+    if (const auto spill = gufo::platform::StateSpillFor(static_cast<std::uint64_t>(per_request) * state_count);
+        spill.known && spill.spill_bytes != 0) {
+      const auto mib = [](std::uint64_t bytes) { return std::to_string(bytes >> 20); };
+      Logger::Warn("memory_guard",
+                   "event=memory_guard action=load_spill sessions=" + std::to_string(state_count) + " per_session_mib=" + mib(per_request) +
+                       " needed_mib=" + mib(static_cast<std::uint64_t>(per_request) * state_count) + " spill_mib=" + mib(spill.spill_bytes) +
+                       " ram_available_mib=" + mib(spill.ram_available_bytes) + " floor_mib=" + mib(spill.floor_bytes) +
+                       " floor_eaten_mib=" + mib(spill.floor_eaten_bytes) +
+                       " note=\"part of the session state uses system RAM" +
+                       (spill.floor_eaten_bytes != 0 ? " and eats into the keep-free floor" : "") +
+                       "; fewer --sessions, a smaller --context, or a lower GUFO_CACHE_HOST_FLOOR_MB make more room; the runtime memory guard skips and drops cache snapshots under pressure\"");
     }
   }
 
@@ -295,6 +441,7 @@ ValidatedRunner ValidateRunner(std::shared_ptr<TextModelRunner> runner,
       .descriptor = std::move(descriptor),
       .resources = resources,
       .plans = std::move(plans),
+      .state_count = state_count,
   };
 }
 
@@ -325,6 +472,14 @@ std::string_view SnapshotEventActionName(SnapshotEventAction action) noexcept {
   return "unknown";
 }
 
+std::string_view SnapshotEventReasonName(SnapshotEventReason reason) noexcept;
+
+void NoteSkips(TextRunnerPool::Request::CommitMetrics& metrics, const ContinuationCache::Lease& lease) {
+  metrics.snapshots_skipped = lease.skipped_snapshots();
+  if (metrics.snapshots_skipped != 0)
+    metrics.snapshot_skip_reason = std::string(SnapshotEventReasonName(lease.skip_reason()));
+}
+
 std::string_view SnapshotEventReasonName(SnapshotEventReason reason) noexcept {
   switch (reason) {
     case SnapshotEventReason::kByteCapacity:
@@ -339,26 +494,21 @@ std::string_view SnapshotEventReasonName(SnapshotEventReason reason) noexcept {
       return "reservation_mismatch";
     case SnapshotEventReason::kHostMemoryFloor:
       return "host_memory_floor";
+    case SnapshotEventReason::kMemoryPressure:
+      return "memory_pressure";
   }
   return "unknown";
 }
 
-// GUFO_CACHE_HOST_FLOOR_MB=N (default 0 = off): refuse a new snapshot
+// GUFO_CACHE_HOST_FLOOR_MB=N (default 4096; 0 = off): refuse a new snapshot
 // (event=snapshot action=skipped reason=host_memory_floor) when host
 // MemAvailable minus the snapshot would fall under N MiB. 10-09 L4 arm A: the
 // cache kept admitting 4.75 GB snapshots until 0.96 GB was left and the request
-// then died with HTTP 500.
+// then died with HTTP 500. The capacity no longer follows free RAM (L-REL-5),
+// so this floor is the runtime protection against a busy host.
 std::uint64_t HostFloorBytes() {
-  static const std::uint64_t floor_bytes = [] {
-    const char* v = std::getenv("GUFO_CACHE_HOST_FLOOR_MB");
-    if (v == nullptr || *v == '\0' || *v == '-')
-      return std::uint64_t{0};
-    char* end = nullptr;
-    const auto mb = std::strtoull(v, &end, 10);
-    return end != v && *end == '\0'
-               ? static_cast<std::uint64_t>(mb) * 1024ull * 1024ull
-               : std::uint64_t{0};
-  }();
+  static const std::uint64_t floor_bytes =
+      ParseHostFloorBytes(std::getenv("GUFO_CACHE_HOST_FLOOR_MB"));
   return floor_bytes;
 }
 
@@ -545,8 +695,12 @@ void EmitDiskEvent(const ContinuationDiskEvent& event) noexcept {
   }
 }
 
+// `persistent_copies`: a disk cache is configured. Its captures are copied to
+// the host payload (at capture, or at persistence in evict_idle mode), so they
+// keep the whole-payload charge of the host-memory floor.
 ContinuationCache::SnapshotSupport MakeSnapshotSupport(
-    ValidatedRunner* validated, TextRunnerRamCacheOptions options) {
+    ValidatedRunner* validated, TextRunnerRamCacheOptions options,
+    bool persistent_copies) {
   if (options.disabled || validated == nullptr ||
       !validated->descriptor.capabilities.snapshot ||
       !validated->descriptor.capabilities.fork) {
@@ -569,6 +723,33 @@ ContinuationCache::SnapshotSupport MakeSnapshotSupport(
       .capacity_bytes =
           [validated, options] {
             const auto resources = validated->runner->ResourceClaim();
+            if (resources.snapshot_capacity_from_totals) {
+              // L-REL-5: no free-memory reading. The same machine, model and
+              // session count always give the same capacity.
+              SnapshotCapacityInputs inputs;
+              inputs.host_total_bytes = resources.host_total_bytes_override
+                                            ? *resources.host_total_bytes_override
+                                            : HostTotalBytes();
+              inputs.host_resident_bytes =
+                  resources.host_resident_bytes.value_or(0);
+              inputs.model_footprint_bytes = SaturatingAdd(
+                  resources.resident_weights_bytes.value_or(0),
+                  SaturatingMul(
+                      validated->state_count,
+                      SaturatingAdd(
+                          resources.per_request_state_bytes.value_or(0),
+                          resources.temporary_scratch_bytes.value_or(0))));
+              inputs.device_total_bytes = resources.device_total_bytes;
+              inputs.explicit_bytes = options.capacity_bytes;
+              validated->capacity_inputs = inputs;
+              validated->capacity_plan = PlanSnapshotCapacity(inputs);
+              validated->capacity_planned = true;
+              validated->snapshot_automatic_bytes =
+                  validated->capacity_plan.automatic_bytes;
+              validated->snapshot_max_bytes =
+                  validated->capacity_plan.ceiling_bytes;
+              return validated->capacity_plan.capacity_bytes;
+            }
             const auto automatic =
                 resources.retained_snapshot_capacity_bytes.value_or(0);
             validated->snapshot_automatic_bytes = std::min(
@@ -577,7 +758,7 @@ ContinuationCache::SnapshotSupport MakeSnapshotSupport(
                 resources.retained_snapshot_ceiling_bytes.value_or(automatic);
             if (options.capacity_bytes == 0)
               return validated->snapshot_automatic_bytes;
-            // An explicit limit is the operator's choice to trade headroom
+            // An explicit limit is the user's choice to trade headroom
             // for retention, bounded so the host keeps a fixed reserve.
             return std::min(options.capacity_bytes,
                             validated->snapshot_max_bytes);
@@ -585,10 +766,27 @@ ContinuationCache::SnapshotSupport MakeSnapshotSupport(
       .on_event = EmitSnapshotEvent,
       .host_available_bytes = [] { return HostAvailableBytes(); },
       .host_floor_bytes = HostFloorBytes(),
+      .host_bytes =
+          [validated, persistent_copies](std::uint64_t payload_bytes,
+                                         std::size_t token_count) {
+            return persistent_copies
+                       ? payload_bytes
+                       : validated->runner->SnapshotHostBytes(payload_bytes,
+                                                              token_count);
+          },
+      .allow_new = [] {
+        const auto* guard = gufo::platform::ProcessMemoryGuard();
+        return guard == nullptr || guard->SnapshotsAllowed();
+      },
   };
 }
 
 }  // namespace
+
+std::optional<SessionsFitFailure> LastSessionsFitFailure() {
+  const std::lock_guard<std::mutex> lock(LastSessionsFitMutex());
+  return LastSessionsFit();
+}
 
 void TextModelRunner::AdvanceBatch(
     std::span<const TextRunnerAdvance> advances) const {
@@ -699,7 +897,8 @@ struct TextRunnerPool::Impl {
               ReconcileStateBytes(validated.resources, *state);
               return state;
             },
-            MakeSnapshotSupport(&validated, ram_cache_options),
+            MakeSnapshotSupport(&validated, ram_cache_options,
+                                disk_cache_options.has_value()),
             TextRunnerRamCacheOptions::kMaxEntries),
         cache_enabled(!ram_cache_options.disabled) {
     // Entry and byte limits constrain retention independently of session count.
@@ -714,6 +913,30 @@ struct TextRunnerPool::Impl {
               " automatic_bytes=" +
               std::to_string(validated.snapshot_automatic_bytes) +
               " max_bytes=" + std::to_string(validated.snapshot_max_bytes));
+      if (validated.capacity_planned) {
+        const auto& in = validated.capacity_inputs;
+        const auto& plan = validated.capacity_plan;
+        const auto line =
+            "event=snapshot_capacity_plan host_total_bytes=" +
+            std::to_string(in.host_total_bytes) +
+            " host_resident_bytes=" + std::to_string(in.host_resident_bytes) +
+            " model_footprint_bytes=" +
+            std::to_string(in.model_footprint_bytes) +
+            " reserve_bytes=" + std::to_string(in.reserve_bytes) +
+            " device_total_bytes=" +
+            (in.device_total_bytes ? std::to_string(*in.device_total_bytes)
+                                   : std::string("none")) +
+            " explicit_bytes=" + std::to_string(in.explicit_bytes) +
+            " limit=" + plan.limit +
+            " ceiling_bytes=" + std::to_string(plan.ceiling_bytes) +
+            " automatic_bytes=" + std::to_string(plan.automatic_bytes) +
+            " capacity_bytes=" + std::to_string(plan.capacity_bytes) +
+            " clamp=" + (plan.clamp.empty() ? std::string("none") : plan.clamp);
+        if (plan.clamp.empty())
+          Logger::Info("cache", line);
+        else
+          Logger::Warn("cache", line);
+      }
     }
     if (cache_enabled && disk_cache_options.has_value()) {
       if (!validated.descriptor.persistence.has_value()) {
@@ -860,10 +1083,11 @@ struct TextRunnerPool::Request::Impl {
       // Cold long prompts still retain the last grid point for late edits.
       // A grid point just before the prompt end saves little on an edit but
       // would split the final prefill pass and store another snapshot.
-      // With the NPU prefill on the grid is the NPU chunk size, so a checkpoint
-      // never splits a 4096-token chunk (the NPU offloads only exact 4096 chunks).
-      const std::size_t npu_chunk = runner->PrefillPreferredChunk();
-      const std::size_t interval = npu_chunk ? npu_chunk : 2048;
+      // The grid is the runner's forward chunk, so a checkpoint never splits
+      // a chunk: with the NPU prefill on it is the NPU chunk size (the NPU
+      // offloads only exact 4096 chunks), on the GPU alone the forward size.
+      const std::size_t interval =
+          std::max<std::size_t>(1, runner->PrefillCheckpointGrid());
       constexpr std::size_t tail = 128;
       const auto grid_points = (prompt.size() - 1) / interval;
       const auto count =
@@ -1738,6 +1962,12 @@ TextDecodeSelection TextRunnerPool::Request::SelectNext() {
   return selection;
 }
 
+TextGenerationBackend::TerminationCause TextRunnerPool::Request::termination_cause() const noexcept {
+  return impl_ && impl_->sampler.ToolArgumentLoopDetected()
+      ? TextGenerationBackend::TerminationCause::kToolArgumentLoop
+      : TextGenerationBackend::TerminationCause::kNone;
+}
+
 void TextRunnerPool::Request::Advance() {
   if (!*this) {
     throw std::logic_error("text runner request is empty");
@@ -1752,6 +1982,7 @@ void TextRunnerPool::Request::Advance() {
                          impl_->pending_selection->token);
   impl_->pending_selection.reset();
   impl_->state_reusable = true;
+  impl_->stopped = impl_->sampler.ToolArgumentLoopDetected();
 }
 
 TextDecodeStep TextRunnerPool::Request::DecodeStep(std::size_t max_tokens) {
@@ -1791,6 +2022,7 @@ TextDecodeStep TextRunnerPool::Request::DecodeStep(std::size_t max_tokens) {
     impl_->sampler.Accept(selection.token);
     impl_->generated.push_back(selection.token);
   }
+  step.stop = step.stop || impl_->sampler.ToolArgumentLoopDetected();
   impl_->stopped = step.stop;
   impl_->state_reusable = true;
   return step;
@@ -1835,6 +2067,7 @@ TextRunnerPool::Request::CommitMetrics TextRunnerPool::Request::Commit() {
         " generated=" + std::to_string(impl_->generated.size()));
   }
   checkpoint.resize(position);
+  NoteSkips(impl_->snapshot_metrics, impl_->lease);
   if (capabilities.snapshot && capabilities.fork) {
     CommitMetrics metrics = impl_->snapshot_metrics;
     metrics.snapshot_bytes += impl_->lease.Commit(
@@ -1846,6 +2079,7 @@ TextRunnerPool::Request::CommitMetrics TextRunnerPool::Request::Commit() {
 
   std::unique_ptr<TextRunnerSnapshot> snapshot;
   CommitMetrics metrics;
+  NoteSkips(metrics, impl_->lease);
   metrics.snapshot_bytes =
       impl_->lease.Commit(std::move(checkpoint), std::move(snapshot));
   impl_.reset();
@@ -1889,6 +2123,7 @@ TextRunnerPool::Request::Cancel() noexcept {
     } else {
       state.Invalidate();
     }
+    NoteSkips(impl_->snapshot_metrics, impl_->lease);
     CommitMetrics metrics = impl_->snapshot_metrics;
     if (capabilities.snapshot && capabilities.fork) {
       metrics.snapshot_bytes += impl_->lease.Commit(
@@ -1958,6 +2193,8 @@ json::Value TextRunnerPool::DebugSettings() const {
   ram["host_headroom_bytes"] = kHostSnapshotHeadroomBytes;
   ram["max_intermediate_checkpoints"] =
       impl_->cache_enabled ? Impl::kIntermediateCheckpoints : 0;
+  ram["checkpoint_grid_tokens"] =
+      impl_->validated.runner->PrefillCheckpointGrid();
   ram["shared_checkpoint_slack"] = Request::kSharedCheckpointSlack;
   ram["shared_prefix_min_tokens"] = Request::kSharedPrefixMinTokens;
   settings["ram_cache"] = std::move(ram);
@@ -2072,6 +2309,7 @@ std::vector<std::exception_ptr> TextRunnerPool::AdvanceBatch(
     if (!failures[i]) {
       requests[i]->impl_->pending_selection.reset();
       requests[i]->impl_->state_reusable = true;
+      requests[i]->impl_->stopped = requests[i]->impl_->sampler.ToolArgumentLoopDetected();
     }
   }
   return failures;
@@ -2149,6 +2387,7 @@ std::vector<TextDecodeStep> TextRunnerPool::DecodeBatch(
       request.sampler.Accept(selection.token);
       request.generated.push_back(selection.token);
     }
+    step.stop = step.stop || request.sampler.ToolArgumentLoopDetected();
     request.stopped = step.stop;
     request.state_reusable = true;
   }
@@ -2357,6 +2596,18 @@ TextRunnerPool::Request TextRunnerPool::Acquire(
     std::vector<TextRunnerToken> prompt,
     const CancellationCheck& is_cancelled) {
   return Acquire(std::move(prompt), sampling::SamplingConfig{}, is_cancelled);
+}
+
+std::uint64_t TextRunnerPool::TrimSnapshots(std::uint64_t target_bytes, bool host_only) {
+  return impl_->cache.TrimSnapshots(target_bytes, host_only);
+}
+
+std::uint64_t TextRunnerPool::RetainedSnapshotBytes() const {
+  return impl_->cache.retained_snapshot_bytes();
+}
+
+ContinuationCache::SnapshotFootprint TextRunnerPool::RetainedSnapshotFootprint() const {
+  return impl_->cache.snapshot_footprint();
 }
 
 std::size_t TextRunnerPool::CachedPrefixTokens(

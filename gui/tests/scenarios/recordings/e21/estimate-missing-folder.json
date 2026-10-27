@@ -1,0 +1,1 @@
+{"schema_version":1,"type":"error","operation_id":"47defde116f648ab5918dd0834f76322","seq":1,"time":"2026-10-21T00:45:06Z","product":{"name":"bubo","version":"0.1.1","revision":"4924e51e","engine_version":"0.10.0"},"payload":{"code":"model_missing","component":"models","stage":"model","retryable":false,"remedy":"Use a file, a folder or a catalogue id from bubo models list."}}

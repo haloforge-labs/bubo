@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
+#include "src/models/qwen36_a3b/config.hpp"
 #include "src/models/qwen36_a3b/decode_kernels.hpp"
 
 namespace gufo::models::qwen::vision {
@@ -31,37 +32,6 @@ namespace gufo::models::qwen36_a3b {
 
 struct DFlash;  // dflash.hpp
 
-struct Config {
-  std::uint32_t layers{0};
-  std::uint32_t hidden{0};
-  std::uint32_t vocab{0};
-  std::uint32_t heads{0};
-  std::uint32_t kv_heads{0};
-  std::uint32_t head_dim{0};
-  std::uint32_t rotary_dim{0};
-  float rope_theta{0};
-  float eps{0};
-  std::uint32_t full_attention_interval{0};
-  std::uint32_t ssm_conv_kernel{0};
-  std::uint32_t ssm_head_dim{0};
-  std::uint32_t ssm_k_heads{0};
-  std::uint32_t ssm_v_heads{0};
-  std::uint32_t experts{0};
-  std::uint32_t experts_used{0};
-  std::uint32_t expert_ff{0};
-  std::uint32_t shared_ff{0};
-  std::uint32_t nextn{0};  // MTP blocks after the trunk (not in `layers`)
-
-  bool IsLinear(std::uint32_t layer) const {
-    return (layer + 1) % full_attention_interval != 0;
-  }
-  std::uint32_t ConvChannels() const {
-    return (2 * ssm_k_heads + ssm_v_heads) * ssm_head_dim;
-  }
-  std::uint32_t SsmValueDim() const { return ssm_v_heads * ssm_head_dim; }
-  std::uint32_t QDim() const { return heads * head_dim; }
-  std::uint32_t KvDim() const { return kv_heads * head_dim; }
-};
 
 /// A device tensor in its GGUF encoding. rows = output dim, cols = input dim.
 struct Tensor {
@@ -276,6 +246,7 @@ public:
   }
 
 private:
+  friend struct EngineTestAccess;
   Engine() = default;
   bool Bind(std::string* error);
   bool Upload(std::string* error);
@@ -468,6 +439,7 @@ private:
   Q8_1Block* act_q_{};  // routed + shared activations for the down GEMV
   float *xf_{}, *packed_{};
   std::int32_t *ids_{}, *tokens_dev_{};
+  std::int32_t* zero_ids_{};  // dense MMVQ addresses expert zero
   std::uint32_t* pos_dev_{};
   // Pinned staging for tokens and position.
   std::int32_t* tokens_host_{};

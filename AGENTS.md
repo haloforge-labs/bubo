@@ -2,7 +2,10 @@
 
 ## Platform and build
 
-Production targets Linux x86-64 AMD Strix Halo (`gfx1151`) only. CMake owns
+The product, Bubo, is the Windows 11 x64 build for AMD Strix Halo (`gfx1151`):
+`bubo.exe`, its engine DLL and the desktop app. The Linux build below is the
+upstream engine's. Testing: write the failing case first, prefer an end-to-end
+run of the real executable, and never write unit tests after the code. CMake owns
 compiler flags, dependencies and installation; Nix supplies the pinned toolchain.
 Linux source-build prerequisites are in [README.md](README.md#build-from-source).
 

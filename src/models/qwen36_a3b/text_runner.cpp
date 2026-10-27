@@ -124,6 +124,10 @@ struct Model {
   std::unique_ptr<tokenization::QwenTokenizer> tokenizer;
   std::shared_ptr<qwen::vision::Encoder> encoder;  // null: text only
   std::optional<tokenization::TokenId> im_end;
+  /// The GGUF carries the Cyber-Tiel chat template (matched by its hash):
+  /// prompts use that template. Its tool calls are XML unless the request
+  /// asks for JSON (chat_template_kwargs.tool_call_format).
+  bool cybertiel_template{false};
   ServeConfig config;
   std::uint32_t limit{0};  // usable context (verify headroom kept free)
   std::string model_id;
@@ -241,7 +245,9 @@ public:
         .state_capacity_bytes = std::nullopt,
         .per_request_state_bytes = std::nullopt,
         .temporary_scratch_bytes = std::nullopt,
-        .retained_snapshot_capacity_bytes = server::HostSnapshotBudgetBytes(),
+        // Snapshots are host vectors (StateSnapshot::state), so plan from the
+        // host total alone, with no free-memory reading (L-REL-5).
+        .snapshot_capacity_from_totals = true,
         .requires_device_runtime_lock = true,
     };
   }
@@ -272,9 +278,27 @@ public:
     return sampling::JsonConstraint::ToolFormat::kQwen;
   }
 
+  [[nodiscard]] sampling::JsonConstraint::ToolFormat RequestToolFormat(
+      const server::ChatRequest& request) const override {
+    return m_->cybertiel_template && request.json_tool_calls
+               ? sampling::JsonConstraint::ToolFormat::kJson
+               : sampling::JsonConstraint::ToolFormat::kQwen;
+  }
+
+  [[nodiscard]] bool TemplateTeachesToolFormat() const override {
+    return m_->cybertiel_template;
+  }
+
   [[nodiscard]] std::optional<std::vector<TextRunnerToken>> RenderAndTokenize(
       const server::ChatRequest& request) const override {
-    return Prepare(request).tokens;
+    // Messages counting renders text before execution-context admission.
+    // PreparePrompt still prepares vision and enforces the generation limit.
+    return tokenization::QwenChatTemplate::RenderAndTokenize(
+        *m_->tokenizer, request.messages,
+        request.tool_choice == server::ChatRequest::ToolChoice::kNone
+            ? std::span<const tokenization::ChatTool>{}
+            : std::span<const tokenization::ChatTool>{request.tools},
+        ChatOptions(request));
   }
 
   [[nodiscard]] std::optional<server::TextPreparedPrompt> PreparePrompt(
@@ -511,11 +535,22 @@ private:
       const server::ChatRequest& request) const {
     auto options = tokenization::ResolveQwenChatOptions(request.reasoning,
                                                         request.add_vision_id);
-    // Qwen3.6's template: no reasoning-effort line, and earlier turns'
-    // reasoning is dropped unless the client asks to keep it.
-    options.reasoning_effort = tokenization::QwenReasoningEffort::kMedium;
-    options.preserve_thinking =
-        request.reasoning.preserve_thinking.value_or(false);
+    if (m_->cybertiel_template) {
+      // The Cyber-Tiel template's own defaults: XML tool calls, medium effort
+      // (no effort line) unless the client asks, and earlier reasoning kept.
+      options.dialect = tokenization::QwenTemplateDialect::kCyberTiel;
+      options.tool_format = request.json_tool_calls
+                                ? tokenization::QwenToolFormat::kJson
+                                : tokenization::QwenToolFormat::kXml;
+      if (!request.reasoning.effort)
+        options.reasoning_effort = tokenization::QwenReasoningEffort::kMedium;
+    } else {
+      // Qwen3.6's template: no reasoning-effort line, and earlier turns'
+      // reasoning is dropped unless the client asks to keep it.
+      options.reasoning_effort = tokenization::QwenReasoningEffort::kMedium;
+      options.preserve_thinking =
+          request.reasoning.preserve_thinking.value_or(false);
+    }
     options.require_tool_call =
         request.tool_choice == server::ChatRequest::ToolChoice::kRequired;
     options.max_output_bytes =
@@ -772,9 +807,19 @@ std::shared_ptr<server::TextModelRunner> CreateTextRunner(
   if (model->tokenizer == nullptr)
     return nullptr;
   model->im_end = model->tokenizer->FindSpecialToken("<|im_end|>");
+  {
+    std::string template_error;
+    const auto chat_template = tokenization::QwenChatTemplate::CreateFromGguf(
+        model->engine->gguf(), &template_error);
+    model->cybertiel_template =
+        chat_template != nullptr &&
+        chat_template->GetProfile() ==
+            tokenization::QwenChatTemplate::Profile::kCyberTiel;
+  }
   try {
-    model->encoder = qwen::vision::Encoder::Open(
-        model_path, config.vision_model_path, model->engine->config().hidden);
+    model->encoder = qwen::vision::Encoder::OpenUnlessDisabled(
+        config.vision_disabled, model_path, config.vision_model_path,
+        model->engine->config().hidden);
   } catch (const std::exception& e) {
     if (error != nullptr)
       *error = std::string("vision sidecar: ") + e.what();

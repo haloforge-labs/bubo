@@ -1,0 +1,80 @@
+Bubo will prepare these files.
+Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf | huggingface.co |
+https://huggingface.co/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/reso
+lve/73e9eb7c69fdbf667def63e233e70845e7d5ac0b/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4
+_K_XL-00001-of-00004.gguf | 10946752 bytes | 0.010 GiB | 290a31ca20b7 |
+290a31ca20b74ed2c21b257d378a5678d821ad9fdd8feb1fc52c719761668903 |
+qwen-community-1.0 |
+C:\bubo\run\app\v8\E21\rootA\models\huihui-qwen38-flash-next-ud-q4-k-xl-v1\Qwen3
+.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf | reuse
+Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf | huggingface.co |
+https://huggingface.co/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/reso
+lve/73e9eb7c69fdbf667def63e233e70845e7d5ac0b/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4
+_K_XL-00002-of-00004.gguf | 49859583296 bytes | 46.435 GiB | 0ebf70d076e0 |
+0ebf70d076e0e98f74dc414a90b92c67d7267876ae524bc7799cf463e27b754b |
+qwen-community-1.0 |
+C:\bubo\run\app\v8\E21\rootA\models\huihui-qwen38-flash-next-ud-q4-k-xl-v1\Qwen3
+.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf | reuse
+Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf | huggingface.co |
+https://huggingface.co/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/reso
+lve/73e9eb7c69fdbf667def63e233e70845e7d5ac0b/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4
+_K_XL-00003-of-00004.gguf | 49376141664 bytes | 45.985 GiB | e9b12f44e13e |
+e9b12f44e13e60d6ef9396449f7b4356b2e2911222b8183a596830c2418db19a |
+qwen-community-1.0 |
+C:\bubo\run\app\v8\E21\rootA\models\huihui-qwen38-flash-next-ud-q4-k-xl-v1\Qwen3
+.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf | reuse
+Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf | huggingface.co |
+https://huggingface.co/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/reso
+lve/73e9eb7c69fdbf667def63e233e70845e7d5ac0b/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4
+_K_XL-00004-of-00004.gguf | 12087983680 bytes | 11.258 GiB | 983901b3e476 |
+983901b3e47686f56f5fcec87ba8c51e7e2c6996277dd77bc3fc804a1d563da3 |
+qwen-community-1.0 |
+C:\bubo\run\app\v8\E21\rootA\models\huihui-qwen38-flash-next-ud-q4-k-xl-v1\Qwen3
+.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf | reuse
+mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf | huggingface.co |
+https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/resolve/766911a6b7369840a
+91dbcd95f9f997acaab6cd6/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf | 2786568256
+bytes | 2.595 GiB | 5ff54097406a |
+5ff54097406a905cf3a724c709124ceb0e3e10235ee862298969e91c96fa96e6 |
+qwen-community-1.0 |
+C:\bubo\run\app\v8\E21\rootA\models\huihui-qwen38-flash-next-ud-q4-k-xl-v1\mtp/m
+tp-Qwen3.8-Flash-Next-shared-Q8_0.gguf | reuse
+mmproj-BF16.gguf | huggingface.co |
+https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/resolve/766911a6b7369840a
+91dbcd95f9f997acaab6cd6/mmproj-BF16.gguf | 907542944 bytes | 0.845 GiB |
+2e788f8c511d | 2e788f8c511d8093c7b43cb87b2fd7e14228340318057f8fb20c86df2efe2355
+| qwen-community-1.0 |
+C:\bubo\run\app\v8\E21\rootA\models\huihui-qwen38-flash-next-ud-q4-k-xl-v1\mmpro
+j/mmproj-Qwen3.8-Flash-Next-BF16.gguf | reuse
+iq4-nofullattn-nohc.gguf | huggingface.co |
+https://huggingface.co/HaloForgeLabs/bubo-qwen3.8-flash-next/resolve/bb72204d4f9
+bdd1568c225cce3bf878673009780/twin/iq4-nofullattn-nohc.gguf | 1230788768 bytes |
+1.146 GiB | 18e083123455 |
+18e0831234551a4d14a0407c24598fb02fdb1fe83a20a4fcff23f410399c66c2 |
+qwen-community-1.0 |
+C:\bubo\run\app\v8\E21\rootA\models\huihui-qwen38-flash-next-ud-q4-k-xl-v1\twin/
+iq4-nofullattn-nohc.gguf | reuse
+draft-out-q4k.gguf | huggingface.co |
+https://huggingface.co/HaloForgeLabs/bubo-qwen3.8-flash-next/resolve/bb72204d4f9
+bdd1568c225cce3bf878673009780/draft_head/draft-out-q4k.gguf | 357581248 bytes |
+0.333 GiB | 6867948dc9f5 |
+6867948dc9f5c467818daa4281c4878dc64b53cd1bba9d16970fd77cd1656777 |
+qwen-community-1.0 |
+C:\bubo\run\app\v8\E21\rootA\models\huihui-qwen38-flash-next-ud-q4-k-xl-v1\draft
+_head/draft-out-q4k.gguf | reuse
+Total file size: 116617136608 bytes (108.608 GiB).
+Total download size: 0 bytes (0.000 GiB).
+The derived files are hosted by the Bubo project.
+Qwen Community License 1.0 applies to the model files. They are not MIT
+licensed.
+A copy of LICENSE and NOTICE is saved in
+C:\bubo\run\app\v8\E21\rootA\models\huihui-qwen38-flash-next-ud-q4-k-xl-v1\licen
+ses after the download.
+Read the MaaS and AI Work Assistant conditions in the licence.
+The main shards total 111334655392 bytes (103.688 GiB).
+Estimated download time: unknown; download speed is not known.
+Bubo checks each download's full SHA-256 while it receives the file.
+Existing main shards use GGUF and tensor fingerprint checks; --verify checks
+full SHA-256.
+HF downloads can redirect to allowed hosts under huggingface.co or hf.co.
+Bubo will not build a model on this computer.

@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "operation_id": "11111111111111111111111111111111",
+  "seq": 1,
+  "time": "2026-10-13T18:00:00Z",
+  "product": {
+    "name": "bubo",
+    "version": "0.1.0",
+    "revision": "3ff74dce",
+    "engine_version": "0.1.0"
+  },
+  "type": "ready",
+  "payload": {
+    "identity": {
+      "instance_id": "22222222222222222222222222222222",
+      "pid": 1234,
+      "process_creation_time": "134000000000000000",
+      "exe_path": "C:/Bubo/bubo.exe"
+    },
+    "endpoint": "http://127.0.0.1:49152/v1",
+    "served_model": "fixture",
+    "effective_settings": {
+      "context": {
+        "requested": 4096,
+        "effective": 4096,
+        "source": "cli",
+        "reason": null
+      }
+    },
+    "log_path": null,
+    "readiness": {
+      "runtime": true,
+      "model": true,
+      "server": true
+    },
+    "npu_prefill_runtime": {
+      "state": "on",
+      "reason": null,
+      "trips": 0,
+      "hal_faults": 2,
+      "whea_events": 3,
+      "invalid_chunks": 0,
+      "chip_power": {
+        "state": "broken",
+        "w_mean": 12.5,
+        "window_s": 0.25
+      },
+      "memory": {
+        "min_available_mib": 1024,
+        "max_commit_pct": 75
+      },
+      "scheme": {
+        "guid": "fixture-guid",
+        "name": "fixture"
+      }
+    }
+  },
+  "instance_id": "22222222222222222222222222222222",
+  "pid": 1234,
+  "process_creation_time": "134000000000000000",
+  "exe_path": "C:/Bubo/bubo.exe"
+}

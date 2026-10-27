@@ -134,8 +134,8 @@ struct EogBoundaryState {
 
 
 struct LoopBreaker {
-    enum channel { ANSWER, THINK };
-    enum action { NONE, NUDGE, FORCE_THINK, STOP_ANSWER };
+    enum channel { ANSWER, THINK, TOOL };
+    enum action { NONE, NUDGE, FORCE_THINK, STOP_ANSWER, STOP_TOOL };
     static constexpr int kMaxPeriod = 128;
 
     struct config {
@@ -145,6 +145,9 @@ struct LoopBreaker {
         int answer_tokens = 512;
         int think_max_period = kMaxPeriod;
         int answer_max_period = 16;
+        int tool_repeats = 16;
+        int tool_tokens = 128;
+        int tool_max_period = kMaxPeriod;
     } cfg;
 
     struct event {
@@ -169,6 +172,14 @@ struct LoopBreaker {
     uint8_t pending_head = 0;
     uint8_t pending_size = 0;
     bool terminal = false;
+    // TOOL has its own history and stops immediately, without a temperature nudge.
+    struct ToolHistory {
+        std::array<int32_t, kMaxPeriod> tail {};
+        std::array<uint32_t, kMaxPeriod> matching {};
+        uint64_t count = 0, last_framing = 0;
+        event stop {};
+    } tool;
+    uint64_t stopped_tools = 0;
 
     void reset() {
         const config saved = cfg;
@@ -185,13 +196,15 @@ struct LoopBreaker {
         watch_left = 0;
         nudges_in_span = 0;
         terminal = false;
+        tool = {};
     }
 
     bool nudging() const { return nudge_left > 0; }
 
     // Called once for each target token accepted by the sampler.
     // This includes each token in a multi-token speculative verification pass.
-    event accept(int32_t token, channel where) {
+    event accept(int32_t token, channel where, bool tool_framing = false) {
+        if (where == TOOL) return accept_tool(token, tool_framing);
         if (where != current) boundary(where);
         if (terminal) return {};
         if (nudge_left > 0) --nudge_left;
@@ -237,6 +250,41 @@ struct LoopBreaker {
             ++detections;
             if (where == THINK) ++forced_thinks; else ++stopped_answers;
         }
+        queue_event(found);
+        return found;
+    }
+
+    event accept_tool(int32_t token, bool framing) {
+        if (tool.stop.what != NONE) return {};
+        if (framing) {
+            tool.last_framing = tool.count + 1;
+        }
+        event found {};
+        for (int p = 1; p <= std::clamp(cfg.tool_max_period, 0, kMaxPeriod); ++p) {
+            auto & run = tool.matching[p - 1];
+            if (tool.count >= (uint64_t) p && tool.tail[(tool.count - p) % tool.tail.size()] == token) {
+                if (run != std::numeric_limits<uint32_t>::max()) ++run;
+            } else run = 0;
+            const uint64_t pure = (uint64_t) run + p;
+            if (found.what == NONE && run >= (uint32_t) p &&
+                pure >= (uint64_t) cfg.tool_tokens && pure / p >= (uint64_t) cfg.tool_repeats &&
+                tool.last_framing > tool.count + 1 - p) {
+                found = { STOP_TOOL, TOOL, p, (int) std::min<uint64_t>(
+                    pure / p, (uint64_t) std::numeric_limits<int32_t>::max()) };
+            }
+        }
+        tool.tail[tool.count % tool.tail.size()] = token;
+        ++tool.count;
+        if (found.what != NONE) {
+            tool.stop = found;
+            ++detections;
+            ++stopped_tools;
+            queue_event(found);
+        }
+        return found;
+    }
+
+    void queue_event(event found) {
         if (found.what != NONE) {
             if (pending_size == pending.size()) {
                 pending_head = (uint8_t) ((pending_head + 1) % pending.size());
@@ -245,7 +293,6 @@ struct LoopBreaker {
             pending[(pending_head + pending_size) % pending.size()] = found;
             ++pending_size;
         }
-        return found;
     }
 
     void replace_last_action(action what) {
@@ -261,11 +308,25 @@ struct LoopBreaker {
     }
 };
 
+struct MarkerEntropyThreshold {
+  double value;
+  MarkerEntropyThreshold(double threshold) noexcept : value(threshold) {}
+  // Prevent optional from copying unused double storage when disengaged.
+  MarkerEntropyThreshold(const MarkerEntropyThreshold& other) noexcept
+      : value(other.value) {}
+  MarkerEntropyThreshold& operator=(
+      const MarkerEntropyThreshold& other) noexcept {
+    value = other.value;
+    return *this;
+  }
+  operator double() const noexcept { return value; }
+};
 struct BehaviourConfig {
   std::string marker_bias_by_effort, reasoning_budget_message;
   std::string reasoning_start_tag{"<think>"};
   std::vector<std::string> reasoning_end_tags{"</think>"};
   std::optional<double> request_marker_bias;
+  std::optional<MarkerEntropyThreshold> marker_entropy_gate;
   bool production_sampling{false}, model_suppress_tokens{false};
   std::vector<std::uint32_t> suppress_ids;
   float native_temperature{0}, native_top_p{1}, native_min_p{0};
@@ -274,6 +335,7 @@ struct BehaviourConfig {
   std::size_t native_min_keep{0}, native_repeat_last_n{64};
   bool think_eog_guard{false}, eog_boundary{false}, eog_min_prob_exact{false};
   bool loop_breaker{false}, loop_eog_close{false}, loop_exempt{false};
+  bool loop_tool_args{true};
   bool reasoning_budget_enabled{false}, logit_bias_enabled{false};
   bool spec_eog_stop{false}, initial_thinking{false};
   double eog_min_prob{0}, eog_defer_p{0}, marker_bias{0};
@@ -283,18 +345,56 @@ struct BehaviourConfig {
   std::vector<std::uint32_t> eog_ids, think_start, think_end;
   std::vector<std::vector<std::uint32_t>> think_starts, think_ends;
   std::vector<std::uint32_t> budget_forced, loop_prefix, marker_ids;
+  std::vector<std::uint32_t> tool_framing_ids;
   std::vector<std::pair<std::uint32_t,float>> logit_bias;
   std::vector<std::pair<std::string,float>> text_logit_bias;
   std::shared_ptr<const std::vector<std::string>> token_pieces;
   [[nodiscard]] bool enabled() const noexcept {
-    return production_sampling || model_suppress_tokens || think_eog_guard || eog_boundary || eog_min_prob > 0 ||
-      eog_defer_p > 0 || loop_breaker || loop_eog_close ||
-      reasoning_budget_enabled || logit_bias_enabled || marker_bias != 0 ||
-      !marker_bias_by_effort.empty() || request_marker_bias.has_value() ||
-      spec_eog_stop;
+    return production_sampling || model_suppress_tokens || think_eog_guard ||
+           eog_boundary || eog_min_prob > 0 || eog_defer_p > 0 ||
+           loop_breaker || loop_eog_close || reasoning_budget_enabled ||
+           logit_bias_enabled || marker_bias != 0 ||
+           !marker_bias_by_effort.empty() || request_marker_bias.has_value() ||
+           spec_eog_stop;
   }
 };
 struct BehaviourCount { std::uint64_t taken{0}, fallback{0}; };
+struct ThinkMarkerRow {
+  double entropy;
+  bool gate_open;
+  ThinkMarkerRow(double value, bool open) : entropy(value), gate_open(open) {}
+  // Nontrivial copies let a disengaged optional copy only its presence flag.
+  ThinkMarkerRow(const ThinkMarkerRow& other)
+      : entropy(other.entropy), gate_open(other.gate_open) {}
+  ThinkMarkerRow& operator=(const ThinkMarkerRow& other) {
+    entropy = other.entropy;
+    gate_open = other.gate_open;
+    return *this;
+  }
+};
+struct ThinkMarkerCounts {
+  std::uint64_t think_tokens{0}, markers{0}, gate_rows{0}, gate_open{0};
+  // 0.1-nat bins over [0, 3), last bin 3+ (about half of thinking rows sit near 0, so p80 needs fine bins)
+  std::array<std::uint64_t, 31> hist_all{}, hist_marker{};
+  ThinkMarkerCounts() = default;
+  // Keep the histogram payload out of disengaged optional copies.
+  ThinkMarkerCounts(const ThinkMarkerCounts& other)
+      : think_tokens(other.think_tokens),
+        markers(other.markers),
+        gate_rows(other.gate_rows),
+        gate_open(other.gate_open),
+        hist_all(other.hist_all),
+        hist_marker(other.hist_marker) {}
+  ThinkMarkerCounts& operator=(const ThinkMarkerCounts& other) {
+    think_tokens = other.think_tokens;
+    markers = other.markers;
+    gate_rows = other.gate_rows;
+    gate_open = other.gate_open;
+    hist_all = other.hist_all;
+    hist_marker = other.hist_marker;
+    return *this;
+  }
+};
 struct BehaviourState {
   bool thinking{false}, prefix_used{false}, waiting_utf8{false};
   bool close_decision{false}, guard_escalated{false}, guard_escalation_taken{false};
@@ -307,8 +407,10 @@ struct BehaviourState {
   std::string force_reason;
   EogBoundaryState boundary;
   LoopBreaker loop;
+  bool tool_call_open{false};
   std::string utf8_tail;
   std::map<std::pair<std::string,std::string>, BehaviourCount> counters;
+  std::optional<ThinkMarkerCounts> think_markers;
 
   void Reset(const BehaviourConfig& cfg) {
     *this = {};
@@ -333,7 +435,7 @@ struct BehaviourState {
       std::equal(seq.rbegin(),seq.rend(),match_tail.rbegin());
   }
   void Accept(const BehaviourConfig& cfg, std::uint32_t token,
-              bool grammar_active) {
+              bool grammar_active, bool tool_grammar_active = false) {
     ++accepted_count;
     if(std::ranges::find(deferred_at,accepted_count)!=deferred_at.end()) boundary.deferred_stop=true;
     if(std::ranges::find(close_at,accepted_count)!=close_at.end()) close_decision=true;
@@ -428,6 +530,15 @@ struct BehaviourState {
       } else if(event.what==LoopBreaker::STOP_ANSWER && !cfg.eog_ids.empty())
         Force({cfg.eog_ids.front()},"loop_breaker");
     }
+    if (cfg.loop_breaker && cfg.loop_tool_args && cfg.loop_exempt &&
+        tool_grammar_active && !was_thinking && !thinking && !was_forcing && !forcing()) {
+      // Known limit: literal argument data with >=16 whole tool-call
+      // envelopes is indistinguishable from an accidental framing loop.
+      const bool framing = std::ranges::find(cfg.tool_framing_ids, token) != cfg.tool_framing_ids.end();
+      const auto event = loop.accept(static_cast<std::int32_t>(token), LoopBreaker::TOOL, framing);
+      if (event.what == LoopBreaker::STOP_TOOL && !cfg.eog_ids.empty())
+        Force({cfg.eog_ids.front()}, "tool_argument_loop");
+    }
   }
   void Taken(std::string name,std::string reason) { ++counters[{std::move(name),std::move(reason)}].taken; }
   void Fallback(std::string name,std::string reason) { ++counters[{std::move(name),std::move(reason)}].fallback; }
@@ -436,6 +547,12 @@ struct BehaviourState {
     for(const auto& [key,count]:counters)
       out.push_back("BEHAVIOUR_ENGAGE name="+key.first+" taken="+std::to_string(count.taken)+
         " fallback="+std::to_string(count.fallback)+" reason="+key.second+" scope=request");
+    if (loop.stopped_tools) {
+      const auto& stop = loop.tool.stop;
+      out.push_back("BEHAVIOUR_ENGAGE name=loop_breaker taken="+std::to_string(loop.stopped_tools)+
+        " fallback=0 reason=tool_argument_loop period="+std::to_string(stop.period)+
+        " repeats="+std::to_string(stop.repeats)+" scope=request");
+    }
     return out;
   }
 };

@@ -1,9 +1,10 @@
 # Packs the release build into a prebuilt zip for people who do not build:
 #   bubo-v<product-version>-windows-x64-gfx1151\
-#     start.cmd                    the launcher (number keys)
+#     start.cmd                    VC++ check, then the app (bin\Bubo.Control.Web.exe,
+#                                  added by assemble-app.ps1) or bin\bubo.exe serve
 #     bin\bubo.exe + DLLs          lazy engine and vcpkg libraries; VC++ v14 x64 is a prerequisite
 #                                  AMD files are acquired by bubo prepare runtime
-#     tools\windows\launcher.ps1, inventory.ps1
+#     tools\windows\vc-runtime.ps1 the VC++ check that start.cmd runs
 #     tools\npu\ NPU prefill kernel files and their sources
 #     README.txt, LICENSE, THIRD-PARTY.txt
 #
@@ -60,13 +61,14 @@ Get-ChildItem (Join-Path $build "*.dll") | Where-Object {
 # VC++ v14 x64 Redistributable is a prerequisite, never shipped.
 
 Copy-Item (Join-Path $root "start.cmd") $stage
-Copy-Item (Join-Path $root "tools\windows\launcher.ps1"), (Join-Path $root "tools\windows\inventory.ps1"), (Join-Path $root "tools\windows\vc-runtime.ps1") (Join-Path $stage "tools\windows")
+# start.cmd needs only the VC++ check; it opens the app or runs bin\bubo.exe serve.
+Copy-Item (Join-Path $root "tools\windows\vc-runtime.ps1") (Join-Path $stage "tools\windows")
 Copy-Item (Join-Path $root "LICENSE") $stage
 Copy-Item (Join-Path $root "tools\windows\prebuilt\README.txt"), (Join-Path $root "tools\windows\prebuilt\THIRD-PARTY.txt") $stage
 New-Item -ItemType Directory -Force (Join-Path $stage "licenses") | Out-Null
 New-Item -ItemType Directory -Force (Join-Path $stage "tools\npu") | Out-Null
 Copy-Item (Join-Path $root "tools\npu\*") (Join-Path $stage "tools\npu")
-Copy-Item (Join-Path $root "licenses\mlir-aie-Apache-2.0-LLVM-exception.txt"), (Join-Path $root "licenses\strata-MIT.txt") (Join-Path $stage "licenses")
+Copy-Item (Join-Path $root "licenses\mlir-aie-Apache-2.0-LLVM-exception.txt"), (Join-Path $root "licenses\strata-MIT.txt"), (Join-Path $root "licenses\gsqhalo-MIT.txt") (Join-Path $stage "licenses")
 Copy-Item (Join-Path $Vcpkg "installed\x64-windows\share\libwebp\copyright") (Join-Path $stage "licenses\libwebp.txt")
 Copy-Item (Join-Path $Vcpkg "installed\x64-windows\share\zlib\copyright") (Join-Path $stage "licenses\zlib.txt")
 $commit = (& git -C $root rev-parse --short HEAD 2>$null)

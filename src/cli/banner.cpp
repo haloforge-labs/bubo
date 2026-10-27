@@ -34,7 +34,8 @@ bool SupportsUnicode() {
 bool SuppressesBanner(std::span<const char* const> options) {
   return std::ranges::any_of(options, [](const char* option) {
     const std::string_view value(option);
-    return value == "--json" || value == "--help" || value == "-h";
+    return value == "--json" || value == "--jsonl" || value == "--help" ||
+           value == "-h";
   });
 }
 
@@ -61,7 +62,7 @@ void PrintStartupBanner(std::string_view version,
 
   std::clog << "  " << tint << ",___," << reset << "   " << bold << kProductName
             << reset << ' ' << version << '\n'
-            << "  " << tint << eyes << reset << "   Fast LLM & DiT inference"
+            << "  " << tint << eyes << reset << "   Local LLM server"
             << separator << "gfx1151\n"
             << std::flush;
 }

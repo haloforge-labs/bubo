@@ -54,12 +54,76 @@ bool WriteStderr(std::string_view batch) noexcept {
   return false;
 }
 
+class RotatingFile {
+public:
+  RotatingFile(std::filesystem::path path, std::uint64_t max_bytes,
+               unsigned retained)
+      : path_(std::move(path)), limit_(max_bytes), retained_(retained) {
+    Open();
+  }
+  bool Write(std::string_view batch) {
+    while (!batch.empty()) {
+      if (size_ >= limit_)
+        Rotate();
+      const auto count = static_cast<std::size_t>(
+          std::min<std::uint64_t>(batch.size(), limit_ - size_));
+      file_.write(batch.data(), static_cast<std::streamsize>(count));
+      if (!file_)
+        return false;
+      size_ += count;
+      batch.remove_prefix(count);
+    }
+    file_.flush();
+    return file_.good();
+  }
+
+private:
+  void Open() {
+    std::error_code ec;
+    size_ = std::filesystem::exists(path_, ec)
+                ? std::filesystem::file_size(path_, ec)
+                : 0;
+    if (ec)
+      throw std::runtime_error("Cannot read the log file size.");
+    file_.open(path_, std::ios::binary | std::ios::app);
+    if (!file_)
+      throw std::runtime_error("Cannot open the log file.");
+  }
+  std::filesystem::path Backup(unsigned index) const {
+    auto path = path_;
+    path += "." + std::to_string(index);
+    return path;
+  }
+  void Rotate() {
+    file_.close();
+    std::filesystem::remove(Backup(retained_));
+    for (unsigned index = retained_; index > 1; --index)
+      if (std::filesystem::exists(Backup(index - 1)))
+        std::filesystem::rename(Backup(index - 1), Backup(index));
+    std::filesystem::rename(path_, Backup(1));
+    size_ = 0;
+    file_.open(path_, std::ios::binary | std::ios::trunc);
+    if (!file_)
+      throw std::runtime_error("Cannot rotate the log file.");
+  }
+  std::filesystem::path path_;
+  std::ofstream file_;
+  std::uint64_t limit_, size_ = 0;
+  unsigned retained_;
+};
+std::mutex file_mutex;
+std::unique_ptr<RotatingFile> file_sink;
+bool WriteLog(std::string_view batch) {
+  std::lock_guard lock(file_mutex);
+  return file_sink ? file_sink->Write(batch) : WriteStderr(batch);
+}
+
 AsyncLogSink& ProductionSink() {
   // Intentionally retain state through CRT teardown, including a stuck writer.
   static auto* sink = [] {
     const char* sync = std::getenv("GUFO_LOG_SYNC");
     auto* result =
-        new AsyncLogSink(WriteStderr, sync && std::string_view(sync) == "1");
+        new AsyncLogSink(WriteLog, sync && std::string_view(sync) == "1");
     std::atexit([] { Logger::Shutdown(); });
     return result;
   }();
@@ -488,6 +552,18 @@ std::string_view LogLevelName(LogLevel level) {
 
 void Logger::SetLevel(LogLevel level) {
   LevelStorage().store(level, std::memory_order_relaxed);
+}
+
+void Logger::SetLogFile(const std::filesystem::path& path,
+                        std::uint64_t max_bytes, unsigned retained) {
+  if (path.empty() || max_bytes < 4096 || max_bytes > 1024ULL * 1024 * 1024 ||
+      retained < 1 || retained > 16)
+    throw std::invalid_argument("Invalid log rotation settings.");
+  auto sink = std::make_unique<RotatingFile>(path, max_bytes, retained);
+  std::lock_guard lock(file_mutex);
+  if (file_sink)
+    throw std::invalid_argument("Log file was already configured.");
+  file_sink = std::move(sink);
 }
 
 LogLevel Logger::Level() {

@@ -21,6 +21,7 @@ Centralizing these constants does not change tokenization or EOS handling.
 | `kEndOfText` | End-of-text entry; fallback eos and pad when GGUF metadata does not carry them. |
 | `kImStart` | Opens a chat turn, emitted immediately before the role name; fallback BOS. |
 | `kImEnd` | Closes a chat turn; the primary end-of-generation stop token. |
+| `kToolCallStart`, `kToolCallEnd` | Canonical Qwen tool-call envelope markers. |
 | `kObjectRefStart`, `kObjectRefEnd` | Delimit an object reference in grounding output. |
 | `kBoxStart`, `kBoxEnd` | Delimit a bounding box in grounding output. |
 | `kQuadStart`, `kQuadEnd` | Delimit a quadrilateral in grounding output. |

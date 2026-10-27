@@ -12,13 +12,14 @@ set(gufo_pr_targets
   cache_retention_test
   arg_parser_test json_test json_constraint_test gguf_reader_test gguf_identity_test
   logit_sampler_test ggml_dequant_test
-  loop_breaker_test release_profile_test log_async_test brand_test
+  loop_breaker_test tool_argument_loop_test release_profile_test log_async_test brand_test
   quote_tracker_test
   openai_chat_test http_server_test trace_test audio_websocket_test
   text_generation_scheduler_test
   text_model_runner_test continuation_disk_store_test
   bench_cli_test prompt_cli_test eval_http_client_test
-  qwen_tokenizer_test qwen_chat_template_test
+  qwen_tokenizer_test qwen_chat_template_test qwen_cybertiel_template_test
+  qwen_qwen36_template_test
   qwen38_flash_next_config_test qwen38_flash_next_mtp_sampling_test
   ds4_sampling_test ds4_chat_template_test ds4_cli_test
   qwen3_asr_config_test qwen3_asr_audio_api_test

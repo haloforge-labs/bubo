@@ -70,6 +70,10 @@ def link_violations(metadata: Path) -> list[str]:
     # Only this reviewed CPU platform dependency may be linked. Arbitrary relay
     # targets are rejected too, so they cannot hide a transitive model/HIP link.
     allowed = {"Threads::Threads"}
+    if sys.platform == "win32":
+        # CMake links the shared Win32 POSIX shim into every host target.
+        # Model, HTTP and GPU relay targets remain forbidden below.
+        allowed.add("gufo_posix_compat")
     return [f"gufo_cache: unapproved dependency {library}"
             for line in metadata.read_text().splitlines()
             for library in line.split(";") if library and library not in allowed]

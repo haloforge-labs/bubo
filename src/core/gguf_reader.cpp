@@ -322,6 +322,43 @@ std::unique_ptr<GgufReader> GgufReader::OpenSplitFileSet(
   return combined;
 }
 
+bool GgufReader::OverlayTensors(
+    const std::filesystem::path& overlay_path,
+    const std::function<bool(std::string_view)>& take, std::string* error_msg) {
+  const auto fail = [&](const std::string& message) {
+    if (error_msg != nullptr)
+      *error_msg = message;
+    return false;
+  };
+  auto overlay = OpenSingleFile(overlay_path, error_msg);
+  if (!overlay)
+    return false;
+  if (GetMetadataString("general.architecture") != overlay->GetMetadataString("general.architecture"))
+    return fail("Overlay GGUF has another architecture: " + overlay_path.string());
+  // Validate every replacement before changing anything.
+  std::vector<std::pair<std::size_t, std::size_t>> replacements;
+  for (std::size_t i = 0; i < tensors_.size(); ++i) {
+    const auto& ours = tensors_[i];
+    if (!take(ours.name))
+      continue;
+    const auto* theirs = overlay->FindTensor(ours.name);
+    if (theirs == nullptr)
+      return fail("Overlay GGUF is missing tensor " + std::string(ours.name));
+    if (theirs->dimensions != ours.dimensions)
+      return fail("Overlay tensor " + std::string(ours.name) + " has another shape");
+    replacements.emplace_back(i, static_cast<std::size_t>(theirs - overlay->tensors_.data()));
+  }
+  if (replacements.empty())
+    return fail("No tensor matched the overlay rule: " + overlay_path.string());
+  // The tensor names are views into the overlay's mapped metadata, which stays alive in shards_.
+  for (const auto& [ours, theirs] : replacements)
+    tensors_[ours] = overlay->tensors_[theirs];
+  // size_ stays the base mapping's length: a single-file base unmaps exactly that many bytes.
+  mapped_regions_.push_back({overlay->data_, overlay->size_, overlay->fd_});
+  shards_.push_back(std::move(overlay));
+  return true;
+}
+
 std::unique_ptr<GgufReader> GgufReader::OpenMemory(const void* data,
                                                    std::size_t size,
                                                    std::string* error_msg) {

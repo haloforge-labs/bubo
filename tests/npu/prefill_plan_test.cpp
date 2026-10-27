@@ -50,6 +50,27 @@ int main() {
   assert(PrefillChunk(true, PrefillBoundaryBudget(4096, 2048, 7703, 3000), 3000,
                       2048, 2176) == 2048);
   assert(PrefillBoundaryBudget(0, 2048, 7703, 3000) == 3000);
+  // Checkpoint grid: NPU chunk wins; GPU alone follows the forward chunk.
+  assert(CheckpointGrid(4096, 4096) == 4096);
+  assert(CheckpointGrid(4096, 1000) == 4096);
+  assert(CheckpointGrid(0, 4096) == 4096);
+  assert(CheckpointGrid(0, 2048) == 2048);
+  assert(CheckpointGrid(0, 3000) == 3000);
+  assert(CheckpointGrid(0, 8192) == 8192);
+  assert(CheckpointGrid(0, 16384) == 8192);
+  // Default-neutral: every chunk up to 4096 gives the grid it gave before.
+  for (std::size_t capacity = 0; capacity <= 4096; ++capacity) {
+    const std::size_t before =
+        capacity == 0 ? 2048
+        : capacity < 2048
+            ? (2048 + capacity - 1) / capacity * capacity
+            : std::min<std::size_t>(capacity, 4096);
+    assert(CheckpointGrid(0, capacity) == before);
+  }
+  assert(CheckpointGrid(0, 1024) == 2048);
+  assert(CheckpointGrid(0, 1000) == 3000);
+  assert(CheckpointGrid(0, 64) == 2048);
+  assert(CheckpointGrid(0, 0) == 2048);
   std::cout << "PASS planner: OFF original sequences; ON exact 4096 and hard "
                "boundaries\n";
 }

@@ -1,0 +1,204 @@
+@import 'tailwindcss';
+
+@font-face {
+  font-family: 'ET Book';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../fonts/et-book-roman-line-figures.woff') format('woff');
+}
+@font-face {
+  font-family: 'ET Book';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../fonts/et-book-display-italic-old-style-figures.woff')
+    format('woff');
+}
+@font-face {
+  font-family: 'ET Book';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('../fonts/et-book-bold-line-figures.woff') format('woff');
+}
+@font-face {
+  font-family: 'Go Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../fonts/Go-Mono.ttf') format('truetype');
+}
+
+:root,
+:root[data-theme='light'] {
+  color-scheme: light;
+  --paper: #faf8f1;
+  --ink: #222;
+  --accent: #245c64;
+  --brand: #b83f3f;
+  --danger: var(--brand);
+  --muted: #595959;
+  --line: #ddd;
+  --wash: #f3f1ea;
+  --tint: rgba(36, 92, 100, 0.07);
+  --serif:
+    'ET Book', Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif;
+  --mono: 'Go Mono', ui-monospace, Consolas, monospace;
+  --radius: 0px;
+}
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --paper: #1a1a1a;
+  --ink: #e6e6e6;
+  --accent: #8bc6cc;
+  --brand: #e85a5a;
+  --muted: #b0b0b0;
+  --line: #333;
+  --wash: #252525;
+  --tint: rgba(139, 198, 204, 0.07);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --paper: #1a1a1a;
+    --ink: #e6e6e6;
+    --accent: #8bc6cc;
+    --brand: #e85a5a;
+    --muted: #b0b0b0;
+    --line: #333;
+    --wash: #252525;
+    --tint: rgba(139, 198, 204, 0.07);
+  }
+}
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+@theme inline {
+  --color-background: var(--paper);
+  --color-foreground: var(--ink);
+  --color-card: var(--paper);
+  --color-card-foreground: var(--ink);
+  --color-popover: var(--paper);
+  --color-popover-foreground: var(--ink);
+  --color-primary: var(--accent);
+  --color-primary-foreground: var(--paper);
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--paper);
+  --color-secondary: var(--wash);
+  --color-secondary-foreground: var(--ink);
+  --color-muted: var(--wash);
+  --color-muted-foreground: var(--muted);
+  --color-accent: var(--wash);
+  --color-accent-foreground: var(--ink);
+  --color-destructive: var(--danger);
+  --color-border: var(--line);
+  --color-input: var(--muted);
+  --color-ring: var(--accent);
+  --color-sidebar: var(--wash);
+  --color-sidebar-foreground: var(--ink);
+  --color-sidebar-primary: var(--accent);
+  --color-sidebar-primary-foreground: var(--paper);
+  --color-sidebar-accent: var(--tint);
+  --color-sidebar-accent-foreground: var(--accent);
+  --color-sidebar-border: var(--line);
+  --color-sidebar-ring: var(--accent);
+  --font-sans: var(--serif);
+  --font-mono: var(--mono);
+  --radius-sm: var(--radius);
+  --radius-md: var(--radius);
+  --radius-lg: var(--radius);
+  --radius-xl: var(--radius);
+}
+@layer base {
+  * {
+    box-sizing: border-box;
+    border-color: var(--line);
+    box-shadow: none !important;
+  }
+  html,
+  body,
+  #root {
+    min-height: 100%;
+    margin: 0;
+  }
+  html {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--serif);
+    font-size: 18px;
+  }
+  ::selection {
+    background: var(--accent);
+    color: var(--paper);
+  }
+  a {
+    color: var(--accent);
+    text-underline-offset: 0.2em;
+  }
+  h1 {
+    color: var(--brand);
+    font-style: italic;
+  }
+  [data-slot='sidebar-menu-button'][data-active='true'] {
+    position: relative;
+  }
+  [data-slot='sidebar-menu-button'][data-active='true']::before {
+    content: '';
+    position: absolute;
+    inset-block: 0;
+    inset-inline-start: 0;
+    width: 3px;
+    background: var(--brand);
+  }
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+  }
+  [data-slot='tabs-trigger']:focus:not(:focus-visible) {
+    outline: none;
+  }
+  code,
+  pre,
+  .tabular-nums,
+  input[type='number'],
+  input[inputmode='numeric'],
+  input[inputmode='decimal'] {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+  }
+  code,
+  pre {
+    font-size: 0.8rem;
+  }
+  button:disabled,
+  [data-slot][data-disabled],
+  [data-slot]:disabled {
+    color: var(--muted);
+    background: var(--wash);
+    border: 1px dashed var(--muted);
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+}
+.error-note {
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+  border-left: 4px solid var(--danger);
+  background: color-mix(in srgb, var(--danger) 7%, var(--paper));
+  padding: 0.75rem;
+}
+/* Primitive controls carry a mono utility; prose and placeholders stay serif. */
+input:not([inputmode='numeric']):not([inputmode='decimal']):not(
+    [type='number']
+  ),
+select,
+input::placeholder {
+  font-family: var(--serif);
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition: none !important;
+    animation: none !important;
+  }
+}

@@ -91,7 +91,76 @@ int main() {
   std::map<std::string, std::string> values{{"GUFO_NPU_DIR", "0"}};
   auto knobs = ParseKnobs(token, values);
   assert(knobs.artifacts == "0" && knobs.slices == 6 && knobs.gate_slices == 0);
-  assert(knobs.shared_expert);
+  assert(knobs.shared_expert && knobs.hal_monitor);  // HAL monitor default on
+  assert(IsKnob("GUFO_NPU_HAL_MONITOR") && IsKnob("GUFO_NPU_CHIP_POWER"));
+  assert(knobs.chip_power);  // chip power logging default on
+  assert(IsKnob("GUFO_NPU_MEM_TRACE") && knobs.mem_trace);
+  // G1 guard: on|off|log (default on), strict; and the internal test override.
+  assert(IsKnob("GUFO_NPU_GUARD") && IsKnob("GUFO_NPU_GUARD_TEST"));
+  assert(knobs.guard == GuardMode::kOn && !knobs.guard_test.power_w &&
+         !knobs.guard_test.hold_s);
+  for (const auto& [text, mode] :
+       {std::pair<const char*, GuardMode>{"on", GuardMode::kOn},
+        {"off", GuardMode::kOff},
+        {"log", GuardMode::kLog}}) {
+    auto guarded = values;
+    guarded["GUFO_NPU_GUARD"] = text;
+    assert(ParseKnobs(token, guarded).guard == mode);
+  }
+  for (const auto* bad : {"", "ON", "1", "0", "yes", "on ", "enforce"}) {
+    auto invalid = values;
+    invalid["GUFO_NPU_GUARD"] = bad;
+    Reject([&] { ParseKnobs(token, invalid); });
+  }
+  {
+    auto tested = values;
+    tested["GUFO_NPU_GUARD_TEST"] = "power_w=30,hold_s=60";
+    const auto parsed = ParseKnobs(token, tested);
+    assert(parsed.guard_test.power_w == 30 && parsed.guard_test.hold_s == 60);
+  }
+  for (const auto* bad : {"power_w=x", "volts=3", "hold_s=-1", "power_w"}) {
+    auto invalid = values;
+    invalid["GUFO_NPU_GUARD_TEST"] = bad;
+    Reject([&] { ParseKnobs(token, invalid); });
+  }
+  // L-REL-2: the token-count part of the lane qualification, shared with the
+  // linear and projection lanes and with the backup decision in Session::Feed.
+  assert(QualifiedChunk(4096, 4096) && QualifiedChunk(8192, 8192) &&
+         QualifiedChunk(16384, 16384));
+  assert(!QualifiedChunk(100, 4096) && !QualifiedChunk(1024, 4096) &&
+         !QualifiedChunk(4095, 4096) && !QualifiedChunk(4097, 8192) &&
+         !QualifiedChunk(8192, 4096) && !QualifiedChunk(20480, 20480) &&
+         !QualifiedChunk(0, 4096));
+  // L-REL-2 internal failure injection: a chunk number, strict.
+  assert(IsKnob("GUFO_NPU_TEST_FAIL_CHUNK") && !knobs.test_fail_chunk);
+  for (const auto* value : {"0", "1", "12"}) {
+    auto failing = values;
+    failing["GUFO_NPU_TEST_FAIL_CHUNK"] = value;
+    assert(ParseKnobs(token, failing).test_fail_chunk ==
+           std::stoull(std::string(value)));
+  }
+  for (const auto* bad : {"", "-1", "x", "1.5", "1 ", "1000001"}) {
+    auto invalid = values;
+    invalid["GUFO_NPU_TEST_FAIL_CHUNK"] = bad;
+    Reject([&] { ParseKnobs(token, invalid); });
+  }
+  for (const auto* value : {"0", "1"}) {
+    auto traced = values;
+    traced["GUFO_NPU_MEM_TRACE"] = value;
+    assert(ParseKnobs(token, traced).mem_trace == (std::string(value) == "1"));
+  }
+  for (const auto* value : {"0", "1"}) {
+    auto powered = values;
+    powered["GUFO_NPU_CHIP_POWER"] = value;
+    assert(ParseKnobs(token, powered).chip_power ==
+           (std::string(value) == "1"));
+  }
+  for (const auto* value : {"0", "1"}) {
+    auto monitored = values;
+    monitored["GUFO_NPU_HAL_MONITOR"] = value;
+    assert(ParseKnobs(token, monitored).hal_monitor ==
+           (std::string(value) == "1"));
+  }
   assert(knobs.timing.timeout.count() == 8000 &&
          knobs.timing.keepalive_interval.count() == 1000);
   Reject([&] { ParseKnobs({}, values); });
@@ -111,7 +180,8 @@ int main() {
     Reject([&] { ParseKnobs(token, bad_path); });
   }
   for (const auto* name :
-       {"GUFO_NPU_SHEXP", "GUFO_NPU_KEEPALIVE"}) {
+       {"GUFO_NPU_SHEXP", "GUFO_NPU_KEEPALIVE", "GUFO_NPU_HAL_MONITOR",
+        "GUFO_NPU_CHIP_POWER", "GUFO_NPU_MEM_TRACE"}) {
     for (const auto* bad :
          {"", "01", "00", "2", "-1", "+1", "1x", " 1", "1 ", "on"}) {
       auto invalid = values;

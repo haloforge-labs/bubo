@@ -59,6 +59,9 @@ inline constexpr DebugSettingsIrrelevantEnvironment
   auto environment = json::Value::object();
   for (const char* name : kDebugSettingsEnvironment) {
     const char* value = std::getenv(name);
+    if (std::strcmp(name, "GUFO_THINK_MARKER_ENTROPY_GATE") == 0 &&
+        (!value || !*value))
+      continue;
     environment[name] = value ? json::Value(value) : json::Value();
   }
   settings["environment"] = std::move(environment);
@@ -88,6 +91,13 @@ inline constexpr DebugSettingsIrrelevantEnvironment
   auto efforts = json::Value::object();
   sampling::BehaviourConfig inactive;
   const auto& cfg = parsed ? *parsed : inactive;
+  if (cfg.marker_entropy_gate)
+    behaviour["marker_entropy_gate"] =
+        static_cast<double>(*cfg.marker_entropy_gate);
+  else if (const char* gate = std::getenv("GUFO_THINK_MARKER_ENTROPY_GATE");
+           gate && *gate)
+    behaviour["marker_entropy_gate"] =
+        BehaviourNumber("GUFO_THINK_MARKER_ENTROPY_GATE", 0);
   for (const char* effort : {"minimal", "low", "medium", "high", "xhigh", "max"})
     efforts[effort] = ResolveMarkerBias(cfg, effort);
   behaviour["marker_bias_by_effort"] = std::move(efforts);
@@ -140,6 +150,11 @@ inline constexpr DebugSettingsIrrelevantEnvironment
   behaviour["model_suppress_tokens"] = policy.model_suppress_tokens;
   behaviour["production_sampling"] = policy.production_sampling;
   behaviour["marker_bias"] = policy.marker_bias;
+  if (policy.marker_entropy_gate)
+    behaviour["marker_entropy_gate"] =
+        static_cast<double>(*policy.marker_entropy_gate);
+  else
+    behaviour.erase_member("marker_entropy_gate");
   auto efforts = json::Value::object();
   for (const char* effort : {"minimal", "low", "medium", "high", "xhigh", "max"})
     efforts[effort] = ResolveMarkerBias(policy, effort);

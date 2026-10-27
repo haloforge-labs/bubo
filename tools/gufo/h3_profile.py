@@ -16,7 +16,6 @@ import hashlib
 import json
 import os
 import platform
-import resource
 import signal
 import statistics
 import subprocess
@@ -277,6 +276,10 @@ def public_descriptor(
 
 
 def child_rusage() -> dict[str, float | int]:
+    # Linux process accounting is needed only for an actual profiling run;
+    # report parsing and aggregation are also used by Windows CPU checks.
+    import resource
+
     usage = resource.getrusage(resource.RUSAGE_CHILDREN)
     return {
         "user_seconds": usage.ru_utime,

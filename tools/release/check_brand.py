@@ -120,6 +120,21 @@ def sites(root):
     return found, locations
 
 
+def gui_urls(root):
+    """Production GUI links cannot use the old organization, even if allow-listed."""
+    errors = []
+    legacy_url = re.compile(r'https?://[^\s\x27\x22<>]*gufo-org', re.IGNORECASE)
+    for path in sorted((root / 'gui/wails/frontend/src').rglob('*')):
+        if not path.is_file() or path.suffix not in {'.ts', '.tsx', '.css'}:
+            continue
+        if '.test.' in path.name or '.shots.' in path.name:
+            continue
+        for number, line in enumerate(path.read_text(encoding='utf-8').splitlines(), 1):
+            if legacy_url.search(line):
+                errors.append(f'{path.relative_to(root).as_posix()}:{number}: legacy GUI organization URL')
+    return errors
+
+
 def check(root):
     entries = json.loads((root / 'tools/release/program_name_allowlist.json').read_text(encoding='utf-8'))
     allowed = Counter()
@@ -164,7 +179,7 @@ def main():
     parser.add_argument('--release-gate', type=Path,
                         help='Also run the offline production pin/evidence gate executable')
     args = parser.parse_args()
-    errors = check(args.root) + prepare_security(args.root, args.prepare_library)
+    errors = check(args.root) + gui_urls(args.root) + prepare_security(args.root, args.prepare_library)
     if args.release_gate:
         result = subprocess.run([str(args.release_gate), '--release',
                                  str(args.root / 'tools/release/prepare-evidence')], check=False)
@@ -175,6 +190,7 @@ def main():
     if not errors:
         print('PASS: Bubo program-name literal scan (src/cli, docs, README, tools/windows/*.ps1, start.cmd, flake.nix, .devops, CMakeLists.txt, cmake; categorized exact-line allow-list)')
         print('PASS: production prepare source/archive fixture guard and forbidden second HTTP/hash/inflater stack scan')
+        print('PASS: production GUI links reject legacy organization URLs')
     if args.package_folder:
         result = subprocess.run(['pwsh', '-NoProfile', '-File',
                                  str(args.root / 'tools/release/check-package.ps1'),

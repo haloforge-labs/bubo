@@ -35,5 +35,5 @@ src/cli/
 - **Adding a Command**:
   1. Create `src/cli/<command>/<command>.hpp` and `<command>.cpp` in `namespace gufo::cli`.
   2. Implement `Run<Command>(std::span<const char* const> args)`.
-  3. Register the routing in `src/cli/main.cpp`.
-  4. Add the source files to `CMakeLists.txt` under `add_executable(gufo ...)` and write unit tests in `tests/cli/`.
+  3. Register its name, summary, engine requirement and runner in `src/cli/command_table.inc`; bootstrap, engine dispatch and global help share that table. Add the uniform-context runner adapter beside the engine adapters in `main.cpp`, or the engine-free adapters in `command_table.cpp`.
+  4. Before the code, write the ways the command can fail and an end-to-end test that runs the real `bubo.exe` (`tests/cli/`). Then add the source files to `CMakeLists.txt` under `add_executable(gufo ...)`.

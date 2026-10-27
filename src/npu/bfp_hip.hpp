@@ -9,6 +9,8 @@ namespace gufo::npu::bfp {
 // HIP encoding support. All spans are DEVICE storage, kept alive until
 // the stream completes. Caller zeros invalid once per chunk and refuses the
 // chunk after its existing completion wait if any encoder/decoder set it.
+// The word is a bit set (invalid_bits.hpp): each cause is one atomicOr, so
+// non-zero still means invalid and the bits say why.
 // Stream success alone does not establish finite/valid results.
 hipError_t EncodeAHip(std::span<const std::uint16_t> input, std::size_t pitch,
                       std::span<std::uint8_t> output, unsigned* invalid,

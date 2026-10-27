@@ -1,0 +1,102 @@
+{
+  "source": "R2-runtime-20261015-043903 (int ab6d0572), TWINBATCH2 20261015-0303 (int 16d5a483); default profile, no image-token cap. Package/header facts recorded without loading.",
+  "package_id": "huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+  "architecture": "qwen4exp",
+  "model_family": "qwen3.8-flash-next",
+  "native_context": 262144,
+  "artefacts": {
+    "mtp": "mtp/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+    "mmproj": "mmproj/mmproj-Qwen3.8-Flash-Next-BF16.gguf",
+    "twin": "twin/iq4-nofullattn-nohc.gguf",
+    "draft_head": "draft_head/draft-out-q4k.gguf"
+  },
+  "gpu_available_bytes": 119078647808,
+  "host_available_bytes": 13919617024,
+  "maximum_overestimate_bytes": 3221225472,
+  "points": [
+    {
+      "sessions": 1,
+      "context": 262144,
+      "device_used_mib": 92675,
+      "vision_reserved_mib_per_session": 2563,
+      "expected_admission_bytes": 101462081728,
+      "expected_cache_at_clamp_bytes": 8589934592,
+      "expected_host_spill_bytes": 7159091392,
+      "expected_recommended": true,
+      "expected_recommendation_failures": [],
+      "expected_fits": true
+    },
+    {
+      "sessions": 2,
+      "context": 188416,
+      "device_used_mib": 95871,
+      "vision_reserved_mib_per_session": 2563,
+      "expected_admission_bytes": 106082631936,
+      "expected_cache_at_clamp_bytes": 8589934592,
+      "expected_host_spill_bytes": 11779641600,
+      "expected_recommended": false,
+      "expected_recommendation_failures": [
+        "gpu_headroom",
+        "host_floor"
+      ],
+      "expected_fits": true
+    },
+    {
+      "sessions": 2,
+      "context": 262144,
+      "device_used_mib": 99755,
+      "vision_reserved_mib_per_session": 2563,
+      "expected_admission_bytes": 111674163456,
+      "expected_cache_at_clamp_bytes": 5602469888,
+      "expected_host_spill_bytes": 14383708416,
+      "expected_recommended": false,
+      "expected_recommendation_failures": [
+        "gpu_headroom",
+        "host_floor"
+      ],
+      "expected_fits": false,
+      "expected_fit_reason_contains": "Memory is short:",
+      "expected_fits_note": "2 x 262144 loads and runs on this machine with about 1 GiB of host room left (measured), but the planner now counts the part of the need beyond the 95.8 GiB (102.9 GB) dedicated carve-out against the RAM above its floor: 8.78 GB of spill + 0.91 GB host need + 4.29 GB floor > 13.92 GB available. The GUI shows it as not recommended with this reason; serve still starts it (load_spill warning)."
+    }
+  ],
+  "gpu_total_bytes": 119078647808,
+  "host_total_bytes": 33982058496,
+  "dedicated_video_memory_bytes": 102892924928,
+  "recommendation_inputs_source": "Fixed pre-load GPU budget (no process usage), physical host total from retained capacity logs; dedicated size 98126 MiB from lane S3d DXGI observation. These are planner inputs, not new runtime measurements.",
+  "snapshot_capacity_records": [
+    {
+      "source_path": "C:\\bubo\\run\\app\\smoke\\R2-runtime-20261015-043903\\result\\supervisor-logs-2-mvp-two\\stderr.0.log",
+      "source_line": "2026-10-15 04:40:12 [INFO] [cache] event=snapshot_capacity_plan host_total_bytes=33982058496 host_resident_bytes=0 model_footprint_bytes=101610003624 reserve_bytes=4294967296 device_total_bytes=115842263040 explicit_bytes=6442450944 limit=device ceiling_bytes=8985404248 automatic_bytes=4492702124 capacity_bytes=6442450944 clamp=none",
+      "host_total_bytes": 33982058496,
+      "host_resident_bytes": 0,
+      "model_footprint_bytes": 101610003624,
+      "reserve_bytes": 4294967296,
+      "device_total_bytes": 115842263040,
+      "explicit_bytes": 6442450944,
+      "ceiling_bytes": 8985404248,
+      "automatic_bytes": 4492702124,
+      "capacity_bytes": 6442450944,
+      "limit": "device",
+      "clamp": "none",
+      "context_tokens": 188416,
+      "sessions": 2
+    },
+    {
+      "source_path": "C:\\bubo\\benchmarks\\release-smoke-128cf16d-20261015-012550\\P1-server.err",
+      "source_line": "2026-10-15 01:26:20 [INFO] [cache] event=snapshot_capacity_plan host_total_bytes=33982058496 host_resident_bytes=0 model_footprint_bytes=96958458708 reserve_bytes=4294967296 device_total_bytes=115817097216 explicit_bytes=6442450944 limit=device ceiling_bytes=13636949164 automatic_bytes=6818474582 capacity_bytes=6442450944 clamp=none",
+      "host_total_bytes": 33982058496,
+      "host_resident_bytes": 0,
+      "model_footprint_bytes": 96958458708,
+      "reserve_bytes": 4294967296,
+      "device_total_bytes": 115817097216,
+      "explicit_bytes": 6442450944,
+      "ceiling_bytes": 13636949164,
+      "automatic_bytes": 6818474582,
+      "capacity_bytes": 6442450944,
+      "limit": "device",
+      "clamp": "none",
+      "context_tokens": 262144,
+      "sessions": 1
+    }
+  ]
+}

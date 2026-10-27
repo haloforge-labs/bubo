@@ -5,9 +5,13 @@
 #include <cstring>
 
 #include "bfp_hip.hpp"
+#include "chunk_retry.hpp"
+#include "fault_telemetry.hpp"
+#include "hal_fault_monitor.hpp"
 #include "layer_worker.hpp"
 #include "projection_geometry.hpp"
 #include "request_stats.hpp"
+#include "src/cli/serve/logging.hpp"
 
 namespace gufo::npu {
 struct HipLinearZStorage {
@@ -42,7 +46,7 @@ HipLinearZTransfer::HipLinearZTransfer(std::shared_ptr<ServerPrefill> service,
       second_(second),
       stream_(stream) {
   if (!service_ || !input || !output || !QualifiedPrefill(tokens, 4) ||
-      !service_->ready())
+      !service_->lane_ready())
     throw std::invalid_argument("NPU prefill HIP bridge not qualified/ready");
   auto& shared = service_->TransferStorage();
   if (!shared) {
@@ -229,9 +233,52 @@ bool CheckHipPrefillChunk(ServerPrefill& service, std::string* error) {
   if (!service.ChunkUsed())
     return true;
   const auto& storage = service.TransferStorage();
-  if (storage && *storage->host_invalid) {
+  unsigned cause = storage ? *storage->host_invalid : 0;
+  // Internal test switch (debug hooks only, see ServerPrefill::Start): report
+  // this chunk as an invalid result and take the normal failure path below.
+  if (!cause &&
+      TestFailChunkHits(service.knobs().test_fail_chunk,
+                        Stats().chunks.load(std::memory_order_relaxed)))
+    cause = kInvalidDecoderExp255;
+  if (cause) {
     Stats().failures.fetch_add(1, std::memory_order_relaxed);
-    FailProcess("NPU prefill chunk has invalid activations or packed output");
+    Faults().invalid_chunks.fetch_add(1, std::memory_order_relaxed);
+  }
+  // Chunk context: stamps, idle gap, memory, per-chunk counters. The only HAL
+  // monitor access is the sequence number read inside EndChunkTelemetry.
+  // Telemetry must never throw out of this function: it did not throw before.
+  const auto& start = service.chunk();
+  std::string detail;
+  std::uint64_t hal_new = 0;
+  try {
+    const auto end = EndChunkTelemetry(start);
+    NoteRequestChunk(start, end);
+    hal_new = end.hal_new;  // HAL Id 15 events only; WHEA is counted apart
+    if (cause || hal_new)
+      detail = FormatChunkFailure(start, end, cause);
+    // G1: the power rule sees this chunk's mean. A trip only holds later
+    // chunks; it never fails this request.
+    if (!cause && !ProcessFailed()) {
+      try {
+        if (auto* guard = service.guard())
+          guard->OnChunkEnd(start, end);
+      } catch (...) {
+      }
+    }
+  } catch (...) {
+    detail.clear();
+  }
+  if (cause) {
+    FailProcess("NPU prefill chunk has invalid activations or packed output" +
+                (detail.empty() ? std::string() : ": " + detail));
+  } else if (hal_new) {
+    // A fault with no Bubo failure (finite garbage would pass the check).
+    try {
+      server::Logger::Warn(
+          "npu",
+          "HAL fault event during an NPU chunk with a valid result: " + detail);
+    } catch (...) {
+    }
   }
   if (!ProcessFailed())
     return true;

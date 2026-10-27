@@ -7,6 +7,7 @@
 #include <stdexcept>
 
 #include "bfp_hip.hpp"
+#include "invalid_bits.hpp"
 
 namespace gufo::npu::bfp {
 namespace {
@@ -23,7 +24,7 @@ __device__ void Encode(const float* v, std::uint8_t* out, unsigned* invalid) {
   for (unsigned i = 0; i < 8; ++i)
     e = max(e, (__float_as_uint(v[i]) >> 23) & 255U);
   if (e == 255) {
-    atomicExch(invalid, 1U);
+    atomicOr(invalid, kInvalidEncoderNonFinite);
     for (unsigned i = 0; i < 9; ++i)
       out[i] = 0;
     return;
@@ -32,8 +33,10 @@ __device__ void Encode(const float* v, std::uint8_t* out, unsigned* invalid) {
   out[0] = static_cast<std::uint8_t>(e);
   for (unsigned i = 0; i < 8; ++i) {
     const float q = fminf(127.0F, fmaxf(-128.0F, rintf(v[i] * inv)));
+    // Bits 0 and 1 are shared by the A (activation) and B (weight) encoders;
+    // EncodeBHip has no caller in the server, so a bit seen in a chunk is A.
     if (e == 254 && q == -128.0F)
-      atomicExch(invalid, 1U);
+      atomicOr(invalid, kInvalidEncoderSaturated);
     out[i + 1] = static_cast<std::uint8_t>(static_cast<int>(q) & 255);
   }
 }
@@ -71,13 +74,13 @@ __global__ void C(const std::uint8_t* x, float* out, std::size_t pitch,
   const auto p = Position(Layout::C, g);
   const auto* bytes = x + g * 9;
   if (bytes[0] == 255) {
-    atomicExch(invalid, 1U);
+    atomicOr(invalid, kInvalidDecoderExp255);
     return;
   }
   if (bytes[0] == 254) {
     for (unsigned i = 1; i < 9; ++i) {
       if (bytes[i] == 128) {
-        atomicExch(invalid, 1U);
+        atomicOr(invalid, kInvalidDecoderExp254Mant128);
         return;
       }
     }

@@ -12,6 +12,8 @@ from __future__ import annotations
 kEndOfText = "<|endoftext|>"
 kImStart = "<|im_start|>"
 kImEnd = "<|im_end|>"
+kToolCallStart = "<tool_call>"
+kToolCallEnd = "</tool_call>"
 kObjectRefStart = "<|object_ref_start|>"
 kObjectRefEnd = "<|object_ref_end|>"
 kBoxStart = "<|box_start|>"

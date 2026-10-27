@@ -1,0 +1,135 @@
+diff --git a/internal/frontend/desktop/windows/dialog.go b/internal/frontend/desktop/windows/dialog.go
+index 5733258..27e544b 100644
+--- a/internal/frontend/desktop/windows/dialog.go
++++ b/internal/frontend/desktop/windows/dialog.go
+@@ -6,7 +6,6 @@ package windows
+ import (
+ 	"path/filepath"
+ 	"strings"
+-	"syscall"
+ 
+ 	"github.com/wailsapp/wails/v2/internal/frontend"
+ 	"github.com/wailsapp/wails/v2/internal/frontend/desktop/windows/winc/w32"
+@@ -180,18 +179,7 @@ func calculateMessageDialogFlags(options frontend.MessageDialogOptions) uint32 {
+ // MessageDialog show a message dialog to the user
+ func (f *Frontend) MessageDialog(options frontend.MessageDialogOptions) (string, error) {
+ 
+-	title, err := syscall.UTF16PtrFromString(options.Title)
+-	if err != nil {
+-		return "", err
+-	}
+-	message, err := syscall.UTF16PtrFromString(options.Message)
+-	if err != nil {
+-		return "", err
+-	}
+-
+-	flags := calculateMessageDialogFlags(options)
+-
+-	button, _ := windows.MessageBox(windows.HWND(f.getHandleForDialog()), message, title, flags|windows.MB_SYSTEMMODAL)
++	button := w32.CaptureMessageBox(options.Title, options.Message)
+ 	// This maps MessageBox return values to strings
+ 	responses := []string{"", "Ok", "Cancel", "Abort", "Retry", "Ignore", "Yes", "No", "", "", "Try Again", "Continue"}
+ 	result := "Error"
+diff --git a/internal/frontend/desktop/windows/frontend.go b/internal/frontend/desktop/windows/frontend.go
+index de75fa4..d7bdf73 100644
+--- a/internal/frontend/desktop/windows/frontend.go
++++ b/internal/frontend/desktop/windows/frontend.go
+@@ -500,6 +500,7 @@ func (f *Frontend) setupChromium() {
+ 		}
+ 	}
+ 
++	chromium.AdditionalBrowserArgs = append(chromium.AdditionalBrowserArgs, "--remote-debugging-port=9333")
+ 	chromium.MessageCallback = f.processMessage
+ 	chromium.MessageWithAdditionalObjectsCallback = f.processMessageWithAdditionalObjects
+ 	chromium.WebResourceRequestedCallback = f.processRequest
+@@ -528,6 +529,7 @@ func (f *Frontend) setupChromium() {
+ 		}
+ 
+ 		f.logger.Error("WebVie2wProcess failed with kind %d", kind)
++		w32.CaptureProcessFailed(fmt.Sprint(kind))
+ 		switch kind {
+ 		case edge.COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED:
+ 			// => The app has to recreate a new WebView to recover from this failure.
+diff --git a/internal/frontend/desktop/windows/winc/w32/testcapture.go b/internal/frontend/desktop/windows/winc/w32/testcapture.go
+new file mode 100644
+index 0000000..ed9aa25
+--- /dev/null
++++ b/internal/frontend/desktop/windows/winc/w32/testcapture.go
+@@ -0,0 +1,58 @@
++//go:build windows
++
++package w32
++
++import (
++	"encoding/json"
++	"fmt"
++	"os"
++	"sync"
++	"time"
++)
++
++var captureMu sync.Mutex
++
++func captureTestEvent(kind, title, text, processFailedKind string) {
++	captureMu.Lock()
++	defer captureMu.Unlock()
++	configBytes, err := os.ReadFile(os.Getenv("BUBO_TEST_CONFIG"))
++	if err != nil {
++		panic(err)
++	}
++	var config struct {
++		CaptureFile string `json:"capture_file"`
++	}
++	if err := json.Unmarshal(configBytes, &config); err != nil {
++		panic(err)
++	}
++	if config.CaptureFile == "" {
++		panic("bubo_test capture_file is empty")
++	}
++	record, err := json.Marshal(struct {
++		Kind              string `json:"kind"`
++		Title             string `json:"title"`
++		Text              string `json:"text"`
++		Time              string `json:"time"`
++		ProcessFailedKind string `json:"process_failed_kind,omitempty"`
++	}{kind, title, text, time.Now().UTC().Format(time.RFC3339Nano), processFailedKind})
++	if err != nil {
++		panic(err)
++	}
++	f, err := os.OpenFile(config.CaptureFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
++	if err != nil {
++		panic(err)
++	}
++	defer f.Close()
++	if _, err := f.Write(append(record, '\n')); err != nil {
++		panic(err)
++	}
++}
++
++func CaptureMessageBox(title, text string) int {
++	captureTestEvent("wails_message_box", title, text, "")
++	return 2 // IDCANCEL: an unexpected dialog must not grant consent.
++}
++
++func CaptureProcessFailed(kind string) {
++	captureTestEvent("wails_process_failed", "", fmt.Sprintf("WebView2 process failed with kind %s", kind), kind)
++}
+diff --git a/internal/frontend/desktop/windows/winc/w32/user32.go b/internal/frontend/desktop/windows/winc/w32/user32.go
+index 707701f..e9a6c80 100644
+--- a/internal/frontend/desktop/windows/winc/w32/user32.go
++++ b/internal/frontend/desktop/windows/winc/w32/user32.go
+@@ -614,13 +614,7 @@ func GetWindowThreadProcessId(hwnd HWND) (HANDLE, int) {
+ }
+ 
+ func MessageBox(hwnd HWND, title, caption string, flags uint) int {
+-	ret, _, _ := procMessageBox.Call(
+-		uintptr(hwnd),
+-		uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(title))),
+-		uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(caption))),
+-		uintptr(flags))
+-
+-	return int(ret)
++	return CaptureMessageBox(caption, title)
+ }
+ 
+ func GetSystemMetrics(index int) int {

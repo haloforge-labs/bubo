@@ -1,0 +1,8 @@
+<|im_start|>user
+Picture 1: <|vision_start|><|image_pad|><|vision_end|>vsPicture 2: <|vision_start|><|image_pad|><|vision_end|><|im_end|>
+<|im_start|>assistant
+Different.<|im_end|>
+<|im_start|>user
+Picture 3: <|vision_start|><|image_pad|><|vision_end|>and this?<|im_end|>
+<|im_start|>assistant
+<think>

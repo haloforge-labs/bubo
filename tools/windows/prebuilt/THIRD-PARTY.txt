@@ -19,6 +19,8 @@ NPU prefill kernel files in tools\npu (xclbin as built by the fork, with sources
   from mikealanni/gufo (MIT), derived from AMD mlir-aie examples,
   Apache-2.0 WITH LLVM-exception (licenses/mlir-aie-Apache-2.0-LLVM-exception.txt)
 Strata grouped decode expert kernel (adapted from Niko1221/Strata) - MIT (licenses/strata-MIT.txt)
+GSQHalo.cpp / ggml routed IQ/Q2 expert slice decoders and WMMA staging - MIT,
+  Copyright (c) 2023-2026 The ggml authors (licenses/gsqhalo-MIT.txt)
 
 Prerequisite: Microsoft VC++ v14 x64 Redistributable (not shipped).
 Install it separately from Microsoft's official installer:
@@ -27,3 +29,9 @@ Bubo does not download it or include Microsoft CRT binaries in the archive.
 
 Bubo's source licence is in LICENSE. Complete dependency/source notices and
 redistribution provenance remain subject to the release notice review.
+
+GUI and updater
+---------------
+The desktop package's generated inventory is licenses/gui/THIRD-PARTY-GUI.md
+(source: docs/release/THIRD-PARTY-GUI.md). Complete GUI and updater dependency
+licence texts accompany that inventory.

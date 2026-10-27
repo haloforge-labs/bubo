@@ -1,0 +1,63 @@
+{
+  "name": "bubo-frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "engines": {
+    "node": ">=24.19.0"
+  },
+  "scripts": {
+    "dev": "vite --host localhost",
+    "build": "npm run routes && npm run typecheck && vite build",
+    "routes": "node scripts/generate-routes.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . --max-warnings 0",
+    "knip": "knip",
+    "format:check": "prettier --check .",
+    "gen:types": "node scripts/generate-types.mjs",
+    "test": "vitest run --project unit --project browser",
+    "test:shots": "node scripts/run-shots.mjs"
+  },
+  "dependencies": {
+    "@hookform/resolvers": "5.9.1",
+    "@tanstack/react-query": "5.104.2",
+    "@tanstack/react-router": "1.170.44",
+    "@tanstack/react-table": "8.21.3",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "lucide-react": "1.57.0",
+    "radix-ui": "1.8.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "react-hook-form": "7.90.0",
+    "recharts": "3.10.1",
+    "sonner": "2.0.8",
+    "tailwind-merge": "3.7.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@tailwindcss/vite": "4.3.3",
+    "@tanstack/eslint-plugin-query": "5.104.2",
+    "@tanstack/router-generator": "1.167.44",
+    "@tanstack/router-plugin": "1.168.46",
+    "@types/node": "26.6.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "@vitest/browser-playwright": "4.1.11",
+    "eslint": "10.12.0",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "globals": "17.13.0",
+    "json-schema-to-typescript": "16.0.0",
+    "knip": "6.41.0",
+    "playwright": "1.63.0",
+    "prettier": "3.9.10",
+    "tailwindcss": "4.3.3",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.71.2",
+    "vite": "8.3.4",
+    "vitest": "4.1.11",
+    "vitest-browser-react": "2.3.0"
+  }
+}

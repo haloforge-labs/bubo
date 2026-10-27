@@ -188,6 +188,51 @@ and events. Token records include original unsigned UTF-8 bytes and descending
 top candidates. Token strings use the existing replacement decoding for
 incomplete UTF-8 token pieces; byte arrays preserve those pieces exactly.
 
+
+### DiffusionGemma images
+
+DiffusionGemma image input requires an explicit matching --mmproj BF16 sidecar;
+a file found next to the checkpoint is not bound automatically.
+
+The Gemma 4 vision projector accepts `gemma4v` in either `clip.vision.projector_type` or
+`clip.projector_type` GGUF metadata; the former takes precedence when both are
+present.
+
+### DiffusionGemma reads
+
+Send a read to `/v1/chat/completions` or `/v1/completions`.
+Use a list of token IDs as `prompt` on `/v1/completions`.
+Set `return_tokens_as_token_ids` to `true` to get `token_id:N` strings.
+Set chat `logprobs` to `true` and `top_logprobs` to 0..20.
+Set completion `logprobs` to an integer from 0..20.
+
+Put these fields in `vllm_xargs`:
+
+| Field | Accepted value |
+| --- | --- |
+| `diffusion_seed_canvas` | A list of token IDs. Give exactly one ID for each canvas position. Each ID must be in the model vocabulary. |
+| `diffusion_canvas_length` | A positive integer no larger than the served canvas length. Null selects the served length. DiffusionGemma serves up to 256 positions. |
+| `diffusion_max_steps` | A positive integer. The default is 1; DiffusionGemma currently supports 1..8. |
+| `diffusion_read_only` | A boolean or 0 or 1. A read returns one score row for each canvas position. It ignores the end token. |
+| `diffusion_constrained` | A boolean or 0 or 1. If true, give `logprob_token_ids`. |
+| `diffusion_pinned` | A list of positions in the canvas. Give `diffusion_seed_canvas` with this field. |
+
+DiffusionGemma currently supports read-only chat reads at width 256 only.
+`diffusion_constrained: true` and token-ID completions are not supported yet.
+
+`logprob_token_ids` accepts at most 512 token IDs in the model vocabulary.
+The response includes each requested ID at each position, even outside the top 20.
+The server removes duplicate IDs from the response.
+For a read, `max_tokens` cannot make the response shorter than the canvas.
+The backend receives at most the canvas length as `max_tokens`.
+Chat scores are in `choices[0].logprobs.content`.
+Completion scores are in `choices[0].logprobs.top_logprobs`.
+Other `diffusion_*` fields and unsupported models return HTTP 400.
+Other keys in `vllm_xargs` have no effect.
+
+For a token ID prompt without a read, `/v1/completions` accepts `stop_token_ids`.
+Set `logprobs` to 0 to get generated token IDs in `choices[0].logprobs.tokens`.
+
 Scores are log-softmax of the **full raw model row after deterministic logit
 bias, grammar/behaviour masks and repetition/frequency/presence penalties, but
 before temperature, top-k, top-p and min-p**. The optional post-filter
@@ -359,6 +404,11 @@ Generation responses include:
 Server-Timing: ttft;dur=<milliseconds>, inter_token;dur=<milliseconds>
 ```
 
+Chat Completions `usage` includes `completion_tokens_details.reasoning_tokens`:
+the generated tokens that belong to the reasoning block, without the closing
+marker. It is `0` when the model does not reason. The buffered response and
+the terminal streaming usage chunk both carry it.
+
 When `stream_options.include_usage` is enabled, the terminal Chat Completions
 usage chunk also includes a namespaced `usage.gufo` object. It reports
 privacy-safe scheduler and stage metrics used by
@@ -410,8 +460,9 @@ give way before another conversation's last useful checkpoint.
 Prompt reuse is enabled by default; how the cache finds, retains and
 evicts that state is described in [the KV cache](KV-CACHE.md).
 `cache_prompt: false` on
-`/v1/chat/completions` or `/v1/responses` bypasses memory and disk lookup for
-that request; the result can still populate the cache. DeepSeek and Qwen tool
+`/v1/chat/completions`, `/v1/responses`, `/v1/completions` or `/completion`
+bypasses memory and disk lookup for that request; the result can still
+populate the cache. `null` keeps the default, `true`. DeepSeek and Qwen tool
 requests retain a checkpoint before the assistant-generation suffix, including
 when a client drops the interrupted assistant and appends `"."` after a tool result. DeepSeek
 also accounts for tokenization changes where adjacent user/tool turns join.
@@ -614,7 +665,7 @@ busy to hold it.
 
 The cap is only ever lowered to fit the free slots, never raised to fill them,
 so a server's throughput does not depend on the order the servers started. A
-`GPU_MAX_HW_QUEUES` set by the operator is always left alone, but it is still
+`GPU_MAX_HW_QUEUES` set by the user is always left alone, but it is still
 checked: a cap of N resolves to at most N + 1 resident queues, so a value that
 will not fit is reported even though it is honoured. When a server cannot fit,
 it logs a `queue_budget_exceeded` warning and starts anyway.
@@ -710,7 +761,7 @@ cache snapshots. HTTP handlers do not implement model kernels.
 | `POST` | `/v1/audio/speech` | A TTS implementation is compiled and loaded |
 | `POST` | `/v1/images/generations` | Qwen-Image-2.1 image serving is configured |
 | `POST` | `/v1/images/edits` | Qwen-Image-2.1 image serving is configured |
-| `POST` | `/v1/videos` | A validated operator-supplied MiniMax H3 checkpoint is configured |
+| `POST` | `/v1/videos` | A validated user-supplied MiniMax H3 checkpoint is configured |
 | `GET` | `/v1/videos/{id}` | MiniMax H3 video serving is configured |
 | `GET` | `/v1/videos/{id}/content` | The requested MiniMax H3 job completed |
 | `DELETE` | `/v1/videos/{id}` | MiniMax H3 video serving is configured |
@@ -747,7 +798,7 @@ speaker names in `talker_config.spk_id`, while VoiceDesign and Base expose a
 single placeholder name because their timbre comes from `instructions` or
 `reference_audio` per request.
 
-A Base checkpoint can additionally advertise operator-registered named voices,
+A Base checkpoint can additionally advertise user-registered named voices,
 so clients select a speaker by name instead of uploading a reference clip on
 every request:
 
@@ -941,7 +992,9 @@ The other compatibility routes are deliberately limited:
 | `/completion` | One prompt string, non-streaming completion | `n_predict` |
 
 All four routes validate the loaded model, positive integer limits and shared
-sampling controls. `/completion` rejects streaming; all reject multiple
+sampling controls. A limit of `-1` or `null`, as sent by clients built for other
+servers, leaves the server default in place; any other value must be a positive
+integer. `/completion` rejects streaming; all reject multiple
 candidates. Streamed Messages send Anthropic SSE events: `message_start`,
 `content_block_start`/`content_block_delta`/`content_block_stop` for
 `thinking` (`thinking_delta`), `text` (`text_delta`) and `tool_use`
@@ -966,8 +1019,15 @@ constraints and cache reuse match Chat Completions. Calls are returned as
 the following `tool_result` blocks. Server tools such as `web_search` are
 rejected. Completions routes accept `stop`;
 Messages accepts `stop_sequences`. Responses has no stop-sequence field.
-`/infill` and `/v1/messages/count_tokens` return 501: suffix-conditioned infill
-and template-aware message counting are not implemented.
+`POST /v1/messages/count_tokens` accepts the same text, system, thinking and
+tool history as Messages and returns `{"input_tokens": N}` after rendering the
+model's chat template. `max_tokens` is optional; `stream: true` is rejected.
+The count includes cached prompt tokens and does not generate, prefill or
+change the conversation cache. Prompts may exceed the configured execution
+context so clients can size them before trimming; generation still enforces
+the context limit. Images are unsupported, as on Messages. Backends without
+chat counting support return 501. `/infill` still returns 501 because
+suffix-conditioned infill is not implemented.
 
 Raw Completions accepts `stream: true` and
 `stream_options: {"include_usage": true}`. The final usage event reports prompt,
@@ -1094,6 +1154,15 @@ Stops and token limits terminate normally without emitting incomplete calls.
 With no tools or `tool_choice:"none"`, tool markers are ordinary text and do
 not interrupt reasoning or delay streaming.
 
+Native tool-call arguments stream as they are generated. In a stream, an
+ordinary end of generation inside a started tool call is reported as an error
+event with code `generation_failed`. If the loop breaker stops a tool call after
+part of its arguments was streamed, the request ends with a `generation_failed`
+error (Chat error event, Responses `response.failed`, Messages error event); the
+partial call must not be executed. Without streaming, or when no part of the
+call was sent, the cut call is dropped and the request finishes with `stop`.
+Clients must not run a tool call whose arguments are not valid JSON.
+
 Stop sequences match accepted output bytes, including reasoning and tool
 markup, before streaming or response parsing. Partial prefixes are buffered;
 matched sequences and subsequent text are excluded. OpenAI reports
@@ -1140,8 +1209,12 @@ Supported: objects, arrays, nullable types, `enum`/`const`, `anyOf`, recursive l
 array length bounds. Formats include date/time, duration, email, hostname,
 IP addresses and UUID.
 
-The root must resolve to an object. Objects require `additionalProperties:false`;
-strict schemas require every property (use null for optional values).
+The root must resolve to an object. As in llama.cpp, an object that declares
+`properties` admits no other keys unless `additionalProperties` is `true` or a
+schema for their values; extra keys then follow the declared properties. An
+object without `properties` admits any keys unless `additionalProperties` is
+`false`. Strict schemas require every property (use null for optional values).
+Tool parameter schemas keep their separate rules below.
 Unsupported keywords, external references and unusable cycles are rejected.
 Schemas are limited to 2 MiB, 5,000 properties, 1,000 enum values and 120,000
 characters in names and enum/const strings. Patterns use ECMA-262 Unicode
@@ -1149,9 +1222,9 @@ semantics; lookbehind, backreferences, inline flags and unbounded repetition
 of assertions are unsupported.
 
 Function `strict:true` constrains tool arguments independently of the response
-schema. Chat Completions defaults to non-strict tools. Responses attempts strict
-schema normalization when `strict` is omitted, falling back to `strict:false`
-when unsupported; explicit `strict:false` keeps best-effort arguments.
+schema. Chat Completions and Responses both default to non-strict tools: when
+`strict` is omitted or null, the schema is used as sent and optional properties
+stay optional; explicit `strict:false` keeps best-effort arguments.
 With `tool_choice: "auto"`, the model may call a tool or give a final answer;
 the response schema constrains the latter. Use `"none"` for JSON answers only,
 `"required"` to force a call, or select a named function.
@@ -1172,7 +1245,9 @@ Verify with `tests/functional/openai_sdk.py --suite tools`,
 
 `GET /v1/models` lists the configured text model and ready audio/video
 services. Entries provide `id`, `object`, `created` and `owned_by`; the text
-entry also provides `context_length` and `architecture.input_modalities`: `["text"]`
+entry also provides `context_length`, `max_model_len` and `meta.n_ctx` (all three
+hold the same context limit; they are absent when the limit is unknown) and
+`architecture.input_modalities`: `["text"]`
 for text-only serving or `["text", "image"]` when a vision encoder is loaded.
 Image support reflects the loaded projector, not the model name; launching a
 vision-capable model without its projector advertises text only. Audio/video
@@ -1218,7 +1293,10 @@ Authorization: Bearer <local-token>
 ```
 
 Authentication covers every route, including health, metrics, audio, and video.
-CORS preflight (`OPTIONS`) does not require credentials. Select the listen
+CORS preflight (`OPTIONS`) does not require credentials and answers
+`Access-Control-Allow-Headers` with the header names the page asked for
+(`Access-Control-Request-Headers`), so SDK headers such as `x-api-key`,
+`anthropic-version` and `x-stainless-*` pass. Select the listen
 address with `--host`; it must be an IPv4 address. TLS termination belongs in
 a reverse proxy.
 
@@ -1229,6 +1307,11 @@ never executes tools, shell commands, URLs, or generated code.
 
 The HTTP transport currently uses a wildcard CORS origin and the same listener
 and API key for inference and metrics.
+
+Errors on `/v1/messages` and `/v1/messages/count_tokens` use Anthropic's body,
+`{"type":"error","error":{"type":...,"message":...},"request_id":...}`, with the
+stable code as an extra `code` field of the error object. Every other route
+keeps the OpenAI error object.
 
 `bubo eval` and `tools/serving/gufo-serving-bench.py` send `OPENAI_API_KEY`
 as the bearer credential when it is set.
@@ -1273,7 +1356,7 @@ Only a hard HIP error from the probe
 marks the device lost. A probe still pending after 5 s may be queued behind
 long kernels, so it logs `event=device_probe_timeout` and counts as usable. A
 usable device leaves the original failure unchanged. A lost device logs
-`event=device_lost remedy=restart reason=<driver error>` once and makes the
+`event=device_lost remedy=restart_process exit_status=75 reason=<driver error>` once and makes the
 loss permanent for the process:
 
 - the failing request reports `device_lost`: a 503 with
@@ -1290,6 +1373,25 @@ loss permanent for the process:
   and exits with status 75 (`EX_TEMPFAIL`), also when an external `SIGTERM`
   stops it after the loss. Teardown can block on the dead device, so the
   process exits with status 75 after 10 s regardless.
+
+A device call that never returns is a different failure: nothing fails, so
+nothing is probed, and the server keeps answering `/health` and sending stream
+heartbeats while generation has stopped. `--stall-timeout-ms MS` bounds that.
+Progress means a request being admitted, a work unit starting, a pending
+checkpoint capture completing or the idle wait returning. When the scheduler has work but none of those
+happens for `MS`, it logs
+`event=device_lost remedy=restart_process exit_status=75 reason=scheduler made no progress for <MS> ms`
+and follows the lost-device path above, including the exit with status 75 and
+the `gufo_device_lost_total` increment. This covers a hang on the scheduler
+thread, in a capture the scheduler is waiting for, and in the idle device
+probe. Detection takes between `MS` and about 1.5 times `MS`. Requests already
+in flight end when the process exits. The default, 0, disables the check;
+other values must be at least 60000, because a deep checkpoint capture or a
+post-failure device probe can legitimately hold progress for tens of seconds.
+An idle server and a queued request never count as stalled. While any other
+request is still progressing, a hung capture is not reported; it is once
+nothing else can run. A disk-cache write that never completes is not detected
+while generation continues.
 
 Text streams defer HTTP headers until the scheduler admits the request and
 starts its prompt, or until the request has waited five seconds in the queue,
@@ -1356,7 +1458,13 @@ prompt, `n_prompt_tokens_cache` the tokens restored from cache, and
 `timings.prompt_n`. `next_token[0].n_decoded` counts generated tokens and
 `n_remain` the remaining token budget. Idle slots report zero counts and
 `n_remain` -1. `task_id` and `state` (0 idle, 1 processing) remain for older
-clients; `prompt` is always empty. `/props` metadata is a placeholder.
+clients; `prompt` is always empty.
+`GET /props` answers without a query. It reports the served model as `model`,
+`default_generation_settings.n_ctx` (the context limit), `total_slots` (the
+number of execution sessions, at least 1) and `modalities.vision` (true when a
+vision encoder is loaded). With `?model=NAME`, `model` echoes `NAME`. The
+`template` field is empty and `model_info` is an empty object: the server does
+not report a chat template.
 Slots and metrics are separate snapshots; requests can advance between polls.
 
 Streaming terminal chunks always include llama.cpp-compatible `timings`, even
@@ -1458,7 +1566,9 @@ Each request to `/v1/chat/completions`, `/v1/completions`, `/v1/responses`,
   tool-call parsing.
 - `response`: `status`, `outcome`, whether the reply was a `stream`, and the
   `body` the client received. For a stream this is the event stream as
-  written, `: ping` keepalives included, so a difference between streaming and
+  written, keepalives included (`: ping` comments; a `response.in_progress` event
+  on Responses streams, which clients such as Codex count as activity), so a
+  difference between streaming and
   non-streaming parsing shows up in the trace.
 
 A request that fails before generation, for example with invalid JSON, has
@@ -1482,8 +1592,21 @@ latency, prefill/decode speed, execution width, memory/disk cache hits and reuse
 tokens, plus accepted/proposed drafts and acceptance percentage. These metrics
 are logged even when a streaming client does not request a usage chunk.
 Errors include a stable error code; disconnects and stream failures are marked.
+Every `event=completed` line ends its request keys with `client=ADDRESS`, the
+peer address of the connection (never a header value). A request that ends with
+HTTP status 400 or higher also has `error="TEXT"` after it for a fixed list
+of error codes: the error message, up to 120 bytes, or, for errors that name a
+model or field, a filtered name of up to 100 bytes (other bytes become `?`). It
+can contain short parts of the request such as an unknown model name. For every
+other error code the line has `error_code` and no text. Prompt text is not
+logged. The memory keys follow.
 On a cache miss, `cache_miss_reason` distinguishes a missing checkpoint, changed
-token prefix, changed image input, and explicit cache bypass. Common-prefix and
+token prefix, changed image input, explicit cache bypass, and a checkpoint the
+cache dropped (`evicted_byte_capacity`, `evicted_entry_capacity`, `evicted_guard`)
+or refused (`skipped_capacity`, `skipped_entry_capacity`, `skipped_host_floor`,
+`skipped_guard`); see KV-CACHE.md. `cache_snapshots_skipped` and
+`cache_snapshot_skip_reason` count the snapshot copies a request wanted and the
+cache refused. Common-prefix and
 nearest-checkpoint token counts report token agreement even when image
 identity differs; matching image-placeholder tokens do not imply matching
 pixels. Prompt text is not logged. Adding tools or editing system/developer
@@ -1554,10 +1677,11 @@ out-of-range values use 4096. Restart to change it. The model context caps
 both capacities. Executor scratch, ordinary prefill, in-pass checkpoint
 capture and the disk in-pass path all use this value; the final pass may
 include up to 128 additional tokens. Scheduler budgets and distinct learned
-boundaries can shorten a pass. The independent 2048-token history grid and
-disk minimum checkpoint spacing are cache retention policies, not chunk-size
-settings. Learned disk boundaries still round down under
-`GUFO_DISK_BOUNDARY_ALIGN` (unset = 256; 0 or 1 disables rounding) for operator
+boundaries can shorten a pass. The Flash Next checkpoint grid follows the
+forward chunk (4096 tokens in the release profile). The independent 2048-token
+history grid and disk minimum checkpoint spacing are cache retention policies,
+not chunk-size settings. Learned disk boundaries still round down under
+`GUFO_DISK_BOUNDARY_ALIGN` (unset = 256; 0 or 1 disables rounding) for user
 A/B qualification of upstream's chunk-independent attention fix.
 
 ## Flash-Next prefill diagnostics

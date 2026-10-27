@@ -1,0 +1,11 @@
+{
+  "_source": "fixture",
+  "state": "Stopped",
+  "records": {
+    "models": "../v12/models-with-warnings.json",
+    "npu_runtime": "../../../../../tests/cli/contract/valid/status-npu-faulted.json",
+    "saved_estimate": "../v12/estimate-flash-c262144-s2.json",
+    "status": "../v12/status-main.json",
+    "switches": "../v12/switches.json"
+  }
+}

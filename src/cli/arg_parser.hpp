@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <initializer_list>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -23,6 +24,7 @@ namespace gufo::cli {
 /// A lightweight, type-safe C++20 command-line argument parser.
 class ArgParser {
 public:
+  enum class ParseError { UnknownArgument, MissingValue, UnexpectedValue };
   struct Option {
     std::string short_name;
     std::string long_name;
@@ -30,6 +32,7 @@ public:
     std::string description;
     std::string group;
     bool is_flag = false;
+    bool allow_inline_values = true;
     mutable bool supplied = false;
     std::function<bool(std::string_view, std::string_view, std::string*)>
         parse_fn;
@@ -38,6 +41,60 @@ public:
   explicit ArgParser(std::string_view program_name,
                      std::string_view description = "")
       : program_name_(program_name), description_(description) {}
+
+  /// Compatibility policies for commands whose grammar predates this parser.
+  /// Defaults retain the standard --name=value and early implicit help rules.
+  ArgParser& SetInlineValues(bool enabled) {
+    inline_values_ = enabled;
+    return *this;
+  }
+  ArgParser& SetImplicitHelp(bool enabled) {
+    implicit_help_ = enabled;
+    return *this;
+  }
+  ArgParser& SetOptionInlineValues(std::string_view name, bool enabled) {
+    for (auto& option : options_)
+      if (option.short_name == name || option.long_name == name)
+        option.allow_inline_values = enabled;
+    return *this;
+  }
+  ArgParser& SetErrorHandler(
+      std::function<std::string(ParseError, std::string_view)> handler) {
+    error_handler_ = std::move(handler);
+    return *this;
+  }
+  /// Delegate unmatched tokens, for example to a subsequent command parser.
+  /// The view refers to the original, null-terminated argument; no tokens are
+  /// consumed or rewritten by this handler.
+  ArgParser& SetUnrecognizedHandler(
+      std::function<bool(std::string_view, std::string*)> handler) {
+    unrecognized_handler_ = std::move(handler);
+    return *this;
+  }
+  /// Inspect raw tokens before parsing, including malformed command lines.
+  /// Machine-output isolation and subcommand routing need this even when a
+  /// recognized spelling appears in an option's value position.
+  static bool Contains(std::span<const char* const> args,
+                       std::initializer_list<std::string_view> names,
+                       bool include_inline_values = false) {
+    return ContainsTokens(args, names, include_inline_values);
+  }
+  static bool Contains(std::span<const wchar_t* const> args,
+                       std::initializer_list<std::wstring_view> names,
+                       bool include_inline_values = false) {
+    return ContainsTokens(args, names, include_inline_values);
+  }
+
+  ArgParser& AddCustomFlag(
+      std::string_view short_name, std::string_view long_name,
+      std::string_view description, std::string_view group,
+      std::function<bool(std::string_view, std::string_view, std::string*)>
+          parser) {
+    AddCustomOption(short_name, long_name, "", description, group,
+                    std::move(parser));
+    options_.back().is_flag = true;
+    return *this;
+  }
 
   /// Register a boolean switch flag (e.g. `--verbose` or `-v`).
   ArgParser& AddFlag(std::string_view short_name, std::string_view long_name,
@@ -169,7 +226,7 @@ public:
     for (std::size_t i = 0; i < args.size(); ++i) {
       const std::string_view arg = args[i];
 
-      if (arg == "-h" || arg == "--help") {
+      if (implicit_help_ && (arg == "-h" || arg == "--help")) {
         help_requested_ = true;
         return true;
       }
@@ -178,15 +235,17 @@ public:
       // inline spelling lets a value that would otherwise be mistaken for
       // another flag (`--system=-v`) be passed unambiguously.
       const std::size_t equals = arg.find('=');
-      if (equals != std::string_view::npos && equals > 0 && arg[0] == '-') {
+      if (inline_values_ && equals != std::string_view::npos && equals > 0 &&
+          arg[0] == '-') {
         const std::string_view name = arg.substr(0, equals);
         const std::string_view val = arg.substr(equals + 1);
         const Option* inline_match = FindOption(name);
-        if (inline_match != nullptr) {
+        if (inline_match != nullptr && inline_match->allow_inline_values) {
           if (inline_match->is_flag) {
             if (error_msg != nullptr) {
-              *error_msg =
-                  "Option " + std::string(name) + " does not take a value";
+              *error_msg = FormatError(
+                  ParseError::UnexpectedValue, arg,
+                  "Option " + std::string(name) + " does not take a value");
             }
             return false;
           }
@@ -210,7 +269,9 @@ public:
         } else {
           if (i + 1 >= args.size()) {
             if (error_msg != nullptr) {
-              *error_msg = "Missing argument for " + std::string(arg);
+              *error_msg =
+                  FormatError(ParseError::MissingValue, arg,
+                              "Missing argument for " + std::string(arg));
             }
             return false;
           }
@@ -219,10 +280,14 @@ public:
             return false;
           }
         }
+      } else if (unrecognized_handler_) {
+        if (!unrecognized_handler_(arg, error_msg))
+          return false;
       } else if (!arg.empty() && arg[0] == '-' && arg.size() > 1) {
         // Unknown flag
         if (error_msg != nullptr) {
-          *error_msg = "Unknown option: " + std::string(arg);
+          *error_msg = FormatError(ParseError::UnknownArgument, arg,
+                                   "Unknown option: " + std::string(arg));
         }
         return false;
       } else {
@@ -233,7 +298,9 @@ public:
           }
         } else {
           if (error_msg != nullptr) {
-            *error_msg = "Unexpected argument: " + std::string(arg);
+            *error_msg =
+                FormatError(ParseError::UnknownArgument, arg,
+                            "Unexpected argument: " + std::string(arg));
           }
           return false;
         }
@@ -333,6 +400,24 @@ public:
   void PrintHelp(std::ostream& os = std::cout) const { os << FormatHelp(); }
 
 private:
+  template<typename Character>
+  static bool ContainsTokens(
+      std::span<const Character* const> args,
+      std::initializer_list<std::basic_string_view<Character>> names,
+      bool include_inline_values) {
+    return std::ranges::any_of(args, [&](const Character* arg) {
+      const std::basic_string_view<Character> token(arg);
+      const auto name =
+          include_inline_values
+              ? token.substr(0, token.find(static_cast<Character>('=')))
+              : token;
+      return std::ranges::find(names, name) != names.end();
+    });
+  }
+  std::string FormatError(ParseError kind, std::string_view arg,
+                          std::string fallback) const {
+    return error_handler_ ? error_handler_(kind, arg) : std::move(fallback);
+  }
   // --- Type parsing helper implementations ---
 
   static bool ParseValue(std::string_view val, std::string* target,
@@ -458,6 +543,10 @@ private:
   std::string description_;
   std::vector<Option> options_;
   std::function<bool(std::string_view, std::string*)> positional_handler_;
+  std::function<bool(std::string_view, std::string*)> unrecognized_handler_;
+  std::function<std::string(ParseError, std::string_view)> error_handler_;
+  bool inline_values_ = true;
+  bool implicit_help_ = true;
   mutable bool help_requested_ = false;
 };
 
