@@ -609,6 +609,16 @@ when one does but no restorable boundary covers it;
 `cache_common_prefix_tokens` is then the longest agreement and
 `cache_checkpoint_tokens` the deepest compatible boundary.
 
+`usage.gufo.cache_snapshot_bytes` is the number of bytes of cache snapshots
+(saved model state for the prompt cache) that this request stored in the prompt
+cache. It adds up the snapshots the request published (the prompt checkpoint
+and the end-of-turn state) and is counted when the request finishes. It is 0
+when the request stored nothing new, for example on an exact cache hit or when
+the cache refused the copy; refusals show in `cache_snapshots_skipped` and
+`cache_snapshot_skip_reason`. It is an amount for one request, not the total
+size of the cache. `cache_restore_bytes` in the same object is the amount
+restored.
+
 Flash-Next also reports `usage.gufo.component_cache.captured_checkpoint_ids`.
 Match these request-local IDs to `checkpoint_id` in publication/refusal logs:
 an earlier request's asynchronous write may finish after the current response.
