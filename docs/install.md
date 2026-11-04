@@ -2,7 +2,7 @@
 
 **Supported hardware:** Bubo is built and tested for AMD Strix Halo with 128 GB of memory on Windows, mainly laptops. It can work on other machines, with no promise.
 
-**96 GB machines:** use the lower-memory model. Set Variable Graphics Memory (AMD Software: Adrenalin Edition > Performance > Tuning) to the largest value offered (72 GB if available, at least 64 GB), then restart Windows. At 72 GB, Bubo uses the default 200,000-token context for one session. At 64 GB it does too when about 16 GB of system memory is free, and picks a smaller context when less is free. These values are calculated: Bubo has not yet run on a 96 GB machine.
+**96 GB machines:** use a lower-memory model: the lower-memory build of Flash Next, one of the ISTA files IQ3_S, IQ3_XXS and IQ2_XS, or the Flash Next Coder. Set Variable Graphics Memory (AMD Software: Adrenalin Edition > Performance > Tuning) to the largest value offered (72 GB if available, at least 64 GB), then restart Windows. At 72 GB, Bubo uses the default 200,000-token context for one session with the lower-memory build. At 64 GB it does too when about 16 GB of system memory is free, and picks a smaller context when less is free. The ISTA files and the Coder need less GPU memory than the lower-memory build: about 64 GiB for IQ3_S, 57 for IQ3_XXS, 50 for IQ2_XS and 41 for the Coder at 200,000 tokens and one session, measured on a 128 GB machine. To save more, set KV cache to Q8 (Server page in the app, or `--kv-cache-type q8_0`): the context cache becomes 47 % smaller. These values are calculated: Bubo has not been tested on a 96 GB machine.
 
 Use this setup for a Strix Halo machine. The speeds on this site come from a laptop with Radeon 8060S graphics at approximately 70 W.
 Bubo runs natively on Windows 11 x64 with AMD HIP.
@@ -25,7 +25,7 @@ A page file does not replace physical RAM for full-speed operation.
 
 ## Get the package
 
-1. Download `bubo-v0.1.1-windows-x64-gfx1151.zip` from the [Bubo release page](https://github.com/haloforge-labs/bubo/releases/tag/v0.1.1). The file is 66,241,059 bytes. Its SHA-256 value is `eeffccd3dc4c322b968a332ce378ffd99521eb377db262ac195111d847d5f2ee`. After you extract it, `bubo --version` prints `bubo 0.1.1 (0cb4bd87), engine gufo 0.10.0`.
+1. Download `bubo-v0.1.2-windows-x64-gfx1151.zip` from the [Bubo release page](https://github.com/haloforge-labs/bubo/releases/tag/v0.1.2). The file is 71,949,037 bytes. Its SHA-256 value is `f1a86f1d667c6fd2926f846c3b1cca9f7151791b599a07db9179275ad6117e89`. After you extract it, `bubo --version` prints `bubo 0.1.2 (88eec3ab1), engine gufo 0.26.0`.
 2. Extract the complete package into a folder.
 3. Open PowerShell in the `bin` folder of the package. The `bubo.exe` file is in `bin`. The file `start.cmd` is in the package folder, one level up.
 

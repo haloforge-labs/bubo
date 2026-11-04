@@ -4,28 +4,28 @@
 
 **Supported hardware:** Bubo is built and tested for AMD Strix Halo with 128 GB of memory on Windows, mainly laptops. Smaller models need less memory. It can work on other machines, with no promise.
 
-**96 GB machines:** use the lower-memory model. Set Variable Graphics Memory (AMD Software: Adrenalin Edition > Performance > Tuning) to the largest value offered (72 GB if available, at least 64 GB), then restart Windows. At 72 GB, Bubo uses the default 200,000-token context for one session. At 64 GB it does too when about 16 GB of system memory is free, and picks a smaller context when less is free. These values are calculated: Bubo has not yet run on a 96 GB machine.
+**96 GB machines:** use a lower-memory model: the lower-memory build of Flash Next, one of the ISTA files IQ3_S, IQ3_XXS and IQ2_XS, or the Flash Next Coder. Set Variable Graphics Memory (AMD Software: Adrenalin Edition > Performance > Tuning) to the largest value offered (72 GB if available, at least 64 GB), then restart Windows. At 72 GB, Bubo uses the default 200,000-token context for one session with the lower-memory build. At 64 GB it does too when about 16 GB of system memory is free, and picks a smaller context when less is free. The ISTA files and the Coder need less GPU memory than the lower-memory build: about 64 GiB for IQ3_S, 57 for IQ3_XXS, 50 for IQ2_XS and 41 for the Coder at 200,000 tokens and one session, measured on a 128 GB machine. To save more, set KV cache to Q8 (Server page in the app, or `--kv-cache-type q8_0`): the context cache becomes 47 % smaller. These values are calculated: Bubo has not been tested on a 96 GB machine.
 
 Halowin Bubo is a native Windows fork of [gufo](https://github.com/gufo-org/gufo), from HaloForge Labs.
 It uses AMD HIP and optimal defaults for Ryzen AI Max laptops with Radeon 8060S graphics at approximately 70 W.
 The command is `bubo`. The executable is `bubo.exe`.
 
 Gufo provides the engine. The Windows layer comes from [pixmaate/gufo, branch `windows-port`](https://github.com/pixmaate/gufo/tree/windows-port).
-The base is gufo v0.10.0 with selected upstream fixes.
+The base is gufo v0.26.0.
 
 ## Performance at 70 W
 
 Tokens per second, higher is better. Same laptop, same model file (Huihui Qwen3.8 Flash Next, UD-Q4_K_XL), same day.
 
-| Workload | Bubo 0.1.1 | Bubo 0.1.0 |
+| Workload | Bubo 0.1.2 | Bubo 0.1.0 |
 | --- | ---: | ---: |
-| Prose | 56.4 | 52.9 |
-| Python code | 68.7 | 65.4 |
-| C++ code | 74.8 | 69.7 |
-| Long agent session, writing | 68.5 | 62.4 |
-| Long agent session, reading new text | 946 | 930 |
-| Code edit, rename | 107.5 | 97.3 |
-| Reading a 32K prompt | 1,384 | 1,318 |
+| Prose | 57.1 | 52.3 |
+| Python code | 66.3 | 63.7 |
+| C++ code | 77.5 | 70.0 |
+| Long agent session, writing | 66.2 | 62.0 |
+| Long agent session, reading new text | 971 | 949 |
+| Code edit, rename | 109.0 | 97.7 |
+| Reading a 32K prompt | 1,415 | 1,333 |
 
 The laptop is an ASUS ProArt PX13 with Radeon 8060S graphics in Performance mode at approximately 70 W. Sampled rows use temperature 1.0 with thinking on. Edit rows are greedy. Comparisons with other engines and every row: [Benchmarks](https://haloforgelabs.com/benchmarks).
 
@@ -52,7 +52,7 @@ A page file does not replace physical RAM for full-speed operation.
 
 ## Install
 
-1. Download `bubo-v0.1.1-windows-x64-gfx1151.zip` from the [Bubo release page](https://github.com/haloforge-labs/bubo/releases/tag/v0.1.1). The file is 66,241,059 bytes. Its SHA-256 value is `eeffccd3dc4c322b968a332ce378ffd99521eb377db262ac195111d847d5f2ee`. `bubo --version` prints `bubo 0.1.1 (0cb4bd87), engine gufo 0.10.0`.
+1. Download `bubo-v0.1.2-windows-x64-gfx1151.zip` from the [Bubo release page](https://github.com/haloforge-labs/bubo/releases/tag/v0.1.2). The file is 71,949,037 bytes. Its SHA-256 value is `f1a86f1d667c6fd2926f846c3b1cca9f7151791b599a07db9179275ad6117e89`. `bubo --version` prints `bubo 0.1.2 (88eec3ab1), engine gufo 0.26.0`.
 2. Extract the complete package into a folder.
 3. To use the app, double-click `start.cmd` in the package folder. See [Use the app](https://haloforgelabs.com/docs/app/).
 4. To use the command line, open PowerShell in the `bin` folder of the package and run `.\bubo.exe prepare`.
@@ -96,24 +96,26 @@ Keep the local address for normal laptop use.
 
 - Pick a smaller model. The app has eight models of 16 to 23 GB.
 - Use a shorter context: `--context N`.
+- Make the KV cache 47 % smaller: `--kv-cache-type q8_0` (Qwen3.8 Flash Next only). Each extra 64K session needs 1.1 GB instead of 1.9 GB.
 - Use a smaller RAM cache: `--cache-ram-bytes N`. The default is 8 GiB.
 - Leave out the dense twin (`--no-twin`) or the image projector (`--no-vision`).
-- Run `bubo models estimate --model PATH` for a memory estimate and a recommended context.
+- Run `bubo models estimate --model PATH` for a memory estimate and a recommended context. Add `--kv-cache-type q8_0` to estimate with the Q8 context cache. Add `--switch NAME=VALUE` (repeat it for more) to estimate with any other `bubo serve` option set as you would save it.
 - The memory guard keeps 4,096 MiB free. A request that needs more is refused with HTTP 503 or 507.
 
 ## Fast restarts with the disk cache
 
 The disk prompt cache is off by default. When you turn it on, Bubo keeps the computed prompt state of long conversations on the disk. After a server restart, or after the RAM cache drops a conversation, the conversation continues without processing the whole prompt again. The cache writes to your SSD.
 
-See the [quickstart](docs/quickstart.md#fast-restarts-with-the-disk-cache) for the steps. To turn it on, add the folder for the cache and a staging size to the server command:
+See the [quickstart](docs/quickstart.md#fast-restarts-with-the-disk-cache) for the steps. To turn it on, add the folder for the cache to the server command:
 
 ```powershell
-.\bubo.exe serve llm --served-model-name bubo --cache-disk "D:\BuboCache" --cache-disk-staging-bytes 5368709120
+.\bubo.exe serve llm --served-model-name bubo --cache-disk "D:\BuboCache"
 ```
 
 - Bubo saves a snapshot about 30 s after the conversation goes idle.
 - The disk budget is 8.6 GB by default. Change it with `--cache-disk-bytes`. A long session can need more.
-- Add `--cache-disk-staging-bytes 5368709120` (5.4 GB) for long sessions.
+- The first start of v0.1.2 deletes the disk cache files of v0.1.1 in that folder, and the first requests after that run cold. Use a separate folder for each server.
+- `--cache-disk-staging-bytes` is ignored on Qwen3.8 Flash Next, and the server logs a warning.
 - Turn the cache off again with `--no-cache-disk`. The `exact` profile turns all caches off and ignores the disk cache.
 
 ## Profiles
@@ -141,7 +143,10 @@ These defaults apply to Qwen3.8 Flash Next.
 | `--sessions` | `1` | Use the `subagents` profile for concurrent requests. |
 | `--mtp-model` | From the manifest | Supply another matching MTP sidecar for speculative decode. |
 | `--mmproj` | From the manifest | Supply another BF16 vision sidecar for images. `--no-vision` leaves it out. |
-| `--cache-ram-bytes` | `8589934592` (8.6 GB) | Reduce the budget if host RAM is limited. Zero means automatic sizing. |
+| `--cache-ram-bytes` | `8589934592` (8.6 GB) | Reduce the budget if host RAM is limited. Zero means automatic sizing. `off` keeps no RAM checkpoint. |
+| `--prefill-mode` | `normal` | Use `fast` to read prompts that have 4,096 or more new tokens up to 16 % faster with fewer experts (experimental, no visible quality change). Shorter prompts read as in `normal`. The `exact` profile and the 256-expert Coder refuse it. |
+| `--kv-cache-type` | `f16` | Use `q8_0` to make the KV cache 47 % smaller (Qwen3.8 Flash Next only; lossy). |
+| `--refusal-direction` | `off` | Use `on` to remove a refusal direction from the outputs of Qwen3.8 Flash Next models that are not already abliterated. The direction file is in the `refusal` folder beside `bubo.exe`. |
 | `--npu-prefill` | Off | Use `on` to prefill long prompts on the NPU. See [NPU prefill](docs/npu.md). |
 | `--served-model-name` | The model's id | Set the model name that clients send. `bubo` always works as well. |
 | `--no-mtp` | Unset | A Gemma 4 package that has an MTP file uses MTP by default. Use `--no-mtp` to turn it off. |
@@ -159,6 +164,7 @@ The app downloads these models after you approve the files. The weights are not 
 | Model | Download | Images |
 | --- | ---: | :--: |
 | Qwen3.8 Flash Next (Huihui and original) | 116.6 GB | Yes |
+| Qwen3.8 Flash Next Coder (ISTA GSQ-RCO, 256 experts) | 61.2 GB (with the MTP file) | No |
 | Qwen3.8 27B | 19.6 GB | Yes |
 | Qwen3.6 27B | 18.5 GB | Yes |
 | Cyber-Tiel Coder 35B-A3B | 23.4 GB | Yes |
@@ -173,9 +179,7 @@ See [Models supported](https://haloforgelabs.com/models).
 ## Known issues
 
 - Bubo is not code-signed. Windows can ask you to confirm. See [Windows security prompts](docs/install.md#windows-security-prompts).
-- The repeat guard stops repeated text in answers only when the repeating unit is 16 tokens or shorter (thinking and tool arguments: up to 128 tokens). A longer repeating passage in an answer can run until the length limit.
 - Deep sessions and images need more memory. Reduce `--context` if memory is limited.
-- The server writes some whole numbers in exponent form, for example the context size as `2e+05` in `/v1/models`. This is valid JSON. A client that needs an integer type there can fail.
 - Bubo refuses a request that needs new memory when free memory is below the floor (HTTP 503 or 507). See [Memory guard](https://haloforgelabs.com/docs/system-setup/#memory-guard).
 - If the GPU stops responding, the server logs `event=device_lost remedy=restart_process exit_status=75` and exits with status 75. The Bubo app starts the server again once. Without the app, start the server again, or run it under a supervisor that restarts it on failure. See [Known issues](https://haloforgelabs.com/docs/known-issues/).
 - Tracing reduces decode speed. Keep tracing off.
@@ -193,7 +197,7 @@ AMD runtime components have separate licenses.
 Read `THIRD-PARTY.txt` in the package, and the `licenses` folder in the package and in the runtime folder.
 Keep these notices with the installed runtime.
 
-Qwen licenses apply to model weights and the derived dense twin and draft head.
+Qwen licenses apply to model weights and the derived dense twin, draft head and refusal direction file.
 Read the [Qwen license](https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/main/LICENSE) and the [Huihui license](https://huggingface.co/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-GGUF/blob/main/LICENSE).
 All licences: [Licences](https://haloforgelabs.com/licences).
 

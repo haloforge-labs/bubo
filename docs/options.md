@@ -39,12 +39,14 @@ Use `bubo serve llm --help` for command-specific help.
 | `--cache-disk VALUE` | Set the disk prompt cache directory. | Off | Set a directory when prompt snapshots must persist across server restarts. |
 | `--cache-disk-bytes VALUE` | Limit disk prompt cache storage. | 8589934592 (8.6 GB) | Keep 8.6 GB unless the disk cache must retain more prompt snapshots. |
 | `--cache-disk-staging-bytes VALUE` | Limit RAM used to stage disk prompt snapshots. | 0 (automatic). At most the disk budget and one eighth of available RAM. | Keep the automatic limit unless disk persistence needs a different RAM limit. |
-| `--cache-ram-bytes VALUE` | Set the RAM snapshot cache size. | 8589934592 (8.6 GB). Zero means automatic. | Keep 8.6 GB. Use the subagents profile for 4.3 GB. Bubo limits the size to a ceiling. See [RAM snapshot cache](#ram-snapshot-cache). |
+| `--cache-ram-bytes VALUE` | Set the RAM snapshot cache size. | 8589934592 (8.6 GB). Zero means automatic. `off` keeps no RAM checkpoint. | Keep 8.6 GB. Use the subagents profile for 4.3 GB. Bubo limits the size to a ceiling. See [RAM snapshot cache](#ram-snapshot-cache). |
 | `--context VALUE` | Set the context token limit for each session. | 200000 (largest: 262144) | Keep the profile context unless the task needs a different token limit. A request that needs new memory when free memory is below the floor is refused. See [Memory guard](https://haloforgelabs.com/docs/system-setup/#memory-guard). |
 | `--draft-tokens VALUE` | Set the maximum speculative draft length. | 7 | Keep seven tokens unless speculative draft length tests need another value. |
+| `--enable-yarn` | Allow a context above 262144 on Qwen3.8 Flash Next. | Off | Use it only when the task needs a context above 262144. Without it, Bubo refuses a larger context. The setting applies to every request. |
 | `--exact` | Select the exact profile. | Unset | Use it when output must repeat with the same build, prompt, and seed. |
 | `--frequency-penalty VALUE` | Penalize tokens by their generated occurrence count. | 0.0 (off) | Keep zero unless the task needs fewer frequently repeated tokens. |
 | `--host VALUE` | Set the server listen address. | 127.0.0.1 | Keep the local address unless remote clients must connect to the server. |
+| `--kv-cache-type f16\|q8_0` | Set the storage type of the context cache of Qwen3.8 Flash Next. | f16 | Use `q8_0` when memory is short. It uses about half the cache memory, so more or longer conversations fit. It is lossy, and replies can differ slightly. Saved caches rebuild when the type changes. In the app: Server page, KV cache. |
 | `--log-level VALUE` | Set the amount of server log detail. | info | Keep info unless diagnosis needs debug messages or normal operation needs fewer messages. |
 | `--log-progress` | Log prompt processing progress. | off | Keep it off unless prompt processing progress must appear in the log. |
 | `--max-buffered-output-bytes VALUE` | Limit buffered output for each request. | 65536 (64 KiB) | Keep 64 KiB unless slow clients need more buffered output per request. |
@@ -52,7 +54,7 @@ Use `bubo serve llm --help` for command-specific help.
 | `--max-connections VALUE` | Limit simultaneous HTTP connections. | 16 | Keep 16 unless the client workload needs more simultaneous HTTP connections. |
 | `--max-output-bytes VALUE` | Limit output text bytes for each request. | 1048576 (1 MB) | Keep 1 MB unless a request must return more output text. |
 | `--max-pending VALUE` | Limit queued requests. | 16 | Keep 16 unless the workload needs a larger request queue. |
-| `--max-pending-per-client VALUE` | Limit queued requests from each client. | Same as --max-pending | Keep the queue limit unless one client must have a smaller request allowance. |
+| `--max-pending-per-client VALUE` | Limit queued requests from each client. | Same as the queue limit (`--max-pending`) | Keep the queue limit unless one client must have a smaller request allowance. |
 | `--max-request-bytes VALUE` | Set the maximum HTTP request body size. | 67108864 | Keep 67.1 MB unless larger request bodies are necessary. |
 | `--max-tokens VALUE` | Limit new tokens generated per request. | -1 | Keep unlimited generation unless responses need a fixed new token limit. |
 | `--min-draft-tokens VALUE` | Set the minimum speculative draft length. | 1 | Keep one token unless speculative draft tests need a larger minimum. |
@@ -73,12 +75,14 @@ Use `bubo serve llm --help` for command-specific help.
 | `--npu-prefill off\|on` | Use the Ryzen AI NPU for prompt processing when it is available. | Off. Exact and stock force it off. | Use `on` to turn it on. It needs the AMD NPU driver. See [NPU prefill](npu.md). |
 | `--port VALUE` | Set the server listen port. | 8080 | Keep 8080 unless another service uses that port or clients need a different port. |
 | `--prefill-chunk VALUE` | Limit prompt tokens between active decode rounds. | 512 | Keep 512 unless active sessions need shorter pauses during another request prefill. |
-| `--presence-penalty VALUE` | Penalize tokens already generated in the response. | Qwen3.8: 0.0 thinking. 1.5 non-thinking unless GUFO_PRODUCTION_SAMPLING=1 | Keep the model preset unless the task needs a different penalty for previously generated tokens. |
+| `--prefill-mode normal\|fast` | Set how Bubo reads prompts that have 4,096 or more new tokens. Qwen3.8 Flash Next models with 512 experts. | normal | Use `fast` to read such prompts up to 16 % faster with fewer experts. Experimental. Normal reading uses 10 of the 512 experts for each token. Fast mode uses 3 experts for all new prompt tokens except the last 256, which are read as in `normal` mode. New tokens are the prompt tokens that the cache does not restore. Shorter prompts read as in `normal` mode. Decode (writing the answer) is not affected and uses all 10 experts. No visible quality change. Bubo stops with an error if the profile is exact or vanilla, for the 256-expert Coder, for any model that is not Qwen3.8 Flash Next, and when the fold-table file `prefill-fold-L3.txt` beside `bubo.exe` is missing. In the app: Server page, Speed and behaviour, Prefill mode. |
+| `--presence-penalty VALUE` | Penalize tokens already generated in the response. | Model preset (Qwen3.8: 0.0 thinking. 1.5 non-thinking, unless production sampling is on) | Keep the model preset unless the task needs a different penalty for previously generated tokens. |
 | `--preserve-thinking auto\|on\|off` | Select which thinking history to retain. | auto | Keep auto unless the client needs a different policy for retained thinking history. |
 | `--print-effective-settings` | Print resolved settings as JSON and exit. | Unset | Use it when resolved settings must be inspected without loading a model. |
 | `--profile default\|stock\|exact\|subagents` | Select the release settings profile. | default | Keep default for normal use. Use stock, exact, or subagents for their documented tasks. |
 | `--prompt-lookup` | Propose tokens from an earlier conversation match. | On with MTP. Otherwise off. | Keep it enabled with MTP unless prompt lookup comparisons need it off. |
 | `--reasoning-effort auto\|minimal\|low\|medium\|high\|xhigh\|max` | Set the default reasoning effort. | medium | Keep medium. Use low for shorter reasoning or xhigh for difficult tasks. |
+| `--refusal-direction on\|off` | Remove a refusal direction from the outputs of Qwen3.8 Flash Next models that are not already abliterated. | off | Use `on` only when the model must not refuse. The direction file is in the `refusal` folder beside `bubo.exe`. For a model that is already abliterated (the Huihui builds) or for the Coder, Bubo refuses to start with it on. In the app: Server page, Speed and behaviour, In-engine abliteration (Qwen3.8 Flash Next). |
 | `--repeat-last-n VALUE` | Set the recent token window for repetition penalties. | 64 | Keep 64 unless repetition penalties need a different recent token window. |
 | `--repeat-penalty VALUE` | Penalize recently used tokens. | 1.0 (off) | Keep one unless the task needs a penalty for recent repeated tokens. |
 | `--request-timeout-ms VALUE` | Limit request time in milliseconds. | 0 (off) | Keep zero unless requests must stop after a fixed time limit. |
@@ -89,7 +93,7 @@ Use `bubo serve llm --help` for command-specific help.
 | `--temperature VALUE` | Set the randomness of token sampling. | preset (Qwen3.8: 1.0 thinking, 0.7 non-thinking) | Keep the model preset unless the task needs different randomness or greedy decoding with zero. |
 | `--think on\|off\|auto` | Set the default reasoning mode. | on | Keep on. Use off when the task does not need reasoning. |
 | `--top-k VALUE` | Limit sampling to the highest probability candidates. | preset 20 (Qwen3.8) | Keep the model preset unless the task needs a different sampling candidate limit. |
-| `--top-p VALUE` | Filter sampling candidates by cumulative probability. | preset (0.95 thinking. 0.8 non-thinking unless GUFO_PRODUCTION_SAMPLING=1) | Keep the model preset unless the task needs a different cumulative probability limit. |
+| `--top-p VALUE` | Filter sampling candidates by cumulative probability. | Model preset (Qwen3.8: 0.95 thinking. 0.8 non-thinking, unless production sampling is on) | Keep the model preset unless the task needs a different cumulative probability limit. |
 
 ## Environment options
 
@@ -108,11 +112,11 @@ $env:GUFO_DENSE_TWIN_MODEL = "D:\Models\Qwen3.8-Flash-Next\iq4-nofullattn-nohc.g
 | `GUFO_DENSE_TWIN_BATCH` | Enable dense twin decode with multiple sessions. | off | Keep the profile setting unless batched twin comparisons need a different setting. |
 | `GUFO_DENSE_TWIN_MAX_N` | Limit the dense twin batch width. | 8 | Keep eight unless batched twin tests outside exact need a different batch limit. |
 | `GUFO_DENSE_TWIN_MODEL` | Select the four bit dense weights used for decode and verify. | No file set. Optimal: matching dense twin outside exact. | Set the matching dense twin when faster decoding outside exact is necessary. |
-| `GUFO_DISK_DEFER` | Defer disk writes until idle. | Unset. 1 with --cache-disk | Keep the disk bundle setting unless disk write deferral tests need another setting. |
-| `GUFO_DISK_EVICT_DOMINATED` | Skip snapshots covered by a longer retained snapshot. | Unset. 1 with --cache-disk | Keep the disk bundle setting unless dominated snapshot eviction tests need another setting. |
-| `GUFO_DISK_EVICT_SKIP_TOKENS` | Skip snapshot writes close to an existing persisted prefix. | Unset. 8192 with --cache-disk | Keep 8192 with disk caching unless eviction tests need a different minimum prompt length. |
+| `GUFO_DISK_DEFER` | Defer disk writes until idle. | Off. On with the disk cache | Keep the disk bundle setting unless disk write deferral tests need another setting. |
+| `GUFO_DISK_EVICT_DOMINATED` | Skip snapshots covered by a longer retained snapshot. | Off. On with the disk cache | Keep the disk bundle setting unless dominated snapshot eviction tests need another setting. |
+| `GUFO_DISK_EVICT_SKIP_TOKENS` | Skip snapshot writes close to an existing persisted prefix. | Off. 8192 with the disk cache | Keep 8192 with disk caching unless eviction tests need a different minimum prompt length. |
 | `GUFO_DISK_INPASS` | Enable disk snapshots during prefill passes. | 1 | Keep one unless disk cache tests need in-pass checkpoints to be disabled. |
-| `GUFO_DISK_PERSIST` | Persist disk snapshots on eviction after idle. | Unset. evict_idle with --cache-disk | Keep the disk bundle policy unless persistence tests need a different write policy. |
+| `GUFO_DISK_PERSIST` | Persist disk snapshots on eviction after idle. | Off. Persist when idle with the disk cache | Keep the disk bundle policy unless persistence tests need a different write policy. |
 | `GUFO_DRAFT_OUT_MODEL` | Select the four bit output head used for MTP drafts. | No file set. Optimal: matching Q4_K draft head with MTP outside exact. | Set the matching draft head when faster MTP decoding outside exact is necessary. |
 | `GUFO_DRAFT_VOCAB_AUTO` | Set thresholds for automatic draft vocabulary selection. | 2,16,64 (2 of last 16 non-latin. back after 64 latin) | Keep the default thresholds unless automatic draft vocabulary tests need different thresholds. |
 | `GUFO_EOG_BOUNDARY` | Permit EOG tokens at allowed boundaries. | 1 | Keep it enabled unless end token boundary comparisons need it off. |
@@ -145,8 +149,8 @@ $env:GUFO_DENSE_TWIN_MODEL = "D:\Models\Qwen3.8-Flash-Next\iq4-nofullattn-nohc.g
 | `GUFO_SPEC_EOG_STOP` | Permit speculative EOG stops. | 1 | Keep it enabled unless speculative end token comparisons need it off. |
 | `GUFO_THINK_EOG_GUARD` | Block end of turn inside an unfinished thinking span. | 1 | Keep it enabled unless thinking termination comparisons need it off. |
 | `GUFO_THINK_GUARD_ESCALATE` | Close thinking after this many blocked end-of-turn attempts. Zero turns it off. | 16 | Keep 16 unless thinking guard tests need a different end token streak length. |
-| `GUFO_THINK_MARKER_BIAS` | Set a fixed thinking marker probability bias. | 0 | Keep zero unless a fixed thinking marker bias is necessary outside exact. |
-| `GUFO_THINK_MARKER_BIAS_BY_EFFORT` | Map reasoning effort to think marker bias. | low:-2,medium:-1,xhigh:0 | Keep the default map unless reasoning effort tests need different thinking marker biases. |
+| `GUFO_THINK_MARKER_BIAS` | Uses one rethinking penalty at every reasoning effort. Negative numbers lower the chance of "wait" and "let me rethink" restarts. | 0 | Use 0 for vanilla. |
+| `GUFO_THINK_MARKER_BIAS_BY_EFFORT` | Lowers the chance of "wait" and "let me rethink" restarts while the model thinks. It does not cut thinking off. | low:-2,medium:-1,xhigh:0 | Defaults are recommended: low -2, medium -1, xhigh 0; use 0 for vanilla, or go more negative to think less. |
 | `HOST` | Set the server address through the environment fallback. | Unset | Leave it unset unless the server address must come from the environment fallback. |
 | `PORT` | Set the server port through the environment fallback. | Unset | Leave it unset unless the server port must come from the environment fallback. |
 
@@ -218,10 +222,11 @@ Disk snapshots write to the SSD.
 Automatic RAM staging can limit snapshots near 70K tokens.
 The limit depends on the model and available RAM.
 Set `--cache-disk` only when prompts must persist across restarts.
-To turn it on, add `--cache-disk <folder>` to the server command. The first start with the cache checks the model files once and saves a stamp. The 109K-token test used `--cache-disk-staging-bytes` 5 GB.
-Measured on a 109K-token session: restore after a restart takes 3.5 s instead of 88.8 s.
-SSD writes are about 3 GB for each long saved session and about 5 GB for a 90-request agent replay.
-Decode speed cost is about 2.5%.
+To turn it on, add `--cache-disk <folder>` to the server command. The first start with the cache checks the model files once and saves a stamp. The first start with v0.1.2 deletes the disk cache files of v0.1.1 in that folder (`*.kvc` and temporary files, top level only). The first requests after that run cold. Use a separate folder for each server.
+On Qwen3.8 Flash Next, `--cache-disk-staging-bytes` has no effect. Bubo writes a warning.
+Measured on v0.1.1 with a 109K-token session: restore after a restart takes 3.5 s instead of 88.8 s.
+Measured on v0.1.1: SSD writes are about 3 GB for each long saved session and about 5 GB for a 90-request agent replay.
+Measured on v0.1.1: decode speed cost is about 2.5%.
 The resolver supplies the disk policies when that folder option is set.
 The default disk budget is 8.6 GB.
 
