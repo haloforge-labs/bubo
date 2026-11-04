@@ -20,6 +20,19 @@ namespace gufo::server {
 namespace dg = models::diffusion_gemma;
 
 namespace {
+// The tools a reply may call. With tool_choice none the adapter reads no
+// calls, so the reply text is left as written.
+std::vector<std::string> DeclaredToolNames(const ChatRequest& request) {
+  std::vector<std::string> names;
+  if (request.tool_choice == ChatRequest::ToolChoice::kNone)
+    return names;
+  for (const auto& tool : request.tools)
+    names.push_back(tool.name);
+  return names;
+}
+}  // namespace
+
+namespace {
 
 // Bytes at the end of `text` that start an incomplete UTF-8 sequence.
 std::size_t IncompleteUtf8Tail(std::string_view text) {
@@ -290,7 +303,8 @@ DiffusionGemmaBackend::start_chat(const ChatRequest& request,
             models::gemma4::vision::Prompt prompt, std::size_t max_tokens,
             sampling::SamplingConfig sampling, CancellationCheck cancellation,
             std::string client_id, std::vector<std::string> stop_sequences,
-            bool thinking, bool cache_prompt)
+            bool thinking, bool cache_prompt,
+            std::vector<std::string> tool_names)
         : backend_(backend),
           prompt_(std::move(prompt)),
           max_tokens_(max_tokens),
@@ -299,7 +313,8 @@ DiffusionGemmaBackend::start_chat(const ChatRequest& request,
           client_id_(std::move(client_id)),
           stop_sequences_(std::move(stop_sequences)),
           thinking_(thinking),
-          cache_prompt_(cache_prompt) {}
+          cache_prompt_(cache_prompt),
+          tool_names_(std::move(tool_names)) {}
     Result Wait(const TokenCallback& on_token, const ProgressCallback&,
                 const StartCallback&) override {
       if (waited_.exchange(true, std::memory_order_acq_rel))
@@ -312,7 +327,7 @@ DiffusionGemmaBackend::start_chat(const ChatRequest& request,
           },
           on_token, client_id_, stop_sequences_,
           thinking_ ? Thinking::kTagged : Thinking::kRemove, false,
-          cache_prompt_);
+          cache_prompt_, tool_names_);
     }
     void Cancel() noexcept override {
       cancelled_.store(true, std::memory_order_release);
@@ -328,13 +343,15 @@ DiffusionGemmaBackend::start_chat(const ChatRequest& request,
     std::vector<std::string> stop_sequences_;
     bool thinking_;
     bool cache_prompt_;
+    std::vector<std::string> tool_names_;
     std::atomic<bool> waited_{false};
     std::atomic<bool> cancelled_{false};
   };
   return std::make_shared<Request>(
       *this, std::move(prompt), max_tokens, sampling, is_cancelled,
       request.client_id, request.stop_sequences,
-      request.reasoning.enabled.value_or(false), request.cache_prompt);
+      request.reasoning.enabled.value_or(false), request.cache_prompt,
+      DeclaredToolNames(request));
 }
 
 models::gemma4::vision::Prompt DiffusionGemmaBackend::PrepareChat(
@@ -454,7 +471,7 @@ TextGenerationBackend::Result DiffusionGemmaBackend::chat(
   return Run(prompt, max_tokens, sampling, is_cancelled, on_token,
              request.client_id, request.stop_sequences,
              thinking ? Thinking::kTagged : Thinking::kRemove, false,
-             request.cache_prompt);
+             request.cache_prompt, DeclaredToolNames(request));
 }
 
 /// Memory guard (see core/platform/memory_guard.hpp): an image request needs the vision tower and the encoder scratch, committed on the
@@ -531,7 +548,8 @@ TextGenerationBackend::Result DiffusionGemmaBackend::Run(
     const sampling::SamplingConfig& sampling,
     const CancellationCheck& is_cancelled, const TokenCallback& on_token,
     std::string_view client_id, const std::vector<std::string>& stop_sequences,
-    Thinking thinking, bool ignore_eos, bool cache_prompt) {
+    Thinking thinking, bool ignore_eos, bool cache_prompt,
+    std::vector<std::string> tool_names) {
   const auto& tokenizer = engine_->tokenizer();
   const int room =
       engine_->max_context() - static_cast<int>(prompt.tokens.size());
@@ -627,7 +645,7 @@ TextGenerationBackend::Result DiffusionGemmaBackend::Run(
                 ? DecodeTaggedThinking(tokenizer, generated, open, close)
                 : tokenizer.Decode(
                       dg::StripThinkingTokens(generated, open, close), false);
-        visible = dg::NativeToolCallsToXml(decoded, &held);
+        visible = dg::NativeToolCallsToXml(decoded, &held, tool_names);
         std::size_t cut = std::string::npos;
         for (const auto& stop : stop_sequences) {
           const std::size_t from =

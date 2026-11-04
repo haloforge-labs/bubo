@@ -44,7 +44,15 @@ std::string FormatToolDeclaration(const json::Value& tool);
 /// <tool_call|>`) as a Qwen XML call block, which the HTTP adapter parses
 /// into tool calls. Text from an unterminated call onward is cut and its
 /// offset in `text` stored in `*held` (npos when nothing is held).
-std::string NativeToolCallsToXml(std::string_view text, std::size_t* held);
+///
+/// The model sometimes drops the `<|tool_call>` opener (and `call:`) but
+/// writes the body and the closer. When `tools` names the declared tools, a
+/// closer preceded by `NAME{...}` for one of them (optionally after `call:`
+/// and a code fence line) is read as that call, and a `NAME{` still waiting
+/// for its closer is held back like an unterminated call. Anything else,
+/// such as a fenced example without a closer, stays text.
+std::string NativeToolCallsToXml(std::string_view text, std::size_t* held,
+                                 std::span<const std::string> tools = {});
 
 /// Removes a leading thinking channel (`<|channel>...<channel|>`) from
 /// generated text; returns the text unchanged when there is none.

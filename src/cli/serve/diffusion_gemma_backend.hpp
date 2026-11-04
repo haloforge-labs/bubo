@@ -129,7 +129,8 @@ private:
              const CancellationCheck& is_cancelled,
              const TokenCallback& on_token, std::string_view client_id,
              const std::vector<std::string>& stop_sequences, Thinking thinking,
-             bool ignore_eos, bool cache_prompt = true);
+             bool ignore_eos, bool cache_prompt = true,
+             std::vector<std::string> tool_names = {});
   /// Memory guard: refuses an image request whose vision memory does not fit (see the definition).
   void AdmitVisionMemory(const models::gemma4::vision::Prompt& prompt);
   Result RunRead(const models::gemma4::vision::Prompt& prompt,

@@ -343,6 +343,9 @@ public:
     }
   }
 
+  /// Where parsing stopped; after Object() the end of the object.
+  std::size_t Position() const { return pos_; }
+
 private:
   bool Peek(std::string_view s) const {
     return text_.substr(pos_, s.size()) == s;
@@ -519,7 +522,182 @@ std::string RenderChat(const std::vector<Message>& messages,
   return out;
 }
 
-std::string NativeToolCallsToXml(std::string_view text, std::size_t* held) {
+namespace {
+
+std::string CallXml(const std::string& name, const json::Value& arguments) {
+  std::string xml = "<tool_call>\n<function=" + name + ">\n";
+  for (const auto& [key, value] : arguments.members())
+    xml += "<parameter=" + key + ">\n" +
+           (value.is_string() ? value.str() : value.dump()) +
+           "\n</parameter>\n";
+  xml += "</function>\n</tool_call>";
+  return xml;
+}
+
+bool NameBoundary(char c) {
+  return !(std::isalnum(static_cast<unsigned char>(c)) || c == '_' ||
+           c == '$' || c == '.' || c == '-' || c == '/' || c == ':');
+}
+
+// The text between a code fence and the `{` of a call stays short.
+constexpr std::size_t kMaxFenceHead = 120;
+
+bool FenceHeadChar(char c) {
+  return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '.' ||
+         c == '$' || c == '/' || c == ':' || c == '-' || c == ' ' ||
+         c == '\t' || c == '\r' || c == '\n';
+}
+
+// Could `head` (the text after a ``` fence) still turn into a language word,
+// separators and a tool name? One line break at most.
+bool FenceHeadPossible(std::string_view head) {
+  return head.size() <= kMaxFenceHead &&
+         std::ranges::all_of(head, FenceHeadChar) &&
+         std::ranges::count(head, '\n') <= 1;
+}
+
+// A call the model wrote without its opener, seen from the text before its
+// `{`: the name of a declared tool, with or without `call:`, or after a code
+// fence line that carries the language and the name in any order of the forms
+// ```bash\nbash{  ```bash:bash{  ```bash-bash{  ```call:bash{  ```bash{
+// (the language is the name) and ```bash\n{ .
+struct BareHead {
+  std::size_t start;  // Where the replaced text begins (fence, `call:` or name).
+  std::string name;
+  bool fenced;
+};
+
+std::optional<BareHead> ResolveBareHead(std::string_view before,
+                                        std::span<const std::string> tools) {
+  const auto edge = [](char c) {
+    return !(std::isalnum(static_cast<unsigned char>(c)) || c == '_' ||
+             c == '$' || c == '.' || c == '/');
+  };
+  // The longest declared name that ends `text` at a word edge.
+  const auto name_at_end = [&](std::string_view text) -> const std::string* {
+    const std::string* best = nullptr;
+    for (const auto& name : tools) {
+      if (name.empty() || name.size() > text.size() || !text.ends_with(name))
+        continue;
+      if (name.size() < text.size() && !edge(text[text.size() - name.size() - 1]))
+        continue;
+      if (!best || name.size() > best->size())
+        best = &name;
+    }
+    return best;
+  };
+  if (const auto fence = before.rfind("```"); fence != std::string_view::npos) {
+    const auto head = before.substr(fence + 3);
+    if (FenceHeadPossible(head)) {
+      std::string_view t = head;
+      while (!t.empty() && (t.back() == ' ' || t.back() == '\t' ||
+                            t.back() == '\r' || t.back() == '\n' ||
+                            t.back() == ':' || t.back() == '-'))
+        t.remove_suffix(1);
+      if (const auto* name = name_at_end(t)) {
+        // What comes before the name: at most a language word, then `call`.
+        std::string_view lead = t.substr(0, t.size() - name->size());
+        std::vector<std::string_view> words;
+        for (std::size_t i = 0; i < lead.size();) {
+          const auto is_sep = [](char c) {
+            return c == ' ' || c == '\t' || c == '\r' || c == '\n' ||
+                   c == ':' || c == '-';
+          };
+          if (is_sep(lead[i])) {
+            ++i;
+            continue;
+          }
+          std::size_t j = i;
+          while (j < lead.size() && !is_sep(lead[j]))
+            ++j;
+          words.push_back(lead.substr(i, j - i));
+          i = j;
+        }
+        if (words.size() <= 1 || (words.size() == 2 && words[1] == "call"))
+          return BareHead{fence, *name, true};
+      }
+    }
+  }
+  // Without a fence: NAME{ or call:NAME{ on the same line.
+  const auto line = before.rfind('\n');
+  const auto text = before.substr(line == std::string_view::npos ? 0 : line + 1);
+  const auto* name = name_at_end(text);
+  if (!name || (name->size() < text.size() &&
+                !NameBoundary(text[text.size() - name->size() - 1]) &&
+                !text.substr(0, text.size() - name->size()).ends_with("call:")))
+    return std::nullopt;
+  std::size_t start = before.size() - name->size();
+  if (before.substr(0, start).ends_with("call:")) {
+    start -= 5;
+    if (start > 0 && !NameBoundary(before[start - 1]))
+      return std::nullopt;
+  }
+  return BareHead{start, *name, false};
+}
+
+struct BareCandidate {
+  std::size_t brace;  // The `{` that opens the arguments.
+  BareHead head;
+};
+
+// Every `{` in `text` that a bare call could open at, in order.
+std::vector<BareCandidate> BareCandidates(std::string_view text,
+                                          std::span<const std::string> tools) {
+  std::vector<BareCandidate> found;
+  if (tools.empty())
+    return found;
+  for (auto at = text.find('{'); at != std::string_view::npos;
+       at = text.find('{', at + 1)) {
+    if (auto head = ResolveBareHead(text.substr(0, at), tools))
+      found.push_back({at, std::move(*head)});
+  }
+  return found;
+}
+
+// Where a bare call may be starting at the end of `text`: a code fence line,
+// `call:` or a declared name that is still arriving. Streamed text must not
+// include these bytes, or the call that replaces them would retract them.
+std::size_t PendingBareStart(std::string_view text,
+                             std::span<const std::string> tools) {
+  if (tools.empty())
+    return std::string_view::npos;
+  const auto prefix_of = [](std::string_view part, std::string_view whole) {
+    return whole.starts_with(part);
+  };
+  const std::size_t from = text.size() > 160 ? text.size() - 160 : 0;
+  for (std::size_t p = from; p < text.size(); ++p) {
+    if (p > 0 && !NameBoundary(text[p - 1]) && text[p] != '`')
+      continue;
+    std::string_view rest = text.substr(p);
+    if (rest.starts_with("```") || prefix_of(rest, "```")) {
+      if (rest.size() <= 3 || FenceHeadPossible(rest.substr(3)))
+        return p;
+      continue;
+    }
+    if (rest[0] == '`')
+      continue;
+    const auto pending_tail = [&](std::string_view tail) {
+      if (prefix_of(tail, "call:"))
+        return true;
+      const auto named = tail.starts_with("call:") ? tail.substr(5) : tail;
+      for (const auto& name : tools) {
+        const std::string needle = name + "{";
+        if (!named.empty() && named.size() < needle.size() &&
+            prefix_of(named, needle))
+          return true;
+      }
+      return false;
+    };
+    if (pending_tail(rest))
+      return p;
+  }
+  return std::string_view::npos;
+}
+
+}  // namespace
+
+std::string NativeToolCallsToXml(std::string_view text, std::size_t* held,
+                                 std::span<const std::string> tools) {
   constexpr std::string_view kOpen = "<|tool_call>";
   constexpr std::string_view kClose = "<tool_call|>";
   *held = std::string_view::npos;
@@ -527,8 +705,61 @@ std::string NativeToolCallsToXml(std::string_view text, std::size_t* held) {
   std::size_t cursor = 0;
   while (true) {
     const auto open = text.find(kOpen, cursor);
+    const auto stray = text.find(kClose, cursor);
+    if (stray != std::string_view::npos &&
+        (open == std::string_view::npos || stray < open)) {
+      // A closer with no opener: the model dropped the opener token. Read the
+      // call when a declared tool name and a complete argument object end at
+      // this closer; anything else stays text.
+      const auto segment = text.substr(cursor, stray - cursor);
+      bool taken = false;
+      for (const auto& c : BareCandidates(segment, tools)) {
+        CallParser parser(segment.substr(c.brace));
+        const auto arguments = parser.Object();
+        if (!arguments ||
+            segment.substr(c.brace + parser.Position())
+                    .find_first_not_of(" \t\r\n") != std::string_view::npos)
+          continue;
+        out += segment.substr(0, c.head.start);
+        out += CallXml(c.head.name, *arguments);
+        cursor = stray + kClose.size();
+        if (c.head.fenced) {
+          // The closing fence of the block, when it has arrived.
+          const auto rest = text.substr(cursor);
+          const auto skip = rest.find_first_not_of(" \t\r\n");
+          const auto tail = skip == std::string_view::npos
+                                ? std::string_view()
+                                : rest.substr(skip);
+          if (tail.starts_with("```")) {
+            cursor += skip + 3;
+          } else if (std::string_view("```").starts_with(tail)) {
+            // Part of the fence may still arrive.
+            *held = cursor;
+            return out;
+          }
+        }
+        taken = true;
+        break;
+      }
+      if (!taken) {
+        out += segment;
+        out += kClose;
+        cursor = stray + kClose.size();
+      }
+      continue;
+    }
     if (open == std::string_view::npos) {
-      out += text.substr(cursor);
+      // No closer yet: a bare call may still be coming, so hold it back.
+      const auto rest = text.substr(cursor);
+      std::size_t hold_at = PendingBareStart(rest, tools);
+      for (const auto& c : BareCandidates(rest, tools))
+        hold_at = std::min(hold_at, c.head.start);
+      if (hold_at != std::string_view::npos) {
+        out += rest.substr(0, hold_at);
+        *held = cursor + hold_at;
+        return out;
+      }
+      out += rest;
       return out;
     }
     out += text.substr(cursor, open - cursor);
