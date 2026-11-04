@@ -2864,6 +2864,45 @@ void TestBehaviourSummaryLoggedAtRequestDestruction() {
          "request destruction logs every final summary line exactly once");
 }
 
+void TestOneTokenDecodeStepKeepsTheSelectionScore() {
+  // A multi-token runner hands a one-token budget to TextModelRunner::DecodeStep.
+  // The scheduler reads scores from step.logprobs, so the base step has to carry
+  // the selection's score; without it the request ends in HTTP 500.
+  class ScoredRunner final : public FakeRunner {
+  public:
+    ScoredRunner() : FakeRunner(std::make_shared<FakeStats>()) {}
+
+    TextDecodeSelection SelectNext(
+        TextRunnerState& state,
+        gufo::sampling::SamplerState& sampler) const override {
+      auto selection = FakeRunner::SelectNext(state, sampler);
+      if (!selection.stop) {
+        selection.logprob = std::make_shared<const gufo::sampling::TokenLogprob>(
+            gufo::sampling::TokenLogprob{
+                .token = static_cast<gufo::sampling::TokenId>(selection.token),
+                .logprob = -0.5,
+                .top_logprobs = {}});
+      }
+      return selection;
+    }
+  };
+  ScoredRunner runner;
+  auto state = runner.CreateState();
+  RequireFakeState(*state).frontier = 90;
+  gufo::sampling::SamplingConfig config;
+  config.logprobs = 0;
+  const std::vector<TextRunnerToken> prompt{1};
+  gufo::sampling::SamplerState sampler(config, prompt);
+  const auto step = runner.DecodeStep(*state, 1, sampler);
+  Expect(step.selections.size() == 1 && !step.stop,
+         "the one-token budget produces one selection");
+  Expect(step.logprobs.size() == 1 &&
+             step.logprobs.front().token ==
+                 static_cast<gufo::sampling::TokenId>(step.selections.front().token) &&
+             step.logprobs.front().logprob == -0.5,
+         "the one-token budget keeps the selection's score in step.logprobs");
+}
+
 }  // namespace
 
 int main() {
@@ -2945,6 +2984,7 @@ int main() {
       failure_log.str().find("[WARN] [cache]") != std::string::npos &&
           failure_log.str().find("reason=capture_failure") != std::string::npos,
       "cache fallback retains an actionable warning");
+  TestOneTokenDecodeStepKeepsTheSelectionScore();
   std::cout << "All text model runner tests passed\n";
   return 0;
 }

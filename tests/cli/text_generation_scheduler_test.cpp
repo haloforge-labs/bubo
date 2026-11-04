@@ -206,6 +206,9 @@ struct FakeControl {
   bool final_token_advance_required{true};
   bool incremental_text_is_exact{false};
   bool multi_token_decode{false};
+  // Mirrors the Flash-Next and Gemma 4 MTP runners: a one-token budget uses
+  // the base step.
+  bool base_single_token_decode{false};
   bool batched_multi_token_decode{false};
   std::size_t actual_batch_width{4};
   bool prefix_reuse{true};
@@ -403,7 +406,8 @@ public:
   }
 
   [[nodiscard]] TextDecodeSelection SelectNext(
-      TextRunnerState& state, gufo::sampling::SamplerState&) const override {
+      TextRunnerState& state,
+      gufo::sampling::SamplerState& sampler) const override {
     const auto& fake = RequireFakeState(state);
     if (!fake.frontier.has_value()) {
       throw std::logic_error("scheduler fake has no frontier");
@@ -420,11 +424,20 @@ public:
         return {.stop = true};
       return {.token = *fake.frontier, .piece = control_->output_pieces[index]};
     }
-    return {
+    TextDecodeSelection selection{
         .stop = false,
         .token = *fake.frontier,
         .piece = std::to_string(*fake.frontier),
     };
+    // A real runner scores the selection when the request asks for logprobs.
+    if (sampler.LogprobsRequested()) {
+      selection.logprob = std::make_shared<const gufo::sampling::TokenLogprob>(
+          gufo::sampling::TokenLogprob{
+              .token = static_cast<gufo::sampling::TokenId>(selection.token),
+              .logprob = -static_cast<double>(selection.token) / 1000.0,
+              .top_logprobs = {}});
+    }
+    return selection;
   }
 
   [[nodiscard]] std::optional<TextDecodeSelection> PreviewFirstToken(
@@ -513,7 +526,8 @@ public:
   [[nodiscard]] TextDecodeStep DecodeStep(
       TextRunnerState& state, std::size_t max_tokens,
       gufo::sampling::SamplerState& sampler) const override {
-    if (!control_->multi_token_decode) {
+    if (!control_->multi_token_decode ||
+        (control_->base_single_token_decode && max_tokens == 1)) {
       return TextModelRunner::DecodeStep(state, max_tokens, sampler);
     }
     auto& fake = RequireFakeState(state);
@@ -530,6 +544,9 @@ public:
         break;
       }
       Advance(state, selection.token);
+      // Real multi-token runners return the scores in step.logprobs.
+      if (selection.logprob)
+        step.logprobs.push_back(*selection.logprob);
       step.selections.push_back(std::move(selection));
     }
     step.draft_rounds = 1;
@@ -2983,6 +3000,56 @@ void TestEmptyTokenIsPublished() {
          "an empty streamed piece still charges the output budget");
 }
 
+// A runner that delegates a one-token budget to the base step (MTP, at the
+// first token or at the tail of a request) must still hand the scheduler one
+// score per token. A 1-token limit and a 4-token limit (3 + a 1-token tail)
+// cover both; the batched pass uses the multi-token batch path.
+void TestOneTokenBudgetKeepsLogprobs() {
+  for (const std::size_t limit : {std::size_t{1}, std::size_t{4}}) {
+    for (const bool batched : {false, true}) {
+      auto control = std::make_shared<FakeControl>();
+      control->multi_token_decode = true;
+      control->base_single_token_decode = true;
+      control->prefix_reuse = false;
+      control->batched_multi_token_decode = batched;
+      control->supports_batched_advance = batched;
+      if (batched)
+        control->block_prefill_label = 1;
+      auto scheduler = MakeScheduler(control, batched ? 2 : 1);
+      gufo::sampling::SamplingConfig config;
+      config.seed = 123;
+      config.logprobs = 0;
+      std::vector<TextGenerationScheduler::Request> requests;
+      requests.push_back(scheduler->Submit({1, 10}, limit, config));
+      if (batched) {
+        control->WaitForPrefill(1);
+        requests.push_back(scheduler->Submit({2, 20}, limit, config));
+        control->ReleasePrefill();
+      }
+      for (std::size_t index = 0; index < requests.size(); ++index) {
+        std::string failure;
+        TextGenerationScheduler::Result result;
+        try {
+          result = requests[index].Wait();
+        } catch (const std::exception& error) {
+          failure = error.what();
+        }
+        Expect(failure.empty(),
+               "a one-token budget with logprobs completes (" + failure + ")");
+        const auto label = static_cast<TextRunnerToken>(index + 1);
+        Expect(result.tokens == ExpectedTokens(label, limit) &&
+                   result.logprobs.size() == limit,
+               "a one-token budget keeps one score per generated token");
+        for (std::size_t i = 0; i < result.tokens.size(); ++i)
+          Expect(result.logprobs[i].token == result.tokens[i] &&
+                     result.logprobs[i].logprob ==
+                         -static_cast<double>(result.tokens[i]) / 1000.0,
+                 "a one-token budget score belongs to its token");
+      }
+    }
+  }
+}
+
 int main() {
   TestPublicationWaitUsesRecentSubstantialPrefill();
   // Log assertions in this binary match the plain "[LEVEL] [component]" text
@@ -2996,6 +3063,7 @@ int main() {
   TestPromptProgressCancellation();
   TestIgnoreEosIsRequestScoped();
   TestEmptyTokenIsPublished();
+  TestOneTokenBudgetKeepsLogprobs();
   TestStopSequenceChunkBoundaries();
   TestStopSequencesPreserveExecutedState();
   TestStopPrefixFlushAndBatchIsolation();
