@@ -3,8 +3,9 @@
 // persistent byte form, at a prompt boundary and mid-decode.
 #include <algorithm>
 #include <chrono>
-#include <cstdlib>
 #include <cmath>
+#include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <future>
 #include <iostream>
@@ -15,6 +16,8 @@
 
 #include "src/core/sampling.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
+#include "tests/models/qwen38_flash_next/checkpoint_memory_test_support.hpp"
+#include "tests/models/qwen38_flash_next/kv_rotation_restore_test_support.hpp"
 
 void LimitReportedDeviceFree(std::size_t bytes);
 
@@ -307,7 +310,9 @@ void CheckCheckpointRetention(const std::shared_ptr<qfn::Model>& model,
   Require(large != nullptr, error);
   source->Reset();
   Require(source->Sync(prompt.first(16), &error), error);
-  Require(large->DeviceBytes() > before + (80ULL << 20),
+  const auto deep_minimum = gufo::test::QfnDeepCheckpointMinimumBytes(
+      model->config().AttentionKvDim(), model->CacheType());
+  Require(large->DeviceBytes() > before + deep_minimum,
           "deep checkpoint did not preserve its overwritten rows");
   large.reset();
   // Count owned backing blocks rather than HIP's global heap cache. A short
@@ -366,21 +371,63 @@ void CheckDeviceExhaustion(const std::shared_ptr<qfn::Model>& model,
 
 }  // namespace
 
+void CheckYarnCacheOnlyProducers(const char* model_path, const char* mtp_path,
+                                 qfn::KvCacheType type, bool require_stacked);
+
 int main(int argc, char** argv) {
-  if (argc != 5 || std::string_view(argv[1]) != "--model" ||
+  auto kv_cache_type = qfn::KvCacheType::kF16;
+  if (argc >= 3 && std::string_view(argv[argc - 2]) == "--kv-cache-type") {
+    const std::string_view value(argv[argc - 1]);
+    if (value == "q8_0")
+      kv_cache_type = qfn::KvCacheType::kQ8_0;
+    else if (value == "q8_0-rotated")
+      kv_cache_type = qfn::KvCacheType::kQ8_0Rotated;
+    else if (value != "f16") {
+      std::cerr << "--kv-cache-type must be f16 or q8_0"
+                   " or q8_0-rotated"
+                   "\n";
+      return 2;
+    }
+    argc -= 2;
+  } else if (argc >= 2 &&
+             std::string_view(argv[argc - 1]) == "--kv-cache-type") {
+    std::cerr << "--kv-cache-type requires f16 or q8_0"
+                 " or q8_0-rotated"
+                 "\n";
+    return 2;
+  }
+  const bool extended = argc == 6 && std::string_view(argv[5]) == "--extended";
+  const bool yarn_stacked =
+      argc == 6 && std::string_view(argv[5]) == "--yarn-stacked-producer-only";
+  const bool yarn_separate =
+      argc == 6 && std::string_view(argv[5]) == "--yarn-separate-producer-only";
+  if ((argc != 5 && !extended && !yarn_stacked && !yarn_separate) ||
+      std::string_view(argv[1]) != "--model" ||
       std::string_view(argv[3]) != "--mtp-model") {
-    std::cerr
-        << "Usage: snapshot_test --model FIRST.gguf --mtp-model MTP.gguf\n";
+    std::cerr << "Usage: snapshot_test --model FIRST.gguf --mtp-model MTP.gguf "
+                 "[--extended|--yarn-stacked-producer-only|--yarn-separate-"
+                 "producer-only] "
+                 "[--kv-cache-type f16|q8_0"
+                 "|q8_0-rotated"
+                 "]\n";
     return 77;
   }
   try {
+    if (yarn_stacked || yarn_separate) {
+      CheckYarnCacheOnlyProducers(argv[2], argv[4], kv_cache_type,
+                                  yarn_stacked);
+      return 0;
+    }
     std::string error;
-    constexpr std::uint32_t kContext = 8192;
-    auto model = qfn::Model::Load(argv[2],
-                                  {.max_context = kContext,
-                                   .mtp_model_path = argv[4],
-                                   .max_draft_tokens = 7},
-                                  &error);
+    const std::uint32_t kContext = extended ? 409600 : 8192;
+    auto model = qfn::Model::Load(
+        argv[2],
+        {.max_context = kContext,
+         .mtp_model_path = argv[4],
+         .max_draft_tokens = 7,
+         .rope_scaling = qfn::RopeScalingForContext(kContext, 262144),
+         .kv_cache_type = kv_cache_type},
+        &error);
     Require(model != nullptr, error);
     // Run in separate processes with the knob unset, 2048, 4096 and 8192.
     // Check the model capacities used by scratch and both runner paths.
@@ -564,14 +611,24 @@ int main(int argc, char** argv) {
                         prompt_logits.size() * sizeof(float)) == 0,
             "extension after restore differs");
 
-    // Cached state from older prefill arithmetic must be rebuilt.
-    auto incompatible = bytes;
-    const std::uint32_t old_version = qfn::Session::kSnapshotPayloadVersion - 1;
-    std::memcpy(incompatible.data() + 8, &old_version, sizeof(old_version));
-    Require(!restored->RestoreSnapshot(incompatible, &error),
-            "incompatible snapshot version accepted");
-    Require(restored->Position() == extended.size(),
-            "incompatible snapshot disturbed the session");
+    // Public and embedded-native pairs: current rotated/F16/plain, unknown
+    // and old epochs. Rejections preserve all captured state; valid restore
+    // then succeeds. The helper restores this live extended boundary on return.
+    gufo::test::kv_rotation_restore::CheckHeaderPairs(*restored, *model, bytes);
+
+    // A wrapped executor size must not make a header-only frame look large
+    // enough for its token/logit host sections or cause a read past the frame.
+    const auto headers =
+        gufo::test::kv_rotation_restore::ReadHeaders(bytes, *model);
+    using PublicHeader = gufo::test::kv_rotation_restore::PublicHeader;
+    std::vector<std::uint8_t> wrapped(bytes.begin(),
+                                      bytes.begin() + sizeof(PublicHeader));
+    gufo::test::kv_rotation_restore::Put(
+        wrapped, offsetof(PublicHeader, executor_bytes),
+        static_cast<std::uint64_t>(wrapped.size()) - headers.native_offset);
+    gufo::test::kv_rotation_restore::RejectWithoutMutation(
+        *restored, wrapped, Payload(*restored),
+        "session snapshot does not fit this session");
 
     // Rejections: truncated payload, and a context too small to hold it.
     Require(!restored->RestoreSnapshot(

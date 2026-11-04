@@ -132,12 +132,34 @@ class SwitchRegistryTest(unittest.TestCase):
 
     def test_labels_cover_user_and_advanced_rows(self):
         labeled = [row for row in self.rows if row['audience'] in ('user', 'advanced')]
-        self.assertEqual(len(labeled), 48)
+        self.assertEqual(len(labeled), 56)
+        self.assertIn('--kv-cache-type', {row['name'] for row in labeled})
         for row in labeled:
             with self.subTest(name=row['name']):
                 self.assertTrue(row['label'].strip())
         self.assertEqual(next(row['label'] for row in self.rows if row['name'] == 'GUFO_EXPERT_V2K'),
                          'Grouped expert kernel')
+
+    def test_direction_toggle_and_cli_controls_are_bounded(self):
+        rows = {row['name']: row for row in self.rows}
+        names = ('--refusal-direction', '--refusal-direction-file',
+                 '--refusal-direction-strength', '--refusal-direction-mode',
+                 '--refusal-direction-layer-start', '--refusal-direction-layer-end')
+        for name in names:
+            with self.subTest(name=name):
+                self.assertEqual(rows[name]['kind'], 'flag')
+                self.assertEqual(rows[name]['audience'], 'user' if name == names[0] else 'advanced')
+                self.assertEqual(rows[name]['gui_control'], name == names[0])
+        visible = [name for panel in self.panels['panels']
+                   for section in panel['sections'] for name in section['switches']
+                   if name.startswith('--refusal-direction')]
+        self.assertEqual(visible, ['--refusal-direction'])
+        self.assertEqual(rows[names[0]]['model_family'], 'qwen3.8-flash-next')
+        self.assertEqual(rows[names[0]]['built_in'], 'off')
+        self.assertEqual(rows[names[2]]['allowed'], {'type': 'number', 'minimum': 0, 'maximum': 4})
+        self.assertEqual(rows[names[3]]['allowed']['values'], ['sites', 'stream'])
+        for name in names[4:]:
+            self.assertEqual(rows[name]['allowed'], {'type': 'integer', 'minimum': 1, 'maximum': 47})
 
     def test_published_integers_are_exact(self):
         for row in self.rows:

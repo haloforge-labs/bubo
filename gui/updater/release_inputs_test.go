@@ -3,6 +3,7 @@ package updater
 import (
 	"encoding/json"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -26,10 +27,11 @@ func TestReleaseRequiresExplicitDecisions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The first item of the release text, without its number or bold marks.
 	summary := ""
-	for _, line := range strings.Split(string(text), "\n") {
-		if strings.HasPrefix(line, "- ") {
-			summary = strings.ReplaceAll(strings.TrimSpace(line[2:]), "**", "")
+	for _, line := range strings.Split(string(text), "\n")[1:] {
+		if line = strings.TrimSpace(line); line != "" {
+			summary = strings.ReplaceAll(regexp.MustCompile(`^(\d+\.|-)\s+`).ReplaceAllString(line, ""), "**", "")
 			break
 		}
 	}

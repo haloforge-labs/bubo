@@ -111,7 +111,7 @@ const wording: Record<string, Wording> = {
     recovery: 'logs',
   },
   protocol_mismatch: {
-    message: 'Bubo and its runtime use different versions.',
+    message: 'Bubo and its engine use different versions.',
     action: 'Review Bubo version',
     recovery: 'about',
   },
@@ -568,11 +568,6 @@ const wording: Record<string, Wording> = {
   },
   not_applicable: {
     message: 'This action is not available right now.',
-    action: '',
-    recovery: 'none',
-  },
-  support_bundle_saved: {
-    message: 'Support bundle saved locally.',
     action: '',
     recovery: 'none',
   },

@@ -14,6 +14,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "src/cli/machine_output.hpp"
@@ -607,6 +608,269 @@ gufo::server::ReleaseStartup InspectSettings(std::vector<std::string> args) {
   return startup;
 }
 
+// --kv-cache-type q8_0 saves what the engine measured, never more. Measured on
+// the production package (Total Committed, one session, 2026-11-02): the whole
+// process was 685,064,192 bytes smaller at 65,536 tokens and 2,055,262,208
+// bytes smaller at 196,608 tokens (mem-measure, rows.jsonl); the validation run
+// at 131,072 tokens (never used for the fit) saved 1,370,202,112 bytes. The estimate must
+// save at most that, and not less than 90 % of it.
+void KvQ8Estimate() {
+  const auto* table = MemoryTableFor(prepare::kPackageId);
+  Require(table != nullptr, "the Flash Next table exists");
+  MemoryEstimateInputs f16;
+  MemoryEstimateInputs q8;
+  q8.kv_q8 = true;
+  const struct {
+    std::uint64_t context, measured;
+  } rows[] = {{65536, 685064192ULL}, {131072, 1370202112ULL}, {196608, 2055262208ULL}};
+  for (const auto& row : rows) {
+    const auto before = ComputeMemoryTotals(*table, f16, row.context, 1);
+    const auto after = ComputeMemoryTotals(*table, q8, row.context, 1);
+    Require(before.per_session > after.per_session,
+            "q8_0 counts less session memory than f16");
+    const auto saved = before.per_session - after.per_session;
+    Require(saved <= row.measured,
+            "the estimated q8_0 saving never exceeds the measured one: context=" +
+                std::to_string(row.context) + " saved=" + std::to_string(saved));
+    Require(saved * 10 >= row.measured * 9,
+            "the estimated q8_0 saving is within 10 % of the measured one: "
+            "context=" + std::to_string(row.context) +
+                " saved=" + std::to_string(saved));
+  }
+  const auto fixed_f16 = ComputeMemoryTotals(*table, f16, 0, 1).per_session;
+  const auto fixed_q8 = ComputeMemoryTotals(*table, q8, 0, 1).per_session;
+  Require(fixed_f16 == fixed_q8, "the fixed part of a session does not depend on the cache type");
+}
+
+// The start check of the app runs `models estimate` for the setup serve will
+// start. For q8_0 at 262,144 tokens and 4 sessions it must give serve's own
+// numbers and verdict, and the f16 default must stay larger. Owner's setup,
+// 2026-11-03: the app asked for f16, called a fitting setup tight and refused.
+void KvQ8EstimateAgreesWithServe(const fs::path& base) {
+  using namespace gufo::server;
+  const auto start = checks;
+  const auto path = base / "gguf" / "fn.gguf";
+  const auto inspection = InspectGguf(path);
+  std::uint64_t per_session[2] = {};
+  int index = 0;
+  for (const std::string kv : {"f16", "q8_0"}) {
+    EstimateRequest request;
+    request.context = 262144;
+    request.sessions = 4;
+    request.kv_cache_type = kv;
+    request.available_bytes = 36 * kGiB;
+    request.host_available_bytes = 128 * kGiB;
+    request.capacity_budgets.gpu_total = 36 * kGiB;
+    request.capacity_budgets.host_total = 128 * kGiB;
+    const auto listed = EstimateForGguf(inspection, request).memory_estimate;
+    auto startup = InspectSettings({"--model", path.string(), "--context",
+                                    "262144", "--sessions", "4",
+                                    "--kv-cache-type", kv});
+    auto table = *MemoryTableFor(prepare::kPackageId);
+    table.main_weights_bytes = inspection.facts.total_bytes;
+    const auto served =
+        BuildReleaseMemoryEstimate(startup.resolved,
+                                   std::string(prepare::kPackageId),
+                                   request.available_bytes,
+                                   request.host_available_bytes, &table,
+                                   request.capacity_budgets)
+            .value;
+    for (const char* field : {"per_session_state", "session_state_total"})
+      Require(listed.find(field)->member_size("bytes") ==
+                  served.find(field)->member_size("bytes"),
+              "models estimate and serve count the same " + std::string(field) +
+                  " for " + kv);
+    Require(listed.find("gpu")->find("need")->member_size("bytes") ==
+                served.find("gpu")->find("need")->member_size("bytes"),
+            "models estimate and serve need the same GPU memory for " + kv);
+    Require(listed.find("fits")->dump() == served.find("fits")->dump() &&
+                listed.find("recommended")->dump() ==
+                    served.find("recommended")->dump(),
+            "models estimate and serve give the same verdict for " + kv);
+    per_session[index++] = listed.find("per_session_state")->member_size("bytes");
+  }
+  Require(per_session[1] < per_session[0],
+          "q8_0 at 262,144 x 4 counts less per session than f16: f16=" +
+              std::to_string(per_session[0]) + " q8_0=" +
+              std::to_string(per_session[1]));
+  std::cout << "KvQ8EstimateAgreesWithServe: " << checks - start
+            << " checks passed\n";
+}
+
+// Every serve switch the app saves reaches `models estimate` as --switch and is
+// read like serve reads it. The totals of the two must agree whichever switch
+// changes memory; a switch that moves serve's numbers but not the estimate's
+// would show up here as a difference.
+void SwitchesAgreeWithServe(const fs::path& base) {
+  using namespace gufo::server;
+  const auto start = checks;
+  const auto path = base / "gguf" / "fn.gguf";
+  const auto inspection = InspectGguf(path);
+  struct Case {
+    std::vector<std::string> flags;  // serve's spelling: --name=value
+    bool changes_estimate;           // the fixture has something to change
+  };
+  const Case cases[] = {
+      {{}, false},
+      {{"--no-cache"}, true},
+      {{"--cache-ram-bytes=4294967296"}, true},
+      {{"--kv-cache-type=q8_0", "--cache-ram-bytes=2147483648"}, true},
+      {{"--no-vision"}, false},
+  };
+  std::string baseline;
+  for (const auto& c : cases) {
+    std::string label;
+    for (const auto& flag : c.flags)
+      label += flag + " ";
+    EstimateRequest request;
+    request.context = 262144;
+    request.sessions = 4;
+    request.serve_args = c.flags;
+    request.available_bytes = 36 * kGiB;
+    request.host_available_bytes = 128 * kGiB;
+    request.capacity_budgets.gpu_total = 36 * kGiB;
+    request.capacity_budgets.host_total = 128 * kGiB;
+    const auto listed = EstimateForGguf(inspection, request).memory_estimate;
+    std::vector<std::string> serve = {"--model", path.string(), "--context",
+                                      "262144", "--sessions", "4"};
+    for (const auto& flag : c.flags) {
+      const auto equals = flag.find('=');
+      serve.push_back(flag.substr(0, equals));
+      if (equals != std::string::npos)
+        serve.push_back(flag.substr(equals + 1));
+    }
+    auto startup = InspectSettings(serve);
+    auto table = *MemoryTableFor(prepare::kPackageId);
+    table.main_weights_bytes = inspection.facts.total_bytes;
+    const auto served =
+        BuildReleaseMemoryEstimate(startup.resolved,
+                                   std::string(prepare::kPackageId),
+                                   request.available_bytes,
+                                   request.host_available_bytes, &table,
+                                   request.capacity_budgets)
+            .value;
+    if (c.flags.empty())
+      baseline = listed.dump();
+    else
+      Require((listed.dump() != baseline) == c.changes_estimate,
+              "the estimate read the switch: " + label);
+    for (const char* field :
+         {"per_session_state", "session_state_total", "weights"})
+      Require(listed.find(field)->member_size("bytes") ==
+                  served.find(field)->member_size("bytes"),
+              "models estimate and serve count the same " + std::string(field) +
+                  " with " + label);
+    for (const char* side : {"gpu", "host"})
+      Require(listed.find(side)->find("need")->member_size("bytes") ==
+                  served.find(side)->find("need")->member_size("bytes"),
+              std::string("models estimate and serve need the same ") + side +
+                  " memory with " + label);
+    Require(listed.find("fits")->dump() == served.find("fits")->dump(),
+            "models estimate and serve give the same verdict with " + label);
+  }
+  // --switch NAME=VALUE: serve's names, the user's values; the rest is refused.
+  const auto Parse = [](std::vector<std::string> extra) {
+    std::vector<std::string> words = {"estimate", "--model", "x"};
+    words.insert(words.end(), extra.begin(), extra.end());
+    std::vector<const char*> raw;
+    for (const auto& word : words)
+      raw.push_back(word.c_str());
+    ModelsCommandOptions options;
+    std::string error;
+    const bool ok = ParseModelsCommand(raw, options, error);
+    return std::tuple{ok, options, error};
+  };
+  {
+    const auto [ok, options, error] = Parse(
+        {"--switch", "--kv-cache-type=q8_0", "--switch", "--no-cache=",
+         "--switch", "--cache-ram-bytes=4294967296", "--switch",
+         "GUFO_MAX_IMAGE_TOKENS=1024"});
+    Require(ok && options.serve_args ==
+                      std::vector<std::string>{"--kv-cache-type=q8_0",
+                                               "--no-cache",
+                                               "--cache-ram-bytes=4294967296"} &&
+                options.serve_env.size() == 1 &&
+                options.serve_env[0].first == "GUFO_MAX_IMAGE_TOKENS" &&
+                options.serve_env[0].second == "1024",
+            "--switch maps flags to serve's spelling and env settings to the "
+            "environment: " + error);
+  }
+  for (const auto* bad : {"--not-a-switch=1", "--cache-ram-bytes=", "--no-cache=3",
+                          "--context=4096", "--model=x"}) {
+    const auto [ok, options, error] = Parse({"--switch", bad});
+    Require(!ok && !error.empty(), std::string("--switch refuses ") + bad);
+  }
+  std::cout << "SwitchesAgreeWithServe: " << checks - start
+            << " checks passed\n";
+}
+
+// --cache-ram-bytes off passes the release rule; the estimate that serve and
+// `models estimate` run next must read it as "no RAM cache", not throw.
+void CacheOffEstimate(const fs::path& base) {
+  using namespace gufo::server;
+  const auto path = base / "gguf" / "fn.gguf";
+  auto startup = InspectSettings({"--model", path.string(), "--cache-ram-bytes", "off"});
+  auto table = *MemoryTableFor(prepare::kPackageId);
+  table.main_weights_bytes = InspectGguf(path).facts.total_bytes;
+  const auto estimate = BuildReleaseMemoryEstimate(
+      startup.resolved, std::string(prepare::kPackageId), 24 * kGiB, 128 * kGiB,
+      &table, {});
+  Require(estimate.inputs.ram_cache_bytes == 0 && !estimate.inputs.cache_automatic,
+          "--cache-ram-bytes off is no RAM cache in the memory estimate");
+}
+
+// serve's several-session fallback estimate runs after serve has put
+// GUFO_LENIENT=bounded into its own environment. Resolving the model path again
+// then refused ("GUFO_LENIENT: needs speculative==mtp") and dropped the side
+// files. The fallback now reads serve's resolved settings.
+void FallbackUsesResolvedSettings(const fs::path& base) {
+  using namespace gufo::server;
+  const auto path = base / "gguf" / "fn.gguf";
+  const auto inspection = InspectGguf(path);
+  auto startup =
+      InspectSettings({"--model", path.string(), "--sessions", "2"});
+  EstimateRequest request;
+  request.sessions = 2;
+  request.available_bytes = 100 * kGiB;
+  request.host_available_bytes = 128 * kGiB;
+  request.capacity_budgets.gpu_total = 100 * kGiB;
+  request.capacity_budgets.host_total = 128 * kGiB;
+  const auto plain = EstimateForGguf(inspection, request);
+  Require(plain.state == "estimated", "the plain estimate exists: " + plain.reason);
+  _putenv_s("GUFO_LENIENT", "bounded");
+  bool refused = false;
+  try {
+    (void)EstimateForGguf(inspection, request);
+  } catch (const std::invalid_argument& error) {
+    refused = std::string_view(error.what()).find("GUFO_LENIENT") !=
+              std::string_view::npos;
+  }
+  request.resolved = &startup.resolved;
+  // As serve passes it: the id of a prepared package, empty for a loose file.
+  request.resolved_package_id =
+      startup.package.manifest_path.empty() ? "" : startup.package.package_id;
+  EstimateResult from_resolved;
+  std::string failure;
+  try {
+    from_resolved = EstimateForGguf(inspection, request);
+  } catch (const std::exception& error) {
+    failure = error.what();
+  }
+  _putenv_s("GUFO_LENIENT", "");
+  Require(refused,
+          "resolving the path again against the injected environment refuses");
+  Require(failure.empty() && from_resolved.state == "estimated" &&
+              from_resolved.memory_estimate.find("weights")->dump() ==
+                  plain.memory_estimate.find("weights")->dump(),
+          "the estimate from serve's resolved settings ignores the injected "
+          "environment: " + failure + " state=" + from_resolved.state +
+              " reason=" + from_resolved.reason + " weights=" +
+              (from_resolved.memory_estimate.is_null()
+                   ? std::string("null")
+                   : from_resolved.memory_estimate.find("weights")->dump()) +
+              " plain=" + plain.memory_estimate.find("weights")->dump());
+}
+
 void EstimateConsistency(const fs::path& base) {
   using namespace gufo::server;
   const auto start = checks;
@@ -686,6 +950,26 @@ void EstimateConsistency(const fs::path& base) {
                               ->find("by_sessions")
                               ->items()
                               .at(sessions - 1);
+        if (std::string_view(file) == "fn.gguf" && sessions > 1 &&
+            row.find("recommended")->as_bool()) {
+          // `models estimate --sessions N` without --context judges the very
+          // context serve will run (the recommended row), on every package.
+          auto planning_startup = InspectSettings({"--model", path.string(),
+                                                   "--sessions",
+                                                   std::to_string(sessions)});
+          const auto planned = BuildPlanningReleaseMemoryEstimate(
+              planning_startup.resolved, std::string(prepare::kPackageId),
+              request.available_bytes, request.host_available_bytes, &table,
+              request.capacity_budgets, false);
+          Require(planned.value.member_size("context_tokens") == pick,
+                  "the planning estimate without --context resolves serve's "
+                  "recommended context: sessions=" +
+                      std::to_string(sessions) + " budget=" +
+                      std::to_string(budget) + " estimate=" +
+                      std::to_string(planned.value.member_size(
+                          "context_tokens")) +
+                      " expected=" + std::to_string(pick));
+        }
         if (sessions == 1) {
           Require(
               !ResolveDefaultSessionContext(startup.resolved, sessions, served),
@@ -1124,6 +1408,53 @@ void Estimates(const fs::path& base) {
                   "bytes") == 61064419200ULL,
           "lowmemory uses the calibrated main coefficient plus selected side "
           "files while its measured resident slot remains unavailable");
+  // The 256-expert Coder has an estimate: its resident weights (about 29 GB),
+  // not the 58.4 GB of its two shards that the generic file-size estimate used.
+  const auto* coder = FindCatalogueEntry(
+      shipped.entries, "qwen38-flash-next-coder-ista-gsq-rco-256");
+  Require(coder != nullptr && coder->measured_main_resident_bytes ==
+                                  std::optional<std::uint64_t>(29200000000ULL),
+          "the Coder catalogue entry carries its measured resident weights");
+  {
+    // One table for the Coder, the one serve reads (MemoryTableFor); its
+    // numbers are the catalogue's, so the two cannot drift.
+    const auto* coder_table = MemoryTableFor(coder->id);
+    std::uint64_t catalogue_mtp = 0;
+    for (const auto& file : coder->files)
+      if (file.role == "mtp")
+        catalogue_mtp = file.bytes;
+    Require(coder->id == kCoderPackageId && coder_table != nullptr &&
+                coder_table->main_weights_bytes ==
+                    *coder->measured_main_resident_bytes &&
+                coder_table->mtp_bytes == catalogue_mtp &&
+                coder_table->twin_bytes == 0 && coder_table->vision_bytes == 0,
+            "the Coder has its own common coefficient table that matches the "
+            "catalogue row");
+    Require(!ShippedCatalogue().version.empty(),
+            "the shipped catalogue carries its version");
+  }
+  auto coder_request = request;
+  coder_request.available_bytes = 100 * kGiB;
+  const auto coder_result =
+      EstimateForCatalogueEntry(*coder, base / "models", coder_request);
+  Require(coder_result.state == "estimated" &&
+              !coder_result.memory_estimate.is_null(),
+          "the Coder has an estimate: " + coder_result.reason);
+  const auto coder_weights =
+      coder_result.memory_estimate.find("weights")->member_size("bytes");
+  Require(coder_weights >= 29200000000ULL && coder_weights < 33000000000ULL,
+          "the Coder weights term is its resident size (plus the MTP file), not "
+          "the two shards: " + std::to_string(coder_weights));
+  {
+    // The note quotes the term in GiB, the unit of the estimate lines.
+    std::string notes;
+    for (const auto& note : coder_result.notes)
+      notes += note + '\n';
+    Require(Contains(notes, "keeps on the GPU (27.2 GiB, plus 2.6 GiB for the "
+                            "draft file)") &&
+                !Contains(notes, " GB)"),
+            "the Coder weights note derives GiB numbers from the term: " + notes);
+  }
   const auto* flash = FindCatalogueEntry(shipped.entries, prepare::kPackageId);
   auto catalogue_request = request;
   catalogue_request.available_bytes = 100 * kGiB;
@@ -2194,7 +2525,7 @@ void Command(const fs::path& base) {
   {
     const auto event = gufo::json::parse(out);
     const auto& catalogue = *event.find("payload")->find("catalogue");
-    Require(catalogue.size() == 11, "models list --json ships eleven entries");
+    Require(catalogue.size() == 12, "models list --json ships twelve entries");
     unsigned lowmemory_rows = 0;
     for (const auto& row : catalogue.items()) {
       Require(row.member_str("id") != "huihui-qwen38-flash-next-ista-hybrid-v1",
@@ -2304,6 +2635,11 @@ int main(int argc, char** argv) {
       std::cerr << "stage Support\n";
     Support(base);
     EstimateConsistency(base);
+    CacheOffEstimate(base);
+    FallbackUsesResolvedSettings(base);
+    KvQ8Estimate();
+    KvQ8EstimateAgreesWithServe(base);
+    SwitchesAgreeWithServe(base);
     if (std::getenv("BUBO_TEST_TRACE"))
       std::cerr << "stage Estimates\n";
     Estimates(base);

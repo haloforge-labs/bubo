@@ -256,9 +256,9 @@ void Matrix() {
     Reject([&] { ResolveReleaseSettings(inputs); },
            "--draft-head-model: needs speculative==mtp");
   }
-  const auto doc =
-      Read(fs::path(__FILE__).parent_path().parent_path().parent_path() /
-           "docs/prepare-binding.md");
+  auto doc = Read(fs::path(BUBO_MANIFEST_TEST_SOURCE_DIR) /
+                  "docs/prepare-binding.md");
+  doc.erase(std::remove(doc.begin(), doc.end(), '\r'), doc.end());
   Expect(doc.find(RenderArtefactBindingTable()) != doc.npos,
          "ONE T10 docs/test table exactly matches renderer");
 }
@@ -341,11 +341,11 @@ void ManifestCases(const fs::path& directory) {
   fixture.Save();
   Reject([&] { fixture.Load(); }, "schema_version");
   fixture.manifest = baseline;
-  fixture.manifest["engine_min"] = "0.1.1";
+  fixture.manifest["engine_min"] = "0.1.2";
   fixture.Save();
   Expect(fixture.Load().files.size() == 8,
-         "current product version 0.1.1 is accepted");
-  fixture.manifest["engine_min"] = "0.1.2";
+         "current product version 0.1.2 is accepted");
+  fixture.manifest["engine_min"] = "0.1.3";
   fixture.Save();
   Reject([&] { fixture.Load(); }, "engine_min");
   fixture.manifest = baseline;

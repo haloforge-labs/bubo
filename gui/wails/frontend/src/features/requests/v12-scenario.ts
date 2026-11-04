@@ -1,7 +1,5 @@
 import { fixture } from '@/components/test-view'
 
-
-
 export function realRequestsView() {
   const view = fixture('ready-busy')
   const rows = [

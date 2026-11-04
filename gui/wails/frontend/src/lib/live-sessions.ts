@@ -34,7 +34,7 @@ export function promptRead(slot: Slot) {
 export function liveRate(value: number | undefined) {
   return value != null && Number.isFinite(value) && value >= 0
     ? rate(value)
-    : '-'
+    : '—'
 }
 
 export function liveSessionSummary(view: View) {
@@ -45,9 +45,12 @@ export function liveSessionSummary(view: View) {
   const progress = promptRead(slot)
   const summary =
     slot.state === 'generating'
-      ? `Writing · ${liveRate(slot.decode_tps)} tok/s`
+      ? // No live rate yet is said by saying nothing about it.
+        slot.decode_tps != null && Number.isFinite(slot.decode_tps)
+        ? `Writing · ${liveRate(slot.decode_tps)} tok/s`
+        : 'Writing'
       : slot.state === 'prefilling'
-        ? `Reading prompt · ${progress ? `${progress.percent}%` : '-'}`
+        ? `Reading prompt · ${progress ? `${progress.percent}%` : '—'}`
         : 'Session status unavailable'
   return slots.length > 1
     ? `Session ${slot.id + 1} · ${summary} · ${slots.length} active sessions`

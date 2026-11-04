@@ -18,7 +18,7 @@ export function NavGroup({
   const href = useLocation({ select: (location) => location.pathname })
   return (
     <SidebarGroup>
-      <SidebarGroupLabel>{title}</SidebarGroupLabel>
+      {title && <SidebarGroupLabel>{title}</SidebarGroupLabel>}
       <SidebarMenu>
         {items.map((item) => (
           <SidebarMenuLink

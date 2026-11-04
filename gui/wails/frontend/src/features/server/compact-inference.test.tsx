@@ -6,13 +6,17 @@ import type { View } from '@/lib/bindings'
 
 let cleanup = () => {}
 afterEach(() => cleanup())
-function Inference({ view }: { view: View }) {
+function Inference({ view, width = 800 }: { view: View; width?: number }) {
   const registry = useSetupRegistry(view)
+  // The rows follow the width of their container, not of the window: two
+  // columns when the container is wide, one when it is narrow.
   return (
-    <section aria-label="Inference">{registry.render('Inference')}</section>
+    <div className="@container" style={{ width }}>
+      <section aria-label="Inference">{registry.render('Inference')}</section>
+    </div>
   )
 }
-test('Inference starts with three side by side sampling controls and hides the remaining rows', async () => {
+test('Inference lays its rows out in two columns on a wide page and hides the remaining rows', async () => {
   const view = fixture()
   cleanup = renderView(<Inference view={view} />, view).cleanup
   await expect
@@ -36,7 +40,8 @@ test('Inference starts with three side by side sampling controls and hides the r
         .getBoundingClientRect(),
     )
   expect(rects[0]!.top).toBe(rects[1]!.top)
-  expect(rects[1]!.top).toBe(rects[2]!.top)
+  expect(rects[2]!.top).toBeGreaterThan(rects[0]!.top)
+  expect(rects[1]!.left).toBeGreaterThan(rects[0]!.right)
   await expect
     .element(page.getByText('More inference settings', { exact: true }))
     .toBeVisible()
@@ -48,7 +53,21 @@ test('Inference starts with three side by side sampling controls and hides the r
   expect(
     document.querySelector('[aria-label="Inference"]')!.getBoundingClientRect()
       .height,
-  ).toBeLessThan(720)
+  ).toBeLessThan(500)
+})
+
+test('Inference lays its rows out in one column when its container is narrow', async () => {
+  const view = fixture()
+  cleanup = renderView(<Inference view={view} width={300} />, view).cleanup
+  await expect
+    .element(page.getByRole('group', { name: 'Temperature', exact: true }))
+    .toBeVisible()
+  const rects = ['--temperature', '--top-p', '--top-k'].map((name) =>
+    document.querySelector(`[data-setting="${name}"]`)!.getBoundingClientRect(),
+  )
+  expect(rects[1]!.top).toBeGreaterThan(rects[0]!.top)
+  expect(rects[2]!.top).toBeGreaterThan(rects[1]!.top)
+  expect(rects[1]!.left).toBe(rects[0]!.left)
 })
 
 test('stopped inference shows editable narrow sampling number inputs even before effective values arrive', async () => {
@@ -71,6 +90,8 @@ test('stopped inference shows editable narrow sampling number inputs even before
     .element(page.getByRole('spinbutton', { name: 'Top-k', exact: true }))
     .toBeVisible()
   await expect
-    .element(page.getByRole('button', { name: 'Set Temperature', exact: true }))
+    .element(
+      page.getByRole('button', { name: 'Change Temperature', exact: true }),
+    )
     .not.toBeInTheDocument()
 })

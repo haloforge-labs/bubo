@@ -1,8 +1,5 @@
 #include "src/cli/serve/serve.hpp"
 
-#include <arpa/inet.h>
-#include <unistd.h>
-
 #include <algorithm>
 #include <atomic>
 #include <charconv>
@@ -30,19 +27,23 @@
 
 #include "src/cli/arg_parser.hpp"
 #include "src/cli/brand.hpp"
+#include "src/cli/kv_cache_options.hpp"
 #include "src/cli/machine_adapter.hpp"
 #include "src/cli/machine_exit.hpp"
 #include "src/cli/machine_output.hpp"
 #include "src/cli/machine_warnings.hpp"
 #include "src/cli/model_catalogue.hpp"
 #include "src/cli/models_support.hpp"
+#include "src/cli/side_file_check.hpp"
 #include "src/cli/prepare/runtime_location.hpp"
 #include "src/cli/prepared_default.hpp"
+#include "src/cli/refusal_options.hpp"
 #include "src/cli/sampling_options.hpp"
 #include "src/cli/serve/asr_service.hpp"
 #include "src/cli/serve/cache_disk_limits.hpp"
 #include "src/cli/serve/debug_request.hpp"
 #include "src/cli/serve/debug_settings.hpp"
+#include "src/cli/serve/embedding_service.hpp"
 #include "src/cli/serve/http_server.hpp"
 #include "src/cli/serve/image_api.hpp"
 #include "src/cli/serve/inference_backend.hpp"
@@ -63,6 +64,7 @@
 #include "src/cli/serve/sampling_request.hpp"
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/diagnostics/gpu_queues.h"
+#include "src/core/platform/shutdown_signal.hpp"
 #include "src/core/platform/loaded_files.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
@@ -107,6 +109,10 @@ public:
         << std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::steady_clock::now() - start_)
                .count()
+        << " monotonic_us="
+        << std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+               .count()
         << ' ' << details << ' ' << server::Logger::MemoryStatus();
 #if defined(ENGINE_ENABLE_HIP)
     std::size_t free = 0, total = 0;
@@ -136,50 +142,8 @@ private:
   bool completed_{false};
 };
 
-// Reports a fatal signal on the way out. A driver or runtime failure during a
-// load can abort the process outright, which runs no destructor and no
-// terminate handler, leaving a log that stops at event=load_started. Only
-// async-signal-safe calls are allowed here, so the line is assembled by hand
-// and written straight to the descriptor.
-extern "C" void ReportFatalSignal(int number) {
-  static constexpr char kPrefix[] =
-      "[ERROR] [server] event=fatal_signal signal=";
-  char digits[8];
-  std::size_t length = 0;
-  int value = number;
-  if (value <= 0) {
-    digits[length++] = '0';
-  } else {
-    char reversed[8];
-    std::size_t count = 0;
-    while (value > 0 && count < sizeof(reversed)) {
-      reversed[count++] = static_cast<char>('0' + (value % 10));
-      value /= 10;
-    }
-    while (count > 0) {
-      digits[length++] = reversed[--count];
-    }
-  }
-  (void)::write(STDERR_FILENO, kPrefix, sizeof(kPrefix) - 1);
-  (void)::write(STDERR_FILENO, digits, length);
-  (void)::write(STDERR_FILENO, "\n", 1);
-  // Restore the default action and re-raise, so the exit status and any core
-  // dump still describe the original fault.
-  struct sigaction restore{};
-  restore.sa_handler = SIG_DFL;
-  (void)::sigemptyset(&restore.sa_mask);
-  (void)::sigaction(number, &restore, nullptr);
-  (void)::raise(number);
-}
-
 void InstallFatalSignalReporter() {
-  struct sigaction action{};
-  action.sa_handler = ReportFatalSignal;
-  (void)::sigemptyset(&action.sa_mask);
-  action.sa_flags = SA_RESETHAND;
-  for (const int number : {SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGFPE}) {
-    (void)::sigaction(number, &action, nullptr);
-  }
+  platform::InstallFatalSignalReporter();
 }
 
 // Installs a terminate handler that names the reason before the process dies.
@@ -299,6 +263,25 @@ constexpr std::string_view kVerboseHelp = "Shorthand for --log-level=debug";
 constexpr std::string_view kTraceHelp =
     "Append text request bodies, rendered prompts, generated text and replies "
     "to PATH as JSON Lines; the file holds client content";
+
+void AddCacheRamOption(gufo::cli::ArgParser& parser,
+                       server::TextRunnerRamCacheOptions* target) {
+  parser.AddCustomOption(
+      "", "--cache-ram-bytes", "N|off",
+      "Retained RAM-cache byte budget (default: 0 = auto: half of free "
+      "RAM, at most 32 GiB; explicit values may use free RAM minus 4 GiB). "
+      "off keeps no RAM checkpoints and commits no cache memory; "
+      "sessions still reuse their own live state, and --cache-disk still "
+      "works (Qwen and Flash-Next then use up to 512 MiB of backing for "
+      "disk captures)",
+      "Cache",
+      [target](std::string_view, std::string_view value, std::string* error) {
+        const auto parsed = server::ParseRamCacheOption(value, error);
+        if (parsed)
+          *target = *parsed;
+        return parsed.has_value();
+      });
+}
 
 void AddServerOptions(gufo::cli::ArgParser& parser, std::string* host,
                       int* port, std::size_t* session_count,
@@ -589,6 +572,20 @@ void AddSpeechOptions(ArgParser& parser, bool tts, SpeechOptions* options) {
       });
 }
 
+void AddEmbeddingOptions(ArgParser& parser, std::filesystem::path* model,
+                         std::string* served_model_name,
+                         std::string* default_prompt_name) {
+  parser.AddOption("-m", "--model", "DIR", "EmbeddingGemma 2 model directory",
+                   "Model", model);
+  parser.AddOption("", "--served-model-name", "NAME",
+                   "Public API model ID (default: embeddinggemma-2)", "Model",
+                   served_model_name);
+  parser.AddOption("", "--default-prompt-name", "NAME",
+                   "Checkpoint prompt for text inputs without prompt_name "
+                   "(default: none)",
+                   "Model", default_prompt_name);
+}
+
 // The `--model` value wherever it appears in `args`; empty when absent.
 std::string ModelArgument(std::span<const char* const> args) {
   for (std::size_t i = 0; i < args.size(); ++i) {
@@ -666,6 +663,19 @@ void PrintServeHelp(std::string_view program_name,
     parser.PrintHelp();
     return;
   }
+  if (subcommand == "embedding") {
+    std::filesystem::path model;
+    std::string name = "embeddinggemma-2";
+    std::string default_prompt_name;
+    ArgParser parser(
+        std::string(program_name) + " serve embedding",
+        "Serve EmbeddingGemma 2 text, image and audio embeddings.");
+    AddEmbeddingOptions(parser, &model, &name, &default_prompt_name);
+    ServerOptionHelpTargets server_help;
+    AddServerOptionsForHelp(parser, &server_help, false);
+    parser.PrintHelp();
+    return;
+  }
   if (subcommand == "video") {
     std::filesystem::path video_model;
     std::filesystem::path video_root = "video-jobs";
@@ -716,6 +726,7 @@ void PrintServeHelp(std::string_view program_name,
     std::string reasoning_mode = "auto";
     std::string reasoning_effort = "auto";
     std::string preserve_thinking = "auto";
+    std::int64_t reasoning_budget = -1;
     std::string speculative_backend;
     std::string dflash_model_path;
     std::string draft_policy;
@@ -738,17 +749,23 @@ void PrintServeHelp(std::string_view program_name,
         server::kDefaultMaxBufferedOutputBytes;
     std::size_t max_buffered_output_bytes_total =
         server::kDefaultMaxBufferedOutputBytesTotal;
-    std::size_t cache_ram_bytes = 0;
+    server::TextRunnerRamCacheOptions cache_ram;
     std::filesystem::path cache_disk_directory;
     std::size_t cache_disk_bytes =
         server::TextRunnerDiskCacheOptions::kDefaultCapacityBytes;
     std::size_t cache_disk_staging_bytes = 0;
     bool log_progress = false;
+    bool enable_yarn = false;
     std::string trace_path;
 
+    models::qwen38_flash_next::KvCacheType kv_cache_type =
+        models::qwen38_flash_next::KvCacheType::kF16;
+    models::qwen38_flash_next::RefusalOverrides refusal_options;
     gufo::cli::ArgParser parser(
         std::string(program_name) + " serve llm",
         "Start the OpenAI/Anthropic-compatible text LLM HTTP server.");
+    RegisterKvCacheTypeOption(parser, &kv_cache_type);
+    RegisterRefusalOptions(parser, &refusal_options);
 
     // Model & Context
     parser.AddOption("-m", "--model", "PATH",
@@ -759,13 +776,17 @@ void PrintServeHelp(std::string_view program_name,
                      "Matching BF16 vision file (auto-discovered beside model)",
                      "Model", &vision_model_path);
     parser.AddOption("", "--served-model-name", "ID",
-                     "Model identifier exposed by the OpenAI API (default: "
-                     "package ID or file stem)",
+                     "Model identifier exposed by the OpenAI API (repeatable; "
+                     "the first is primary)",
                      "Model", &served_model_name);
     parser.AddOption(
         "-c", "--context", "N",
         "Context tokens per session (default: 0 = model native context)",
         "Model", &max_context);
+    parser.AddFlag("", "--enable-yarn",
+                   "Flash-Next: static YaRN, required for --context above the "
+                   "native 262144; it applies to every request",
+                   "Model", &enable_yarn);
 
     // Sampling Defaults
     parser.AddOption(
@@ -787,6 +808,11 @@ void PrintServeHelp(std::string_view program_name,
     parser.AddOption("", "--preserve-thinking", "MODE",
                      "Replay prior reasoning: on, off, or auto",
                      "Reasoning Defaults", &preserve_thinking);
+    parser.AddOption(
+        "", "--reasoning-budget", "N",
+        "Reasoning tokens before </think> is forced: -1 unlimited, 0 none "
+        "(default: -1)",
+        "Reasoning Defaults", &reasoning_budget);
 
     // Speculative & Hardware
     parser.AddOption("", "--speculative", "MODE",
@@ -865,13 +891,10 @@ void PrintServeHelp(std::string_view program_name,
         "", "--max-buffered-output-total", "N",
         "Maximum queued stream bytes across requests (default: 262144)",
         "Scheduling", &max_buffered_output_bytes_total);
-    parser.AddOption(
-        "", "--cache-ram-bytes", "N",
-        "Retained RAM-cache byte budget (default: 0 = auto: half of free "
-        "RAM, at most 32 GiB; explicit values may use free RAM minus 4 GiB)",
-        "Cache", &cache_ram_bytes);
+    AddCacheRamOption(parser, &cache_ram);
     parser.AddOption("", "--cache-disk", "DIR",
-                     "Opt-in restart-safe continuation cache directory",
+                     "Opt-in restart-safe continuation cache directory "
+                     "(Flash-Next: owned by one process)",
                      "Cache", &cache_disk_directory);
     parser.AddOption("", "--cache-disk-bytes", "N",
                      "Retained disk-cache byte budget (default: " +
@@ -879,7 +902,9 @@ void PrintServeHelp(std::string_view program_name,
                      "Cache", &cache_disk_bytes);
     parser.AddOption(
         "", "--cache-disk-staging-bytes", "N",
-        "RAM limit for queued snapshots and each disk read "
+        "Flash-Next: pinned disk transfer buffer allocated at startup within "
+        "the RAM ceiling, not a checkpoint size limit (default: 0 = 1 MiB). "
+        "Other models: RAM limit for queued snapshots and each disk read "
         "(default: 0 = auto, at most the disk budget and 1/8 available RAM)",
         "Cache", &cache_disk_staging_bytes);
     parser.AddFlag("", "--log-progress",
@@ -903,6 +928,8 @@ void PrintServeHelp(std::string_view program_name,
            "  --no-behaviour --no-twin --no-draft-head --no-vision --no-mtp\n"
            "  --no-prompt-lookup --no-cache --no-cache-disk "
            "--allow-unmeasured-memory\n"
+           "  --prefill-mode <normal|fast>  fast reads prompts of 4,096 or more new tokens sooner "
+           "(Qwen3.8 Flash Next, 512 experts only)\n"
            "\nDiffusionGemma checkpoint directories:\n"
            "  Release profiles do not apply. --context, --sessions, "
            "--prefill-chunk, --max-tokens, --mmproj\n"
@@ -929,7 +956,9 @@ void PrintServeHelp(std::string_view program_name,
          "/v1/images/edits)\n"
       << "  tts       Serve Qwen3-TTS speech synthesis (/v1/audio/speech)\n"
       << "  asr       Serve Qwen3-ASR transcription "
-         "(/v1/audio/transcriptions)\n\n"
+         "(/v1/audio/transcriptions)\n"
+      << "  embedding Serve EmbeddingGemma 2 text, image and audio embeddings "
+         "(/v1/embeddings)\n\n"
       << "Server:\n"
       << "  -i, --host <IP>        Bind address (default: 127.0.0.1)\n"
       << "  -p, --port <N>         Port to listen on (default: 8080)\n"
@@ -1066,6 +1095,7 @@ static int RunServeImpl(std::span<const char* const> args,
   std::string release_profile_name;
   std::string think_marker_bias;
   std::string loop_breaker;
+  std::string prefill_mode;
   bool release_exact = false, print_effective_settings = false;
   bool no_twin = false, no_draft_head = false, no_vision = false;
   bool no_mtp = false, no_behaviour = false, no_prompt_lookup = false;
@@ -1097,6 +1127,10 @@ static int RunServeImpl(std::span<const char* const> args,
     parser.AddOption("", "--loop-breaker", "on|off",
                      "Control the repeated-output loop breaker",
                      "Reasoning Defaults", &loop_breaker);
+    parser.AddOption("", "--prefill-mode", "normal|fast",
+                     "Qwen3.8-Flash-Next: fast reads long prompts quicker "
+                     "with a small change in answers (default: normal)",
+                     "Scheduling", &prefill_mode);
     parser.AddFlag("", "--exact", "Use the exact profile", "Profiles",
                    &release_exact);
     parser.AddFlag("", "--print-effective-settings",
@@ -1210,15 +1244,16 @@ static int RunServeImpl(std::span<const char* const> args,
       continue;
     }
     if (arg == "llm" || arg == "video" || (arg == "tts" || arg == "asr") ||
-        arg == "image") {
+        arg == "image" || arg == "embedding") {
       subcommand = arg;
       sub_args.erase(sub_args.begin() + static_cast<std::ptrdiff_t>(i));
     } else if (arg == "--help" || arg == "-h" || arg == "help") {
       const std::string_view topic =
           arg == "help" && i + 1 < args.size() ? args[i + 1] : "";
       if (!topic.empty() && topic != "llm" && topic != "video" &&
-          topic != "tts" && topic != "asr" && topic != "image") {
-        server::Logger::FlushSync(std::chrono::seconds(2));
+          topic != "tts" && topic != "asr" && topic != "image" &&
+          topic != "embedding") {
+      server::Logger::FlushSync(std::chrono::seconds(2));
         std::cerr << "Error: unknown serve command '" << topic << "'\n";
         return 2;
       }
@@ -1240,10 +1275,9 @@ static int RunServeImpl(std::span<const char* const> args,
   // and returns before that point.
 
   const auto prepare_server_options = [&] {
-    in_addr address{};
-    if (::inet_pton(AF_INET, host.c_str(), &address) != 1) {
+    if (!gufo::server::IsListenAddress(host)) {
+      std::cerr << "Error: --host must be an IPv4 or IPv6 address\n";
       server::Logger::FlushSync(std::chrono::seconds(2));
-      std::cerr << "Error: --host must be an IPv4 address\n";
       return false;
     }
     if (port < 0 || port > 65535) {
@@ -1384,8 +1418,62 @@ static int RunServeImpl(std::span<const char* const> args,
   std::shared_ptr<server::TtsService> tts;
   std::shared_ptr<server::AsrService> asr;
   std::shared_ptr<server::ImageService> images;
+  std::shared_ptr<server::EmbeddingService> embeddings;
 
-  if (subcommand == "image") {
+  if (subcommand == "embedding") {
+    std::filesystem::path model;
+    std::string name = "embeddinggemma-2";
+    std::string default_prompt_name;
+    ArgParser parser(
+        gufo::cli::ProductCommand("serve embedding"),
+        "Serve EmbeddingGemma 2 text, image and audio embeddings.");
+    AddEmbeddingOptions(parser, &model, &name, &default_prompt_name);
+    add_server_options(parser, false);
+    if (!parser.Parse(sub_args, &parse_err)) {
+      std::cerr << "Error: " << parse_err << '\n';
+      return 2;
+    }
+    if (parser.IsHelpRequested()) {
+      PrintServeHelp(gufo::cli::kProductName, "embedding");
+      return 0;
+    }
+    if (!prepare_server_options())
+      return 2;
+    if (model.empty()) {
+      std::cerr << "Error: --model <DIR> is required for embedding server\n";
+      return 2;
+    }
+    ModelLoadLog load_log("embedding_gemma2", model);
+    std::map<std::string, std::string> prompts;
+    std::string prompts_error;
+    if (!server::LoadSentenceTransformerPrompts(model, &prompts,
+                                                &prompts_error)) {
+      std::cerr << "Error: " << prompts_error << '\n';
+      return 1;
+    }
+    try {
+      embeddings = std::make_shared<server::EmbeddingService>(
+          server::EmbeddingServiceOptions{
+              .model_root = model,
+              .validate_model = true,
+              .model_id = name,
+              .prompts = std::move(prompts),
+              .default_prompt_name = default_prompt_name,
+              .runner = {},
+          });
+    } catch (const std::exception& error) {
+      std::cerr << "Error loading EmbeddingGemma 2: " << error.what() << '\n';
+      return 1;
+    }
+    if (!embeddings->ready()) {
+      std::cerr << "Error enabling EmbeddingGemma 2 service: "
+                << embeddings->initialization_error() << '\n';
+      return 1;
+    }
+    load_log.Complete(
+        "model=" + embeddings->model_id() + " context_tokens=" +
+        std::to_string(server::EmbeddingService::kMaxInputTokens));
+  } else if (subcommand == "image") {
     std::filesystem::path model;
     std::string name = "Qwen-Image-2.1";
     ArgParser parser(gufo::cli::ProductCommand("serve image"),
@@ -1588,12 +1676,14 @@ static int RunServeImpl(std::span<const char* const> args,
     // Default to LLM server
     std::string model = diffusion_folder;
     std::string served_model_name;
+    std::vector<std::string> served_model_names;
     std::uint32_t max_context = 0;
     std::int64_t max_tokens = -1;
     sampling::SamplingConfig sampling_config;
     std::string reasoning_mode = "auto";
     std::string reasoning_effort = "auto";
     std::string preserve_thinking = "auto";
+    std::int64_t reasoning_budget = -1;
     std::string speculative_backend;
     std::string dflash_model_path;
     std::string draft_policy;
@@ -1619,17 +1709,23 @@ static int RunServeImpl(std::span<const char* const> args,
         server::kDefaultMaxBufferedOutputBytes;
     std::size_t max_buffered_output_bytes_total =
         server::kDefaultMaxBufferedOutputBytesTotal;
-    std::size_t cache_ram_bytes = 0;
+    server::TextRunnerRamCacheOptions cache_ram;
     std::filesystem::path cache_disk_directory;
     std::size_t cache_disk_bytes =
         server::TextRunnerDiskCacheOptions::kDefaultCapacityBytes;
     std::size_t cache_disk_staging_bytes = 0;
     bool log_progress = false;
+    bool enable_yarn = false;
     std::string trace_path;
 
+    models::qwen38_flash_next::KvCacheType kv_cache_type =
+        models::qwen38_flash_next::KvCacheType::kF16;
+    models::qwen38_flash_next::RefusalOverrides refusal_options;
     gufo::cli::ArgParser llm_parser(
         gufo::cli::ProductCommand("serve llm"),
         "Start the OpenAI/Anthropic-compatible text LLM HTTP server.");
+    RegisterKvCacheTypeOption(llm_parser, &kv_cache_type);
+    RegisterRefusalOptions(llm_parser, &refusal_options);
     llm_parser.AddOption("-m", "--model", "PATH",
                          "GGUF model file or DiffusionGemma checkpoint "
                          "directory (default: the model that 'bubo prepare' "
@@ -1639,14 +1735,30 @@ static int RunServeImpl(std::span<const char* const> args,
         "", "--mmproj", "PATH",
         "Matching BF16 vision file (auto-discovered beside model)", "Model",
         &vision_model_path);
-    llm_parser.AddOption("", "--served-model-name", "ID",
-                         "Model identifier exposed by the OpenAI API (default: "
-                         "package ID or file stem)",
-                         "Model", &served_model_name);
+    llm_parser.AddCustomOption(
+        "", "--served-model-name", "ID",
+        "Model identifier exposed by the OpenAI API (repeatable; the first "
+        "is primary)",
+        "Model",
+        [&served_model_names](std::string_view, std::string_view value,
+                              std::string* err) {
+          if (std::ranges::find(served_model_names, value) !=
+              served_model_names.end()) {
+            *err = "duplicate --served-model-name";
+            return false;
+          }
+          if (!value.empty())
+            served_model_names.emplace_back(value);
+          return true;
+        });
     llm_parser.AddOption(
         "-c", "--context", "N",
         "Context tokens per session (default: 0 = model native context)",
         "Model", &max_context);
+    llm_parser.AddFlag("", "--enable-yarn",
+                       "Flash-Next: static YaRN, required for --context above "
+                       "the native 262144; it applies to every request",
+                       "Model", &enable_yarn);
     llm_parser.AddOption(
         "-n", "--max-tokens", "N",
         "Default new-token limit (default: -1 = until EOS or context full)",
@@ -1664,6 +1776,11 @@ static int RunServeImpl(std::span<const char* const> args,
     llm_parser.AddOption("", "--preserve-thinking", "MODE",
                          "Replay prior reasoning: on, off, or auto",
                          "Reasoning Defaults", &preserve_thinking);
+    llm_parser.AddOption(
+        "", "--reasoning-budget", "N",
+        "Reasoning tokens before </think> is forced: -1 unlimited, 0 none "
+        "(default: -1)",
+        "Reasoning Defaults", &reasoning_budget);
     llm_parser.AddOption("", "--speculative", "MODE",
                          "HTTP draft backend: dspark, dflash2, mtp, or off",
                          "Speculative", &speculative_backend);
@@ -1756,13 +1873,10 @@ static int RunServeImpl(std::span<const char* const> args,
         "", "--max-buffered-output-total", "N",
         "Maximum queued stream bytes across requests (default: 262144)",
         "Scheduling", &max_buffered_output_bytes_total);
-    llm_parser.AddOption(
-        "", "--cache-ram-bytes", "N",
-        "Retained RAM-cache byte budget (default: 0 = auto: half of free "
-        "RAM, at most 32 GiB; explicit values may use free RAM minus 4 GiB)",
-        "Cache", &cache_ram_bytes);
+    AddCacheRamOption(llm_parser, &cache_ram);
     llm_parser.AddOption("", "--cache-disk", "DIR",
-                         "Opt-in restart-safe continuation cache directory",
+                         "Opt-in restart-safe continuation cache directory "
+                         "(Flash-Next: owned by one process)",
                          "Cache", &cache_disk_directory);
     llm_parser.AddOption("", "--cache-disk-bytes", "N",
                          "Retained disk-cache byte budget (default: " +
@@ -1770,7 +1884,9 @@ static int RunServeImpl(std::span<const char* const> args,
                          "Cache", &cache_disk_bytes);
     llm_parser.AddOption(
         "", "--cache-disk-staging-bytes", "N",
-        "RAM limit for queued snapshots and each disk read "
+        "Flash-Next: pinned disk transfer buffer allocated at startup within "
+        "the RAM ceiling, not a checkpoint size limit (default: 0 = 1 MiB). "
+        "Other models: RAM limit for queued snapshots and each disk read "
         "(default: 0 = auto, at most the disk budget and 1/8 available RAM)",
         "Cache", &cache_disk_staging_bytes);
     llm_parser.AddFlag("", "--log-progress",
@@ -1800,6 +1916,8 @@ static int RunServeImpl(std::span<const char* const> args,
       PrintServeHelp(gufo::cli::kProductName, "llm");
       return 0;
     }
+    if (!served_model_names.empty())
+      served_model_name = served_model_names.front();
     if (!diffusion_folder.empty() && vision_model_path.empty() && !no_vision) {
       const auto* entry = bubo::cli::FindCatalogueEntry(
           bubo::cli::ShippedCatalogue().entries,
@@ -1946,12 +2064,26 @@ static int RunServeImpl(std::span<const char* const> args,
       std::cerr << "Error: speculative draft limits are invalid\n";
       return 2;
     }
-    const auto reasoning_defaults = ResolveReasoningDefaults(
+    auto reasoning_defaults = ResolveReasoningDefaults(
         reasoning_mode, reasoning_effort, preserve_thinking, &parse_err);
     if (!reasoning_defaults.has_value()) {
       server::Logger::FlushSync(std::chrono::seconds(2));
       std::cerr << "Error: " << parse_err << "\n";
       return 2;
+    }
+    if (reasoning_budget < -1) {
+      std::cerr << "Error: --reasoning-budget must be -1 or nonnegative\n";
+      return 2;
+    }
+    if (reasoning_budget >= 0)
+      reasoning_defaults->budget_tokens =
+          static_cast<std::size_t>(reasoning_budget);
+
+    if (!refusal_options.file) {
+      const auto file =
+          release.resolved.effective_flags.find("--refusal-direction-file");
+      if (file != release.resolved.effective_flags.end())
+        refusal_options.file = file->second;
     }
 
     server::TextSpeculativeConfig speculative_config;
@@ -2021,6 +2153,22 @@ static int RunServeImpl(std::span<const char* const> args,
         throw bubo::cli::ControlError(12, "Model is missing.");
       return 2;
     }
+    // Q8 K/V storage on a model without it is not an error: the resolver made
+    // the effective setting f16 and logged the line; the loader uses that.
+    if (kv_cache_type != models::qwen38_flash_next::KvCacheType::kF16) {
+      const auto effective =
+          release.resolved.effective_flags.find("--kv-cache-type");
+      if (effective != release.resolved.effective_flags.end() &&
+          effective->second == "f16")
+        kv_cache_type = models::qwen38_flash_next::KvCacheType::kF16;
+    }
+    // A helper file the user named (--mtp-model, --mmproj, --draft-head-model)
+    // must fit the model. Same check, same reason as `bubo models
+    // check-side-file`; headers only, so it runs before anything loads. Files
+    // a package manifest pins are not checked here: their hashes pin them.
+    if (const auto refusal = bubo::cli::ExplicitSideFileRefusal(
+            release.resolved, std::filesystem::u8path(model)))
+      throw server::ReleaseSettingError(refusal->switch_name, refusal->reason);
     active_model = bubo::cli::ActiveModelIdentity(
         std::filesystem::u8path(model), release.package.manifest_path,
         release.package.manifest_path.empty() ? std::string_view{}
@@ -2033,6 +2181,12 @@ static int RunServeImpl(std::span<const char* const> args,
     const bool diffusion_gemma = false;
 #endif
     if (diffusion_gemma) {
+      if (!ValidateKvCacheTypeForArchitecture(kv_cache_type, "diffusion_gemma",
+                                              nullptr)) {
+        server::Logger::FlushSync(std::chrono::seconds(2));
+        std::cerr << server::kKvCacheQ8FallbackLine << '\n';
+        kv_cache_type = models::qwen38_flash_next::KvCacheType::kF16;
+      }
 #if defined(ENGINE_ENABLE_HIP)
       // The diffusion engine has no draft model, continuation
       // snapshot or NPU path: refuse these options before anything loads.
@@ -2190,6 +2344,7 @@ static int RunServeImpl(std::span<const char* const> args,
       ModelLoadLog load_log("text", model);
       auto inference = std::make_shared<server::InferenceBackend>();
       backend = inference;
+      server::LoadingResponder loading(host, port);
       if (!inference->load(
               model, &err, max_context, session_count,
               server::TextPrefillPolicy{
@@ -2228,7 +2383,10 @@ static int RunServeImpl(std::span<const char* const> args,
               },
               vision_model_path,
               server::TextRunnerRamCacheOptions{
-                  .capacity_bytes = cache_ram_bytes, .disabled = no_cache})) {
+                  .capacity_bytes = cache_ram.capacity_bytes,
+                  .enabled = cache_ram.enabled,
+                  .disabled = no_cache},
+              enable_yarn, kv_cache_type, refusal_options)) {
         server::Logger::FlushSync(std::chrono::seconds(2));
         if (const auto fit = server::LastSessionsFitFailure()) {
           // The sessions do not fit this machine: a typed refusal (exit 19,
@@ -2247,6 +2405,10 @@ static int RunServeImpl(std::span<const char* const> args,
       }
       inference->set_model_id(
           server::ServedModelName(served_model_name, model, release.package));
+      if (!served_model_names.empty())
+        inference->set_model_ids(served_model_names);
+      inference->set_served_artifact(model, GUFO_RELEASE_VERSION " (" GUFO_REVISION ")");
+      loading.stop();
       inference->set_sampling_defaults(
           max_tokens < 0 ? 0 : static_cast<std::size_t>(max_tokens),
           sampling_config, [&] {
@@ -2476,7 +2638,7 @@ static int RunServeImpl(std::span<const char* const> args,
                   lifecycle->Transition("request_completed", std::move(row));
               },
       },
-      images);
+      images, embeddings);
   std::string err;
   if (reservation)
     reservation->Release();

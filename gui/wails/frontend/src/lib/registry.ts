@@ -27,7 +27,7 @@ const boundSchema = z.union([z.number(), z.string().regex(/^-?\d+$/)])
 const allowedSchema = z.object({
   type: z.enum(['boolean', 'enum', 'integer', 'number', 'string']),
   values: z.array(z.union([z.string(), z.number(), z.boolean()])).optional(),
-  also: z.array(z.number()).optional(),
+  also: z.array(z.union([z.number(), z.string()])).optional(),
   format: z.string().optional(),
   suggested: z.unknown().optional(),
   minimum: boundSchema.optional(),

@@ -5,18 +5,24 @@
 #include "src/npu/projection_geometry.hpp"
 #endif
 
-#include <atomic>
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_fp16.h>
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <hipcub/block/block_radix_sort.hpp>
 #include <stdexcept>
 #include <type_traits>
 
+#include "src/cli/serve/logging.hpp"
+#include "src/models/qwen38_flash_next/hc_bf16_dense_policy.hpp"
+#include "src/models/qwen38_flash_next/kernels/rocm/iq_pair_decode.hpp"
+#include "src/models/qwen38_flash_next/kernels/rocm/kv_q8_load.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/ggml-common.h"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
+#include "src/models/qwen38_flash_next/native_gather.hpp"
+#include "src/models/qwen38_flash_next/refusal_math.hpp"
 
 // HIP kernels follow the layouts and operator formulas in reference.cpp.
 
@@ -24,6 +30,41 @@ namespace gufo::models::qwen38_flash_next::rocm {
 namespace {
 
 constexpr unsigned kThreads = 256;
+
+// Fused callers repeat a row reduction per tile/stream, without new launches.
+__device__ float RefusalDot(const float* y, const float* r, unsigned dim) {
+  if (r == nullptr)
+    return 0;
+  __shared__ float sums[kThreads];
+  sums[threadIdx.x] = RefusalLaneDot(y, r, dim, threadIdx.x, kThreads);
+  __syncthreads();
+  for (unsigned stride = kThreads / 2; stride; stride /= 2) {
+    if (threadIdx.x < stride)
+      sums[threadIdx.x] += sums[threadIdx.x + stride];
+    __syncthreads();
+  }
+  const float dot = sums[0];
+  __syncthreads();
+  return dot;
+}
+__device__ float RefusalValue(float y, const float* r, unsigned i, float dot,
+                              float strength) {
+  return r != nullptr ? RefusalSubtract(y, r[i], dot, strength) : y;
+}
+__device__ float4 RefusalValue4(float4 y, const float* r, unsigned i, float dot,
+                                float strength) {
+  return {RefusalValue(y.x, r, i, dot, strength),
+          RefusalValue(y.y, r, i + 1, dot, strength),
+          RefusalValue(y.z, r, i + 2, dot, strength),
+          RefusalValue(y.w, r, i + 3, dot, strength)};
+}
+__global__ void RefusalProjectKernel(float* y, const float* r, unsigned dim,
+                                     float strength) {
+  float* row = y + static_cast<std::size_t>(blockIdx.x) * dim;
+  const float dot = RefusalDot(row, r, dim);
+  for (unsigned i = threadIdx.x; i < dim; i += kThreads)
+    row[i] = RefusalSubtract(row[i], r[i], dot, strength);
+}
 
 __device__ __forceinline__ float SigmoidF(float x) {
   return 1.0f / (1.0f + __expf(-x));
@@ -47,6 +88,45 @@ static_assert(sizeof(Q8_1Block) == 36);
 __device__ __forceinline__ float Materialize(float v) {
   asm volatile("" : "+v"(v));
   return v;
+}
+
+// The narrow epilogue's authoritative slot-order sum, shared by its
+// standalone store and the fused combine. Materialize the returned F32 at
+// the fusion boundary, where the standalone route has a global store.
+__device__ __forceinline__ float MoeEpilogueValue(MoeFusionInput input,
+                                                  std::uint32_t t,
+                                                  std::uint32_t i,
+                                                  std::uint32_t dim) {
+  const auto k = input.slots;
+  constexpr std::uint32_t kMaxSlots = 16;
+  if (k <= kMaxSlots) {
+    const float* rows =
+        input.expert + static_cast<std::size_t>(t) * k * dim + i;
+    float w[kMaxSlots];
+    float v[kMaxSlots];
+#pragma unroll
+    for (std::uint32_t s = 0; s < kMaxSlots; ++s) {
+      w[s] = s < k ? input.weights[t * k + s] : 0.0f;
+      v[s] = s < k ? rows[static_cast<std::size_t>(s) * dim] : 0.0f;
+    }
+    const std::size_t idx = static_cast<std::size_t>(t) * dim + i;
+    const float sh = input.shared[idx];
+    const float g = input.gate[static_cast<std::size_t>(t) * input.gate_stride];
+    float acc = Materialize(0.0f);
+#pragma unroll
+    for (std::uint32_t s = 0; s < kMaxSlots; ++s) {
+      if (s < k)
+        acc = Materialize(acc + w[s] * v[s]);
+    }
+    return acc + SigmoidF(g) * sh;
+  }
+  float acc = 0.0f;
+  for (std::uint32_t s = 0; s < k; ++s)
+    acc += input.weights[t * k + s] *
+           input.expert[(static_cast<std::size_t>(t) * k + s) * dim + i];
+  return acc +
+         SigmoidF(input.gate[static_cast<std::size_t>(t) * input.gate_stride]) *
+             input.shared[static_cast<std::size_t>(t) * dim + i];
 }
 
 /// Lane i receives lane (i ^ offset)'s value, as __shfl_xor(v, offset) does
@@ -90,21 +170,22 @@ __device__ __forceinline__ void QuantizeQ8_1Lane(float v, void* y,
                                                  std::size_t i) {
   const float xi = Materialize(v);
   float amax = fabsf(xi);
-  float sum = xi;
 #pragma unroll
   for (int offset = 16; offset > 0; offset >>= 1) {
     amax = fmaxf(amax, XorLane(amax, offset));
   }
-#pragma unroll
-  for (int offset = 16; offset > 0; offset >>= 1) {
-    sum += XorLane(sum, offset);
-  }
   const float d = amax / 127.0f;
   const std::int8_t q = amax == 0.0f ? 0 : roundf(xi / d);
+  int sumq = q;
+  sumq += XorLane(sumq, 16);
+  sumq += XorLane(sumq, 8);
+  sumq += XorLane(sumq, 4);
+  sumq += XorLane(sumq, 2);
+  sumq += XorLane(sumq, 1);
   Q8_1Block* blocks = static_cast<Q8_1Block*>(y);
   blocks[i / 32].qs[i % 32] = q;
   if (i % 32 == 0) {
-    blocks[i / 32].ds = make_half2(d, sum);
+    blocks[i / 32].ds = make_half2(d, d * sumq);
   }
 }
 
@@ -214,6 +295,30 @@ __global__ void EmbedKernel(const void* table, WeightType type,
   }
 }
 
+template<WeightType type, class Block, unsigned lanes>
+__global__ void NativeEmbedKernel(const void* table, const std::int32_t* tokens,
+                                  float* res, std::uint32_t hidden,
+                                  std::uint32_t streams) {
+  const std::uint32_t t = blockIdx.x;
+  const auto* row = static_cast<const Block*>(table) +
+                    std::size_t{hidden / 256} * tokens[t];
+  for (std::uint32_t b = threadIdx.x / lanes; b < hidden / 256;
+       b += blockDim.x / lanes) {
+    const auto& x = row[b];
+    const int lane = threadIdx.x % lanes;
+    const float d = __half2float(x.d);
+    for (std::uint32_t s = 0; s < streams; ++s) {
+      float* dst = res + (std::size_t{t} * streams + s) * hidden + b * 256;
+      if constexpr (type == WeightType::kIQ3_S)
+        native::Iq3S(x, d, dst, lane, iq3s_grid);
+      else if constexpr (type == WeightType::kIQ4_XS)
+        native::Iq4Xs(x, d, dst, lane, kvalues_iq4nl);
+      else
+        native::Q6K(x, d, dst, lane);
+    }
+  }
+}
+
 __global__ void RmsNormKernel(const float* x, const float* gamma, float* out,
                               std::uint32_t group_dim, std::uint32_t groups,
                               float eps) {
@@ -280,9 +385,9 @@ __global__ void RmsNormCachedKernel(const float* x, const float* gamma,
 /// the stream loops unroll: every read is issued up front, the inject
 /// weights before the `mixed` store, and the sums still run stream by
 /// stream in order.
-template<std::uint32_t kStreams>
+template<std::uint32_t kStreams, bool kBf16>
 __global__ void HcMixEpilogueKernel(const float* xn, const float* gate,
-                                    const float* inject_w, float* mixed,
+                                    const void* inject_w, float* mixed,
                                     float* inject, std::uint32_t hidden,
                                     std::uint32_t streams, void* mixed_q8) {
   constexpr std::uint32_t kMaxStreams = 8;
@@ -309,10 +414,15 @@ __global__ void HcMixEpilogueKernel(const float* xn, const float* gate,
   for (std::uint32_t o = 0; o < kSlots; ++o) {
 #pragma unroll
     for (std::uint32_t s = 0; s < kSlots; ++s) {
-      wv[o][s] =
-          inject_w != nullptr && live && o < streams && s < streams
-              ? inject_w[o * hc_dim + static_cast<std::size_t>(s) * hidden + i]
-              : 0.0f;
+      wv[o][s] = 0.0f;
+      if (inject_w != nullptr && live && o < streams && s < streams) {
+        const auto idx = o * hc_dim + static_cast<std::size_t>(s) * hidden + i;
+        if constexpr (kBf16)
+          wv[o][s] =
+              Bf16ToF32(static_cast<const std::uint16_t*>(inject_w)[idx]);
+        else
+          wv[o][s] = static_cast<const float*>(inject_w)[idx];
+      }
     }
   }
   float acc = 0.0f;
@@ -654,12 +764,19 @@ struct InjectParts {
 /// `XnT` is float for the reference route and __half for the F16 mixer
 /// input route; a non-null `xn_q8` also receives the norm quantized into
 /// the tiled Q8 layout (hidden % 32 == 0) for the W8A8 down projection.
-template<typename XnT>
+template<typename XnT, bool kMoe = false>
 __global__ void HcCombineKernel(float* res, const float* block_out,
                                 const float* inject, std::uint32_t inject_parts,
                                 const float* gamma, XnT* xn, void* xn_q8,
                                 std::uint32_t hidden, std::uint32_t streams,
-                                float eps, void* xn_q8_1) {
+                                float eps, void* xn_q8_1, MoeFusionInput moe,
+                                const float* direction,
+                                float direction_strength) {
+  if constexpr (kMoe) {
+    if (threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.y == 0)
+      atomicAdd(reinterpret_cast<unsigned long long*>(&moe.audit->launches),
+                1ULL);
+  }
   __shared__ float shared[32];
   const std::uint32_t t = blockIdx.x;
   const std::uint32_t s = blockIdx.y;
@@ -669,6 +786,7 @@ __global__ void HcCombineKernel(float* res, const float* block_out,
   float* dst = res + base;
   const float* src = block_out + static_cast<std::size_t>(t) * hidden;
   const float* g = gamma + static_cast<std::size_t>(s) * hidden;
+  const float refusal_dot = RefusalDot(src, direction, hidden);
   // A row of up to kHeld elements per thread stays in registers between the
   // two passes, every read issued up front (a strided loop of loads behind
   // stores to `res` would wait out each one): the inject partials first, as
@@ -687,7 +805,9 @@ __global__ void HcCombineKernel(float* res, const float* block_out,
       const std::uint32_t i = threadIdx.x + c * blockDim.x;
       const std::uint32_t k = i < hidden ? i : hidden - 1;
       r[c] = dst[k];
-      b[c] = src[k];
+      b[c] = kMoe ? Materialize(MoeEpilogueValue(moe, t, k, hidden))
+                  : RefusalValue(src[k], direction, k, refusal_dot,
+                                 direction_strength);
       gv[c] = gamma != nullptr ? g[k] : 0.0f;
     }
     const float w =
@@ -727,7 +847,11 @@ __global__ void HcCombineKernel(float* res, const float* block_out,
                                   static_cast<float>(streams));
   float ss = 0.0f;
   for (std::uint32_t i = threadIdx.x; i < hidden; i += blockDim.x) {
-    const float v = dst[i] + src[i] * w;
+    const float block =
+        kMoe ? Materialize(MoeEpilogueValue(moe, t, i, hidden))
+             : RefusalValue(src[i], direction, i, refusal_dot,
+                            direction_strength);
+    const float v = dst[i] + block * w;
     dst[i] = v;
     ss += v * v;
   }
@@ -818,7 +942,8 @@ __global__ void HcCombineVec4Kernel(
     float* res, const float* block_out, const float* inject,
     std::uint32_t inject_parts, const float* gamma, XnT* xn, void* xn_q8,
     std::uint32_t hidden, float eps, float* defer_w,
-    const float* inject_w = nullptr, float* inject_out = nullptr) {
+    const float* inject_w = nullptr, float* inject_out = nullptr,
+    const float* direction = nullptr, float direction_strength = 1.0F) {
   constexpr std::uint32_t kStreams = 4;
   constexpr std::uint32_t kMaxChunks = 10;  // 4 x 2560 / 4 / kThreads
   __shared__ float shared[kStreams][kThreads / 32];
@@ -847,6 +972,7 @@ __global__ void HcCombineVec4Kernel(
   }
   float* dst = res + static_cast<std::size_t>(t) * hc_dim;
   const float* src = block_out + static_cast<std::size_t>(t) * hidden;
+  const float refusal_dot = RefusalDot(src, direction, hidden);
   const std::uint32_t chunks = static_cast<std::uint32_t>(hc_dim / 4);
   float4 v[kMaxChunks];
   float ss[kStreams] = {0.0F, 0.0F, 0.0F, 0.0F};
@@ -859,7 +985,9 @@ __global__ void HcCombineVec4Kernel(
       const std::uint32_t i = e - (s * hidden);
       const float ws = w[s];
       const float4 r = *reinterpret_cast<const float4*>(dst + e);
-      const float4 b = *reinterpret_cast<const float4*>(src + i);
+      const float4 b =
+          RefusalValue4(*reinterpret_cast<const float4*>(src + i), direction, i,
+                        refusal_dot, direction_strength);
       v[c] = float4{r.x + b.x * ws, r.y + b.y * ws, r.z + b.z * ws,
                     r.w + b.w * ws};
       if constexpr (!kDefer) {
@@ -991,7 +1119,9 @@ __global__ void HcCombineMoeF16Kernel(
     std::uint32_t used, const float* inject, std::uint32_t inject_parts,
     const float* gamma, __half* xn, void* xn_q8, std::uint32_t hidden,
     float eps, const float* prior_out, const float* prior_w,
-    const float* inject_w, float* inject_out) {
+    const float* inject_w, float* inject_out, const float* direction_shared,
+    const float* direction_prior, float direction_shared_strength,
+    float direction_prior_strength) {
   constexpr std::uint32_t kStreams = 4;
   constexpr std::uint32_t kMaxChunks = 3;  // 2560 / 4 / kThreads, rounded up
   __shared__ float shared[kStreams][kThreads / 32];
@@ -1011,6 +1141,14 @@ __global__ void HcCombineMoeF16Kernel(
   float* dst = res + static_cast<std::size_t>(t) * hc_dim;
   // The block output: sum of the weighted expert rows plus the gated shared
   // expert, per hidden chunk.
+  const float shared_dot =
+      RefusalDot(shared_out + static_cast<std::size_t>(t) * hidden,
+                 direction_shared, hidden);
+  const float prior_dot =
+      direction_prior != nullptr
+          ? RefusalDot(prior_out + static_cast<std::size_t>(t) * hidden,
+                       direction_prior, hidden)
+          : 0;
   const float g = SigmoidF(gate[static_cast<std::size_t>(t) * gate_stride]);
   const __half* rows = expert_out + static_cast<std::size_t>(t) * used * hidden;
   float4 v[kStreams][kMaxChunks];
@@ -1021,8 +1159,10 @@ __global__ void HcCombineMoeF16Kernel(
     float4 prior{0.0F, 0.0F, 0.0F, 0.0F};
     if constexpr (kPrior) {
       if (i < hidden)
-        prior = *reinterpret_cast<const float4*>(
-            prior_out + static_cast<std::size_t>(t) * hidden + i);
+        prior = RefusalValue4(
+            *reinterpret_cast<const float4*>(
+                prior_out + static_cast<std::size_t>(t) * hidden + i),
+            direction_prior, i, prior_dot, direction_prior_strength);
     }
     float4 b{0.0F, 0.0F, 0.0F, 0.0F};
     if (i < hidden) {
@@ -1034,8 +1174,10 @@ __global__ void HcCombineMoeF16Kernel(
         b.z += wk * e.z;
         b.w += wk * e.w;
       }
-      const float4 sh = *reinterpret_cast<const float4*>(
-          shared_out + static_cast<std::size_t>(t) * hidden + i);
+      const float4 sh = RefusalValue4(
+          *reinterpret_cast<const float4*>(
+              shared_out + static_cast<std::size_t>(t) * hidden + i),
+          direction_shared, i, shared_dot, direction_shared_strength);
       b.x += g * sh.x;
       b.y += g * sh.y;
       b.z += g * sh.z;
@@ -1058,25 +1200,27 @@ __global__ void HcCombineMoeF16Kernel(
         v[s][c] = float4{r.x + b.x * w[s], r.y + b.y * w[s], r.z + b.z * w[s],
                          r.w + b.w * w[s]};
         *reinterpret_cast<float4*>(dst + e) = v[s][c];
-        if constexpr (kPrior) {
-          // Keep the non-deferred kernel's compiled square-accumulation order
-          // (gfx1151 ISA of HcCombineMoeF16Kernel<true>) when the preceding
-          // residual FMA stays in registers instead of memory: x, y, z, w for
-          // every stream, except that the first chunk of stream 0 starts with
-          // y * y.
+        {
+          // Pin the same square accumulation for every template variant.
+          // Fast-math otherwise changes scales between the stored and
+          // deferred residual paths (#624).
           const float4 n = v[s][c];
-          if (s == 0 && c == 0) {
-            ss[s] = __fmul_rn(n.y, n.y);
+          if (s == 3) {
+            ss[s] = __fmaf_rn(n.w, n.w, ss[s]);
+            ss[s] = __fmaf_rn(n.y, n.y, ss[s]);
+            ss[s] = __fmaf_rn(n.z, n.z, ss[s]);
             ss[s] = __fmaf_rn(n.x, n.x, ss[s]);
           } else {
-            ss[s] = __fmaf_rn(n.x, n.x, ss[s]);
-            ss[s] = __fmaf_rn(n.y, n.y, ss[s]);
+            if (s == 0 && c == 0) {
+              ss[s] = __fmul_rn(n.y, n.y);
+              ss[s] = __fmaf_rn(n.x, n.x, ss[s]);
+            } else {
+              ss[s] = __fmaf_rn(n.x, n.x, ss[s]);
+              ss[s] = __fmaf_rn(n.y, n.y, ss[s]);
+            }
+            ss[s] = __fmaf_rn(n.z, n.z, ss[s]);
+            ss[s] = __fmaf_rn(n.w, n.w, ss[s]);
           }
-          ss[s] = __fmaf_rn(n.z, n.z, ss[s]);
-          ss[s] = __fmaf_rn(n.w, n.w, ss[s]);
-        } else {
-          ss[s] += v[s][c].x * v[s][c].x + v[s][c].y * v[s][c].y +
-                   v[s][c].z * v[s][c].z + v[s][c].w * v[s][c].w;
         }
       }
     }
@@ -1119,16 +1263,11 @@ __global__ void HcCombineMoeF16Kernel(
       float4 n{0.0F, 0.0F, 0.0F, 0.0F};
       if (i < hidden) {
         const float4 gm = *reinterpret_cast<const float4*>(gamma + e);
-        if constexpr (kPrior) {
-          const float4 g =
-              float4{__fmul_rn(gm.x, scale[s]), __fmul_rn(gm.y, scale[s]),
-                     __fmul_rn(gm.z, scale[s]), __fmul_rn(gm.w, scale[s])};
-          n = float4{v[s][c].x * g.x, v[s][c].y * g.y, v[s][c].z * g.z,
-                     v[s][c].w * g.w};
-        } else {
-          n = float4{v[s][c].x * scale[s] * gm.x, v[s][c].y * scale[s] * gm.y,
-                     v[s][c].z * scale[s] * gm.z, v[s][c].w * scale[s] * gm.w};
-        }
+        const float4 g =
+            float4{__fmul_rn(gm.x, scale[s]), __fmul_rn(gm.y, scale[s]),
+                   __fmul_rn(gm.z, scale[s]), __fmul_rn(gm.w, scale[s])};
+        n = float4{__fmul_rn(v[s][c].x, g.x), __fmul_rn(v[s][c].y, g.y),
+                   __fmul_rn(v[s][c].z, g.z), __fmul_rn(v[s][c].w, g.w)};
         __half* out = xn + (static_cast<std::size_t>(t) * hc_dim) + e;
         const __half2 lo = __floats2half2_rn(n.x, n.y);
         const __half2 hi = __floats2half2_rn(n.z, n.w);
@@ -1416,6 +1555,8 @@ __global__ void SmallGemmKernel(const void* w, const float* x, float* out,
   }
 }
 
+#include "src/models/qwen38_flash_next/kernels/rocm/hc_bf16_dense.hpp"
+
 __global__ void PleGateKernel(const float* key_n, const float* query_n,
                               const float* value, float* gated,
                               std::uint32_t hidden, std::uint32_t streams) {
@@ -1438,7 +1579,8 @@ __global__ void PleGateKernel(const float* key_n, const float* query_n,
   }
 }
 
-__global__ void PleConvKernel(const float* in, const float* w,
+template<WeightType type>
+__global__ void PleConvKernel(const float* in, const void* w,
                               const float* history, float* out,
                               std::uint32_t n_tokens, std::uint32_t channels,
                               std::uint32_t kernel, std::uint32_t dilation,
@@ -1459,7 +1601,7 @@ __global__ void PleConvKernel(const float* in, const float* w,
         src_t >= 0
             ? in[static_cast<std::size_t>(src_t) * channels + c]
             : history[static_cast<std::size_t>(hist + src_t) * channels + c];
-    acc += w[static_cast<std::size_t>(c) * kernel + k] * v;
+    acc += RowElement(w, type, c * kernel + k) * v;
   }
   out[idx] = SiluF(acc);
 }
@@ -2025,7 +2167,14 @@ __global__ void GdnKernel(const float* conv_out, const float* qn,
 
 __global__ void RestoreGdnStateKernel(float* state, RollbackRows snapshots,
                                       std::uint32_t keep, std::uint32_t k_heads,
-                                      std::uint32_t v_heads) {
+                                      std::uint32_t v_heads,
+                                      const GreedyKeepResult* device_keep) {
+  if (device_keep) {
+    if (device_keep->status != GreedyKeepStatus::kReady ||
+        device_keep->keep >= keep)
+      return;
+    keep = device_keep->keep;
+  }
   constexpr std::uint32_t d = kGdnDim;
   const std::size_t i = std::size_t{blockIdx.x} * blockDim.x + threadIdx.x;
   if (i >= std::size_t{v_heads} * d * d)
@@ -2046,6 +2195,27 @@ __global__ void RestoreGdnStateKernel(float* state, RollbackRows snapshots,
                 : __fmaf_rn(beta, correction, __fmul_rn(value, decay));
   }
   state[i] = value;
+}
+
+__global__ void RestoreRollbackRowsKernel(float* out, RollbackRows snapshots,
+                                          std::size_t count,
+                                          std::uint32_t width,
+                                          const GreedyKeepResult* result) {
+  if (result->status != GreedyKeepStatus::kReady || result->keep >= width)
+    return;
+  const auto i = std::size_t{blockIdx.x} * blockDim.x + threadIdx.x;
+  if (i < count)
+    out[i] = snapshots.rows[result->keep - 1][i];
+}
+
+__global__ void GatherRollbackFrontierKernel(const float* logits, float* out,
+                                             std::uint32_t vocab,
+                                             const GreedyKeepResult* result) {
+  if (result->status != GreedyKeepStatus::kReady)
+    return;
+  const auto i = std::size_t{blockIdx.x} * blockDim.x + threadIdx.x;
+  if (i < vocab)
+    out[i] = logits[std::size_t{result->keep - 1} * vocab + i];
 }
 
 /// Per-head RMSNorm of the raw attention rows and the sigmoid output gate,
@@ -2279,17 +2449,136 @@ __global__ void UnpackQGateKernel(const float* qg, std::uint32_t qg_stride,
   }
 }
 
+static_assert(std::is_trivially_copyable_v<YarnRope> && sizeof(YarnRope) == 20);
+
+__device__ __forceinline__ float YarnFrequency(float freq, std::uint32_t pair,
+                                               const YarnRope& yarn) {
+  float scaled = freq * YarnPairMultiplier(yarn, pair);
+  asm volatile("" : "+v"(scaled));
+  return scaled;
+}
+
+__device__ __forceinline__ void YarnScale(float& sine, float& cosine,
+                                          const YarnRope& yarn) {
+  sine *= yarn.mscale;
+  cosine *= yarn.mscale;
+  asm volatile("" : "+v"(sine), "+v"(cosine));
+}
+
+// Packed cache ABI: one independent F16 scale and 32 signed codes. All
+// stores below own a complete 32-lane block (never launch-wide scaling).
+struct Q8KvDeviceBlock {
+  _Float16 scale;
+  std::int8_t values[32];
+};
+static_assert(sizeof(Q8KvDeviceBlock) == sizeof(KvBlockQ8_0));
+static_assert(offsetof(Q8KvDeviceBlock, values) ==
+              offsetof(KvBlockQ8_0, values));
+
+// These operations define persisted bytes. Plain x/y (also the default
+// __fdiv_rn wrapper) can lower to reciprocal/multiply under fast math.
+// Spell LLVM's IEEE fdiv expansion with target builtins, preserving rounded
+// intermediates against reassociation. gfx1151 preserves F32 denormals
+// (descriptor mode 3); this sequence needs no mode toggle.
+__device__ __forceinline__ float OpaqueQ8KvF32(float value) {
+  asm volatile("" : "+v"(value));
+  return value;
+}
+__device__ __forceinline__ float DivideQ8KvRne(float numerator,
+                                               float denominator) {
+  asm volatile("" : "+v"(numerator), "+v"(denominator));
+  bool flag;
+  // false selects scaled denominator; true selects scaled numerator.
+  // The flag from the SECOND call is the one consumed by div_fmas.
+  const float d =
+      __builtin_amdgcn_div_scalef(numerator, denominator, false, &flag);
+  const float n =
+      __builtin_amdgcn_div_scalef(numerator, denominator, true, &flag);
+  const float r = __builtin_amdgcn_rcpf(d);
+  const float e = OpaqueQ8KvF32(__builtin_fmaf(-d, r, 1.0f));
+  const float r1 = OpaqueQ8KvF32(__builtin_fmaf(e, r, r));
+  const float q = OpaqueQ8KvF32(n * r1);
+  const float e2 = OpaqueQ8KvF32(__builtin_fmaf(-d, q, n));
+  const float q1 = OpaqueQ8KvF32(__builtin_fmaf(e2, r1, q));
+  const float e3 = OpaqueQ8KvF32(__builtin_fmaf(-d, q1, n));
+  const float fm = __builtin_amdgcn_div_fmasf(e3, r1, q1, flag);
+  return OpaqueQ8KvF32(__builtin_amdgcn_div_fixupf(fm, denominator, numerator));
+}
+__device__ __forceinline__ void StoreQ8KvLane(void* cache, std::size_t index,
+                                              float value) {
+  float amax = __builtin_fabsf(value);
+  unsigned invalid = !__builtin_isfinite(value);
+  // Spell out the constant DPP offsets; a rolled switch would use LDS.
+  amax = fmaxf(amax, XorLane(amax, 16));
+  invalid |= XorLane(invalid, 16);
+  amax = fmaxf(amax, XorLane(amax, 8));
+  invalid |= XorLane(invalid, 8);
+  amax = fmaxf(amax, XorLane(amax, 4));
+  invalid |= XorLane(invalid, 4);
+  amax = fmaxf(amax, XorLane(amax, 2));
+  invalid |= XorLane(invalid, 2);
+  amax = fmaxf(amax, XorLane(amax, 1));
+  invalid |= XorLane(invalid, 1);
+  const float scale = DivideQ8KvRne(amax, 127.0f);
+  // Invalid activations must remain visibly nonfinite, never silently
+  // become valid zeros. The CPU codec rejects such inputs outright.
+  // Casts are defined here as well, not in fast-compiled HIP wrappers.
+  const float stored_scale = static_cast<float>(static_cast<_Float16>(scale));
+  invalid |= !__builtin_isfinite(
+      static_cast<float>(static_cast<_Float16>(stored_scale * 127.0f)));
+  auto& block = static_cast<Q8KvDeviceBlock*>(cache)[index / 32];
+  if (index % 32 == 0)
+    block.scale = static_cast<_Float16>(invalid ? NAN : scale);
+  const float code = scale == 0.0f || invalid
+                         ? 0.0f
+                         : __builtin_roundf(DivideQ8KvRne(value, scale));
+  block.values[index % 32] =
+      static_cast<std::int8_t>(fminf(127.0f, fmaxf(-127.0f, code)));
+}
+
+// Reconstruct only the eight half operands about to be consumed. The
+// original scalar and WMMA reduction/tile orders are unchanged. Eight-value
+// loads are aligned within a quantization block, so one scale serves them.
+// Scale times i8 is exact in F32 before the F16 RNE boundary. GPU operands
+// are IEEE value-equal to the CPU decode: +0 and -0 are equivalent. Packed
+// reconstruction need not preserve zero signs under this operand contract.
+__device__ __forceinline__ uint4 LoadQ8Kv8(const void* cache,
+                                           std::size_t index) {
+  const auto& block = static_cast<const Q8KvDeviceBlock*>(cache)[index / 32];
+  return detail::LoadQ8Kv8Packed(block.values + index % 32, block.scale);
+}
+// Keep F16-only instantiations independent of the q8 reconstruction helpers.
+template<bool kQ8>
+__device__ __forceinline__ void StoreKvLane(void* cache, std::size_t index,
+                                            float value) {
+  if constexpr (kQ8)
+    StoreQ8KvLane(cache, index, value);
+  else
+    static_cast<__half*>(cache)[index] = __float2half_rn(value);
+}
+template<bool kQ8>
+__device__ __forceinline__ uint4 LoadKv8(const void* cache, std::size_t index) {
+  if constexpr (kQ8)
+    return LoadQ8Kv8(cache, index);
+  else
+    return *reinterpret_cast<const uint4*>(static_cast<const __half*>(cache) +
+                                           index);
+}
+
 // Keep each head's original eight-wave reduction. Heads in a block share
 // rotary angles; normalization statistics remain independent.
-template<std::uint32_t kHeadsPerBlock>
+template<std::uint32_t kHeadsPerBlock, bool kYarn, bool kQ8 = false>
 __global__ void PrepareAttentionKernel(
     const float* __restrict__ packed, std::uint32_t stride,
     const float* __restrict__ q_gamma, const float* __restrict__ k_gamma,
     float* __restrict__ q, float* __restrict__ gate,
-    __half* __restrict__ k_cache, __half* __restrict__ v_cache,
+    void* __restrict__ key_storage, void* __restrict__ value_storage,
     std::uint32_t heads, std::uint32_t kv_heads, std::uint32_t d,
     std::uint32_t rotary, const std::uint32_t* start_pos, float theta,
-    float eps, const qwen::vision::DeviceRope* rope) {
+    float eps, const qwen::vision::DeviceRope* rope,
+    [[maybe_unused]] YarnRope yarn) {
+  auto* k_cache = static_cast<__half*>(key_storage);
+  auto* v_cache = static_cast<__half*>(value_storage);
   __shared__ float partial[kHeadsPerBlock][8];
   __shared__ float norm[kHeadsPerBlock][256];
   const std::uint32_t t = blockIdx.x, first = blockIdx.y * kHeadsPerBlock,
@@ -2334,6 +2623,11 @@ __global__ void PrepareAttentionKernel(
       if (query)
         gate[std::size_t(t) * width + head * d + tid] =
             row[head * 2 * d + d + tid];
+      else if constexpr (kQ8)
+        StoreKvLane<true>(
+            value_storage,
+            std::size_t(*start_pos + t) * kv_width + head * d + tid,
+            row[2 * width + kv_width + head * d + tid]);
       else
         v_cache[std::size_t(*start_pos + t) * kv_width + head * d + tid] =
             __float2half(row[2 * width + kv_width + head * d + tid]);
@@ -2343,10 +2637,14 @@ __global__ void PrepareAttentionKernel(
   const std::uint32_t half = rotary / 2;
   float sine = 0.0f, cosine = 0.0f;
   if (tid < half) {
-    const float freq = powf(
+    float freq = powf(
         theta, -2.0f * static_cast<float>(tid) / static_cast<float>(rotary));
+    if constexpr (kYarn)
+      freq = YarnFrequency(freq, tid, yarn);
     sincosf(qwen::vision::RopePosition(rope, *start_pos + t, tid) * freq, &sine,
             &cosine);
+    if constexpr (kYarn)
+      YarnScale(sine, cosine, yarn);
   }
 #pragma unroll
   for (std::uint32_t j = 0; j < kHeadsPerBlock; ++j) {
@@ -2362,6 +2660,9 @@ __global__ void PrepareAttentionKernel(
       if (query) {
         q[std::size_t(t) * width + head * d + tid] = lo;
         q[std::size_t(t) * width + head * d + tid + half] = hi;
+      } else if constexpr (kQ8) {
+        norm[j][tid] = lo;
+        norm[j][tid + half] = hi;
       } else {
         k_cache[std::size_t(*start_pos + t) * kv_width + head * d + tid] =
             __float2half(lo);
@@ -2372,42 +2673,74 @@ __global__ void PrepareAttentionKernel(
     if (tid >= rotary && tid < d) {
       if (query)
         q[std::size_t(t) * width + head * d + tid] = norm[j][tid];
-      else
+      else if constexpr (!kQ8)
         k_cache[std::size_t(*start_pos + t) * kv_width + head * d + tid] =
             __float2half(norm[j][tid]);
     }
   }
+  if constexpr (kQ8) {
+    __syncthreads();
+#pragma unroll
+    for (std::uint32_t j = 0; j < kHeadsPerBlock; ++j) {
+      const std::uint32_t h = first + j;
+      if (j < live && h >= heads && tid < d)
+        StoreKvLane<true>(
+            key_storage,
+            std::size_t(*start_pos + t) * kv_width + (h - heads) * d + tid,
+            norm[j][tid]);
+    }
+  }
 }
 
+#include "kv_rotation_kernels.hpp"
+
+template<bool kYarn>
 __global__ void RopeKernel(float* x, std::uint32_t heads, std::uint32_t d,
                            std::uint32_t rotary_dim,
                            const std::uint32_t* start_pos, float theta,
-                           const qwen::vision::DeviceRope* rope) {
+                           const qwen::vision::DeviceRope* rope,
+                           [[maybe_unused]] YarnRope yarn) {
   const std::uint32_t t = blockIdx.x;
   const std::uint32_t half = rotary_dim / 2;
   for (std::uint32_t idx = threadIdx.x; idx < heads * half; idx += blockDim.x) {
     const std::uint32_t h = idx / half;
     const std::uint32_t i = idx % half;
     float* v = x + (static_cast<std::size_t>(t) * heads + h) * d;
-    const float freq = powf(
+    float freq = powf(
         theta, -2.0f * static_cast<float>(i) / static_cast<float>(rotary_dim));
+    if constexpr (kYarn)
+      freq = YarnFrequency(freq, i, yarn);
     float s = 0.0f;
     float c = 0.0f;
     sincosf(qwen::vision::RopePosition(rope, *start_pos + t, i) * freq, &s, &c);
+    if constexpr (kYarn)
+      YarnScale(s, c, yarn);
     const float a = v[i];
     const float b = v[i + half];
-    v[i] = a * c - b * s;
-    v[i + half] = a * s + b * c;
+    if constexpr (kYarn) {
+      v[i] = __fmaf_rn(a, c, -__fmul_rn(b, s));
+      v[i + half] = __fmaf_rn(a, s, __fmul_rn(b, c));
+    } else {
+      v[i] = a * c - b * s;
+      v[i + half] = a * s + b * c;
+    }
   }
 }
 
-__global__ void StoreKvKernel(const float* src, __half* cache,
+template<bool kQ8 = false>
+__global__ void StoreKvKernel(const float* src, void* cache,
                               std::uint32_t row_dim,
                               const std::uint32_t* start_pos) {
   const std::uint32_t t = blockIdx.x;
   for (std::uint32_t i = threadIdx.x; i < row_dim; i += blockDim.x) {
-    cache[static_cast<std::size_t>(*start_pos + t) * row_dim + i] =
-        __float2half(src[static_cast<std::size_t>(t) * row_dim + i]);
+    if constexpr (kQ8)
+      StoreKvLane<true>(cache,
+                        static_cast<std::size_t>(*start_pos + t) * row_dim + i,
+                        src[static_cast<std::size_t>(t) * row_dim + i]);
+    else
+      static_cast<__half*>(
+          cache)[static_cast<std::size_t>(*start_pos + t) * row_dim + i] =
+          __float2half(src[static_cast<std::size_t>(t) * row_dim + i]);
   }
 }
 
@@ -2426,6 +2759,7 @@ __global__ void StoreRowsKernel(const float* src, float* dst,
 /// grid: the most blocks a batch can complete. Block b pools raw keys
 /// [b*ratio, (b+1)*ratio) once every one of them is stored, i.e. for
 /// b in [*first_block, (*start_pos + n_tokens) / ratio).
+template<bool kYarn>
 __global__ void PoolBlocksKernel(const float* raw, const float* gamma,
                                  __half* blocks,
                                  const std::uint32_t* first_block,
@@ -2433,7 +2767,8 @@ __global__ void PoolBlocksKernel(const float* raw, const float* gamma,
                                  std::uint32_t n_tokens, std::uint32_t ratio,
                                  std::uint32_t dim, std::uint32_t rotary_dim,
                                  float theta, float eps, std::uint32_t capacity,
-                                 const qwen::vision::DeviceRope* rope) {
+                                 const qwen::vision::DeviceRope* rope,
+                                 [[maybe_unused]] YarnRope yarn) {
   __shared__ float v[256];
   __shared__ float shared[32];
   const std::uint32_t b = *first_block + blockIdx.x;
@@ -2459,11 +2794,15 @@ __global__ void PoolBlocksKernel(const float* raw, const float* gamma,
   float outv = i < dim ? v[i] : 0.0f;
   if (i < rotary_dim) {
     const std::uint32_t p = i < half ? i : i - half;
-    const float freq = powf(
+    float freq = powf(
         theta, -2.0f * static_cast<float>(p) / static_cast<float>(rotary_dim));
+    if constexpr (kYarn)
+      freq = YarnFrequency(freq, p, yarn);
     float s = 0.0f;
     float c = 0.0f;
     sincosf(qwen::vision::RopePosition(rope, b * ratio, p) * freq, &s, &c);
+    if constexpr (kYarn)
+      YarnScale(s, c, yarn);
     const float a = v[p];
     const float bb = v[p + half];
     outv = i < half ? a * c - bb * s : a * s + bb * c;
@@ -2561,7 +2900,7 @@ __global__ void SelectMarkKernel(std::uint32_t* mask, const float* scores,
   __shared__ std::uint32_t state[3];  // threshold, remaining, bin count
   const std::uint32_t t = blockIdx.x;
   const std::uint32_t pos = *start_pos + first_token + t;
-  const std::uint32_t complete = (pos + 1) / ratio;
+  const std::uint32_t complete = min((pos + 1) / ratio, max_blocks);
   std::uint32_t* words = mask + static_cast<std::size_t>(t) * mask_words;
   for (std::uint32_t w = threadIdx.x; w < mask_words; w += blockDim.x) {
     words[w] = complete <= budget ? 0xFFFFFFFFu : 0u;
@@ -2716,9 +3055,9 @@ __global__ void SelectMarkKernel(std::uint32_t* mask, const float* scores,
 /// more than one split each block writes (max, sum, unnormalized acc) to
 /// `partials[(t * heads + h) * splits + z]` and AttentionMergeKernel
 /// combines them, otherwise the normalized row goes straight to `out`.
-__global__ void AttentionKernel(const float* q, const __half* k_cache,
-                                const __half* v_cache,
-                                const std::uint32_t* mask,
+template<bool kQ8 = false>
+__global__ void AttentionKernel(const float* q, const void* k_cache,
+                                const void* v_cache, const std::uint32_t* mask,
                                 std::uint32_t mask_words, float* out,
                                 float* partials, const std::uint32_t* start_pos,
                                 std::uint32_t heads, std::uint32_t kv_heads,
@@ -2759,8 +3098,7 @@ __global__ void AttentionKernel(const float* q, const __half* k_cache,
   // context row (eight dims per lane); the partials are summed at the end.
   float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
   const std::size_t kv_stride = static_cast<std::size_t>(kv_heads) * d;
-  const __half* k_head = k_cache + kvh * d;
-  const __half* v_head = v_cache + kvh * d;
+  const std::size_t head_offset = kvh * d;
 
   // Rows are read eight contiguous halves per lane, one 16-byte load, so a
   // wave reads a whole 256-wide row at once. A wave issues the rows of
@@ -2769,7 +3107,7 @@ __global__ void AttentionKernel(const float* q, const __half* k_cache,
   // the last key's row and are never used; a batch with no key at all is
   // skipped (returns false).
   constexpr std::uint32_t kBatch = 8;
-  const auto load_batch = [&](const __half* head, std::uint32_t base,
+  const auto load_batch = [&](const void* head, std::uint32_t base,
                               uint4* rows) {
     bool any = false;
 #pragma unroll
@@ -2779,11 +3117,47 @@ __global__ void AttentionKernel(const float* q, const __half* k_cache,
     if (!any) {
       return false;
     }
+    if constexpr (kQ8) {
+      static_assert(kBatch == 8);
+      std::uint64_t raw_codes[kBatch];
+      std::uint32_t raw_scales[kBatch];
 #pragma unroll
-    for (std::uint32_t b = 0; b < kBatch; ++b) {
-      const std::uint32_t j = min(keys[base + b], n_kv - 1);
-      rows[b] = *reinterpret_cast<const uint4*>(
-          head + (static_cast<std::size_t>(j) * kv_stride) + (lane * 8));
+      for (std::uint32_t b = 0; b < kBatch; ++b) {
+        const std::uint32_t j = min(keys[base + b], n_kv - 1);
+        const std::size_t index = head_offset +
+                                  (static_cast<std::size_t>(j) * kv_stride) +
+                                  (lane * 8);
+        const auto* block =
+            static_cast<const unsigned char*>(head) +
+            (index / kKvQ8BlockElements) * sizeof(Q8KvDeviceBlock);
+        std::uint16_t scale_bits;
+        __builtin_memcpy(&scale_bits, block, sizeof(scale_bits));
+        __builtin_memcpy(&raw_codes[b], block + 2 + index % kKvQ8BlockElements,
+                         sizeof(raw_codes[b]));
+        raw_scales[b] = scale_bits;
+      }
+      // Opaque read/write operands make reconstruction depend on all eight raw
+      // tuples. Empty asm: no GPU barrier, memory clobber or volatile effects.
+      asm(""
+          : "+v"(raw_codes[0]), "+v"(raw_codes[1]), "+v"(raw_codes[2]),
+            "+v"(raw_codes[3]), "+v"(raw_codes[4]), "+v"(raw_codes[5]),
+            "+v"(raw_codes[6]), "+v"(raw_codes[7]), "+v"(raw_scales[0]),
+            "+v"(raw_scales[1]), "+v"(raw_scales[2]), "+v"(raw_scales[3]),
+            "+v"(raw_scales[4]), "+v"(raw_scales[5]), "+v"(raw_scales[6]),
+            "+v"(raw_scales[7]));
+#pragma unroll
+      for (std::uint32_t b = 0; b < kBatch; ++b) {
+        rows[b] = detail::DecodeQ8Kv8Packed(
+            raw_codes[b], static_cast<std::uint16_t>(raw_scales[b]));
+      }
+    } else {
+#pragma unroll
+      for (std::uint32_t b = 0; b < kBatch; ++b) {
+        const std::uint32_t j = min(keys[base + b], n_kv - 1);
+        rows[b] = LoadKv8<kQ8>(
+            head, head_offset + (static_cast<std::size_t>(j) * kv_stride) +
+                      (lane * 8));
+      }
     }
     return true;
   };
@@ -2809,7 +3183,7 @@ __global__ void AttentionKernel(const float* q, const __half* k_cache,
     float s_mine = -INFINITY;
     for (std::uint32_t k0 = 0; k0 < 32; k0 += kBatch) {
       uint4 rows[kBatch];
-      if (!load_batch(k_head, (wave * 32) + k0, rows)) {
+      if (!load_batch(k_cache, (wave * 32) + k0, rows)) {
         continue;
       }
 #pragma unroll
@@ -2848,7 +3222,7 @@ __global__ void AttentionKernel(const float* q, const __half* k_cache,
     __syncthreads();
     for (std::uint32_t k0 = 0; k0 < 32; k0 += kBatch) {
       uint4 rows[kBatch];
-      if (!load_batch(v_head, (wave * 32) + k0, rows)) {
+      if (!load_batch(v_cache, (wave * 32) + k0, rows)) {
         continue;
       }
 #pragma unroll
@@ -2895,7 +3269,8 @@ __global__ void AttentionKernel(const float* q, const __half* k_cache,
       std::uint32_t flags = 0;
       std::uint32_t count = 0;
       const std::uint32_t b0 = w0 + (i * 4);
-      const std::uint32_t word = b0 < n_complete ? words[b0 / 32] : 0u;
+      const std::uint32_t word =
+          b0 < n_complete && b0 / 32 < mask_words ? words[b0 / 32] : 0u;
       for (std::uint32_t k = 0; k < 4; ++k) {
         const std::uint32_t b = b0 + k;
         const bool set = b < n_complete && ((word >> (b % 32)) & 1u);
@@ -3104,14 +3479,126 @@ __global__ void RouterTopKKernel(const float* logits, std::uint32_t stride,
   }
 }
 
+// Opt-in specialization; the c4 default kernel above is kept verbatim.
+template<unsigned MaxExperts>
+__global__ void PrunedRouterTopKKernel(
+    const float* logits, std::uint32_t stride, std::int32_t* ids,
+    float* weights, std::uint32_t n_experts, std::uint32_t k,
+    std::uint32_t k_keep = 0,
+    PrefillExpertsMode mode = PrefillExpertsMode::kRenorm, float mass = 1,
+    float fold = 1) {
+  __shared__ float probs[1024];
+  __shared__ float shared[32];
+  __shared__ std::uint32_t chosen[32];
+  __shared__ float chosen_p[32];
+  const std::uint32_t t = blockIdx.x;
+  const float* src = logits + static_cast<std::size_t>(t) * stride;
+  float local_max = -INFINITY;
+  for (std::uint32_t e = threadIdx.x; e < n_experts; e += blockDim.x) {
+    local_max = fmaxf(local_max, src[e]);
+  }
+  const float max_logit = BlockMax(local_max, shared);
+  float local_sum = 0.0f;
+  for (std::uint32_t e = threadIdx.x; e < n_experts; e += blockDim.x) {
+    probs[e] = __expf(src[e] - max_logit);
+    local_sum += probs[e];
+  }
+  const float denom = BlockSum(local_sum, shared);
+  for (std::uint32_t e = threadIdx.x; e < n_experts; e += blockDim.x) {
+    probs[e] /= denom;
+  }
+  __syncthreads();
+
+  if (threadIdx.x >= 32)
+    return;
+  constexpr unsigned Items = MaxExperts / 32;
+  float values[Items];
+#pragma unroll
+  for (unsigned j = 0; j < Items; ++j) {
+    unsigned e = threadIdx.x + j * 32;
+    values[j] = e < n_experts ? probs[e] : -1.0f;
+  }
+  for (unsigned slot = 0; slot < k; ++slot) {
+    float best = -1.0f;
+    unsigned index = 0xffffffffu;
+#pragma unroll
+    for (unsigned j = 0; j < Items; ++j) {
+      unsigned e = threadIdx.x + j * 32;
+      if (values[j] > best) {
+        best = values[j];
+        index = e;
+      }
+    }
+#pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+      float other = XorLane(best, offset);
+      unsigned oi = XorLane(index, offset);
+      if (other > best || (other == best && oi < index)) {
+        best = other;
+        index = oi;
+      }
+    }
+    if (threadIdx.x == 0) {
+      chosen[slot] = index;
+      chosen_p[slot] = best;
+    }
+#pragma unroll
+    for (unsigned j = 0; j < Items; ++j) {
+      if (threadIdx.x + j * 32 == index)
+        values[j] = -1.0f;
+    }
+  }
+  if (threadIdx.x == 0) {
+    {
+      float reference = 0.0f;
+      for (std::uint32_t slot = 0; slot < k; ++slot)
+        reference += chosen_p[slot];
+      reference = fmaxf(reference, 6.103515625e-5f);
+      std::uint32_t keep = k_keep;
+      // Smallest prefix reaching tau, bounded by the cap. At tau=1 only,
+      // allow four FP32 epsilons of accumulation error; saturated [1,0,...]
+      // keeps one. Use renorm:10 for an unambiguous full-k control.
+      if (mode == PrefillExpertsMode::kMass) {
+        const float threshold = mass == 1.0f ? mass - 4 * 0x1p-23f : mass;
+        float cumulative = 0.0f;
+        keep = 0;
+        do {
+          cumulative += chosen_p[keep++] / reference;
+        } while (keep < k_keep && cumulative < threshold);
+      }
+      float denominator = reference;
+      if (mode == PrefillExpertsMode::kRenorm ||
+          mode == PrefillExpertsMode::kMass) {
+        denominator = 0.0f;
+        for (std::uint32_t slot = 0; slot < keep; ++slot)
+          denominator += chosen_p[slot];
+        denominator = fmaxf(denominator, 6.103515625e-5f);
+      }
+      for (std::uint32_t slot = 0; slot < k; ++slot) {
+        ids[t * k + slot] =
+            slot < keep ? static_cast<std::int32_t>(chosen[slot]) : -1;
+        float weight = slot < keep ? chosen_p[slot] / denominator : 0.0f;
+        if (slot < keep && mode == PrefillExpertsMode::kFold)
+          weight *= fold;
+        weights[t * k + slot] = weight;
+      }
+      return;
+    }
+  }
+}
+
 /// grid (tokens, dim chunks of kThreads). Up to kMaxSlots slots, every read
 /// is issued before the first product (a slot loop waits out each load in
 /// turn), and the sum still runs slot by slot from zero.
 __global__ void MoeEpilogueKernel(const float* expert_out, const float* weights,
                                   const float* shared_out, const float* gate,
                                   std::uint32_t gate_stride, float* out,
-                                  std::uint32_t k, std::uint32_t dim) {
+                                  std::uint32_t k, std::uint32_t dim,
+                                  const float* direction,
+                                  float direction_strength) {
   const std::uint32_t t = blockIdx.x;
+  const float refusal_dot = RefusalDot(
+      shared_out + static_cast<std::size_t>(t) * dim, direction, dim);
   const std::uint32_t i = blockIdx.y * blockDim.x + threadIdx.x;
   if (i >= dim) {
     return;
@@ -3127,7 +3614,8 @@ __global__ void MoeEpilogueKernel(const float* expert_out, const float* weights,
       v[s] = s < k ? rows[static_cast<std::size_t>(s) * dim] : 0.0f;
     }
     const std::size_t idx = static_cast<std::size_t>(t) * dim + i;
-    const float sh = shared_out[idx];
+    const float sh = RefusalValue(shared_out[idx], direction, i, refusal_dot,
+                                  direction_strength);
     const float g = gate[static_cast<std::size_t>(t) * gate_stride];
     float acc = Materialize(0.0f);
 #pragma unroll
@@ -3146,7 +3634,8 @@ __global__ void MoeEpilogueKernel(const float* expert_out, const float* weights,
   }
   const std::size_t idx = static_cast<std::size_t>(t) * dim + i;
   out[idx] = acc + SigmoidF(gate[static_cast<std::size_t>(t) * gate_stride]) *
-                       shared_out[idx];
+                       RefusalValue(shared_out[idx], direction, i, refusal_dot,
+                                    direction_strength);
 }
 
 /// Four adjacent output lanes per thread: the same reduction over the top-k
@@ -3155,13 +3644,13 @@ __global__ void MoeEpilogueKernel(const float* expert_out, const float* weights,
 /// `ExpertT` is float, or __half when the routed down projection wrote its
 /// rows as F16.
 template<typename ExpertT>
-__global__ void MoeEpilogueVec4Kernel(const ExpertT* expert_out,
-                                      const float* weights,
-                                      const float* shared_out,
-                                      const float* gate,
-                                      std::uint32_t gate_stride, float* out,
-                                      std::uint32_t k, std::uint32_t dim) {
+__global__ void MoeEpilogueVec4Kernel(
+    const ExpertT* expert_out, const float* weights, const float* shared_out,
+    const float* gate, std::uint32_t gate_stride, float* out, std::uint32_t k,
+    std::uint32_t dim, const float* direction, float direction_strength) {
   const std::uint32_t t = blockIdx.x;
+  const float refusal_dot = RefusalDot(
+      shared_out + static_cast<std::size_t>(t) * dim, direction, dim);
   const std::uint32_t i = (blockIdx.y * blockDim.x + threadIdx.x) * 4;
   if (i >= dim) {
     return;
@@ -3178,7 +3667,9 @@ __global__ void MoeEpilogueVec4Kernel(const ExpertT* expert_out,
   }
   const std::size_t idx = static_cast<std::size_t>(t) * dim + i;
   const float g = SigmoidF(gate[static_cast<std::size_t>(t) * gate_stride]);
-  const float4 sh = *reinterpret_cast<const float4*>(shared_out + idx);
+  const float4 sh =
+      RefusalValue4(*reinterpret_cast<const float4*>(shared_out + idx),
+                    direction, i, refusal_dot, direction_strength);
   acc.x += g * sh.x;
   acc.y += g * sh.y;
   acc.z += g * sh.z;
@@ -3394,6 +3885,50 @@ __global__ void PenaltyArgmaxFinishKernel(const float* logits,
 
 constexpr unsigned kMtpCandidateTile = 1024;
 
+__global__ void PublishDraftStepKernel(
+    const std::int32_t* token, std::int32_t* next_token,
+    std::uint32_t* position, std::int32_t* hidden_row, std::uint32_t* blocks,
+    std::uint32_t ratio, std::uint32_t budget, std::uint32_t advance,
+    DraftChainSlot* slot) {
+  const auto id = *token;
+  if (advance) {
+    *next_token = id;
+    *position += advance;
+    if (*position > budget)
+      *blocks = *position / ratio;
+    *hidden_row = -1;
+  }
+  slot->token = id;
+  __threadfence_system();
+  *static_cast<volatile std::uint32_t*>(&slot->ready) = 1;
+}
+
+__global__ void GreedyKeepKernel(const ArgmaxCandidate* predictions,
+                                 const GreedyKeepInput* input,
+                                 GreedyKeepResult* result,
+                                 std::uint32_t width) {
+  GreedyKeepResult value;
+  while (value.keep < width) {
+    const auto prediction = predictions[value.keep - 1];
+    // Do not let a finite-math optimization erase this error fallback.
+    if ((__float_as_uint(prediction.value) & 0x7F800000U) == 0x7F800000U) {
+      value.status = GreedyKeepStatus::kNonFinite;
+      break;
+    }
+    for (std::uint32_t i = 0; i < input->stop_count; ++i) {
+      if (prediction.index == input->stops[i]) {
+        value.status = GreedyKeepStatus::kStop;
+        break;
+      }
+    }
+    if (value.status != GreedyKeepStatus::kReady ||
+        prediction.index != input->drafts[value.keep - 1])
+      break;
+    ++value.keep;
+  }
+  *result = value;
+}
+
 __global__ void GatherArgmaxCandidatesKernel(const float* logits,
                                              const std::uint32_t* ids,
                                              ArgmaxCandidate* out,
@@ -3454,6 +3989,91 @@ __global__ void CopyKernel(const float* src, float* dst, std::size_t count) {
   }
 }
 
+template<bool First>
+__global__ void VerificationCandidateTileKernel(
+    const float* logits, GreedyPenaltyRows penalties,
+    const std::uint32_t* input, std::uint32_t* output, std::uint32_t size,
+    std::uint32_t vocab, std::uint32_t stride) {
+  using Sort = hipcub::BlockRadixSort<float, kThreads, 4, std::uint32_t>;
+  __shared__ Sort::TempStorage scratch;
+  __shared__ unsigned excluded[kMtpCandidateTile / 32];
+  __shared__ unsigned first_penalty;
+  const unsigned row = blockIdx.y;
+  const auto begin = blockIdx.x * kMtpCandidateTile;
+  if constexpr (First) {
+    if (threadIdx.x < kMtpCandidateTile / 32)
+      excluded[threadIdx.x] = 0;
+    if (threadIdx.x == 0) {
+      auto lo = penalties.offsets[row];
+      auto hi = penalties.offsets[row + 1];
+      while (lo < hi) {
+        const auto mid = lo + (hi - lo) / 2;
+        if (penalties.penalties[mid].token < begin)
+          lo = mid + 1;
+        else
+          hi = mid;
+      }
+      first_penalty = lo;
+    }
+    __syncthreads();
+    for (auto i = first_penalty + threadIdx.x; i < penalties.offsets[row + 1];
+         i += blockDim.x) {
+      const auto token = penalties.penalties[i].token;
+      if (token >= begin + kMtpCandidateTile)
+        break;
+      const auto offset = token - begin;
+      atomicOr(&excluded[offset / 32], 1U << (offset % 32));
+    }
+    __syncthreads();
+  }
+  float keys[4];
+  std::uint32_t ids[4];
+#pragma unroll
+  for (unsigned j = 0; j < 4; ++j) {
+    const auto offset = threadIdx.x * 4 + j;
+    const auto i = begin + offset;
+    auto id = i < size ? (First ? i : input[std::size_t(row) * stride + i])
+                       : UINT32_MAX;
+    if constexpr (First) {
+      if ((excluded[offset / 32] >> (offset % 32)) & 1U)
+        id = UINT32_MAX;
+    }
+    const float value =
+        id < vocab ? logits[std::size_t(row) * vocab + id] : -INFINITY;
+    ids[j] = isfinite(value) ? id : UINT32_MAX;
+    keys[j] = isfinite(value) ? (value == 0.0F ? 0.0F : value) : -INFINITY;
+  }
+  Sort(scratch).SortDescending(keys, ids);
+#pragma unroll
+  for (unsigned j = 0; j < 4; ++j) {
+    const auto rank = threadIdx.x * 4 + j;
+    if (rank < kMtpCandidates)
+      output[std::size_t(row) * stride + blockIdx.x * kMtpCandidates + rank] =
+          ids[j];
+  }
+}
+
+__global__ void GatherVerificationCandidatesKernel(
+    const float* logits, GreedyPenaltyRows penalties, const std::uint32_t* ids,
+    sampling::LogitCandidate* out, std::uint32_t vocab, std::uint32_t stride) {
+  const auto row = blockIdx.x;
+  const auto count =
+      kMtpCandidates + penalties.offsets[row + 1] - penalties.offsets[row];
+  auto* destination = out + row * kMtpCandidates + penalties.offsets[row];
+  for (unsigned i = threadIdx.x; i < count; i += blockDim.x) {
+    const auto id =
+        i < kMtpCandidates
+            ? ids[std::size_t(row) * stride + i]
+            : penalties.penalties[penalties.offsets[row] + i - kMtpCandidates]
+                  .token;
+    destination[i] =
+        id < vocab
+            ? sampling::LogitCandidate{id,
+                                       logits[std::size_t(row) * vocab + id]}
+            : sampling::LogitCandidate{UINT32_MAX, -INFINITY};
+  }
+}
+
 inline unsigned Blocks(std::size_t count) {
   return static_cast<unsigned>((count + kThreads - 1) / kThreads);
 }
@@ -3504,10 +4124,11 @@ constexpr std::uint32_t kWmmaMaxMaskWords = 2048;
 /// tiles are gathered from the union of the block's query selections and
 /// four selections overlap far less than 32 (measured at 16k depth: 846
 /// versus 2,478 selected blocks against 512 per query).
-template<std::uint32_t kQueryRows, std::uint32_t kKeys, bool kPackHeads>
+template<std::uint32_t kQueryRows, std::uint32_t kKeys, bool kPackHeads,
+         bool kQ8 = false>
 __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
     const float* __restrict__ q, const float* __restrict__ gate,
-    const __half* __restrict__ k_cache, const __half* __restrict__ v_cache,
+    const void* __restrict__ k_cache, const void* __restrict__ v_cache,
     const std::uint32_t* __restrict__ mask, std::uint32_t mask_words,
     float* __restrict__ out, std::uint32_t start_pos, std::uint32_t n_tokens,
     std::uint32_t first_query_group = 0) {
@@ -3786,19 +4407,18 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
   static_assert(kKRegs * 256 == kKeys * (kHeadDim / 8), "K stages evenly");
   const std::uint32_t v_key = lane % kKeys;
   const std::uint32_t v_slice = (tid / kKeys) * (kVRegs * 8);
-  const auto* v_base =
-      v_cache + (static_cast<std::size_t>(kv_head) * kHeadDim) + v_slice;
-  const auto* k_base = k_cache + (static_cast<std::size_t>(kv_head) * kHeadDim);
+  const std::size_t v_base = std::size_t(kv_head) * kHeadDim + v_slice;
+  const std::size_t k_base = std::size_t(kv_head) * kHeadDim;
 
   const auto load_v = [&](const Tile& tile, uint4* dst) {
     const std::uint32_t key_position = tile_key(tile, v_key);
     const bool live = key_position < context_end;
-    const auto* src =
+    const auto src =
         v_base +
         (static_cast<std::size_t>(live ? key_position : 0) * kWmmaKvWidth);
 #pragma unroll
     for (std::uint32_t j = 0; j < kVRegs; ++j) {
-      dst[j] = live ? *reinterpret_cast<const uint4*>(src + (j * 8))
+      dst[j] = live ? LoadKv8<kQ8>(v_cache, src + (j * 8))
                     : make_uint4(0u, 0u, 0u, 0u);
     }
   };
@@ -3810,12 +4430,12 @@ __launch_bounds__(256, 2) __global__ void WmmaCausalAttentionKernel(
       const std::uint32_t key_position = tile_key(tile, idx / (kHeadDim / 8));
       const std::uint32_t d8 = (idx % (kHeadDim / 8)) * 8;
       const bool live = key_position < context_end;
-      dst[n] =
-          live ? *reinterpret_cast<const uint4*>(
-                     k_base +
-                     (static_cast<std::size_t>(key_position) * kWmmaKvWidth) +
-                     d8)
-               : make_uint4(0u, 0u, 0u, 0u);
+      dst[n] = live ? LoadKv8<kQ8>(k_cache,
+                                   k_base +
+                                       (static_cast<std::size_t>(key_position) *
+                                        kWmmaKvWidth) +
+                                       d8)
+                    : make_uint4(0u, 0u, 0u, 0u);
     }
   };
 
@@ -5551,32 +6171,32 @@ __device__ __forceinline__ void IqDecodePrepared(const IqPrepared& p,
   }
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+// GSQHalo.cpp ggml/src/ggml-cuda/mmb.cu at
+// 16f0929d1da1001fd856c2443cdd31de8d470b73 (MIT,
+// Copyright (c) 2023-2026 The ggml authors) informed the slice-at-a-time
+// LDS decode. This kernel uses our compacted tile map, F16 WMMA fragments and
+// F16 expert intermediate. Each CTA covers 128 weight rows (64 output rows
+// for paired gate/up), BN routed rows and 64 K values per stage.
+//
+// kVar (0 = the reviewed kernel, byte for byte its code generation) selects
+// the stage-latency fixes measured by routed_wmma_iq_bench (10-21: the route
+// was 15 % slower than MMQ; the stage-ablation bench tells which part):
+//   bit 0  activations staged as 16-byte chunks (one rows_in read per chunk
+//          at the start, not one global index load per half);
+//   bit 1  one-stage-ahead register prefetch of the weight bytes (and of the
+//          activation chunks with bit 0): the global-memory latency of slice
+//          s + 1 overlaps the matrix math of slice s, as in the Q4_K kernel;
+//   bit 2  the codebooks in LDS instead of dependent global gathers.
+//   bit 3  apply IQ2/IQ3 signs to the rounded F16 bits, preserving the F32
+//          scale multiplication and the single F16 rounding;
+//   bit 4  full output-row tiles (guarded in the probe launcher): omit the
+//          per-row validity predicate for the model's divisible dimensions.
+//   bit 5  resolve the IQ grid and sign-table gather a slice ahead, keeping
+//          grid, signs and scale in registers across the current WMMA stage.
+// Any of bits 1 and 2 decodes from IqRaw registers (IqLoadRaw/IqDecodeRaw).
+// kAblate (bench only, results are wrong on purpose): bit 0 skips the table
+// decode and the LDS write, bit 1 the activation staging, bit 2 the matrix
+// math, bit 3 the raw weight loads of the register-decode path.
 template<WeightType Type, int BN, bool kPair, int kVar = 0, int kAblate = 0>
 __launch_bounds__(256) __global__ void RoutedIqWmmaKernel(
     const void* __restrict__ w, const void* __restrict__ up,
@@ -5881,6 +6501,326 @@ __launch_bounds__(256) __global__ void RoutedIqWmmaKernel(
   }
 }
 
+// Register-fed IQ gate/up pair kernel (pf-iq-pair, value 2 of
+// GUFO_ROUTED_WMMA_IQ). RoutedIqWmmaKernel decodes every weight with scalar
+// F32 math, stores the halves in LDS and reads them back as A fragments; this
+// kernel takes the tile, the activation plane and the stage schedule of the
+// Q4_K pair kernel (RoutedF16GEMMKernel, kPair): a wave owns eight gate rows
+// and the same eight up rows, each wave half decodes its K16 fragment of both
+// K32 blocks of a 64-K stage straight into A registers, and the halves swap
+// them. Only the codebook (1-8 KB) and the half2 sign masks (2 or 4 KB) sit
+// in LDS beside the activation plane; no weight byte and no decoded weight
+// passes through LDS. A lane loads its bytes of a super-block once, one stage
+// ahead (iq_pair::LoadBlock), as the Q4_K kernel keeps its code cache.
+//
+// A grid byte q becomes 1024 + q as F16 by the CodesToHalves byte permute,
+// and one mixed F16/F32 FMA per value forms (1024 + q) * scale - 1024 * scale
+// exactly in F32 and rounds it once to F16: RoutedIqWmmaKernel's weight bit
+// for bit (iq_pair_decode.hpp). The sign is an XOR of the F16 bits. The WMMA
+// chain visits the K16 fragments in that kernel's order and the SwiGLU
+// epilogue is the same code, so the output equals route 1's.
+//
+// kSignTable: the half2 sign masks come from an LDS table (one 16-byte read
+// per group of eight) or from the sign bits in registers (three VALU per
+// mask, and a parity bit for the ksigns types); the bench times both
+// (probes 64 and 65).
+template<WeightType Type, int BN, bool kSignTable = true>
+__launch_bounds__(256) __global__ void RoutedIqPairKernel(
+    const void* __restrict__ w, const void* __restrict__ w_up,
+    const __half* __restrict__ x, const std::int32_t* __restrict__ tiles,
+    const std::int32_t* __restrict__ pad_bounds,
+    const std::int32_t* __restrict__ rows_in,
+    const std::int32_t* __restrict__ rows_out, __half* __restrict__ out_half,
+    std::size_t m, std::size_t k) {
+  namespace ip = iq_pair;
+  constexpr ip::Type kType = static_cast<ip::Type>(Type);
+  static_assert(BN % 16 == 0 && BN / 16 <= 8);
+  constexpr int kTokTiles = BN / 16;
+  constexpr int kRows = 64;  // output rows: eight gate + eight up per wave
+  constexpr int kBlockBytes = ip::BlockBytes(kType);
+  constexpr bool kGrid64 = ip::Grid64(kType);
+  constexpr int kGridBytes = ip::GridEntries(kType) * (kGrid64 ? 8 : 4);
+  constexpr int kSignEntries = kSignTable ? ip::SignEntries(kType) : 0;
+  // The Q4_K pair kernel's activation plane, [kb][quarter][token][16 B] with
+  // one padding slot per quarter plane; the epilogue reuses its bytes.
+  constexpr int kActStride = BN + 1;
+  constexpr int kActBytes = 2 * 4 * kActStride * 16;
+  constexpr int kPairStride = kRows + 2;
+  constexpr int kEpilogueBytes = BN * kPairStride * 2;
+  constexpr int kPlaneBytes =
+      ((kActBytes > kEpilogueBytes ? kActBytes : kEpilogueBytes) + 15) / 16 *
+      16;
+  __shared__ __attribute__((aligned(16)))
+  std::uint8_t lds[kPlaneBytes + kGridBytes + kSignEntries * 16];
+  auto* s_act = reinterpret_cast<uint4*>(lds);
+  std::uint8_t* s_grid = lds + kPlaneBytes;
+  auto* s_sign = reinterpret_cast<uint4*>(lds + kPlaneBytes + kGridBytes);
+
+  const std::int32_t tile = tiles[blockIdx.y];
+  const int expert = tile & 0xFFFF;
+  const int t_local = (tile >> 16) * BN;
+  const int bucket_begin = pad_bounds[expert];
+  const int bucket_rows = pad_bounds[expert + 1] - bucket_begin;
+  if (t_local >= bucket_rows)
+    return;
+  const int live_tok_tiles =
+      std::min(kTokTiles, (bucket_rows - t_local + 15) / 16);
+  const int num_kb = static_cast<int>(k / 32);
+  const int m_i = static_cast<int>(m);
+  const std::size_t row_bytes = k / 256 * kBlockBytes;
+  const int tid = static_cast<int>(threadIdx.x);
+  const int wave_id = tid >> 5;
+  const int lane_id = tid & 31;
+  const int sub_lane = lane_id & 15;
+  const int half_id = lane_id >> 4;
+  const int r_block = static_cast<int>(blockIdx.x) * kRows;
+
+  // This block's copy of the codebook and the sign masks; the first stage
+  // barrier publishes them.
+  {
+    const std::uint32_t* grid = nullptr;
+    if constexpr (Type == WeightType::kIQ2_XXS)
+      grid = reinterpret_cast<const std::uint32_t*>(iq2xxs_grid);
+    else if constexpr (Type == WeightType::kIQ2_XS)
+      grid = reinterpret_cast<const std::uint32_t*>(iq2xs_grid);
+    else if constexpr (Type == WeightType::kIQ2_S)
+      grid = reinterpret_cast<const std::uint32_t*>(iq2s_grid);
+    else if constexpr (Type == WeightType::kIQ3_XXS)
+      grid = iq3xxs_grid;
+    else
+      grid = iq3s_grid;
+    auto* grid_dst = reinterpret_cast<std::uint32_t*>(s_grid);
+    for (int i = tid; i < kGridBytes / 4; i += 256)
+      grid_dst[i] = grid[i];
+    if (tid < kSignEntries) {
+      const std::uint32_t bits = ip::RawSigns(kType)
+                                     ? static_cast<std::uint32_t>(tid)
+                                     : ksigns_iq2xs[tid];
+      s_sign[tid] = make_uint4(ip::SignMask(bits, 0), ip::SignMask(bits, 1),
+                               ip::SignMask(bits, 2), ip::SignMask(bits, 3));
+    }
+  }
+
+  // Lanes 0-7 of each half own gate rows, lanes 8-15 the same up rows.
+  const int r = r_block + wave_id * 8 + (sub_lane & 7);
+  const auto* weights =
+      static_cast<const std::uint8_t*>((sub_lane & 8) != 0 ? w_up : w) +
+      static_cast<std::size_t>(expert) * m * row_bytes;
+  const std::uint8_t* f_ptr =
+      weights + static_cast<std::size_t>(r < m_i ? r : m_i - 1) * row_bytes;
+
+  // Activation fetch as in the Q4_K pair kernel: BN tokens x 128 bytes per
+  // stage in 16-byte chunks, eight per token, one stage ahead.
+  constexpr int kActFetch = BN <= 64 ? 2 : 4;
+  constexpr int kActChunks = BN * 8;
+  static_assert(kActChunks <= kActFetch * 256);
+  uint4 a_data[kActFetch];
+  const __half* a_src[kActFetch];
+  int a_slot[kActFetch];
+#pragma unroll
+  for (int i = 0; i < kActFetch; ++i) {
+    const int chunk = tid + (i * 256);
+    const int t = chunk / 8;
+    const int sub = chunk % 8;
+    const int c_row = t_local + t;
+    const std::int32_t src = (chunk < kActChunks && c_row < bucket_rows)
+                                 ? rows_in[bucket_begin + c_row]
+                                 : -1;
+    a_src[i] = src >= 0 ? x + (static_cast<std::size_t>(src) * k) + (sub * 8)
+                        : nullptr;
+    a_slot[i] = chunk < kActChunks ? (sub * kActStride) + t : -1;
+  }
+
+  // `blk` receives the next super-block one stage ahead; `cur` holds the one
+  // being computed, its nibbles shifted to this half.
+  ip::Block blk{};
+  ip::Block cur{};
+  float d_cur = 0.0F;
+  const auto fetch_stage = [&](int kb0, int group) {
+    if (group == 0) {
+      blk = ip::LoadBlock<kType>(f_ptr + (kb0 / 8) * kBlockBytes, half_id);
+    }
+#pragma unroll
+    for (int i = 0; i < kActFetch; ++i) {
+      a_data[i] = a_src[i] != nullptr
+                      ? *reinterpret_cast<const uint4*>(a_src[i] + (kb0 * 32))
+                      : make_uint4(0u, 0u, 0u, 0u);
+    }
+  };
+  const auto commit_stage = [&](int group) {
+    if (group == 0) {
+      cur = blk;
+      ip::NormalizeBlock<kType>(cur, half_id);
+      d_cur = __half2float(
+          __builtin_bit_cast(__half, static_cast<std::uint16_t>(cur.d)));
+    }
+#pragma unroll
+    for (int i = 0; i < kActFetch; ++i) {
+      if (a_slot[i] >= 0) {
+        s_act[a_slot[i]] = a_data[i];
+      }
+    }
+  };
+
+  v8f acc[kTokTiles];
+#pragma unroll
+  for (int j = 0; j < kTokTiles; ++j)
+    acc[j] = v8f{0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
+
+  const auto compute_stage = [&](int group) {
+    using v8u = __attribute__((__vector_size__(32))) std::uint32_t;
+    // Both sub-blocks' codebook and sign-mask reads go first, so their LDS
+    // latency overlaps the first decode.
+    std::uint32_t grid[2][2][2];
+    uint4 sign[2][2];
+    float scale[2];
+    float bias[2];
+#pragma unroll
+    for (int kb = 0; kb < 2; ++kb) {
+      const int i = 2 * group + kb;
+      const ip::Groups f =
+          ip::SubBlockFields<kType>(cur.q[i], cur.s[i], cur.e, i, half_id);
+#pragma unroll
+      for (int g = 0; g < 2; ++g) {
+        if constexpr (kGrid64) {
+          const uint2 v = reinterpret_cast<const uint2*>(s_grid)[f.grid[g][0]];
+          grid[kb][g][0] = v.x;
+          grid[kb][g][1] = v.y;
+        } else {
+          const auto* g32 = reinterpret_cast<const std::uint32_t*>(s_grid);
+          grid[kb][g][0] = g32[f.grid[g][0]];
+          grid[kb][g][1] = g32[f.grid[g][1]];
+        }
+        if constexpr (kSignTable) {
+          sign[kb][g] = s_sign[f.sign[g]];
+        } else {
+          // ksigns_iq2xs[code] = code with an even-parity eighth bit.
+          std::uint32_t bits = f.sign[g];
+          if constexpr (!ip::RawSigns(kType))
+            bits |= (static_cast<std::uint32_t>(__builtin_popcount(bits)) & 1U)
+                    << 7;
+          sign[kb][g] = make_uint4(ip::SignMask(bits, 0), ip::SignMask(bits, 1),
+                                   ip::SignMask(bits, 2), ip::SignMask(bits, 3));
+        }
+      }
+      scale[kb] = ip::Scale(kType, d_cur, f.ls);
+      bias[kb] = -1024.0F * scale[kb];
+    }
+#pragma unroll
+    for (int kb = 0; kb < 2; ++kb) {
+      // The half's K16 fragment of K block kb: groups il = 2 half_id + g.
+      v8u own;
+#pragma unroll
+      for (int g = 0; g < 2; ++g) {
+        const std::uint32_t masks[4] = {sign[kb][g].x, sign[kb][g].y,
+                                        sign[kb][g].z, sign[kb][g].w};
+#pragma unroll
+        for (int p = 0; p < 4; ++p) {
+          const std::uint32_t biased = __builtin_amdgcn_perm(
+              grid[kb][g][p / 2], kHalfMagic,
+              (p & 1) != 0 ? 0x03070206U : 0x01050004U);
+          const __half2 h = __builtin_bit_cast(__half2, biased);
+          const float lo = __builtin_fmaf(__low2float(h), scale[kb], bias[kb]);
+          const float hi = __builtin_fmaf(__high2float(h), scale[kb], bias[kb]);
+          own[(4 * g) + p] =
+              __builtin_bit_cast(std::uint32_t, __floats2half2_rn(lo, hi)) ^
+              masks[p];
+        }
+      }
+      v8u peer;
+#pragma unroll
+      for (int i = 0; i < 8; ++i)
+        peer[i] = XorLane(own[i], 16);
+      const v16h a_lo = __builtin_bit_cast(v16h, half_id == 0 ? own : peer);
+      const v16h a_hi = __builtin_bit_cast(v16h, half_id == 1 ? own : peer);
+#pragma unroll
+      for (int j = 0; j < kTokTiles; ++j) {
+        // One token tile's LDS fragments live at a time (compiler barrier
+        // only), and no WMMA work for the empty tiles of a short bucket.
+        asm volatile("" ::: "memory");
+        if constexpr (kTokTiles > 1) {
+          if (j >= live_tok_tiles)
+            continue;
+        }
+        const uint4* frag = s_act + ((kb * 4) * kActStride) + (j * 16) + sub_lane;
+        uint4 b[4];
+#pragma unroll
+        for (int q = 0; q < 4; ++q) {
+          b[q] = frag[q * kActStride];
+        }
+        v16h b_lo;
+        v16h b_hi;
+        __builtin_memcpy(&b_lo, &b[0], 32);
+        __builtin_memcpy(&b_hi, &b[2], 32);
+        acc[j] = Wmma(a_lo, b_lo, acc[j]);
+        acc[j] = Wmma(a_hi, b_hi, acc[j]);
+      }
+    }
+  };
+
+  const auto run_stage = [&](int kb0, int group, int next_group) {
+    commit_stage(group);
+    __syncthreads();
+    if (kb0 + 2 < num_kb) {
+      fetch_stage(kb0 + 2, next_group);
+    }
+    compute_stage(group);
+    __syncthreads();
+  };
+  fetch_stage(0, 0);
+  // Four stages per super-block, exposed so that every field position and
+  // register selection above is a constant.
+  for (int kb0 = 0; kb0 < num_kb; kb0 += 8) {
+    run_stage(kb0, 0, 1);
+    run_stage(kb0 + 2, 1, 2);
+    run_stage(kb0 + 4, 2, 3);
+    run_stage(kb0 + 6, 3, 0);
+  }
+
+  // The Q4_K pair kernel's epilogue: SwiGLU in registers, F16 rows staged
+  // once, stores covering the full 64-column output row.
+  static_assert(BN * kPairStride * sizeof(__half) <= kPlaneBytes);
+  __half* scratch = reinterpret_cast<__half*>(lds);
+#pragma unroll
+  for (int j = 0; j < kTokTiles; ++j) {
+    if (j >= live_tok_tiles)
+      continue;
+#pragma unroll
+    for (int l = 0; l < 4; ++l) {
+      // Pinned as in both existing pair epilogues so that the three routes
+      // round to the same F16 value.
+      float product = acc[j][l + 4] * acc[j][l];
+      asm volatile("" : "+v"(product));
+      float value = product * SigmoidF(acc[j][l]);
+      asm volatile("" : "+v"(value));
+      scratch[(j * 16 + sub_lane) * kPairStride + wave_id * 8 + 2 * l +
+              half_id] = __float2half(value);
+    }
+  }
+  __syncthreads();
+#pragma unroll
+  for (int unit = 0; unit < BN * kRows / (2 * 256); ++unit) {
+    const int flat = (unit * 256 + tid) * 2;
+    const int t = t_local + flat / kRows;
+    const int row = r_block + flat % kRows;
+    if (t < bucket_rows && row < m_i) {
+      const std::int32_t dst = rows_out[bucket_begin + t];
+      if (dst >= 0) {
+        const auto offset = static_cast<std::size_t>(dst) * m + row;
+        const int src = (flat / kRows) * kPairStride + flat % kRows;
+        if (m % 2 == 0 && row + 1 < m_i) {
+          *reinterpret_cast<__half2*>(out_half + offset) =
+              *reinterpret_cast<const __half2*>(scratch + src);
+        } else {
+          out_half[offset] = scratch[src];
+          if (row + 1 < m_i)
+            out_half[offset + 1] = scratch[src + 1];
+        }
+      }
+    }
+  }
+}
+
 /// Compacts the routed assignments by expert with 16-row padded buckets.
 /// One block: exclusive scan of the padded counts into pad_bounds[0..E].
 __global__ void RoutedPadBoundsKernel(const std::uint32_t* __restrict__ counts,
@@ -5943,6 +6883,29 @@ __global__ void RoutedScatterKernel(const std::int32_t* __restrict__ ids,
 void EmbedTokens(const void* table, WeightType type, const std::int32_t* tokens,
                  float* res, std::uint32_t n_tokens, std::uint32_t hidden,
                  std::uint32_t streams, hipStream_t stream) {
+  if (type == WeightType::kIQ3_S || type == WeightType::kIQ4_XS ||
+      type == WeightType::kQ6_K) {
+    if (type == WeightType::kIQ3_S)
+      hipLaunchKernelGGL((NativeEmbedKernel<WeightType::kIQ3_S, block_iq3_s, 32>),
+                         dim3(n_tokens), dim3(kThreads), 0, stream,
+                         table, tokens, res, hidden, streams);
+    else if (type == WeightType::kIQ4_XS)
+      hipLaunchKernelGGL((NativeEmbedKernel<WeightType::kIQ4_XS, block_iq4_xs, 32>),
+                         dim3(n_tokens), dim3(kThreads), 0, stream,
+                         table, tokens, res, hidden, streams);
+    else
+      hipLaunchKernelGGL((NativeEmbedKernel<WeightType::kQ6_K, block_q6_K, 64>),
+                         dim3(n_tokens), dim3(kThreads), 0, stream,
+                         table, tokens, res, hidden, streams);
+    static std::atomic<unsigned> seen{0};
+    const unsigned bit = 1u << static_cast<unsigned>(type);
+    if ((seen.fetch_or(bit, std::memory_order_relaxed) & bit) == 0)
+      gufo::server::Logger::Raw(
+          "[native-dispatch] role=token_embd.weight type=%s pass=embedding-gather "
+          "kernel=native-block-gather host_launches=1\n",
+          type == WeightType::kIQ3_S ? "IQ3_S" : type == WeightType::kIQ4_XS ? "IQ4_XS" : "Q6_K");
+    return;
+  }
   hipLaunchKernelGGL(EmbedKernel, dim3(n_tokens), dim3(kThreads), 0, stream,
                      table, type, tokens, res, hidden, streams);
 }
@@ -5978,22 +6941,31 @@ std::uint32_t HcInjectPartsVec4(std::uint32_t hidden) {
   return Blocks((hidden + 3) / 4);
 }
 
-void HcMixEpilogue(const float* xn, const float* gate, const float* inject_w,
+void HcMixEpilogue(const float* xn, const float* gate, const void* inject_w,
                    float* mixed, float* inject, std::uint32_t n_tokens,
                    std::uint32_t hidden, std::uint32_t streams,
-                   hipStream_t stream, void* mixed_q8) {
+                   hipStream_t stream, void* mixed_q8,
+                   core::GgmlType inject_type) {
   if (hidden % 32 != 0) {
     mixed_q8 = nullptr;
   }
-  if (streams == 4) {
-    hipLaunchKernelGGL(HcMixEpilogueKernel<4>, dim3(n_tokens, Blocks(hidden)),
-                       dim3(kThreads), 0, stream, xn, gate, inject_w, mixed,
-                       inject, hidden, streams, mixed_q8);
-    return;
-  }
-  hipLaunchKernelGGL(HcMixEpilogueKernel<0>, dim3(n_tokens, Blocks(hidden)),
-                     dim3(kThreads), 0, stream, xn, gate, inject_w, mixed,
-                     inject, hidden, streams, mixed_q8);
+  const auto launch = [&]<bool kBf16>() {
+    if (streams == 4) {
+      hipLaunchKernelGGL((HcMixEpilogueKernel<4, kBf16>),
+                         dim3(n_tokens, Blocks(hidden)), dim3(kThreads), 0,
+                         stream, xn, gate, inject_w, mixed, inject, hidden,
+                         streams, mixed_q8);
+      return;
+    }
+    hipLaunchKernelGGL((HcMixEpilogueKernel<0, kBf16>),
+                       dim3(n_tokens, Blocks(hidden)), dim3(kThreads), 0,
+                       stream, xn, gate, inject_w, mixed, inject, hidden,
+                       streams, mixed_q8);
+  };
+  if (inject_w != nullptr && inject_type == core::GgmlType::kBF16)
+    launch.template operator()<true>();
+  else
+    launch.template operator()<false>();
 }
 
 void HcMixEpilogueVec4(const float* xn, const float* gate,
@@ -6034,49 +7006,105 @@ void HcMixEpilogueVec4F16(const __half* xn, const float* gate,
   }
 }
 
+void RefusalProject(float* y, const float* r, std::uint32_t rows,
+                    std::uint32_t hidden, hipStream_t stream, float strength) {
+  hipLaunchKernelGGL(RefusalProjectKernel, dim3(rows), dim3(kThreads), 0,
+                     stream, y, r, hidden, strength);
+}
+
 void HcCombine(float* res, const float* block_out, const float* inject,
                std::uint32_t inject_parts, const float* gamma, float* xn,
                std::uint32_t n_tokens, std::uint32_t hidden,
                std::uint32_t streams, float eps, hipStream_t stream,
-               bool decode) {
+               bool decode, const float* direction, float direction_strength) {
   // One block per token wants a batch: a decode step keeps the
   // one-block-per-stream kernel's parallelism.
   if (!decode && n_tokens >= 16 && streams == 4 && hidden % 128 == 0 &&
       hidden <= 2560) {
     hipLaunchKernelGGL(HcCombineVec4Kernel<float>, dim3(n_tokens),
                        dim3(kThreads), 0, stream, res, block_out, inject,
-                       inject_parts, gamma, xn, nullptr, hidden, eps, nullptr);
+                       inject_parts, gamma, xn, nullptr, hidden, eps, nullptr,
+                       nullptr, nullptr, direction, direction_strength);
     return;
   }
   hipLaunchKernelGGL(HcCombineKernel<float>, dim3(n_tokens, streams),
                      dim3(kThreads), 0, stream, res, block_out, inject,
                      inject_parts, gamma, xn, nullptr, hidden, streams, eps,
-                     nullptr);
+                     nullptr, MoeFusionInput{}, direction, direction_strength);
+}
+
+__global__ void CompareMoeFusionKernel(
+    const float* res, const float* reference_res, const float* xn,
+    const float* reference_xn, const std::uint8_t* q8,
+    const std::uint8_t* reference_q8, std::size_t elements,
+    std::size_t q8_bytes, MoeFusionAudit* audit) {
+  const auto i = std::size_t{blockIdx.x} * blockDim.x + threadIdx.x;
+  unsigned bad = 0;
+  if (i < elements) {
+    bad += __float_as_uint(res[i]) != __float_as_uint(reference_res[i]);
+    if (xn)
+      bad += __float_as_uint(xn[i]) != __float_as_uint(reference_xn[i]);
+  }
+  if (i < q8_bytes)
+    bad += q8[i] != reference_q8[i];
+  if (bad)
+    atomicAdd(reinterpret_cast<unsigned long long*>(&audit->mismatches),
+              static_cast<unsigned long long>(bad));
+  if (i == 0)
+    atomicAdd(reinterpret_cast<unsigned long long*>(&audit->checks), 1ULL);
+}
+
+void CompareMoeFusion(const float* res, const float* reference_res,
+                      const float* xn, const float* reference_xn,
+                      const void* q8, const void* reference_q8,
+                      std::size_t elements, std::size_t q8_bytes,
+                      MoeFusionAudit* audit, hipStream_t stream) {
+  const auto count = std::max(elements, q8_bytes);
+  CompareMoeFusionKernel<<<(count + 255) / 256, 256, 0, stream>>>(
+      res, reference_res, xn, reference_xn,
+      static_cast<const std::uint8_t*>(q8),
+      static_cast<const std::uint8_t*>(reference_q8), elements, q8_bytes,
+      audit);
+}
+
+bool HcCombineMoeF32(float* res, MoeFusionInput moe, const float* inject,
+                     std::uint32_t inject_parts, const float* gamma, float* xn,
+                     void* xn_q8, std::uint32_t rows, std::uint32_t hidden,
+                     std::uint32_t streams, float eps, hipStream_t stream) {
+  if (!DecodeMoeFusionShape(rows, moe.slots, hidden, streams, false, false))
+    return false;
+  hipLaunchKernelGGL((HcCombineKernel<float, true>), dim3(rows, streams),
+                     dim3(kThreads), 0, stream, res, moe.shared, inject,
+                     inject_parts, gamma, xn, nullptr, hidden, streams, eps,
+                     xn_q8, moe, nullptr, 1.0F);
+  return true;
 }
 
 bool HcCombineQ8_1(float* res, const float* block_out, const float* inject,
                    std::uint32_t inject_parts, const float* gamma, float* xn,
                    void* xn_q8, std::uint32_t n_tokens, std::uint32_t hidden,
-                   std::uint32_t streams, float eps, hipStream_t stream) {
+                   std::uint32_t streams, float eps, hipStream_t stream,
+                   const float* direction, float direction_strength) {
   if (gamma == nullptr || hidden % 32 != 0) {
     return false;
   }
   hipLaunchKernelGGL(HcCombineKernel<float>, dim3(n_tokens, streams),
                      dim3(kThreads), 0, stream, res, block_out, inject,
                      inject_parts, gamma, xn, nullptr, hidden, streams, eps,
-                     xn_q8);
+                     xn_q8, MoeFusionInput{}, direction, direction_strength);
   return true;
 }
 
-bool HcCombineMoeF16(float* res, const __half* expert_out, const float* weights,
-                     const float* shared_out, const float* gate,
-                     std::uint32_t gate_stride, std::uint32_t used,
-                     const float* inject, std::uint32_t inject_parts,
-                     const float* gamma, __half* xn, void* xn_q8,
-                     std::uint32_t n_tokens, std::uint32_t hidden,
-                     std::uint32_t streams, float eps, hipStream_t stream,
-                     const float* prior_out, const float* prior_w,
-                     float* inject_out, const float* inject_w) {
+bool HcCombineMoeF16(
+    float* res, const __half* expert_out, const float* weights,
+    const float* shared_out, const float* gate, std::uint32_t gate_stride,
+    std::uint32_t used, const float* inject, std::uint32_t inject_parts,
+    const float* gamma, __half* xn, void* xn_q8, std::uint32_t n_tokens,
+    std::uint32_t hidden, std::uint32_t streams, float eps, hipStream_t stream,
+    const float* prior_out, const float* prior_w, float* inject_out,
+    const float* inject_w, const float* direction_shared,
+    const float* direction_prior, float direction_shared_strength,
+    float direction_prior_strength) {
   if (streams != 4 || hidden % 128 != 0 || hidden > 3 * 4 * kThreads ||
       (gamma != nullptr && xn_q8 == nullptr) ||
       (inject_w != nullptr && (gamma == nullptr || prior_out == nullptr))) {
@@ -6091,25 +7119,32 @@ bool HcCombineMoeF16(float* res, const __half* expert_out, const float* weights,
   hipLaunchKernelGGL(combine, dim3(n_tokens), dim3(kThreads), 0, stream, res,
                      expert_out, weights, shared_out, gate, gate_stride, used,
                      inject, inject_parts, gamma, xn, xn_q8, hidden, eps,
-                     prior_out, prior_w, inject_w, inject_out);
+                     prior_out, prior_w, inject_w, inject_out, direction_shared,
+                     direction_prior, direction_shared_strength,
+                     direction_prior_strength);
   return true;
 }
 
 /// res[t][s][i] += block_out[t][i] * w[t][s], the update a deferring
 /// HcCombineVec4Kernel left out, in the same expression.
 __global__ void HcApplyDeferredKernel(float* res, const float* block_out,
-                                      const float* w, std::uint32_t hidden) {
+                                      const float* w, std::uint32_t hidden,
+                                      const float* direction,
+                                      float direction_strength) {
   constexpr std::uint32_t kStreams = 4;
   const std::uint32_t t = blockIdx.x;
   const std::size_t hc_dim = static_cast<std::size_t>(kStreams) * hidden;
   float* dst = res + static_cast<std::size_t>(t) * hc_dim;
   const float* src = block_out + static_cast<std::size_t>(t) * hidden;
+  const float refusal_dot = RefusalDot(src, direction, hidden);
   for (std::uint32_t e = threadIdx.x * 4; e < hc_dim; e += kThreads * 4) {
     const std::uint32_t s = e / hidden;
     const std::uint32_t i = e - (s * hidden);
     const float ws = w[static_cast<std::size_t>(t) * kStreams + s];
     const float4 r = *reinterpret_cast<const float4*>(dst + e);
-    const float4 b = *reinterpret_cast<const float4*>(src + i);
+    const float4 b =
+        RefusalValue4(*reinterpret_cast<const float4*>(src + i), direction, i,
+                      refusal_dot, direction_strength);
     *reinterpret_cast<float4*>(dst + e) =
         float4{__fmaf_rn(b.x, ws, r.x), __fmaf_rn(b.y, ws, r.y),
                __fmaf_rn(b.z, ws, r.z), __fmaf_rn(b.w, ws, r.w)};
@@ -6118,16 +7153,19 @@ __global__ void HcApplyDeferredKernel(float* res, const float* block_out,
 
 void HcApplyDeferred(float* res, const float* block_out, const float* w,
                      std::uint32_t n_tokens, std::uint32_t hidden,
-                     hipStream_t stream) {
+                     hipStream_t stream, const float* direction,
+                     float direction_strength) {
   hipLaunchKernelGGL(HcApplyDeferredKernel, dim3(n_tokens), dim3(kThreads), 0,
-                     stream, res, block_out, w, hidden);
+                     stream, res, block_out, w, hidden, direction,
+                     direction_strength);
 }
 
 bool HcCombineF16(float* res, const float* block_out, const float* inject,
                   std::uint32_t inject_parts, const float* gamma, __half* xn,
                   void* xn_q8, std::uint32_t n_tokens, std::uint32_t hidden,
                   std::uint32_t streams, float eps, hipStream_t stream,
-                  float* defer_w, float* inject_out, const float* inject_w) {
+                  float* defer_w, float* inject_out, const float* inject_w,
+                  const float* direction, float direction_strength) {
   // F16 prefill keeps the same reduction even for a one-token tail.
   if (streams == 4 && hidden % 128 == 0 && hidden <= 2560) {
     if (inject_w != nullptr && defer_w != nullptr && gamma != nullptr) {
@@ -6136,20 +7174,22 @@ bool HcCombineF16(float* res, const float* block_out, const float* inject,
       hipLaunchKernelGGL((HcCombineVec4Kernel<__half, true, true>),
                          dim3(n_tokens), dim3(kThreads), 0, stream, res,
                          block_out, inject, inject_parts, gamma, xn, xn_q8,
-                         hidden, eps, defer_w, inject_w, inject_out);
+                         hidden, eps, defer_w, inject_w, inject_out, direction,
+                         direction_strength);
       return true;
     }
     const auto combine = defer_w != nullptr ? HcCombineVec4Kernel<__half, true>
                                             : HcCombineVec4Kernel<__half>;
     hipLaunchKernelGGL(combine, dim3(n_tokens), dim3(kThreads), 0, stream, res,
                        block_out, inject, inject_parts, gamma, xn, xn_q8,
-                       hidden, eps, defer_w, nullptr, nullptr);
+                       hidden, eps, defer_w, nullptr, nullptr, direction,
+                       direction_strength);
     return defer_w != nullptr;
   }
   hipLaunchKernelGGL(HcCombineKernel<__half>, dim3(n_tokens, streams),
                      dim3(kThreads), 0, stream, res, block_out, inject,
                      inject_parts, gamma, xn, xn_q8, hidden, streams, eps,
-                     nullptr);
+                     nullptr, MoeFusionInput{}, direction, direction_strength);
   return false;
 }
 
@@ -6423,6 +7463,9 @@ void RoutedCompact(const std::int32_t* ids, const std::uint32_t* counts,
 namespace {
 std::atomic<int> g_iq_variant{-1};
 std::atomic<int> g_iq_ablate{-1};
+// Probe variants of RoutedIqPairKernel (wide pair tiles): 64 with the LDS
+// sign-mask table, 65 with the masks built in registers.
+constexpr int kIqPairProbe = 64;
 }  // namespace
 
 template<WeightType Type, int BN, bool Pair, int V, int A>
@@ -6436,6 +7479,20 @@ void LaunchIqInstance(dim3 grid, hipStream_t stream, const void* w,
   hipLaunchKernelGGL((RoutedIqWmmaKernel<Type, BN, Pair, V, A>), grid,
                      dim3(kThreads), 0, stream, w, up, x, tiles, pad_bounds,
                      rows_in, rows_out, swiglu_gate, out, out_half, m, k);
+}
+
+// RoutedIqPairKernel over 128-row pair tiles (k % 256 == 0 checked by callers).
+template<WeightType Type, bool kSignTable = true>
+bool LaunchIqPair(const void* w, const void* up, const __half* x,
+                  const std::int32_t* tiles, std::uint32_t n_tiles,
+                  const std::int32_t* pad_bounds, const std::int32_t* rows_in,
+                  const std::int32_t* rows_out, __half* out_half, std::size_t m,
+                  std::size_t k, hipStream_t stream) {
+  const dim3 grid(static_cast<unsigned int>((m + 63) / 64), n_tiles);
+  hipLaunchKernelGGL((RoutedIqPairKernel<Type, 128, kSignTable>), grid,
+                     dim3(kThreads), 0, stream, w, up, x, tiles, pad_bounds,
+                     rows_in, rows_out, out_half, m, k);
+  return true;
 }
 
 template<WeightType Type, int BN, bool Pair>
@@ -6456,6 +7513,20 @@ bool LaunchRoutedIq(const void* w, const void* up, const __half* x,
   constexpr bool kWideProbe = (BN == 128 && Pair) || (BN == 96 && !Pair);
   const int var = g_iq_variant.load(std::memory_order_relaxed);
   const int ab = g_iq_ablate.load(std::memory_order_relaxed);
+  if constexpr (Pair && BN == 128 &&
+                (Type == WeightType::kIQ2_XXS || Type == WeightType::kIQ2_XS ||
+                 Type == WeightType::kIQ2_S || Type == WeightType::kIQ3_XXS ||
+                 Type == WeightType::kIQ3_S)) {
+    // Not kVars of RoutedIqWmmaKernel: the register-fed pair kernel with the
+    // LDS sign-mask table (64) or with the masks built in registers (65).
+    if (var == kIqPairProbe && ab == 0)
+      return LaunchIqPair<Type>(w, up, x, tiles, n_tiles, pad_bounds, rows_in,
+                                rows_out, out_half, m, k, stream);
+    if (var == kIqPairProbe + 1 && ab == 0)
+      return LaunchIqPair<Type, false>(w, up, x, tiles, n_tiles, pad_bounds,
+                                       rows_in, rows_out, out_half, m, k,
+                                       stream);
+  }
   if constexpr (kProbeShape) {
     // kVar bit 4 is valid only if the complete output-row tile is in bounds.
     if (var >= 0 && (var & 16) && m % kRows != 0)
@@ -6768,6 +7839,42 @@ bool RoutedGatedF16Gemm(const void* gate, const void* up, WeightType type,
                                   rows_in, rows_out, out, m, k, stream);
 }
 
+bool RoutedIqPairGatedF16Gemm(const void* gate, const void* up, WeightType type,
+                              const __half* x, const std::int32_t* tiles,
+                              std::uint32_t n_tiles, std::uint32_t tile_rows,
+                              const std::int32_t* pad_bounds,
+                              const std::int32_t* rows_in,
+                              const std::int32_t* rows_out, __half* out,
+                              std::size_t m, std::size_t k, hipStream_t stream) {
+  if (m == 0 || k == 0 || k % 256 != 0 || n_tiles == 0 || out == nullptr ||
+      tile_rows != 128 || m > static_cast<std::size_t>(INT32_MAX))
+    return false;
+  switch (type) {
+    case WeightType::kIQ2_XXS:
+      return LaunchIqPair<WeightType::kIQ2_XXS>(gate, up, x, tiles, n_tiles,
+                                               pad_bounds, rows_in, rows_out,
+                                               out, m, k, stream);
+    case WeightType::kIQ2_XS:
+      return LaunchIqPair<WeightType::kIQ2_XS>(gate, up, x, tiles, n_tiles,
+                                              pad_bounds, rows_in, rows_out,
+                                              out, m, k, stream);
+    case WeightType::kIQ2_S:
+      return LaunchIqPair<WeightType::kIQ2_S>(gate, up, x, tiles, n_tiles,
+                                             pad_bounds, rows_in, rows_out, out,
+                                             m, k, stream);
+    case WeightType::kIQ3_XXS:
+      return LaunchIqPair<WeightType::kIQ3_XXS>(gate, up, x, tiles, n_tiles,
+                                               pad_bounds, rows_in, rows_out,
+                                               out, m, k, stream);
+    case WeightType::kIQ3_S:
+      return LaunchIqPair<WeightType::kIQ3_S>(gate, up, x, tiles, n_tiles,
+                                             pad_bounds, rows_in, rows_out, out,
+                                             m, k, stream);
+    default:
+      return false;
+  }
+}
+
 bool RoutedLanerowF16Gemm(const void* w, WeightType type, const __half* x,
                           const std::int32_t* tiles, std::uint32_t n_tiles,
                           std::uint32_t tile_rows,
@@ -6887,12 +7994,13 @@ struct AttentionProjectionOutput {
   const float* k_gamma;
   float* query;
   float* gate;
-  __half* keys;
-  __half* values;
+  void* keys;
+  void* values;
   const std::uint32_t* position;
   float theta;
   float eps;
   const qwen::vision::DeviceRope* rope;
+  YarnRope yarn;
 };
 
 /// Dense F16 WMMA GEMM over Q8_0 or F16 weights: block = BM rows x BN tokens,
@@ -6905,7 +8013,8 @@ struct AttentionProjectionOutput {
 /// skip decoding and use the same ordered K16 products. y is [batch][m].
 template<int BM, int BN, int BK, int WM, int WN, int kRowGroup = 1,
          bool kHcMix = false, bool kSsmConv = false, bool kAttention = false,
-         bool kHalfWeights = false, bool kBf16 = false, bool kStrided = false>
+         bool kHalfWeights = false, bool kBf16 = false, bool kStrided = false,
+         bool kYarn = false, bool kKvQ8 = false>
 __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     const void* __restrict__ w, const __half* __restrict__ x,
     float* __restrict__ y, std::size_t batch, std::size_t m, std::size_t k,
@@ -6975,34 +8084,11 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
 #endif
       ;
   const int t_block = (within / kRowGroup) * BN;
-  // BF16 replaces a library GEMM whose 32-token tile g starts its K loop
-  // (g % 4) * 4 blocks in and wraps. A block takes the four tiles of one
-  // rotation class, one per token wave, so every dot product keeps the
-  // library's order.
-  const int bf16_class = kBf16 ? static_cast<int>(blockIdx.x % 4) : 0;
-  const int batch_start =
-      kBf16 && token_offset != nullptr ? static_cast<int>(*token_offset) : 0;
-  const int slab_abs =
-      ((batch_start + static_cast<int>(blockIdx.x / 4) * 512) / 512) * 512;
-  if constexpr (kBf16) {
-    if (slab_abs + 512 <= batch_start ||
-        slab_abs >= batch_start + static_cast<int>(batch))
-      return;
-  }
-  const int k_rotation = kBf16 ? (bf16_class * 4) % num_kb : 0;
-  const auto token_of = [&](int local) {
-    if constexpr (kBf16) {
-      static_assert(BN == 128 && WN == 4 && kRowGroup == 1);
-      return slab_abs - batch_start + (bf16_class * 32) +
-             ((local / 32) * 128) + (local % 32);
-    } else {
-      return t_block + local;
-    }
-  };
-  const auto rotate = [&](int kb) {
-    const int r = kb + k_rotation;
-    return r >= num_kb ? r - num_kb : r;
-  };
+  // BF16 indexer scores must keep one K order across every token and batch
+  // placement, including mixed-session launches without an absolute offset
+  // (#714). Retain the legacy offset parameter only for source compatibility.
+  (void)token_offset;
+  const auto token_of = [&](int local) { return t_block + local; };
 
   // SSM thread tid owns row tid and K block p of the stage. Other paths
   // use row (p*256+tid)/BK and K block (p*256+tid)%BK; rows past m read
@@ -7043,7 +8129,7 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
       const bool live = a_live[p] && kb < num_kb;
       if constexpr (kRawWeights) {
         const auto* src = reinterpret_cast<const uint4*>(
-            a_ptr[p] + static_cast<std::size_t>(rotate(kb)) * 64);
+            a_ptr[p] + static_cast<std::size_t>(kb) * 64);
 #pragma unroll
         for (int c = 0; c < 4; ++c)
           a_half[p][c] = live ? src[c] : make_uint4(0u, 0u, 0u, 0u);
@@ -7061,7 +8147,7 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
       const int kb = kb0 + (((p * 256) + tid) % BK);
       if (b_ptr[p] != nullptr && kb < num_kb) {
         const auto* src =
-            reinterpret_cast<const uint4*>(b_ptr[p] + (rotate(kb) * 32));
+            reinterpret_cast<const uint4*>(b_ptr[p] + (kb * 32));
 #pragma unroll
         for (int c = 0; c < 4; ++c) {
           b_data[p][c] = src[c];
@@ -7303,13 +8389,17 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
               v[c] = v[c] * gamma[c * 32 + lane_id];
               asm volatile("" : "+v"(v[c]));
             }
-            const float freq = powf(
+            float freq = powf(
                 attention.theta, -2.0F * static_cast<float>(lane_id) / 64.0F);
+            if constexpr (kYarn)
+              freq = YarnFrequency(freq, lane_id, attention.yarn);
             float sn = 0.0F, cs = 0.0F;
             sincosf(qwen::vision::RopePosition(
                         attention.rope, *attention.position + tok, lane_id) *
                         freq,
                     &sn, &cs);
+            if constexpr (kYarn)
+              YarnScale(sn, cs, attention.yarn);
             const float lo = __fmaf_rn(v[0], cs, -__fmul_rn(v[1], sn));
             const float hi = __fmaf_rn(v[0], sn, __fmul_rn(v[1], cs));
             v[0] = lo;
@@ -7322,13 +8412,22 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
               attention.query[tok * width + head * dim + col] = v[c];
             else if (gate)
               attention.gate[tok * width + head * dim + col] = v[c];
+            else if constexpr (kKvQ8)
+              StoreKvLane<true>(
+                  key ? attention.keys : attention.values,
+                  std::size_t(*attention.position + tok) * kvwidth +
+                      head * dim + col,
+                  v[c]);
             else if (key)
-              attention.keys[std::size_t(*attention.position + tok) * kvwidth +
+              static_cast<__half*>(
+                  attention
+                      .keys)[std::size_t(*attention.position + tok) * kvwidth +
                              head * dim + col] = __float2half_rn(v[c]);
             else
-              attention
-                  .values[std::size_t(*attention.position + tok) * kvwidth +
-                          head * dim + col] = __float2half_rn(v[c]);
+              static_cast<__half*>(
+                  attention.values)[std::size_t(*attention.position + tok) *
+                                        kvwidth +
+                                    head * dim + col] = __float2half_rn(v[c]);
           }
         }
       }
@@ -7543,28 +8642,48 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
 
 bool AttentionF16Gemm(const void* weights, const __half* input,
                       const float* q_gamma, const float* k_gamma, float* query,
-                      float* gate, __half* keys, __half* values,
+                      float* gate, void* keys, void* values,
                       std::uint32_t n_tokens, const std::uint32_t* position,
                       float theta, float eps, hipStream_t stream,
-                      const qwen::vision::DeviceRope* rope) {
+                      const qwen::vision::DeviceRope* rope,
+                      const YarnRope& yarn, KvCacheType cache_type) {
+  // Rotated mode deliberately uses Dense + the separate rotated Prepare.
+  // Never reinterpret its 544-byte rows as F16 or rotate quantized bytes.
+  if (!IsKnownKvCacheType(cache_type) || KvIsRotated(cache_type))
+    return false;
   if (n_tokens == 0 || weights == nullptr || input == nullptr ||
       q_gamma == nullptr || k_gamma == nullptr || query == nullptr ||
       gate == nullptr || keys == nullptr || values == nullptr ||
       position == nullptr)
     return false;
-  const AttentionProjectionOutput output{q_gamma, k_gamma,  query, gate, keys,
-                                         values,  position, theta, eps,  rope};
+  const AttentionProjectionOutput output{q_gamma, k_gamma, query, gate, keys,
+                                         values, position, theta, eps, rope,
+                                         yarn};
   // One 256-row tile per query, gate, key or value head (52). Four row
   // tiles per token tile in launch order share each activation tile's read
   // (8.8 to 7.9 ms at 4,096 tokens). One K block per LDS stage halves the
   // stage to 24 KB, so three blocks share a WGP instead of two (7.8 to
   // 7.3 ms); the K order is unchanged.
-  hipLaunchKernelGGL(
-      (DenseF16GEMMKernel<256, 128, 1, 8, 1, 4, false, false, true>),
-      dim3((n_tokens + 127) / 128, 52), dim3(kThreads), 0, stream, weights,
-      input, nullptr, n_tokens, 13312, 2560, nullptr, nullptr, nullptr, nullptr,
-      nullptr, output);
-  return true;
+  const auto launch = [&]<bool kQ8>() {
+    if (yarn.enabled != 0) {
+      hipLaunchKernelGGL(
+          (DenseF16GEMMKernel<256, 128, 1, 8, 1, 4, false, false, true, false,
+                              false, false, true, kQ8>),
+          dim3((n_tokens + 127) / 128, 52), dim3(kThreads), 0, stream, weights,
+          input, nullptr, n_tokens, 13312, 2560, nullptr, nullptr, nullptr,
+          nullptr, nullptr, output);
+      return true;
+    }
+    hipLaunchKernelGGL(
+        (DenseF16GEMMKernel<256, 128, 1, 8, 1, 4, false, false, true, false,
+                            false, false, false, kQ8>),
+        dim3((n_tokens + 127) / 128, 52), dim3(kThreads), 0, stream, weights,
+        input, nullptr, n_tokens, 13312, 2560, nullptr, nullptr, nullptr,
+        nullptr, nullptr, output);
+    return true;
+  };
+  return cache_type == KvCacheType::kQ8_0 ? launch.template operator()<true>()
+                                          : launch.template operator()<false>();
 }
 
 #ifdef GUFO_NPU
@@ -7633,10 +8752,10 @@ bool DenseBf16Gemm(const void* w, const void* x, float* out, std::size_t batch,
                    const std::uint32_t* token_offset) {
   if (m == 0 || batch == 0 || k == 0 || k % 32 != 0)
     return false;
-  // Cover the leading partial absolute slab and every remaining slab.
+  // One K16 chain in K order for every token, independent of its position.
   hipLaunchKernelGGL((DenseF16GEMMKernel<64, 128, 2, 2, 4, 1, false, false,
                                          false, false, true>),
-                     dim3(((batch + 511) / 512 + 1) * 4, (m + 63) / 64),
+                     dim3((batch + 127) / 128, (m + 63) / 64),
                      dim3(kThreads), 0, stream, w,
                      static_cast<const __half*>(x), out, batch, m, k,
                      nullptr, nullptr, nullptr, nullptr, nullptr,
@@ -7829,6 +8948,15 @@ void SmallGemmForType(const void* w, const float* x, float* out,
   }
 }
 
+void SmallGemmHcBf16Variant(const void* w, const float* x, float* out,
+                            std::uint32_t n_tokens, std::uint32_t m,
+                            std::uint32_t k, bool candidate,
+                            hipStream_t stream) {
+  if (candidate && hc_bf16_detail::TryLaunch(w, x, out, n_tokens, m, k, stream))
+    return;
+  SmallGemmForType<WeightType::kBF16>(w, x, out, n_tokens, m, k, stream);
+}
+
 void SmallGemm(const void* w, WeightType type, const float* x, float* out,
                std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
                hipStream_t stream) {
@@ -7837,8 +8965,8 @@ void SmallGemm(const void* w, WeightType type, const float* x, float* out,
       return SmallGemmForType<WeightType::kF32>(w, x, out, n_tokens, m, k,
                                                 stream);
     case WeightType::kBF16:
-      return SmallGemmForType<WeightType::kBF16>(w, x, out, n_tokens, m, k,
-                                                 stream);
+      return SmallGemmHcBf16Variant(w, x, out, n_tokens, m, k,
+                                    hc_bf16_dense::Enabled(), stream);
     case WeightType::kF16:
       return SmallGemmForType<WeightType::kF16>(w, x, out, n_tokens, m, k,
                                                 stream);
@@ -7858,11 +8986,33 @@ void PleConv(const float* in, const float* w, float* history,
              float* history_scratch, float* out, RollbackRows snapshots,
              std::uint32_t n_tokens, std::uint32_t channels,
              std::uint32_t kernel, std::uint32_t dilation, hipStream_t stream) {
+  PleConvTyped(in, w, WeightType::kF32, history, history_scratch, out, snapshots,
+               n_tokens, channels, kernel, dilation, stream);
+}
+
+void PleConvTyped(const float* in, const void* w, WeightType type,
+                  float* history, float* history_scratch, float* out,
+                  RollbackRows snapshots, std::uint32_t n_tokens,
+                  std::uint32_t channels, std::uint32_t kernel,
+                  std::uint32_t dilation, hipStream_t stream) {
   const std::uint32_t hist = (kernel - 1) * dilation;
   const std::size_t count = static_cast<std::size_t>(n_tokens) * channels;
-  hipLaunchKernelGGL(PleConvKernel, dim3(Blocks(count)), dim3(kThreads), 0,
+  if (type == WeightType::kF16) {
+    hipLaunchKernelGGL(PleConvKernel<WeightType::kF16>, dim3(Blocks(count)), dim3(kThreads), 0,
                      stream, in, w, history, out, n_tokens, channels, kernel,
                      dilation, hist);
+    static std::atomic<bool> seen{false};
+    if (!seen.exchange(true, std::memory_order_relaxed))
+      gufo::server::Logger::Raw(
+          "[native-dispatch] role=ple_conv1d.weight type=F16 pass=convolution "
+          "kernel=ple-conv-f16 host_launches=1\n");
+  } else if (type == WeightType::kF32) {
+    hipLaunchKernelGGL(PleConvKernel<WeightType::kF32>, dim3(Blocks(count)), dim3(kThreads), 0,
+                     stream, in, w, history, out, n_tokens, channels, kernel,
+                     dilation, hist);
+  } else {
+    throw std::logic_error("ple_conv1d.weight pass=convolution: unsupported weight type");
+  }
   if (snapshots.rows[0] != nullptr && n_tokens > 1) {
     const std::size_t saved = static_cast<std::size_t>(n_tokens - 1) * channels;
     hipLaunchKernelGGL(RollingSnapshotKernel, dim3(Blocks(saved * hist)),
@@ -8000,11 +9150,25 @@ __global__ void GatherRowsKernel(const std::uint32_t* __restrict__ src,
 }
 
 __global__ void RemapIdsKernel(std::uint32_t* ids, std::uint32_t count,
-                               const std::int32_t* map) {
+                               const std::int32_t* map,
+                               std::uint32_t map_rows) {
   const std::uint32_t i = threadIdx.x;
   if (i < count) {
-    ids[i] = static_cast<std::uint32_t>(map[ids[i]]);
+    ids[i] = ids[i] < map_rows ? static_cast<std::uint32_t>(map[ids[i]])
+                              : UINT32_MAX;
   }
+}
+
+__global__ void RemapDraftIdsKernel(std::uint32_t* ids, std::uint32_t count,
+                                    std::uint32_t prefix,
+                                    const std::int32_t* table,
+                                    std::uint32_t table_rows) {
+  const std::uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= count || ids[i] < prefix)
+    return;
+  const auto row = ids[i] - prefix;
+  ids[i] = row < table_rows ? static_cast<std::uint32_t>(table[row])
+                            : UINT32_MAX;
 }
 }  // namespace
 
@@ -8019,9 +9183,16 @@ void GatherRows(const void* src, void* dst, const std::int32_t* ids,
 }
 
 void RemapIds(std::uint32_t* ids, std::uint32_t count, const std::int32_t* map,
-              hipStream_t stream) {
+              std::uint32_t map_rows, hipStream_t stream) {
   hipLaunchKernelGGL(RemapIdsKernel, dim3(1), dim3(64), 0, stream, ids, count,
-                     map);
+                     map, map_rows);
+}
+
+void RemapDraftIds(std::uint32_t* ids, std::uint32_t count,
+                   std::uint32_t prefix, const std::int32_t* table,
+                   std::uint32_t table_rows, hipStream_t stream) {
+  hipLaunchKernelGGL(RemapDraftIdsKernel, dim3(Blocks(count)), dim3(kThreads), 0,
+                     stream, ids, count, prefix, table, table_rows);
 }
 
 void CopyRegions(const CopyRegion* regions, unsigned count,
@@ -8058,10 +9229,24 @@ void CopyMapped(const void* src, void* dst, std::size_t bytes,
 
 void RestoreGdnState(float* state, RollbackRows snapshots, std::uint32_t keep,
                      std::uint32_t k_heads, std::uint32_t v_heads,
-                     hipStream_t stream) {
+                     hipStream_t stream, const GreedyKeepResult* device_keep) {
   const auto count = std::size_t{v_heads} * kGdnDim * kGdnDim;
   RestoreGdnStateKernel<<<(count + 255) / 256, 256, 0, stream>>>(
-      state, snapshots, keep, k_heads, v_heads);
+      state, snapshots, keep, k_heads, v_heads, device_keep);
+}
+
+void RestoreRollbackRows(float* out, RollbackRows snapshots, std::size_t count,
+                         std::uint32_t width, const GreedyKeepResult* keep,
+                         hipStream_t stream) {
+  RestoreRollbackRowsKernel<<<(count + 255) / 256, 256, 0, stream>>>(
+      out, snapshots, count, width, keep);
+}
+
+void GatherRollbackFrontier(const float* logits, float* out,
+                            std::uint32_t vocab, const GreedyKeepResult* keep,
+                            hipStream_t stream) {
+  GatherRollbackFrontierKernel<<<(vocab + 255) / 256, 256, 0, stream>>>(
+      logits, out, vocab, keep);
 }
 
 void HistoryPrefix(const float* in, std::uint32_t stride, const float* history,
@@ -8207,12 +9392,42 @@ void UnpackQGate(const float* qg, std::uint32_t qg_stride, float* q,
 
 bool PrepareAttention(const float* packed, std::uint32_t stride,
                       const float* q_gamma, const float* k_gamma, float* q,
-                      float* gate, __half* k_cache, __half* v_cache,
+                      float* gate, void* k_cache, void* v_cache,
                       std::uint32_t n_tokens, std::uint32_t heads,
                       std::uint32_t kv_heads, std::uint32_t d,
                       std::uint32_t rotary_dim, const std::uint32_t* start_pos,
                       float theta, float eps, hipStream_t stream,
-                      const qwen::vision::DeviceRope* rope, bool prefill) {
+                      const qwen::vision::DeviceRope* rope, bool prefill,
+                      const YarnRope& yarn, KvCacheType cache_type) {
+  if (!IsKnownKvCacheType(cache_type))
+    return false;
+  if (KvIsRotated(cache_type)) {
+    if (d != 256 || rotary_dim != 64 || kv_heads != 2 ||
+        (heads != 0 && heads != 24) ||
+        stride < std::size_t{2} * (heads + kv_heads) * d)
+      return false;
+    if (n_tokens == 0)
+      return true;
+    if (packed == nullptr || k_cache == nullptr || v_cache == nullptr ||
+        start_pos == nullptr ||
+        (heads != 0 && (q == nullptr || gate == nullptr)))
+      return false;
+    if (yarn.enabled != 0)
+      hipLaunchKernelGGL((PrepareRotatedAttentionKernel<true>),
+                         dim3(n_tokens, heads + kv_heads), dim3(kThreads), 0,
+                         stream, packed, stride, q_gamma, k_gamma, q, gate,
+                         k_cache, v_cache, heads, start_pos, theta, eps, rope,
+                         yarn);
+    else
+      hipLaunchKernelGGL((PrepareRotatedAttentionKernel<false>),
+                         dim3(n_tokens, heads + kv_heads), dim3(kThreads), 0,
+                         stream, packed, stride, q_gamma, k_gamma, q, gate,
+                         k_cache, v_cache, heads, start_pos, theta, eps, rope,
+                         yarn);
+    return true;
+  }
+  if (cache_type == KvCacheType::kQ8_0 && d % 32 != 0)
+    return false;
   if (d == 0 || d > 256 || rotary_dim == 0 || rotary_dim > d ||
       rotary_dim % 2 != 0 || kv_heads == 0 ||
       stride < static_cast<std::size_t>(2) * (heads + kv_heads) * d) {
@@ -8220,35 +9435,107 @@ bool PrepareAttention(const float* packed, std::uint32_t stride,
   }
   if (n_tokens == 0)
     return true;
-  if (!prefill && n_tokens < 32) {
-    hipLaunchKernelGGL((PrepareAttentionKernel<1>),
-                       dim3(n_tokens, heads + kv_heads), dim3(kThreads), 0,
-                       stream, packed, stride, q_gamma, k_gamma, q, gate,
-                       k_cache, v_cache, heads, kv_heads, d, rotary_dim,
-                       start_pos, theta, eps, rope);
-  } else {
-    hipLaunchKernelGGL((PrepareAttentionKernel<4>),
-                       dim3(n_tokens, (heads + kv_heads + 3) / 4),
-                       dim3(kThreads), 0, stream, packed, stride, q_gamma,
-                       k_gamma, q, gate, k_cache, v_cache, heads, kv_heads, d,
-                       rotary_dim, start_pos, theta, eps, rope);
+  const auto launch = [&]<bool kQ8>() {
+    if (yarn.enabled != 0) {
+      if (!prefill && n_tokens < 32) {
+        hipLaunchKernelGGL((PrepareAttentionKernel<1, true, kQ8>),
+                           dim3(n_tokens, heads + kv_heads), dim3(kThreads), 0,
+                           stream, packed, stride, q_gamma, k_gamma, q, gate,
+                           k_cache, v_cache, heads, kv_heads, d, rotary_dim,
+                           start_pos, theta, eps, rope, yarn);
+      } else {
+        hipLaunchKernelGGL((PrepareAttentionKernel<4, true, kQ8>),
+                           dim3(n_tokens, (heads + kv_heads + 3) / 4),
+                           dim3(kThreads), 0, stream, packed, stride, q_gamma,
+                           k_gamma, q, gate, k_cache, v_cache, heads, kv_heads,
+                           d, rotary_dim, start_pos, theta, eps, rope, yarn);
+      }
+    } else {
+      if (!prefill && n_tokens < 32) {
+        hipLaunchKernelGGL((PrepareAttentionKernel<1, false, kQ8>),
+                           dim3(n_tokens, heads + kv_heads), dim3(kThreads), 0,
+                           stream, packed, stride, q_gamma, k_gamma, q, gate,
+                           k_cache, v_cache, heads, kv_heads, d, rotary_dim,
+                           start_pos, theta, eps, rope, yarn);
+      } else {
+        hipLaunchKernelGGL((PrepareAttentionKernel<4, false, kQ8>),
+                           dim3(n_tokens, (heads + kv_heads + 3) / 4),
+                           dim3(kThreads), 0, stream, packed, stride, q_gamma,
+                           k_gamma, q, gate, k_cache, v_cache, heads, kv_heads,
+                           d, rotary_dim, start_pos, theta, eps, rope, yarn);
+      }
+    }
+  };
+  if (cache_type == KvCacheType::kQ8_0)
+    launch.template operator()<true>();
+  else
+    launch.template operator()<false>();
+  return true;
+}
+
+bool RotateKvRows(float* x, std::uint32_t n_tokens, std::uint32_t heads,
+                  std::uint32_t d, KvRotationKind kind, hipStream_t stream) {
+  if (d != 256 || heads == 0 || heads > 24)
+    return false;
+  unsigned rotation;
+  switch (kind) {
+    case KvRotationKind::kKeyQuery:
+      rotation = 256;
+      break;
+    case KvRotationKind::kValueOutput:
+      rotation = 64;
+      break;
+    default:
+      return false;
   }
+  if (n_tokens == 0)
+    return true;
+  if (x == nullptr)
+    return false;
+  const std::uint64_t segments =
+      std::uint64_t{n_tokens} * heads * (256 / rotation);
+  const auto groups = (segments + 3) / 4;
+  if (groups > 0x7fffffffU)
+    return false;
+  const dim3 grid(static_cast<unsigned>(groups)), block(32, 4);
+  if (rotation == 256)
+    hipLaunchKernelGGL((RotateKvRowsKernel<256>), grid, block, 0, stream, x,
+                       segments);
+  else
+    hipLaunchKernelGGL((RotateKvRowsKernel<64>), grid, block, 0, stream, x,
+                       segments);
   return true;
 }
 
 void Rope(float* x, std::uint32_t n_tokens, std::uint32_t heads,
           std::uint32_t d, std::uint32_t rotary_dim,
           const std::uint32_t* start_pos, float theta, hipStream_t stream,
-          const qwen::vision::DeviceRope* rope) {
-  hipLaunchKernelGGL(RopeKernel, dim3(n_tokens), dim3(kThreads), 0, stream, x,
-                     heads, d, rotary_dim, start_pos, theta, rope);
+          const qwen::vision::DeviceRope* rope, const YarnRope& yarn) {
+  if (yarn.enabled != 0)
+    hipLaunchKernelGGL(RopeKernel<true>, dim3(n_tokens), dim3(kThreads), 0,
+                       stream, x, heads, d, rotary_dim, start_pos, theta, rope,
+                       yarn);
+  else
+    hipLaunchKernelGGL(RopeKernel<false>, dim3(n_tokens), dim3(kThreads), 0,
+                       stream, x, heads, d, rotary_dim, start_pos, theta, rope,
+                       yarn);
 }
 
-void StoreKv(const float* src, __half* cache, std::uint32_t n_tokens,
+void StoreKv(const float* src, void* cache, std::uint32_t n_tokens,
              std::uint32_t row_dim, const std::uint32_t* start_pos,
-             hipStream_t stream) {
-  hipLaunchKernelGGL(StoreKvKernel, dim3(n_tokens), dim3(kThreads), 0, stream,
-                     src, cache, row_dim, start_pos);
+             hipStream_t stream, KvCacheType cache_type) {
+  // Codec only: callers of rotated mode must supply already-rotated values.
+  // The helper rejects unknown representations before any GPU work.
+  cache_type =
+      KvUsesQ8Codec(cache_type) ? KvCacheType::kQ8_0 : KvCacheType::kF16;
+  if (!IsValidKvRow(row_dim, cache_type))
+    throw std::invalid_argument("invalid Flash-Next KV store block geometry");
+  if (cache_type == KvCacheType::kQ8_0)
+    hipLaunchKernelGGL((StoreKvKernel<true>), dim3(n_tokens), dim3(kThreads), 0,
+                       stream, src, cache, row_dim, start_pos);
+  else
+    hipLaunchKernelGGL((StoreKvKernel<false>), dim3(n_tokens), dim3(kThreads),
+                       0, stream, src, cache, row_dim, start_pos);
 }
 
 void StoreRows(const float* src, float* dst, std::uint32_t n_tokens,
@@ -8264,14 +9551,21 @@ void PoolIndexerBlocks(const float* raw_keys, const float* gamma,
                        std::uint32_t grid_blocks, std::uint32_t ratio,
                        std::uint32_t dim, std::uint32_t rotary_dim, float theta,
                        float eps, std::uint32_t capacity, hipStream_t stream,
-                       const qwen::vision::DeviceRope* rope) {
+                       const qwen::vision::DeviceRope* rope,
+                       const YarnRope& yarn) {
   if (grid_blocks == 0) {
     return;
   }
-  hipLaunchKernelGGL(PoolBlocksKernel, dim3(grid_blocks), dim3(kThreads), 0,
-                     stream, raw_keys, gamma, blocks, first_block, start_pos,
-                     n_tokens, ratio, dim, rotary_dim, theta, eps, capacity,
-                     rope);
+  if (yarn.enabled != 0)
+    hipLaunchKernelGGL(PoolBlocksKernel<true>, dim3(grid_blocks),
+                       dim3(kThreads), 0, stream, raw_keys, gamma, blocks,
+                       first_block, start_pos, n_tokens, ratio, dim, rotary_dim,
+                       theta, eps, capacity, rope, yarn);
+  else
+    hipLaunchKernelGGL(PoolBlocksKernel<false>, dim3(grid_blocks),
+                       dim3(kThreads), 0, stream, raw_keys, gamma, blocks,
+                       first_block, start_pos, n_tokens, ratio, dim, rotary_dim,
+                       theta, eps, capacity, rope, yarn);
 }
 
 void SelectBlocks(const float* q, const __half* blocks, std::uint32_t* mask,
@@ -8299,61 +9593,101 @@ void SelectBlocks(const float* q, const __half* blocks, std::uint32_t* mask,
                      budget, mask_words, max_blocks);
 }
 
-void Attention(const float* q, const __half* k_cache, const __half* v_cache,
+void Attention(const float* q, const void* k_cache, const void* v_cache,
                const std::uint32_t* mask, std::uint32_t mask_words, float* out,
                float* partials, std::uint32_t splits, std::uint32_t n_tokens,
                const std::uint32_t* start_pos, std::uint32_t heads,
                std::uint32_t kv_heads, std::uint32_t d, std::uint32_t ratio,
-               hipStream_t stream) {
+               hipStream_t stream, KvCacheType cache_type) {
+  if (!IsKnownKvCacheType(cache_type))
+    throw std::invalid_argument(
+        "unknown Flash-Next attention KV representation");
+  if (KvIsRotated(cache_type) && (heads != 24 || kv_heads != 2 || d != 256))
+    throw std::invalid_argument(
+        "invalid rotated Flash-Next attention geometry");
+  cache_type =
+      KvUsesQ8Codec(cache_type) ? KvCacheType::kQ8_0 : KvCacheType::kF16;
   if (d != 256) {
     return;  // the kernel is written for the model's 256-wide heads
   }
   const std::uint32_t z = partials != nullptr ? std::max(splits, 1u) : 1u;
-  hipLaunchKernelGGL(AttentionKernel, dim3(heads, n_tokens, z), dim3(kThreads),
-                     0, stream, q, k_cache, v_cache, mask, mask_words, out,
-                     partials, start_pos, heads, kv_heads, d, ratio);
+  if (cache_type == KvCacheType::kQ8_0) {
+    hipLaunchKernelGGL((AttentionKernel<true>), dim3(heads, n_tokens, z),
+                       dim3(kThreads), 0, stream, q, k_cache, v_cache, mask,
+                       mask_words, out, partials, start_pos, heads, kv_heads, d,
+                       ratio);
+  } else {
+    hipLaunchKernelGGL((AttentionKernel<false>), dim3(heads, n_tokens, z),
+                       dim3(kThreads), 0, stream, q, k_cache, v_cache, mask,
+                       mask_words, out, partials, start_pos, heads, kv_heads, d,
+                       ratio);
+  }
   if (z > 1) {
     hipLaunchKernelGGL(AttentionMergeKernel, dim3(heads, n_tokens),
                        dim3(kThreads), 0, stream, partials, out, heads, d, z);
   }
 }
 
-bool WmmaCausalAttention(const float* q, const float* gate,
-                         const __half* k_cache, const __half* v_cache,
-                         const std::uint32_t* mask, std::uint32_t mask_words,
-                         float* out, std::uint32_t n_tokens,
-                         std::uint32_t start_pos, std::uint32_t heads,
-                         std::uint32_t kv_heads, std::uint32_t d,
-                         std::uint32_t ratio, hipStream_t stream,
-                         bool last_only) {
+std::uint32_t WmmaCausalAttentionContextLimit(std::uint32_t heads,
+                                              std::uint32_t kv_heads,
+                                              std::uint32_t d,
+                                              std::uint32_t ratio) {
   if (heads != kWmmaQueryHeads || kv_heads != kWmmaKvHeads ||
-      d != kWmmaHeadDim || ratio != kWmmaRatio || n_tokens == 0 ||
-      (mask != nullptr && mask_words > kWmmaMaxMaskWords)) {
+      d != kWmmaHeadDim || ratio != kWmmaRatio)
+    return 0;
+  return kWmmaMaxMaskWords * kWmmaRatio * 32;
+}
+
+bool WmmaCausalAttention(const float* q, const float* gate, const void* k_cache,
+                         const void* v_cache, const std::uint32_t* mask,
+                         std::uint32_t mask_words, float* out,
+                         std::uint32_t n_tokens, std::uint32_t start_pos,
+                         std::uint32_t heads, std::uint32_t kv_heads,
+                         std::uint32_t d, std::uint32_t ratio,
+                         hipStream_t stream, bool last_only,
+                         KvCacheType cache_type) {
+  if (!IsKnownKvCacheType(cache_type))
+    return false;
+  cache_type =
+      KvUsesQ8Codec(cache_type) ? KvCacheType::kQ8_0 : KvCacheType::kF16;
+  if (WmmaCausalAttentionContextLimit(heads, kv_heads, d, ratio) == 0 ||
+      n_tokens == 0) {
     return false;
   }
   if (mask != nullptr) {
-    constexpr std::uint32_t kPackedQueries = 4;
-    const std::uint32_t first_group =
-        last_only ? (n_tokens - 1) / kPackedQueries : 0;
-    const dim3 grid(
-        (n_tokens + kPackedQueries - 1) / kPackedQueries - first_group,
-        kWmmaKvHeads);
-    hipLaunchKernelGGL(
-        (WmmaCausalAttentionKernel<kPackedQueries, kWmmaKeys, true>), grid,
-        dim3(kThreads), 0, stream, q, gate, k_cache, v_cache, mask, mask_words,
-        out, start_pos, n_tokens, first_group);
-    return true;
+    const std::uint64_t blocks =
+        (std::uint64_t{start_pos} + n_tokens + kWmmaRatio - 1) / kWmmaRatio;
+    const std::uint64_t words = (blocks + 31) / 32;
+    if (words > kWmmaMaxMaskWords || words > mask_words)
+      return false;
   }
-  const std::uint32_t first_group =
-      last_only ? (n_tokens - 1) / kWmmaQueryRows : 0;
-  const dim3 grid(
-      (n_tokens + kWmmaQueryRows - 1) / kWmmaQueryRows - first_group,
-      kWmmaKvHeads * (kWmmaGqa / kWmmaHeads));
-  hipLaunchKernelGGL(
-      (WmmaCausalAttentionKernel<kWmmaQueryRows, kWmmaKeys, false>), grid,
-      dim3(kThreads), 0, stream, q, gate, k_cache, v_cache, mask, mask_words,
-      out, start_pos, n_tokens, first_group);
-  return true;
+  const auto launch = [&]<bool kQ8>() {
+    if (mask != nullptr) {
+      constexpr std::uint32_t kPackedQueries = 4;
+      const std::uint32_t first_group =
+          last_only ? (n_tokens - 1) / kPackedQueries : 0;
+      const dim3 grid(
+          (n_tokens + kPackedQueries - 1) / kPackedQueries - first_group,
+          kWmmaKvHeads);
+      hipLaunchKernelGGL(
+          (WmmaCausalAttentionKernel<kPackedQueries, kWmmaKeys, true, kQ8>),
+          grid, dim3(kThreads), 0, stream, q, gate, k_cache, v_cache, mask,
+          mask_words, out, start_pos, n_tokens, first_group);
+      return true;
+    }
+    const std::uint32_t first_group =
+        last_only ? (n_tokens - 1) / kWmmaQueryRows : 0;
+    const dim3 grid(
+        (n_tokens + kWmmaQueryRows - 1) / kWmmaQueryRows - first_group,
+        kWmmaKvHeads * (kWmmaGqa / kWmmaHeads));
+    hipLaunchKernelGGL(
+        (WmmaCausalAttentionKernel<kWmmaQueryRows, kWmmaKeys, false, kQ8>),
+        grid, dim3(kThreads), 0, stream, q, gate, k_cache, v_cache, mask,
+        mask_words, out, start_pos, n_tokens, first_group);
+    return true;
+  };
+  return cache_type == KvCacheType::kQ8_0 ? launch.template operator()<true>()
+                                          : launch.template operator()<false>();
 }
 
 __global__ void ExpertCountsKernel(const std::int32_t* ids,
@@ -8367,7 +9701,25 @@ __global__ void ExpertCountsKernel(const std::int32_t* ids,
 
 void RouterTopK(const float* logits, std::uint32_t stride, std::int32_t* ids,
                 float* weights, std::uint32_t n_tokens, std::uint32_t n_experts,
-                std::uint32_t k, hipStream_t stream) {
+                std::uint32_t k, hipStream_t stream, std::uint32_t k_keep,
+                PrefillExpertsMode mode, float mass, float fold) {
+  if (k_keep != 0) {
+    if (k == 0 || k > 32 || k_keep > k || n_experts > 1024 || k > n_experts ||
+        !std::isfinite(mass) || mass <= 0 || mass > 1 || !std::isfinite(fold) ||
+        static_cast<unsigned>(mode) >
+            static_cast<unsigned>(PrefillExpertsMode::kMass))
+      throw std::invalid_argument("invalid router pruning policy");
+    if (n_experts <= 512) {
+      hipLaunchKernelGGL((PrunedRouterTopKKernel<512>), dim3(n_tokens),
+                         dim3(kThreads), 0, stream, logits, stride, ids,
+                         weights, n_experts, k, k_keep, mode, mass, fold);
+    } else {
+      hipLaunchKernelGGL((PrunedRouterTopKKernel<1024>), dim3(n_tokens),
+                         dim3(kThreads), 0, stream, logits, stride, ids,
+                         weights, n_experts, k, k_keep, mode, mass, fold);
+    }
+    return;
+  }
   if (n_experts <= 512) {
     hipLaunchKernelGGL((RouterTopKKernel<512>), dim3(n_tokens), dim3(kThreads),
                        0, stream, logits, stride, ids, weights, n_experts, k);
@@ -8375,6 +9727,113 @@ void RouterTopK(const float* logits, std::uint32_t stride, std::int32_t* ids,
     hipLaunchKernelGGL((RouterTopKKernel<1024>), dim3(n_tokens), dim3(kThreads),
                        0, stream, logits, stride, ids, weights, n_experts, k);
   }
+}
+
+template<class T>
+__device__ T RoutedExpertSentinel() {
+  if constexpr (sizeof(T) == 2)
+    return __builtin_bit_cast(T, std::uint16_t{0x7e55});
+  else
+    return __builtin_bit_cast(T, std::uint32_t{0x7fc01357});
+}
+
+template<class T>
+__device__ bool IsRoutedExpertSentinel(T value) {
+  if constexpr (sizeof(T) == 2)
+    return __builtin_bit_cast(std::uint16_t, value) == 0x7e55;
+  else
+    return __builtin_bit_cast(std::uint32_t, value) == 0x7fc01357;
+}
+
+template<class T, bool Audit>
+__global__ void PrepareRoutedExpertRowsKernel(T* down, const std::int32_t* ids,
+                                              std::uint32_t slots,
+                                              std::uint32_t dim) {
+  // Eight rows per workgroup: one wave per row, including kept rows whose
+  // sole full-audit store is a first-scalar sentinel. Lean never poisons.
+  const std::size_t row = blockIdx.x * (kThreads / 32) + threadIdx.x / 32;
+  const unsigned lane = threadIdx.x % 32;
+  if (row >= slots)
+    return;
+  if (ids[row] < 0) {
+    // Full checks column zero after the GEMM, then clears it. Lean clears
+    // the entire dropped row now in the representation the epilogue reads.
+    for (std::uint32_t col = lane + (Audit ? 1 : 0); col < dim; col += 32)
+      down[row * dim + col] = static_cast<T>(0.0f);
+  }
+  if constexpr (Audit) {
+    if (lane == 0)
+      down[row * dim] = RoutedExpertSentinel<T>();
+  }
+}
+
+template<class T>
+__global__ void CountRoutedExpertRowsKernel(T* down, const std::int32_t* ids,
+                                            std::uint32_t slots,
+                                            std::uint32_t dim,
+                                            RoutedExpertAudit* counters,
+                                            RoutedExpertDroppedRows dropped) {
+  __shared__ float shared[kThreads / 32];
+  const auto row = blockIdx.x * blockDim.x + threadIdx.x;
+  float executed = 0, invalid = 0;
+  if (row < slots) {
+    auto& first = down[static_cast<std::size_t>(row) * dim];
+    const bool untouched = IsRoutedExpertSentinel(first);
+    const auto observation = ObserveRoutedExpertRow(
+        ids[row] >= 0, untouched, __float_as_uint(static_cast<float>(first)),
+        dropped);
+    executed = observation.executed;
+    invalid = observation.invalid;
+    if (ids[row] < 0) {
+      // All combines, including fused HC, must see zero in dropped rows.
+      // Vector down may already have stored zero; MMQ/WMMA leave sentinels.
+      first = static_cast<T>(0.0f);
+    }
+  }
+  const auto writes =
+      static_cast<unsigned long long>(BlockSum(executed, shared));
+  const auto errors =
+      static_cast<unsigned long long>(BlockSum(invalid, shared));
+  if (threadIdx.x == 0 && (writes || errors))
+    atomicAdd(&counters->packed, writes | (errors << 32));
+}
+
+void PrepareRoutedExpertRows(void* down, bool f16, const std::int32_t* ids,
+                             std::uint32_t slots, std::uint32_t dim,
+                             hipStream_t stream, PrefillExpertsAudit audit) {
+  const auto launch = [&]<class T, bool Audit>() {
+    hipLaunchKernelGGL((PrepareRoutedExpertRowsKernel<T, Audit>),
+                       dim3((slots + kThreads / 32 - 1) / (kThreads / 32)),
+                       dim3(kThreads), 0, stream, static_cast<T*>(down), ids,
+                       slots, dim);
+  };
+  if (audit == PrefillExpertsAudit::kFull) {
+    if (f16)
+      launch.operator()<__half, true>();
+    else
+      launch.operator()<float, true>();
+  } else if (audit == PrefillExpertsAudit::kLean) {
+    if (f16)
+      launch.operator()<__half, false>();
+    else
+      launch.operator()<float, false>();
+  } else {
+    throw std::invalid_argument("invalid routed expert audit mode");
+  }
+}
+
+void CountRoutedExpertRows(void* down, bool f16, const std::int32_t* ids,
+                           std::uint32_t slots, std::uint32_t dim,
+                           RoutedExpertAudit* counters, hipStream_t stream,
+                           RoutedExpertDroppedRows dropped) {
+  if (f16)
+    hipLaunchKernelGGL(CountRoutedExpertRowsKernel<__half>, dim3(Blocks(slots)),
+                       dim3(kThreads), 0, stream, static_cast<__half*>(down),
+                       ids, slots, dim, counters, dropped);
+  else
+    hipLaunchKernelGGL(CountRoutedExpertRowsKernel<float>, dim3(Blocks(slots)),
+                       dim3(kThreads), 0, stream, static_cast<float*>(down),
+                       ids, slots, dim, counters, dropped);
 }
 
 void ExpertCounts(const std::int32_t* ids, std::uint32_t* counts,
@@ -8389,37 +9848,41 @@ void ExpertCounts(const std::int32_t* ids, std::uint32_t* counts,
 void MoeEpilogue(const float* expert_out, const float* weights,
                  const float* shared, const float* gate,
                  std::uint32_t gate_stride, float* out, std::uint32_t n_tokens,
-                 std::uint32_t k, std::uint32_t dim, hipStream_t stream) {
+                 std::uint32_t k, std::uint32_t dim, hipStream_t stream,
+                 const float* direction, float direction_strength) {
   hipLaunchKernelGGL(MoeEpilogueKernel, dim3(n_tokens, Blocks(dim)),
                      dim3(kThreads), 0, stream, expert_out, weights, shared,
-                     gate, gate_stride, out, k, dim);
+                     gate, gate_stride, out, k, dim, direction,
+                     direction_strength);
 }
 
 void MoeEpilogueVec4(const float* expert_out, const float* weights,
                      const float* shared, const float* gate,
                      std::uint32_t gate_stride, float* out,
                      std::uint32_t n_tokens, std::uint32_t k, std::uint32_t dim,
-                     hipStream_t stream) {
+                     hipStream_t stream, const float* direction,
+                     float direction_strength) {
   if (dim % 4 != 0) {
     MoeEpilogue(expert_out, weights, shared, gate, gate_stride, out, n_tokens,
-                k, dim, stream);
+                k, dim, stream, direction, direction_strength);
     return;
   }
   hipLaunchKernelGGL(MoeEpilogueVec4Kernel<float>,
                      dim3(n_tokens, Blocks(dim / 4)), dim3(kThreads), 0, stream,
                      expert_out, weights, shared, gate, gate_stride, out, k,
-                     dim);
+                     dim, direction, direction_strength);
 }
 
 void MoeEpilogueVec4F16(const __half* expert_out, const float* weights,
                         const float* shared, const float* gate,
                         std::uint32_t gate_stride, float* out,
                         std::uint32_t n_tokens, std::uint32_t k,
-                        std::uint32_t dim, hipStream_t stream) {
+                        std::uint32_t dim, hipStream_t stream,
+                        const float* direction, float direction_strength) {
   hipLaunchKernelGGL(MoeEpilogueVec4Kernel<__half>,
                      dim3(n_tokens, Blocks(dim / 4)), dim3(kThreads), 0, stream,
                      expert_out, weights, shared, gate, gate_stride, out, k,
-                     dim);
+                     dim, direction, direction_strength);
 }
 
 void MtpHidden(const float* base, const float* alt, const std::int32_t* row,
@@ -8481,6 +9944,22 @@ void PenalizedArgmax(const float* logits, GreedyPenaltyRows penalties,
                                                            vocab);
 }
 
+void PublishDraftStep(const std::int32_t* token, std::int32_t* next_token,
+                      std::uint32_t* position, std::int32_t* hidden_row,
+                      std::uint32_t* blocks, std::uint32_t ratio,
+                      std::uint32_t budget, std::uint32_t advance,
+                      DraftChainSlot* slot, hipStream_t stream) {
+  PublishDraftStepKernel<<<1, 1, 0, stream>>>(token, next_token, position,
+                                              hidden_row, blocks, ratio, budget,
+                                              advance, slot);
+}
+
+void GreedyKeep(const ArgmaxCandidate* predictions,
+                const GreedyKeepInput* input, GreedyKeepResult* result,
+                std::uint32_t width, hipStream_t stream) {
+  GreedyKeepKernel<<<1, 1, 0, stream>>>(predictions, input, result, width);
+}
+
 void GatherArgmaxCandidates(const float* logits, const std::uint32_t* ids,
                             ArgmaxCandidate* out, std::uint32_t rows,
                             std::uint32_t vocab, hipStream_t stream) {
@@ -8524,6 +10003,33 @@ void SelectMtpCandidates(const float* logits, std::uint32_t* ids,
 std::uint32_t MtpCandidateWorkspaceSize(std::uint32_t vocab) {
   const auto tiles = (vocab + 1023) / 1024;
   return (tiles > 2 ? tiles : 2) * kMtpCandidates;
+}
+
+void VerificationCandidates(const float* logits, GreedyPenaltyRows penalties,
+                            std::uint32_t* ids, std::uint32_t* scratch_ids,
+                            sampling::LogitCandidate* out, std::uint32_t rows,
+                            std::uint32_t vocab, hipStream_t stream) {
+  if (!logits || !ids || !scratch_ids || !out || !vocab || !rows || rows > 7)
+    throw std::invalid_argument("invalid verification candidate shape");
+  const auto stride = MtpCandidateWorkspaceSize(vocab);
+  const auto tiles = [](std::uint32_t n) { return 1U + (n - 1U) / 1024; };
+  auto size = vocab;
+  auto blocks = tiles(size);
+  VerificationCandidateTileKernel<true>
+      <<<dim3(blocks, rows), kThreads, 0, stream>>>(logits, penalties, nullptr,
+                                                  ids, size, vocab, stride);
+  auto* source = ids;
+  auto* destination = scratch_ids;
+  while (blocks > 1) {
+    size = blocks * kMtpCandidates;
+    blocks = tiles(size);
+    VerificationCandidateTileKernel<false>
+        <<<dim3(blocks, rows), kThreads, 0, stream>>>(
+            logits, penalties, source, destination, size, vocab, stride);
+    std::swap(source, destination);
+  }
+  GatherVerificationCandidatesKernel<<<rows, kThreads, 0, stream>>>(
+      logits, penalties, source, out, vocab, stride);
 }
 
 void MtpTopCandidates(const float* logits, std::uint32_t* ids,

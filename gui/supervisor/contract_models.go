@@ -14,7 +14,52 @@ import (
 
 // ModelEstimateInfo is the estimate object of one row, and the body of a
 // model_estimate event.
+// EstimateCapabilities are facts about the selected model that `models estimate`
+// reports from the file's header. A CLI that does not report them leaves it nil.
+type EstimateCapabilities struct {
+	RoutedExperts   *uint32          `json:"routed_experts,omitempty"`
+	PrefillModeFast *PrefillModeFast `json:"prefill_mode_fast,omitempty"`
+	// RefusalDirection says whether --refusal-direction on works for the model.
+	RefusalDirection *RefusalDirection `json:"refusal_direction,omitempty"`
+	// KVCacheQ8 says whether --kv-cache-type q8_0 works for the model.
+	KVCacheQ8 *KVCacheQ8 `json:"kv_cache_q8,omitempty"`
+}
+
+// PrefillModeFast says whether --prefill-mode fast works for the model, with the
+// CLI's own reason when it does not.
+type PrefillModeFast struct {
+	Available bool   `json:"available"`
+	Reason    string `json:"reason"`
+}
+
+// RefusalDirection says whether the in-engine abliteration switch works for the
+// model, with the CLI's own reason when it does not.
+type RefusalDirection struct {
+	Available bool   `json:"available"`
+	Reason    string `json:"reason"`
+}
+
+// KVCacheQ8 says whether the compressed KV cache works for the model, with the
+// CLI's own reason when it does not.
+type KVCacheQ8 struct {
+	Available bool   `json:"available"`
+	Reason    string `json:"reason"`
+}
+
+// SideFileCheck is the answer of `models check-side-file`: whether a draft (MTP)
+// file, a vision file or a draft head fits the model. The CLI reads headers only.
+type SideFileCheck struct {
+	Role     string `json:"role"`
+	Fits     bool   `json:"fits"`
+	KindOK   bool   `json:"kind_ok"`
+	FamilyOK bool   `json:"family_ok"`
+	DimsOK   bool   `json:"dims_ok"`
+	Reason   string `json:"reason"`
+	Note     string `json:"note,omitempty"`
+}
+
 type ModelEstimateInfo struct {
+	Capabilities   *EstimateCapabilities      `json:"capabilities,omitempty"`
 	State          string                     `json:"estimate_state"`
 	Reason         *string                    `json:"reason"`
 	EvidenceLabel  *string                    `json:"evidence_label"`
@@ -249,6 +294,9 @@ func (m *Models) Entry(id string) (CatalogueEntry, bool) {
 func (m *ModelEstimate) check() error {
 	if m.Subject == "" {
 		return protocol("model_estimate has no subject")
+	}
+	if m.MemoryEstimate != nil {
+		m.MemoryEstimate.Capabilities = m.Capabilities
 	}
 	return m.ModelEstimateInfo.check(fmt.Sprintf("estimate %s", m.Subject))
 }

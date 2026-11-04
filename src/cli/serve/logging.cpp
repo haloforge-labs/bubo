@@ -1,7 +1,5 @@
 #include "src/cli/serve/logging.hpp"
 
-#include <unistd.h>
-
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -12,15 +10,6 @@
 #include <deque>
 #include <stdexcept>
 #include <thread>
-
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <poll.h>
-#include <pthread.h>
-#include <sched.h>
-#include <signal.h>
-#endif
 
 #include <cstdio>
 #include <cstdlib>
@@ -33,6 +22,7 @@
 #include <string>
 
 #include "src/cli/serve/logging_sink.hpp"
+#include "src/core/platform/os_info.hpp"
 
 namespace gufo::server {
 namespace {
@@ -184,25 +174,11 @@ std::string CurrentTimestamp() {
   const auto now = std::chrono::system_clock::now();
   const auto seconds = std::chrono::system_clock::to_time_t(now);
   std::tm calendar{};
-  ::localtime_r(&seconds, &calendar);
+  gufo::platform::LocalTime(seconds, &calendar);
   std::array<char, 32> buffer{};
   const auto written = std::strftime(buffer.data(), buffer.size(),
                                      "%Y-%m-%d %H:%M:%S", &calendar);
   return {buffer.data(), written};
-}
-
-[[maybe_unused]] std::size_t ReadMemoryKiB(const char* path,
-                                           std::string_view field) {
-  std::ifstream input(path);
-  for (std::string line; std::getline(input, line);) {
-    if (line.starts_with(field)) {
-      std::istringstream value(line.substr(field.size()));
-      std::size_t kib = 0;
-      if (value >> kib)
-        return kib;
-    }
-  }
-  return 0;
 }
 
 }  // namespace
@@ -245,24 +221,8 @@ struct AsyncLogSink::State {
       std::thread([] {
         constexpr char notice[] =
             "[log] sink timeout: subsequent lines discarded and counted\n";
-#ifdef _WIN32
-        const HANDLE handle = GetStdHandle(STD_ERROR_HANDLE);
-        if (handle != nullptr && handle != INVALID_HANDLE_VALUE &&
-            GetFileType(handle) != FILE_TYPE_UNKNOWN) {
-          DWORD written = 0;
-          (void)WriteFile(handle, notice, sizeof(notice) - 1, &written,
-                          nullptr);
-        }
-#else
-        // A closed stderr pipe must not terminate the process with SIGPIPE.
-        sigset_t signals;
-        sigemptyset(&signals);
-        sigaddset(&signals, SIGPIPE);
-        (void)pthread_sigmask(SIG_BLOCK, &signals, nullptr);
-        pollfd handle{STDERR_FILENO, POLLOUT, 0};
-        if (poll(&handle, 1, 0) > 0 && (handle.revents & POLLOUT))
-          (void)::write(STDERR_FILENO, notice, sizeof(notice) - 1);
-#endif
+        platform::WriteStderrNotice(
+            std::string_view(notice, sizeof(notice) - 1));
       }).detach();
     } catch (...) {
       // Thread creation failure cannot escape a logging/teardown caller.
@@ -366,12 +326,7 @@ struct AsyncLogSink::State {
 AsyncLogSink::AsyncLogSink(Writer writer, bool synchronous)
     : state_(std::make_shared<State>(std::move(writer), synchronous)) {
   std::thread([state = state_] {
-#ifdef _WIN32
-    (void)SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
-#else
-    sched_param priority{};
-    (void)pthread_setschedparam(pthread_self(), SCHED_OTHER, &priority);
-#endif
+    platform::SetCurrentThreadNormalPriority();
     state->Run();
   }).detach();
 }
@@ -580,7 +535,7 @@ void Logger::Log(LogLevel level, std::string_view component,
     return;
   }
   static const bool color =
-      std::getenv("NO_COLOR") == nullptr && ::isatty(STDERR_FILENO) != 0;
+      std::getenv("NO_COLOR") == nullptr && gufo::platform::StderrIsTerminal();
   const char* tag = level == LogLevel::kError   ? "ERROR"
                     : level == LogLevel::kWarn  ? "WARN"
                     : level == LogLevel::kDebug ? "DEBUG"
@@ -630,15 +585,9 @@ void Logger::LogFormatted(LogLevel level, std::string_view component,
 
 std::string Logger::MemoryStatus() {
   std::ostringstream output;
-#ifdef _WIN32
-  output << "rss_mib=" << gufo_resident_bytes() / (1024 * 1024)
+  output << "rss_mib=" << platform::ResidentMemoryBytes() / (1024 * 1024)
          << " host_available_mib="
-         << gufo_available_physical_bytes() / (1024 * 1024);
-#else
-  output << "rss_mib=" << ReadMemoryKiB("/proc/self/status", "VmRSS:") / 1024
-         << " host_available_mib="
-         << ReadMemoryKiB("/proc/meminfo", "MemAvailable:") / 1024;
-#endif
+         << platform::AvailableMemoryBytes() / (1024 * 1024);
   return output.str();
 }
 

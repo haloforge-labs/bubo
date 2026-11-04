@@ -23,6 +23,7 @@
 #include "src/core/platform/tuning.hpp"
 #include "src/core/text_sampling_defaults.hpp"
 #include "src/models/qwen38_flash_next/batch_twin_policy.hpp"
+#include "src/models/qwen38_flash_next/refusal_direction.hpp"
 
 namespace gufo::server {
 namespace {
@@ -69,6 +70,12 @@ void ValidateValue(const json::Value& row, const std::string& value) {
     return;
   }
   if (rule == "uint" || rule == "int31") {
+    // A word the reader also accepts next to the number (for example
+    // --cache-ram-bytes off).
+    if (const auto* also = allowed.find("also"))
+      for (const auto& item : also->items())
+        if (item.is_string() && item.str() == value)
+          return;
     const auto parse = [&](const std::string& text) {
       std::uint64_t number = 0;
       const auto parsed =
@@ -209,7 +216,7 @@ std::string AllowedText(const json::Value& allowed) {
       for (const auto& value : also->items()) {
         if (!first)
           result += ", ";
-        result += value.dump();
+        result += value.is_string() ? value.str() : value.dump();
         first = false;
       }
     }
@@ -242,6 +249,73 @@ const json::Value& SwitchNormalization() {
   return contract;
 }
 }  // namespace
+
+PrefillFastRefusal PrefillFastRefusalFor(std::string_view model_family,
+                                         std::uint32_t expert_count) {
+  if (!model_family.empty() && model_family != "qwen3.8-flash-next")
+    return PrefillFastRefusal::kFamily;
+  if (expert_count != 0 && expert_count != kPrefillFoldExperts)
+    return PrefillFastRefusal::kExperts;
+  return PrefillFastRefusal::kNone;
+}
+
+RefusalDirectionRefusal RefusalDirectionRefusalFor(std::string_view model_family,
+                                                   std::uint32_t expert_count,
+                                                   bool already_abliterated) {
+  if (!model_family.empty() && model_family != "qwen3.8-flash-next")
+    return RefusalDirectionRefusal::kFamily;
+  if (expert_count != 0 && expert_count != kPrefillFoldExperts)
+    return RefusalDirectionRefusal::kExperts;
+  if (already_abliterated)
+    return RefusalDirectionRefusal::kAbliterated;
+  return RefusalDirectionRefusal::kNone;
+}
+
+std::string RefusalDirectionRefusalText(RefusalDirectionRefusal refusal) {
+  switch (refusal) {
+  case RefusalDirectionRefusal::kFamily:
+    return "In-engine abliteration is for Qwen3.8 Flash Next only.";
+  case RefusalDirectionRefusal::kExperts:
+    return "In-engine abliteration is not tested for this model.";
+  case RefusalDirectionRefusal::kAbliterated:
+    return "This model is already abliterated.";
+  case RefusalDirectionRefusal::kNone:
+    break;
+  }
+  return {};
+}
+
+bool ModelIsAbliterated(std::string_view package_id,
+                        std::string_view general_name) {
+  const auto contains = [](std::string_view text, std::string_view word) {
+    if (text.size() < word.size())
+      return false;
+    for (std::size_t i = 0; i + word.size() <= text.size(); ++i) {
+      bool match = true;
+      for (std::size_t j = 0; j < word.size() && match; ++j)
+        match = std::tolower(static_cast<unsigned char>(text[i + j])) == word[j];
+      if (match)
+        return true;
+    }
+    return false;
+  };
+  return package_id.starts_with("huihui-") ||
+         contains(general_name, "abliterated");
+}
+
+KvCacheQ8Refusal KvCacheQ8RefusalFor(std::string_view model_family) {
+  if (!model_family.empty() && model_family != "qwen3.8-flash-next")
+    return KvCacheQ8Refusal::kFamily;
+  return KvCacheQ8Refusal::kNone;
+}
+
+std::string_view KvCacheQ8RefusalText(KvCacheQ8Refusal refusal) {
+  return refusal == KvCacheQ8Refusal::kNone
+             ? std::string_view{}
+             : std::string_view{
+                   "Q8 KV cache is not supported for this model yet; it uses "
+                   "f16."};
+}
 
 void ValidateSwitchValue(const json::Value& row, const std::string& value) {
   ValidateValue(row, value);
@@ -350,8 +424,13 @@ void ValidateSwitchTable(std::span<const json::Value> source_rows) {
     if ((row.member_str("kind") == "flag" && !flag_name) ||
         (row.member_str("kind") == "env" && !env_name))
       fail();
+    // A debug-audience row may have no purpose: a made-up sentence is worse
+    // than none.
     for (const auto* key : {"purpose", "default_text"})
-      if (row.member_str(key).find_first_not_of(" \t\r\n") == std::string::npos)
+      if (row.member_str(key).find_first_not_of(" \t\r\n") ==
+              std::string::npos &&
+          !(std::string_view(key) == "purpose" &&
+            row.member_str("audience") == "debug"))
         fail();
     std::istringstream purpose(row.member_str("purpose"));
     std::size_t words = 0;
@@ -367,7 +446,7 @@ void ValidateSwitchTable(std::span<const json::Value> source_rows) {
                      "mistake", "bug"}))
         fail();
     }
-    if (words == 0 || words > 20)
+    if (words > 20 || (words == 0 && row.member_str("audience") != "debug"))
       fail();
     for (const auto* key : {"requires", "suppressed_by", "aliases"}) {
       const auto* list = row.find(key);
@@ -708,7 +787,8 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& requested,
       try {
         ValidateValue(row, *setting.value);
       } catch (const std::invalid_argument& error) {
-        if (Has(name, {"--think-marker-bias", "--loop-breaker"}) ||
+        if (Has(name,
+                {"--think-marker-bias", "--loop-breaker", "--prefill-mode"}) ||
             (match && inputs.profile != "vanilla" &&
              inputs.model_family == "qwen3.8-flash-next"))
           throw;
@@ -821,6 +901,76 @@ ReleaseResolution ResolveReleaseSettings(const ReleaseInputs& requested,
     breaker.origin = "flag";
     breaker.requested = flag->second;
     breaker.skipped_reason.clear();
+  }
+  // Q8 K/V storage exists on Flash-Next only. On another family the request is
+  // not an error: the effective setting is f16 (the memory estimate and the
+  // server read it from here) and one line says so. The rule is the one
+  // `models estimate` reports as capabilities.kv_cache_q8.
+  if (const auto flag = inputs.explicit_flags.find("--kv-cache-type");
+      flag != inputs.explicit_flags.end() && flag->second != "f16" &&
+      KvCacheQ8RefusalFor(inputs.model_family) != KvCacheQ8Refusal::kNone) {
+    auto& cache_type = settings.at("--kv-cache-type");
+    cache_type.value = "f16";
+    cache_type.origin = "flag";
+    cache_type.requested = flag->second;
+    result.logs.push_back(std::string(kKvCacheQ8FallbackLine));
+  }
+  // Fast prefill is the Flash-Next prefill expert cut (3 experts per token,
+  // fold scalars) with a 256-token full tail. Resolve it into the same
+  // environment rows the engine reads; the chunk size is not part of it.
+  if (const auto flag = inputs.explicit_flags.find("--prefill-mode");
+      flag != inputs.explicit_flags.end() && flag->second == "fast") {
+    // The first startup pass runs before the model header names the family.
+    // The fold scalars compensate the dropped router mass of the 512-expert
+    // models; a pruned model (the 256-expert Coder) routes differently, so
+    // refuse instead of applying a table that was not fitted for it.
+    const auto fast_refusal =
+        PrefillFastRefusalFor(inputs.model_family, inputs.expert_count);
+    if (fast_refusal == PrefillFastRefusal::kFamily)
+      throw ReleaseSettingError(
+          "--prefill-mode", "--prefill-mode fast requires Qwen3.8-Flash-Next");
+    if (fast_refusal == PrefillFastRefusal::kExperts)
+      throw ReleaseSettingError(
+          "--prefill-mode",
+          "--prefill-mode fast: the fold table is fitted for " +
+              std::to_string(kPrefillFoldExperts) +
+              " routed experts and this model has " +
+              std::to_string(inputs.expert_count) +
+              "; use --prefill-mode normal");
+    if (inputs.profile == "exact" || inputs.profile == "vanilla")
+      throw ReleaseSettingError("--prefill-mode",
+                                "profile=" + inputs.profile +
+                                    ": --prefill-mode must be normal");
+    std::error_code fold_error;
+    if (inputs.prefill_fold_file.empty() ||
+        !std::filesystem::is_regular_file(inputs.prefill_fold_file,
+                                          fold_error)) {
+      const auto shown = inputs.prefill_fold_file.empty()
+                             ? std::string(kPrefillFoldFileName)
+                             : inputs.prefill_fold_file.string();
+      throw ReleaseSettingError(
+          "--prefill-mode", "--prefill-mode fast: missing file " + shown +
+                                "; reinstall Bubo or use --prefill-mode normal");
+    }
+    const auto fold_text = inputs.prefill_fold_file.u8string();
+    const std::pair<const char*, std::string> fast_rows[] = {
+        {"GUFO_PREFILL_EXPERTS", "3"},
+        {"GUFO_PREFILL_EXPERTS_MODE", "fold"},
+        {"GUFO_PREFILL_EXPERTS_AUDIT", "lean"},
+        {"GUFO_PREFILL_EXPERTS_FOLD",
+         std::string(fold_text.begin(), fold_text.end())},
+        {"GUFO_PREFILL_EXPERTS_TAIL", "256"}};
+    for (const auto& [name, value] : fast_rows) {
+      if (const auto set = environment_value(name); set && *set != value)
+        throw ReleaseSettingError(
+            name, std::string("--prefill-mode fast conflicts with ") + name +
+                      "=" + *set + "; unset it or use --prefill-mode normal");
+      auto& row = settings.at(name);
+      row.value = value;
+      row.origin = "flag";
+      row.requested = flag->second;
+      row.skipped_reason.clear();
+    }
   }
   // The public flag rows show the setting read by the request path, including
   // vanilla mode and direct environment overrides.
@@ -1119,6 +1269,66 @@ void ApplyInjections(const ReleaseResolution& resolved) {
   }
 }
 
+// Records the registry flag at args[i] the way serve does, moving i past its
+// value. Unknown names are left to the argument parser. `models estimate`
+// reads the same tokens, so its flags cannot differ from serve's.
+void ObserveExplicitFlag(std::span<const char* const> args, std::size_t& i,
+                         std::map<std::string, std::string>& explicit_flags) {
+  const std::string arg(args[i]);
+  const auto equals = arg.find('=');
+  const auto name = arg.substr(0, equals);
+  if (Has(name, {"--twin-model", "--draft-head-model", "--verify-model"})) {
+    std::string value = "1";
+    if (name != "--verify-model") {
+      if (equals != std::string::npos)
+        value = arg.substr(equals + 1);
+      else if (++i < args.size())
+        value = args[i];
+      else
+        throw std::invalid_argument("missing value for " + name);
+    } else if (equals != std::string::npos)
+      throw std::invalid_argument(name + " does not take a value");
+    explicit_flags[name] = value;
+    return;
+  }
+  const json::Value* option = nullptr;
+  for (const auto& row : ReleaseSwitchTable()) {
+    if (row.member_str("kind") != "flag")
+      continue;
+    bool match = row.member_str("name") == name;
+    for (const auto& alias : row.find("aliases")->items())
+      match |= alias.str() == name;
+    if (match) {
+      option = &row;
+      break;
+    }
+  }
+  if (!option)
+    return;  // The existing parser reports unknown options.
+  std::string value = "1";
+  if (option->find("takes_value")->as_bool()) {
+    if (equals != std::string::npos)
+      value = arg.substr(equals + 1);
+    else if (++i < args.size())
+      value = args[i];
+    else
+      throw std::invalid_argument("missing value for " + name);
+  } else if (equals != std::string::npos)
+    throw std::invalid_argument(name + " does not take a value");
+  explicit_flags[option->member_str("name")] = value;
+}
+
+std::map<std::string, std::string> ExplicitFlagsFromServeArgs(
+    const std::vector<std::string>& tokens) {
+  std::vector<const char*> raw;
+  for (const auto& token : tokens)
+    raw.push_back(token.c_str());
+  std::map<std::string, std::string> flags;
+  for (std::size_t i = 0; i < raw.size(); ++i)
+    ObserveExplicitFlag(raw, i, flags);
+  return flags;
+}
+
 ReleaseStartup PrepareReleaseSettings(
     std::span<const char* const> args,
     const std::map<std::string, std::string>& manifest_defaults,
@@ -1127,6 +1337,12 @@ ReleaseStartup PrepareReleaseSettings(
   try {
     ReleaseInputs inputs;
     inputs.manifest_defaults = manifest_defaults;
+    try {
+      inputs.prefill_fold_file =
+          bubo::cli::ExecutableDirectory() / std::string(kPrefillFoldFileName);
+    } catch (const std::runtime_error&) {
+      // Left empty; only --prefill-mode fast needs it and reports the file.
+    }
     std::string modality = "llm";
     bool help = false;
     const std::set<std::string> server_options = {"--host",
@@ -1168,7 +1384,7 @@ ReleaseStartup PrepareReleaseSettings(
           ++i;
         continue;
       }
-      if (Has(arg, {"llm", "video", "image", "tts", "asr"}))
+      if (Has(arg, {"llm", "video", "image", "tts", "asr", "embedding"}))
         modality = arg;
       help = Has(arg, {"help", "--help", "-h"});
       break;
@@ -1185,49 +1401,9 @@ ReleaseStartup PrepareReleaseSettings(
         help = true;
         break;
       }
-      if (Has(arg, {"llm", "video", "image", "tts", "asr"}))
+      if (Has(arg, {"llm", "video", "image", "tts", "asr", "embedding"}))
         continue;
-      const auto equals = arg.find('=');
-      const auto name = arg.substr(0, equals);
-      if (Has(name, {"--twin-model", "--draft-head-model", "--verify-model"})) {
-        std::string value = "1";
-        if (name != "--verify-model") {
-          if (equals != std::string::npos)
-            value = arg.substr(equals + 1);
-          else if (++i < args.size())
-            value = args[i];
-          else
-            throw std::invalid_argument("missing value for " + name);
-        } else if (equals != std::string::npos)
-          throw std::invalid_argument(name + " does not take a value");
-        inputs.explicit_flags[name] = value;
-        continue;
-      }
-      const json::Value* option = nullptr;
-      for (const auto& row : ReleaseSwitchTable()) {
-        if (row.member_str("kind") != "flag")
-          continue;
-        bool match = row.member_str("name") == name;
-        for (const auto& alias : row.find("aliases")->items())
-          match |= alias.str() == name;
-        if (match) {
-          option = &row;
-          break;
-        }
-      }
-      if (!option)
-        continue;  // The existing parser reports unknown options.
-      std::string value = "1";
-      if (option->find("takes_value")->as_bool()) {
-        if (equals != std::string::npos)
-          value = arg.substr(equals + 1);
-        else if (++i < args.size())
-          value = args[i];
-        else
-          throw std::invalid_argument("missing value for " + name);
-      } else if (equals != std::string::npos)
-        throw std::invalid_argument(name + " does not take a value");
-      inputs.explicit_flags[option->member_str("name")] = value;
+      ObserveExplicitFlag(args, i, inputs.explicit_flags);
     }
     if (help)
       return startup;
@@ -1319,6 +1495,15 @@ ReleaseStartup PrepareReleaseSettings(
           reader->GetMetadataUint32(inputs.architecture +
                                     ".nextn_predict_layers")
               .value_or(0) > 0;
+      inputs.expert_count =
+          reader->GetMetadataUint32(inputs.architecture + ".expert_count")
+              .value_or(0);
+      // Without a manifest the package id is only the built-in default, so
+      // it says nothing about this file.
+      inputs.model_abliterated = ModelIsAbliterated(
+          inputs.manifest_present ? std::string_view(startup.package.package_id)
+                                  : std::string_view(),
+          reader->GetMetadataString("general.name").value_or(""));
       inputs.native_context =
           reader->GetMetadataUint64(inputs.architecture + ".context_length");
       if (!inputs.native_context)
@@ -1328,6 +1513,72 @@ ReleaseStartup PrepareReleaseSettings(
     } else if (startup.print_effective)
       inputs.model_family = "qwen3.8-flash-next";
     startup.resolved = ResolveReleaseSettings(inputs);
+    // Refuse before the model loads, like --prefill-mode fast. The first
+    // startup pass (no header yet) has an empty family and passes.
+    // Not every model resolves the switch (only Flash Next lists it), so an
+    // explicit flag counts too. The engine also enables the direction from the
+    // environment (GUFO_REFUSAL_DIRECTION_ENABLED) or, when nothing says on or
+    // off, from a file named in GUFO_REFUSAL_DIRECTION (the legacy opt-in):
+    // mirror that here so every route meets the same rule. A file passed with
+    // --refusal-direction-file only chooses the vector (engine.cpp passes
+    // !options.refusal.file as the legacy opt-in), so it never counts as on.
+    const auto switch_on = [](const std::map<std::string, std::string>& flags) {
+      const auto found = flags.find("--refusal-direction");
+      return found != flags.end() && found->second == "on";
+    };
+    const auto from_env = [&](const char* name) -> std::string {
+      if (auto value = selector(name); !value.empty())
+        return value;
+      const char* real =
+          inputs.real_environment ? inputs.real_environment(name) : nullptr;
+      return real ? std::string(real) : std::string();
+    };
+    std::string enabled_text;
+    if (const auto found = inputs.explicit_flags.find("--refusal-direction");
+        found != inputs.explicit_flags.end())
+      enabled_text = found->second;
+    else
+      enabled_text = from_env("GUFO_REFUSAL_DIRECTION_ENABLED");
+    const bool legacy_file_opt_in =
+        !inputs.explicit_flags.contains("--refusal-direction-file") &&
+        !from_env("GUFO_REFUSAL_DIRECTION").empty();
+    if (switch_on(startup.resolved.effective_flags) || enabled_text == "on" ||
+        (enabled_text.empty() && legacy_file_opt_in)) {
+      const auto refusal = RefusalDirectionRefusalFor(
+          inputs.model_family, inputs.expert_count, inputs.model_abliterated);
+      if (refusal != RefusalDirectionRefusal::kNone)
+        throw ReleaseSettingError(
+            "--refusal-direction",
+            "--refusal-direction on: " + RefusalDirectionRefusalText(refusal) +
+                " Use --refusal-direction off");
+    }
+    // Resolve only an enabled default. Explicit CLI and legacy environment
+    // files retain their precedence; OFF never opens a direction file.
+    if (inputs.model_family == "qwen3.8-flash-next" &&
+        startup.resolved.effective_flags.at("--refusal-direction") == "on" &&
+        !inputs.explicit_flags.contains("--refusal-direction-file") &&
+        selector("GUFO_REFUSAL_DIRECTION").empty()) {
+      auto root = startup.package.manifest_path.parent_path();
+      if (root.empty() && !inputs.model_path.empty())
+        root = std::filesystem::absolute(inputs.model_path).parent_path();
+      std::filesystem::path path;
+      std::string error;
+      // A model folder may carry its own direction; otherwise use the one
+      // installed with Bubo, beside the executable like the prefill fold file.
+      if (!models::qwen38_flash_next::ResolvePackagedRefusalDirection(
+              root, &path, nullptr) &&
+          !models::qwen38_flash_next::ResolvePackagedRefusalDirection(
+              bubo::cli::ExecutableDirectory(), &path, &error))
+        throw ReleaseSettingError("--refusal-direction", error);
+      const auto utf8 = path.u8string();
+      const std::string file(utf8.begin(), utf8.end());
+      startup.resolved.effective_flags["--refusal-direction-file"] = file;
+      for (auto& setting : startup.resolved.settings)
+        if (setting.name == "--refusal-direction-file") {
+          setting.value = file;
+          setting.origin = "manifest";
+        }
+    }
     startup.resolved.model_selection = bubo::cli::SelectionJson(selection);
     // For example a plain catalogue model whose projector is not prepared.
     for (const auto& note : startup.package.notes)
@@ -1864,6 +2115,43 @@ json::Value ReleaseSettingsJson(const ReleaseResolution& resolved,
              setting->value == std::optional<std::string>("0"))
       effective_value =
           static_cast<unsigned long long>(*resolved.native_context);
+    const auto explicit_env = [&](const char* key) -> const ReleaseSetting* {
+      const auto* source = setting_for(key);
+      return source && source->origin == "env" && source->value &&
+                     !source->value->empty()
+                 ? source
+                 : nullptr;
+    };
+    if (setting && setting->origin != "flag") {
+      if (name == "--refusal-direction") {
+        if (const auto* source =
+                explicit_env("GUFO_REFUSAL_DIRECTION_ENABLED")) {
+          effective_value = *source->value;
+          effective_source = "env";
+        } else if (const auto* file_setting =
+                       setting_for("--refusal-direction-file");
+                   (!file_setting || file_setting->origin != "flag") &&
+                   explicit_env("GUFO_REFUSAL_DIRECTION")) {
+          effective_value = "on";
+          effective_source = "env";
+        }
+      }
+      const std::pair<std::string_view, const char*> aliases[] = {
+          {"--refusal-direction-strength", "GUFO_REFUSAL_DIRECTION_STRENGTH"},
+          {"--refusal-direction-mode", "GUFO_REFUSAL_DIRECTION_MODE"},
+          {"--refusal-direction-layer-start",
+           "GUFO_REFUSAL_DIRECTION_LAYER_START"},
+          {"--refusal-direction-layer-end", "GUFO_REFUSAL_DIRECTION_LAYER_END"},
+      };
+      for (const auto& [flag, env] : aliases) {
+        if (name == flag) {
+          if (const auto* source = explicit_env(env)) {
+            effective_value = *source->value;
+            effective_source = "env";
+          }
+        }
+      }
+    }
     if (name.find("_NPU_") == 4 && !npu_on)
       effective_value = json::Value();
     auto switch_row = json::Value::object();

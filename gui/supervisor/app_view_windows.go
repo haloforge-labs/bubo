@@ -40,8 +40,9 @@ func (a *AppService) GetView() View {
 		update = a.updates.State()
 	}
 	estimate, estimateErr := a.savedEstimate(saved, snap.Status, snap.Generation)
+	capabilities := a.savedCapabilities(saved, snap.Status)
 	unchanged := applied != nil && (appliedGeneration == snap.Generation || snap.AutoRestarted) && !tightSetupChanged(*applied, saved)
-	return a.view.Build(ViewInput{RunningSetupUnchanged: unchanged, SavedEstimate: estimate, SavedEstimateError: estimateErr, Snapshot: snap, Registry: registry, Models: a.modelsFrame(), Saved: saved, Window: window, Key: KeyView{LANAccess: lan.LanAccess, LANActive: lan.LanActive, Present: lan.APIKeyPresent, Mask: lan.APIKeyMask, RestartNeeded: lan.KeyRestartNeeded, Unavailable: lan.Unavailable, CopyWithKey: lan.CopyWithKey, Addresses: lan.Addresses, AddressesUnavailable: lan.AddressesUnavailable}, Logs: a.backend.Logs(), Notice: notice, Diagnostic: a.backend.Diagnostic(), BundlePreview: a.backend.BundlePreview(), Update: update})
+	return a.view.Build(ViewInput{RunningSetupUnchanged: unchanged, SavedEstimate: estimate, SavedEstimateError: estimateErr, SavedCapabilities: capabilities, Snapshot: snap, Registry: registry, Models: a.modelsFrame(), Saved: saved, Window: window, Key: KeyView{LANAccess: lan.LanAccess, LANActive: lan.LanActive, Present: lan.APIKeyPresent, Mask: lan.APIKeyMask, RestartNeeded: lan.KeyRestartNeeded, Unavailable: lan.Unavailable, CopyWithKey: lan.CopyWithKey, Addresses: lan.Addresses, AddressesUnavailable: lan.AddressesUnavailable}, Logs: a.backend.Logs(), Notice: notice, Diagnostic: a.backend.Diagnostic(), BundlePreview: a.backend.BundlePreview(), Update: update})
 }
 
 func (a *AppService) invoke(action, path string) ActionResult {

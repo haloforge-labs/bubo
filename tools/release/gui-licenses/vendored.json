@@ -11,6 +11,11 @@
     "source": "https://github.com/edwardtufte/et-book"
   },
   {
+    "name": "IBM Plex Sans",
+    "file": "src/fonts/ibm-plex-sans-LICENSE.txt",
+    "source": "https://github.com/IBM/plex"
+  },
+  {
     "name": "Go Mono",
     "file": "src/fonts/Go-Mono-LICENSE.txt",
     "source": "https://go.googlesource.com/image/+/refs/heads/master/font/gofont"

@@ -120,6 +120,48 @@ func TestMVPFailuresStayFailures(t *testing.T) {
 	}
 }
 
+func TestContextResolutionOK(t *testing.T) {
+	const step, minTokens, maxTokens = 8192, 4096, 262144
+	for _, c := range []struct {
+		name                      string
+		effective, snapshot, serv uint64
+		haveServed, want          bool
+	}{
+		{"equal", 131072, 131072, 0, false, true},
+		{"one step apart", 139264, 131072, 0, false, true},
+		{"one step apart, below", 122880, 131072, 0, false, true},
+		{"two steps apart", 147456, 131072, 0, false, false},
+		{"serve line differs from snapshot, equals effective", 139264, 131072, 139264, true, true},
+		{"serve line differs from effective", 131072, 131072, 139264, true, false},
+		{"serve line equal but far from snapshot", 196608, 131072, 196608, true, true},
+		{"not a multiple of the step", 131073, 131073, 0, false, false},
+		{"above the range", 270336, 270336, 0, false, false},
+		{"zero", 0, 0, 0, false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := contextResolutionOK(c.effective, c.snapshot, step, minTokens, maxTokens, c.serv, c.haveServed); got != c.want {
+				t.Fatalf("effective=%d snapshot=%d served=%d/%v: got %v want %v", c.effective, c.snapshot, c.serv, c.haveServed, got, c.want)
+			}
+		})
+	}
+	if contextResolutionOK(131072, 131072, 0, 0, 0, 0, false) {
+		t.Fatal("a table without step_tokens must not pass")
+	}
+}
+
+func TestResolvedContextFromLogs(t *testing.T) {
+	dir := t.TempDir()
+	if _, ok := resolvedContextFromLogs(dir); ok {
+		t.Fatal("empty log folder reported a number")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "stderr.0.log"), []byte("x\nResolved 131072 tokens per session from CLI recommended_context.by_sessions for 2 sessions\nResolved 139264 tokens per session from CLI recommended_context.by_sessions for 2 sessions\ny\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if n, ok := resolvedContextFromLogs(dir); !ok || n != 139264 {
+		t.Fatalf("got %d %v, want the last line 139264", n, ok)
+	}
+}
+
 func TestMVPStrictRatesCadenceAndIsolation(t *testing.T) {
 	zero := 0.0
 	v := supervisor.View{Rates: &supervisor.Rates{Source: "cli", PrefillTPS: &zero, DecodeTPS: &zero}}

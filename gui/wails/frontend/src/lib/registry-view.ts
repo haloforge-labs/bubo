@@ -218,3 +218,15 @@ export function groupRows(
       return groups
     }, {})
 }
+
+// One editor per setting: a setting the CLI also spells as an environment name
+// (Debug hooks, Package manifest, Loop breaker) is edited through its flag. The
+// environment spelling is the same setting, never a second control.
+export function canonicalSwitches(rows: View['switches']) {
+  const flagLabels = new Set(
+    rows.filter((row) => row.name.startsWith('--')).map((row) => row.label),
+  )
+  return rows.filter(
+    (row) => row.name.startsWith('--') || !flagLabels.has(row.label),
+  )
+}

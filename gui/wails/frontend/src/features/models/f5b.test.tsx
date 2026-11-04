@@ -7,6 +7,7 @@ import {
   recordedPlan,
 } from '@/components/core-page-test-support'
 import { bridgeReply } from '@/components/bridge-test-reply'
+import { openDiscover } from './discover-test-support'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -40,8 +41,7 @@ test('job: find, plan, download, see installed, choose for Server without anothe
     .mockResolvedValue(bridgeReply({}))
   const { replaceView } = mountCorePage('/models', view)
   const installed = page.getByRole('region', { name: 'Installed models' })
-  const discover = page.getByRole('region', { name: 'Discover models' })
-  await expect.element(discover).toBeVisible()
+  const discover = await openDiscover()
   const rows = discover.getByRole('row')
   const index = rows
     .elements()

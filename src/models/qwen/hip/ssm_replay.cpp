@@ -1,39 +1,21 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <limits>
 #include <stdexcept>
-#include <utility>
 
 #include "src/core/hip/hip_utils.hpp"
 #include "src/models/qwen/hip/executor.hpp"
-#include "src/models/qwen/hip/kernels/copy_27b.hpp"
 #include "src/models/qwen/hip/ops/ssm.hpp"
 
 namespace gufo::hip {
-namespace {
 
-// Live and saved state contain only recurrent layers in the same order.
-void CopyRecurrentState(void* live, void* saved, std::size_t layer_bytes,
-                        const core::ModelConfig& config, bool save,
-                        hipStream_t stream) {
-  const auto bytes = config.SsmLayerCount() * layer_bytes;
-  if (bytes == 0)
-    return;
-#ifdef _WIN32
-  // ~160 MB per speculative cycle: a copy kernel runs at shader bandwidth,
-  // the Windows copy engine does not.
-  LaunchDeviceCopy27(save ? saved : live, save ? live : saved, bytes, stream);
-#else
-  HIP_CHECK(hipMemcpyAsync(save ? saved : live, save ? live : saved, bytes,
-                           hipMemcpyDeviceToDevice, stream));
-#endif
-}
-
-}  // namespace
-
+// The second buffer of the rollback pair; it holds only recurrent layers in
+// the same order as the first.
 void QwenGpuArena::AllocateRecurrentSnapshot() {
-  if (d_saved_ssm_conv_state_ != nullptr) {
+  if (d_ssm_conv_buffers_[1] != nullptr &&
+      d_ssm_deltanet_buffers_[1] != nullptr) {
     return;
   }
 
@@ -44,22 +26,26 @@ void QwenGpuArena::AllocateRecurrentSnapshot() {
       recurrent_layers * config_.ssm_time_step_rank * config_.ssm_state_size *
       config_.SsmValueSize();
 
-  HIP_CHECK(hipMalloc(&d_saved_ssm_conv_state_, total_conv * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_saved_ssm_deltanet_state_,
-                      total_deltanet * QwenRecurrentStateElementBytes(
-                                           policy_.recurrent_state_storage)));
+  // Publish the pair only once both allocations exist: a pin over a half
+  // allocated pair would divert the next pass into a null buffer.
+  float* conv = nullptr;
+  void* deltanet = nullptr;
+  HIP_CHECK(hipMalloc(&conv, total_conv * sizeof(float)));
+  const hipError_t status = hipMalloc(
+      &deltanet, total_deltanet * QwenRecurrentStateElementBytes(
+                                      policy_.recurrent_state_storage));
+  if (status != hipSuccess) {
+    LogCleanupError(hipFree(conv));
+    HIP_CHECK(status);
+  }
+  d_ssm_conv_buffers_[1] = conv;
+  d_ssm_deltanet_buffers_[1] = deltanet;
 }
 
-// Windows: save lazily. A speculative cycle saves ~160 MB of recurrent state
-// before verification and copies it back after a rejection; instead the
-// saved state aliases the live one and verification/replay write their
-// result into the spare buffer (out-of-place kernels), so the normal cycle
-// copies nothing. Identical bytes either way.
-#ifdef _WIN32
-constexpr bool kLazyRecurrentSave = true;
-#else
-constexpr bool kLazyRecurrentSave = false;
-#endif
+void QwenGpuArena::SyncLivePointers() noexcept {
+  d_ssm_conv_state = d_ssm_conv_buffers_[live_recurrent_];
+  d_ssm_deltanet_state = d_ssm_deltanet_buffers_[live_recurrent_];
+}
 
 void QwenGpuArena::SaveState(std::uint32_t valid_context) {
   if (valid_context > max_context_) {
@@ -70,77 +56,46 @@ void QwenGpuArena::SaveState(std::uint32_t valid_context) {
   // KV entries are append-only and every attention launch is bounded by its
   // explicit position. Draft entries beyond valid_context can remain in place:
   // accepted positions reuse them and rejected positions are overwritten.
-  if (kLazyRecurrentSave) {
-    saved_aliases_live_ = true;
-  } else {
-    CopyRecurrentState(
-        d_ssm_conv_state, d_saved_ssm_conv_state_,
-        config_.SsmQkvSize() * config_.ssm_conv_kernel * sizeof(float), config_,
-        true, stream);
-    CopyRecurrentState(
-        d_ssm_deltanet_state, d_saved_ssm_deltanet_state_,
-        config_.ssm_time_step_rank * config_.ssm_state_size *
-            config_.SsmValueSize() *
-            QwenRecurrentStateElementBytes(policy_.recurrent_state_storage),
-        config_, true, stream);
-    HIP_CHECK(hipStreamSynchronize(stream));
-  }
+  // The recurrent state is pinned where it is; BeginRecurrentWrite diverts the
+  // next pass into the other buffer.
+  saved_recurrent_ = live_recurrent_;
   saved_context_ = valid_context;
   replay_last_position_ = valid_context;
   replay_captured_positions_ = 0;
   has_saved_state_ = true;
 }
 
-void QwenGpuArena::MaterializeSavedState() {
-  if (!saved_aliases_live_)
-    return;
-  CopyRecurrentState(
-      d_ssm_conv_state, d_saved_ssm_conv_state_,
-      config_.SsmQkvSize() * config_.ssm_conv_kernel * sizeof(float), config_,
-      true, stream);
-  CopyRecurrentState(
-      d_ssm_deltanet_state, d_saved_ssm_deltanet_state_,
-      config_.ssm_time_step_rank * config_.ssm_state_size *
-          config_.SsmValueSize() *
-          QwenRecurrentStateElementBytes(policy_.recurrent_state_storage),
-      config_, true, stream);
-  saved_aliases_live_ = false;
-}
-
-void QwenGpuArena::CommitOutOfPlaceState() noexcept {
-  // The spare now holds the updated state and the live buffer still holds
-  // the saved one: swap their roles.
-  std::swap(d_ssm_conv_state, d_saved_ssm_conv_state_);
-  std::swap(d_ssm_deltanet_state, d_saved_ssm_deltanet_state_);
-  saved_aliases_live_ = false;
-}
-
 void QwenGpuArena::RestoreState() {
   if (!has_saved_state_) {
     throw std::logic_error("GPU state has not been saved");
   }
-  if (kLazyRecurrentSave) {
-    // Aliased: the live state is the saved state. Otherwise the spare holds
-    // the saved state untouched since SaveState: make it live again.
-    if (!saved_aliases_live_) {
-      std::swap(d_ssm_conv_state, d_saved_ssm_conv_state_);
-      std::swap(d_ssm_deltanet_state, d_saved_ssm_deltanet_state_);
-      saved_aliases_live_ = true;
-    }
-    return;
-  }
 
-  CopyRecurrentState(
-      d_ssm_conv_state, d_saved_ssm_conv_state_,
-      config_.SsmQkvSize() * config_.ssm_conv_kernel * sizeof(float), config_,
-      false, stream);
-  CopyRecurrentState(
-      d_ssm_deltanet_state, d_saved_ssm_deltanet_state_,
-      config_.ssm_time_step_rank * config_.ssm_state_size *
-          config_.SsmValueSize() *
-          QwenRecurrentStateElementBytes(policy_.recurrent_state_storage),
-      config_, false, stream);
-  HIP_CHECK(hipStreamSynchronize(stream));
+  live_recurrent_ = saved_recurrent_;
+  SyncLivePointers();
+}
+
+QwenRecurrentStateIo QwenGpuArena::BeginRecurrentWrite() {
+  assert(d_ssm_conv_state == d_ssm_conv_buffers_[live_recurrent_] &&
+         d_ssm_deltanet_state == d_ssm_deltanet_buffers_[live_recurrent_]);
+  source_recurrent_ = live_recurrent_;
+  // Writing into the pinned buffer would destroy the rollback point, so the
+  // first pass after SaveState or RestoreState writes the other one. Buffer 1
+  // exists whenever a state has been saved.
+  if (has_saved_state_ && live_recurrent_ == saved_recurrent_) {
+    live_recurrent_ ^= 1U;
+    SyncLivePointers();
+  }
+  return {
+      .conv_in = d_ssm_conv_buffers_[source_recurrent_],
+      .conv_out = d_ssm_conv_buffers_[live_recurrent_],
+      .recurrent_in = d_ssm_deltanet_buffers_[source_recurrent_],
+      .recurrent_out = d_ssm_deltanet_buffers_[live_recurrent_],
+  };
+}
+
+std::uint64_t QwenGpuArena::RecurrentIoIdentity() const noexcept {
+  return (static_cast<std::uint64_t>(source_recurrent_) << 1U) |
+         live_recurrent_;
 }
 
 bool QwenGpuArena::AllocateSsmReplayLog() {

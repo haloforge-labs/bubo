@@ -10,6 +10,7 @@
 #include <thread>
 #include <vector>
 
+#include "src/core/platform/env.hpp"
 #include "src/models/minimax_h3/media.hpp"
 
 namespace {
@@ -120,7 +121,8 @@ int main() {
                                               .fps = 24},
                             pcm, kSamples, 2, 32000, nullptr, &telemetry,
                             &error)) {
-    if (error.find("cannot start FFmpeg") != std::string::npos) {
+    if (error.find("cannot start FFmpeg") != std::string::npos ||
+        error == "FFmpeg media muxing is not yet supported on Windows") {
       std::cout << "SKIP: " << error << '\n';
       return 77;
     }
@@ -186,14 +188,14 @@ int main() {
   const char* saved = std::getenv("GUFO_FFMPEG");
   const std::string saved_value = saved == nullptr ? "" : saved;
   WriteSentinel(error_output);
-  setenv("GUFO_FFMPEG", "/bin/false", 1);
+  gufo::platform::SetEnv("GUFO_FFMPEG", "/bin/false");
   const bool error_result = WriteSynchronizedMp4(
       error_output, frames, kFrames, kWidth, kHeight, 24, pcm, kSamples, 2,
       32000, nullptr, &telemetry, &error);
   if (saved == nullptr) {
-    unsetenv("GUFO_FFMPEG");
+    gufo::platform::UnsetEnv("GUFO_FFMPEG");
   } else {
-    setenv("GUFO_FFMPEG", saved_value.c_str(), 1);
+    gufo::platform::SetEnv("GUFO_FFMPEG", saved_value);
   }
   if (error_result || !HasSentinel(error_output) ||
       HasPartialFor(error_output)) {
@@ -204,14 +206,14 @@ int main() {
   const std::string saved_probe_value =
       saved_probe == nullptr ? "" : saved_probe;
   WriteSentinel(probe_error_output);
-  setenv("GUFO_FFPROBE", "/bin/false", 1);
+  gufo::platform::SetEnv("GUFO_FFPROBE", "/bin/false");
   const bool probe_error_result = WriteSynchronizedMp4(
       probe_error_output, frames, kFrames, kWidth, kHeight, 24, pcm, kSamples,
       2, 32000, nullptr, &telemetry, &error);
   if (saved_probe == nullptr) {
-    unsetenv("GUFO_FFPROBE");
+    gufo::platform::UnsetEnv("GUFO_FFPROBE");
   } else {
-    setenv("GUFO_FFPROBE", saved_probe_value.c_str(), 1);
+    gufo::platform::SetEnv("GUFO_FFPROBE", saved_probe_value);
   }
   if (probe_error_result || !HasSentinel(probe_error_output) ||
       HasPartialFor(probe_error_output)) {

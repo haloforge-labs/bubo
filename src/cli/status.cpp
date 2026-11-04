@@ -511,7 +511,10 @@ Value StatusSnapshot(std::string_view local_app_data, const fs::path& runtime,
   value["last_transition"] = Value();
   value["sample_time"] = UtcTime();
   if (sample_machine) {
-    auto probe = CreateSystemMachineProbe();
+    // A driver call can block for a minute on a cold start. The record must
+    // arrive, with that reading unavailable and named.
+    auto probe = CreateBoundedSystemMachineProbe(std::chrono::seconds(5),
+                                                 std::chrono::seconds(10));
     value["machine"] = MachineReport(*probe);
   }
   value["readiness"] = Value::object();

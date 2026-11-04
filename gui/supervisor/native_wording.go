@@ -315,7 +315,7 @@ func buildFit(estimate *MemoryEstimate) FitVerdict {
 	}
 	if estimate.Recommended != nil && !*estimate.Recommended || len(estimate.RecommendationFailures) > 0 {
 		f.Class = "memory_tight"
-		f.Sentence = "The server would start, but there is little room for the context cache (the KV cache), which grows as a conversation gets longer. If it runs out, the server stops with an out-of-memory error, or Windows slows down." + memoryFailureGuidance(estimate)
+		f.Sentence = "Little room for KV cache growth." + memoryFailureGuidance(estimate)
 		return f
 	}
 	f.Class, f.Sentence = "fits", "Fits."

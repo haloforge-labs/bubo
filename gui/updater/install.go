@@ -151,6 +151,7 @@ func (c *Client) Install(staged *Staged) (*Handoff, *Failure) {
 	} else {
 		// No process started: preserve an actionable result instead of stranding
 		// active.json in the "handoff in progress" state.
+		_ = os.RemoveAll(helperDir)
 		_ = writeJSON(filepath.Join(staged.root, ResultFileName), InstallResult{Status: "failed", Version: staged.Version, Failure: f})
 	}
 	return handoff, f
@@ -362,7 +363,92 @@ func (c *Client) LastResult() (*InstallResult, *Failure) {
 	}
 	result.RuntimeFollowupStarted = a.RuntimeFollowupStarted
 	result.ResultDismissed = a.ResultDismissed
+	c.removeFinishedHelpers()
 	return &result, nil
+}
+
+// InstallInProgress reports whether an update helper holds the install lock of
+// this installation, that is, an update is being installed right now. A GUI
+// started by hand at that moment must not take the single-instance slot: the
+// helper's own new GUI needs it to acknowledge health, and without it the
+// helper rolls the update back.
+func InstallInProgress(installDir string) bool {
+	unlock, err := lockInstall(installDir)
+	if err != nil {
+		return errors.Is(err, errInstallBusy)
+	}
+	unlock()
+	return false
+}
+
+// removeFinishedHelpers deletes the copied update helpers (helper-*) of finished
+// transactions. A running image cannot delete its own file, so the GUI does it
+// after the helper has ended. It never fails the caller: a helper that is still
+// running, or a file that is still in use, stays for the next call or start.
+// Nothing is removed unless all of these hold:
+//   - no Install or Recover is preparing a handoff (handoff lock) and no helper
+//     runs for this installation (install lock);
+//   - the transaction has no journal, so Recover does not need its helper;
+//   - if active.json names the transaction, it has a result and its exact helper
+//     process (PID and creation time) has exited. A helper whose identity is
+//     unknown stays. A transaction that active.json does not name (the user
+//     dismissed the result, or a newer handoff replaced it) is finished, and the
+//     install lock shows that no helper runs.
+func (c *Client) removeFinishedHelpers() {
+	unlockHandoff, err := lockHandoff(c.cfg.InstallDir)
+	if err != nil {
+		return
+	}
+	defer unlockHandoff()
+	probe, err := lockInstall(c.cfg.InstallDir)
+	if err != nil {
+		return
+	}
+	probe()
+	a, f := c.readActive()
+	if f != nil {
+		return
+	}
+	roots, err := os.ReadDir(c.root)
+	if err != nil {
+		return
+	}
+	for _, r := range roots {
+		if r.Type() != os.ModeDir {
+			continue
+		}
+		root := filepath.Join(c.root, r.Name())
+		if exists(filepath.Join(root, journalName)) {
+			continue
+		}
+		if a.Root != "" && strings.EqualFold(filepath.Clean(a.Root), root) && !c.helperFinished(a) {
+			continue
+		}
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.Type() == os.ModeDir && strings.HasPrefix(e.Name(), "helper-") {
+				_ = os.RemoveAll(filepath.Join(root, e.Name()))
+			}
+		}
+	}
+}
+
+// helperFinished reports whether the saved handoff has a result and its helper
+// process is known to have exited.
+func (c *Client) helperFinished(a activeTransaction) bool {
+	if a.HelperPID == 0 || a.HelperCreated == 0 || !exists(filepath.Join(a.Root, ResultFileName)) {
+		return false
+	}
+	p, err := watchProcess(processIdentity{PID: a.HelperPID, Created: a.HelperCreated})
+	if err != nil {
+		return false
+	}
+	defer p.close()
+	exited, err := p.exited()
+	return err == nil && exited
 }
 
 func (c *Client) updateActive(change func(*activeTransaction)) *Failure {
@@ -410,6 +496,7 @@ func (c *Client) ClearLastResult() *Failure {
 	if exists(filepath.Join(a.Root, journalName)) {
 		return fail(CodeRollbackPending, "recover the interrupted update first")
 	}
+	c.removeFinishedHelpers()
 	if a.RuntimeChanged && !a.RuntimePrepared {
 		a.ResultDismissed = true
 		if err := writeJSON(c.activePath(), a); err != nil {

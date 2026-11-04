@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <memory>
 #include <span>
+#include <stdexcept>
 #include <vector>
 
 #include "src/cache/identity.hpp"
@@ -45,6 +46,9 @@ public:
   Slot(Slot&&) = delete;
   Slot& operator=(Slot&&) = delete;
   [[nodiscard]] virtual bool IsValid() const noexcept = 0;
+  // Nonblocking hint for cold slot selection. A cancelled request may have
+  // restored its logical frontier while already-submitted device work drains.
+  [[nodiscard]] virtual bool ExecutionComplete() const noexcept { return true; }
 };
 
 class Adapter {
@@ -68,6 +72,17 @@ public:
   // may insert exact required captures; optional captures can reuse this plan.
   [[nodiscard]] virtual std::vector<Rows> PlanPrefill(const Slot&, Rows first,
                                                       Rows end) const = 0;
+  // Rows a restore must start on: an adapter whose prefill result depends on
+  // where a pass starts (Flash-Next groups four queries per launch from the
+  // pass start) restores a snapshot only at a multiple of this, or when the
+  // snapshot is the whole prompt. Live frontiers are exempt. 1: any boundary.
+  [[nodiscard]] virtual Rows RestoreAlignment() const noexcept { return 1; }
+  // Optional pure host prediction for a supported in-pass checkpoint. The
+  // actual capture must expose these exact coherent component positions.
+  [[nodiscard]] virtual std::vector<ComponentPosition>
+  PrefillCheckpointPositions(const Slot&, Rows) const {
+    return {};
+  }
 
   // Prepare one complete restore, including an exact shorter frontier. On the
   // host, allocate/check capacity and guard every range that will be replaced
@@ -92,6 +107,17 @@ public:
                                                Rows first, Rows end,
                                                std::span<std::byte>,
                                                Stream&) = 0;
+  // Optional immutable view of a completed append range. Obtain it only
+  // during exclusive execution; retain a RowPin for every later transfer.
+  // The address must remain stable until the mutation/release guard drains
+  // its readers. CopyRowsIn must accept these backend-native source bytes as
+  // well as host buffers. Empty means this component cannot be borrowed.
+  [[nodiscard]] virtual std::span<const std::byte> BorrowRowsView(const Slot&,
+                                                                  ComponentId,
+                                                                  Rows,
+                                                                  Rows) const {
+    return {};
+  }
   [[nodiscard]] virtual Completion CopyRowsIn(Slot&, ComponentId, Rows first,
                                               Rows end,
                                               std::span<const std::byte>,
@@ -99,6 +125,25 @@ public:
   [[nodiscard]] virtual Completion LoadPrivate(Slot&, ComponentId,
                                                std::span<const std::byte>,
                                                Stream&) = 0;
+  // Bounded private-state serialization. Offsets address the descriptor's
+  // private_bytes representation; loads may arrive in non-overlapping pieces.
+  // Defaults support a whole buffer only. Continuation adapters must override
+  // these for arbitrary pieces and validate complete coverage, including when
+  // one device tensor crosses a piece boundary.
+  [[nodiscard]] virtual Completion CapturePrivatePiece(
+      const Slot& slot, ComponentId id, std::size_t offset,
+      std::span<std::byte> bytes, Stream& stream) {
+    if (offset != 0)
+      throw std::invalid_argument("private capture requires piece support");
+    return CapturePrivate(slot, id, bytes, stream);
+  }
+  [[nodiscard]] virtual Completion LoadPrivatePiece(
+      Slot& slot, ComponentId id, std::size_t offset,
+      std::span<const std::byte> bytes, Stream& stream) {
+    if (offset != 0)
+      throw std::invalid_argument("private restore requires piece support");
+    return LoadPrivate(slot, id, bytes, stream);
+  }
   // Requires an active BeginRestore. Outside a restore (including after a
   // successful Validate), throw std::logic_error without changing the slot.
   // Check complete loads and exactly one position per component, not

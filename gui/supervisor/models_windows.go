@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -620,20 +621,44 @@ func checkProduct(e Event) error {
 // Estimate runs `models estimate` for a catalogue id or an absolute path.
 // context 0 and sessions 0 leave the CLI defaults.
 func (m *ModelService) Estimate(subject string, contextTokens uint64, sessions uint32) (ModelEstimate, error) {
-	return m.estimateRuntime(subject, contextTokens, sessions, m.cfg.Inputs().RuntimeDir, "")
+	return m.EstimateWithCache(subject, contextTokens, sessions, "")
 }
 
-// A saved setup estimate must retain the runtime captured with that request.
-func (m *ModelService) estimateRuntime(subject string, contextTokens uint64, sessions uint32, runtimeDir, profile string) (ModelEstimate, error) {
-	if !ValidCatalogueID(subject) {
-		// A full path: a model file or a package folder. Pass it clean, without
-		// a trailing separator.
-		clean, err := NormalizeModelFolderPath(subject)
-		if err != nil {
-			return ModelEstimate{}, appError("invalid_arguments", "Choose a catalogue id or a full path.")
-		}
-		subject = clean
+// EstimateWithCache is Estimate for an attention cache type ("" keeps f16).
+func (m *ModelService) EstimateWithCache(subject string, contextTokens uint64, sessions uint32, kvCacheType string) (ModelEstimate, error) {
+	var overrides map[string]string
+	if kvCacheType != "" {
+		overrides = map[string]string{"--kv-cache-type": kvCacheType}
 	}
+	return m.estimateRuntime(subject, contextTokens, sessions, m.cfg.Inputs().RuntimeDir, "", overrides)
+}
+
+// estimateSwitchArgs hands every saved serve override to `models estimate`, as
+// `--switch NAME=VALUE` in name order. The CLI resolves each one with serve's own
+// rules, so the estimate judges the memory the launch will use: a q8_0 cache needs
+// less than the f16 default, and --no-cache, --cache-ram-bytes and the side-file
+// switches (--mtp-model, --mmproj) change the totals too. A new switch needs no
+// change here.
+func estimateSwitchArgs(overrides map[string]string) []string {
+	names := make([]string, 0, len(overrides))
+	for name, value := range overrides {
+		if !markerListUnset(name, value) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	var args []string
+	for _, name := range names {
+		args = append(args, "--switch", name+"="+overrides[name])
+	}
+	return args
+}
+
+// estimateArguments is the one `models estimate` request for a setup. The fit
+// shown before the start and the check at the start both build it, so they judge
+// the same memory. A zero context or sessions and an empty profile leave the CLI
+// defaults; overrides are the saved serve overrides.
+func estimateArguments(subject string, contextTokens uint64, sessions uint32, profile string, overrides map[string]string) []string {
 	args := []string{"models", "estimate", "--model", subject, "--json"}
 	if contextTokens > 0 {
 		args = append(args, "--context", strconv.FormatUint(contextTokens, 10))
@@ -644,6 +669,21 @@ func (m *ModelService) estimateRuntime(subject string, contextTokens uint64, ses
 	if profile != "" {
 		args = append(args, "--profile", profile)
 	}
+	return append(args, estimateSwitchArgs(overrides)...)
+}
+
+// A saved setup estimate must retain the runtime captured with that request.
+func (m *ModelService) estimateRuntime(subject string, contextTokens uint64, sessions uint32, runtimeDir, profile string, overrides map[string]string) (ModelEstimate, error) {
+	if !ValidCatalogueID(subject) {
+		// A full path: a model file or a package folder. Pass it clean, without
+		// a trailing separator.
+		clean, err := NormalizeModelFolderPath(subject)
+		if err != nil {
+			return ModelEstimate{}, appError("invalid_arguments", "Choose a catalogue id or a full path.")
+		}
+		subject = clean
+	}
+	args := estimateArguments(subject, contextTokens, sessions, profile, overrides)
 	events, err := m.captureRuntime(m.ctx, args, 1, m.cfg.CallTimeout, runtimeDir, false)
 	if err != nil {
 		return ModelEstimate{}, m.plainError(err)

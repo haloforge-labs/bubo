@@ -305,17 +305,19 @@ public:
       const server::ChatRequest& request) const override {
     auto prompt = std::make_shared<qwen::vision::Prompt>(Prepare(request));
     const auto cache_prefix = prompt->stable_prefix_tokens;
-    if (prompt->images.empty())
+    const auto& experts = PrefillExperts();
+    if (prompt->images.empty() && !experts.active)
       return server::TextPreparedPrompt{
           std::move(prompt->tokens), {}, cache_prefix};
     // The image rows' identities key gufo serve's prompt cache, as for the
     // Qwen3.8 models (inference_backend.cpp PrepareQwenPrompt).
     auto context = std::make_shared<ImageContext>();
-    context->cache_identity = prompt->cache_identity;
+    context->cache_identity =
+        PrefillCacheIdentity(prompt->cache_identity, experts);
     for (const auto& image : prompt->images) {
       const auto identity = prompt->IdentityForPrefix(image.grid.offset);
       context->cache_prefixes.push_back(
-          {image.grid.offset, {identity.begin(), identity.end()}});
+          {image.grid.offset, PrefillCacheIdentity(identity, experts)});
     }
     context->prompt = prompt;
     return server::TextPreparedPrompt{prompt->tokens, std::move(context),

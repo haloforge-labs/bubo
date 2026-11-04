@@ -19,6 +19,11 @@ param(
   [switch]$StructureOnly
 )
 $ErrorActionPreference = 'Stop'
+# The runtime's THIRD-PARTY.txt may already name the GUI inventory (the prebuilt text does). Add the paragraph only when it does not.
+function Add-GuiThirdPartyNote([string]$File) {
+  if ((Get-Content -LiteralPath $File -Raw).Contains('licenses/gui/THIRD-PARTY-GUI.md')) { return }
+  Add-Content -LiteralPath $File -Value "`r`nGUI and updater`r`n---------------`r`nGenerated inventory: licenses/gui/THIRD-PARTY-GUI.md (source: docs/release/THIRD-PARTY-GUI.md).`r`nComplete GUI dependency licence texts accompany that inventory."
+}
 $root = (Resolve-Path -LiteralPath "$PSScriptRoot\..\..").Path
 $Notes = (Resolve-Path -LiteralPath $Notes).Path
 if ([string]::IsNullOrWhiteSpace([IO.File]::ReadAllText($Notes, [Text.Encoding]::UTF8))) { throw 'Notes must contain a nonempty user-facing release summary' }
@@ -74,13 +79,13 @@ try {
   }
   foreach ($rel in @($layout.gui, $layout.helper)) { if (Test-Path -LiteralPath (Join-Path $stage $rel)) { throw "Runtime already contains $rel" } }
   Copy-Item -LiteralPath $gui -Destination (Join-Path $stage $layout.gui)
-  & $Go build '-ldflags=-H=windowsgui' -o (Join-Path $stage $layout.helper) ./cmd/bubo-update
+  & $Go build -trimpath '-ldflags=-H=windowsgui' -o (Join-Path $stage $layout.helper) ./cmd/bubo-update
   if ($LASTEXITCODE) { throw 'Updater helper build failed' }
   if (-not (Test-Path -LiteralPath (Join-Path $licenses 'THIRD-PARTY-GUI.md'))) { throw 'Generate the GUI licence bundle first' }
   $noticeDir = Join-Path $stage 'licenses\gui'
   New-Item -ItemType Directory -Force $noticeDir | Out-Null
   Copy-Item -Path (Join-Path $licenses '*') -Destination $noticeDir -Recurse
-  Add-Content -LiteralPath (Join-Path $stage 'THIRD-PARTY.txt') -Value "`r`nGUI and updater`r`n---------------`r`nGenerated inventory: licenses/gui/THIRD-PARTY-GUI.md (source: docs/release/THIRD-PARTY-GUI.md).`r`nComplete GUI dependency licence texts accompany that inventory."
+  Add-GuiThirdPartyNote (Join-Path $stage 'THIRD-PARTY.txt')
   if ($StructureOnly) { 'structure only, CPU engine, not shippable' | Set-Content -LiteralPath (Join-Path $stage 'STRUCTURE-ONLY.txt') }
   & "$root\tools\release\build-manifest.ps1" -PackageFolder $stage -ExtendExisting -ExtraFiles @($layout.gui, $layout.helper)
   $manifest = Get-Content -LiteralPath (Join-Path $stage 'BUILD-MANIFEST.json') -Raw | ConvertFrom-Json

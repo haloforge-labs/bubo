@@ -1,4 +1,6 @@
 #include "qfn_mmq_prelude.h"
+#include "scratch_plan.hpp"
+#include "src/core/hip/managed_alloc.hpp"
 namespace qfn_mmq {
 // SPDX-License-Identifier: MIT
 // Implementations of the ggml-API stubs declared in qfn_ggml_stubs.h plus
@@ -16,6 +18,7 @@ namespace qfn_mmq {
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <vector>
 
@@ -107,60 +110,86 @@ int64_t ggml_time_us() {
 namespace {
 
 /* qwen38: every allocation the tier makes is scoped to one entry point and
- * released in reverse order, and every kernel runs on the executor's single
- * stream, so a stack over one device arena is enough. It replaces
+ * released in reverse order, and each arena serves one stream, so stream
+ * order makes a stack over device blocks sufficient. It replaces
  * hipMallocAsync/hipFreeAsync, whose reuse of a just-freed block raced with
  * in-flight kernels on this ROCm and made prefill logits nondeterministic. */
 struct qfn_stack_pool : public ggml_hip_pool {
+    static constexpr size_t kFirstBlockBytes = (size_t) 16 << 20;
+    struct block {
+        char *base;
+        size_t capacity;
+        size_t top;
+    };
+    struct live_alloc {
+        char *ptr;
+        size_t bytes;
+        size_t block;
+    };
     int device;
-    char *base = nullptr;
-    size_t capacity = 0;
-    size_t top = 0;
-    std::vector<std::pair<char *, size_t>> live;
+    std::vector<block> blocks;
+    size_t current = 0;
+    std::vector<live_alloc> live;
+    hipStream_t guarded_stream = nullptr;
+    bool guard_capture = false;
 
     explicit qfn_stack_pool(int device) : device(device) {}
 
     ~qfn_stack_pool() override {
-        if (base) (void)hipFree(base);
+        for (const block &b : blocks) (void)hipFree(b.base);
     }
 
-    void reserve(size_t bytes) {
-        if (bytes <= capacity) return;
-        /* Growing invalidates outstanding pointers, so it only happens while
-         * nothing is live; the arena starts generous to keep that true. */
-        if (top != 0) {
-            (void)::gufo::server::Logger::FlushSync(std::chrono::seconds(2));
-            fprintf(stderr, "qfn_stack_pool: arena exhausted with live allocations\n");
-            abort();
-        }
+    void add_block(size_t bytes) {
+      if (guard_capture) {
+        hipStreamCaptureStatus status = hipStreamCaptureStatusNone;
+        HIP_CHECK(hipStreamIsCapturing(guarded_stream, &status));
+        ::gufo::models::qwen38_flash_next::rocm::mmq::RequirePoolGrowthAllowed(
+            status != hipStreamCaptureStatusNone);
+      }
+        // Keep every old block: captured graphs retain its addresses (#740).
         (void)hipDeviceSynchronize();
-        if (base) (void)hipFree(base);
-        size_t next = capacity ? capacity : (size_t) 256 << 20;
-        while (next < bytes) next *= 2;
-        HIP_CHECK(hipMalloc((void **) &base, next));
-        capacity = next;
+        char *base = nullptr;
+        HIP_CHECK(gufo::hip::AllocateDevice(&base, bytes));
+        blocks.push_back({base, bytes, 0});
     }
 
     void * alloc(size_t size, size_t * actual_size) override {
         ggml_hip_set_device(device);
         const size_t aligned = (size + 255) & ~(size_t) 255;
-        if (top + aligned > capacity) reserve(top + aligned);
-        char *ptr = base + top;
-        top += aligned;
-        live.emplace_back(ptr, aligned);
+        if (blocks.empty()) {
+            size_t first = kFirstBlockBytes;
+            while (first < aligned) first *= 2;
+            add_block(first);
+        }
+        if (blocks[current].top + aligned > blocks[current].capacity) {
+            size_t next = current + 1;
+            while (next < blocks.size() && blocks[next].capacity < aligned) ++next;
+            if (next == blocks.size()) {
+                size_t bytes = blocks.back().capacity * 2;
+                while (bytes < aligned) bytes *= 2;
+                add_block(bytes);
+            }
+            current = next;
+        }
+        block &b = blocks[current];
+        char *ptr = b.base + b.top;
+        b.top += aligned;
+        live.push_back({ptr, aligned, current});
         if (actual_size) *actual_size = aligned;
         return ptr;
     }
 
     void free(void * ptr, size_t /*size*/) override {
         if (!ptr) return;
-        if (live.empty() || live.back().first != ptr) {
+        if (live.empty() || live.back().ptr != ptr) {
             (void)::gufo::server::Logger::FlushSync(std::chrono::seconds(2));
             fprintf(stderr, "qfn_stack_pool: non-LIFO free\n");
             abort();
         }
-        top -= live.back().second;
+        const live_alloc a = live.back();
         live.pop_back();
+        blocks[a.block].top -= a.bytes;
+        while (current > 0 && blocks[current].top == 0) --current;
     }
 };
 
@@ -168,6 +197,51 @@ struct qfn_stack_pool : public ggml_hip_pool {
 
 std::unique_ptr<ggml_hip_pool> ggml_backend_hip_context::new_pool_for_device(int device, int /*stream_no*/) {
     return std::unique_ptr<ggml_hip_pool>(new qfn_stack_pool(device));
+}
+
+namespace {
+std::mutex g_stream_pools_mutex;
+std::map<std::pair<int, hipStream_t>, std::unique_ptr<ggml_hip_pool>> g_stream_pools;
+}
+
+ggml_hip_pool & qfn_pool_for_stream(int device, hipStream_t stream) {
+    const std::lock_guard<std::mutex> lock(g_stream_pools_mutex);
+    auto &pool = g_stream_pools[{device, stream}];
+    if (!pool) pool = ggml_backend_hip_context::new_pool_for_device(device, 0);
+    return *pool;
+}
+
+extern "C" int qfn_mmq_reserve_stream(hipStream_t stream, size_t bytes,
+                                      size_t* reserved) {
+  auto& pool = static_cast<qfn_stack_pool&>(
+      qfn_pool_for_stream(ggml_hip_get_device(), stream));
+  if (!reserved || !pool.blocks.empty())
+    return -1;
+  const size_t capacity =
+      ::gufo::models::qwen38_flash_next::rocm::mmq::ScratchBlockCapacity(bytes);
+  if (capacity)
+    pool.add_block(capacity);
+  pool.guarded_stream = stream;
+  pool.guard_capture = true;
+  *reserved = capacity;
+  return 0;
+}
+
+extern "C" void qfn_mmq_release_stream(hipStream_t stream) {
+    const std::lock_guard<std::mutex> lock(g_stream_pools_mutex);
+    for (auto it = g_stream_pools.begin(); it != g_stream_pools.end();) {
+        if (it->first.second != stream) {
+            ++it;
+            continue;
+        }
+        const hipError_t status = hipStreamSynchronize(stream);
+        if (status != hipSuccess) {
+            fprintf(stderr, "qfn_mmq_release_stream: stream %p not synchronized (%s); keeping its scratch arena\n",
+                    (void *) stream, hipGetErrorString(status));
+            (void)it->second.release();
+        }
+        it = g_stream_pools.erase(it);
+    }
 }
 
 ggml_backend_hip_context::~ggml_backend_hip_context() {

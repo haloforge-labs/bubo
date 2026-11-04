@@ -1,9 +1,16 @@
 import type { View } from '@/lib/bindings'
 import { number } from '@/lib/format'
 import { activeSessions, liveRate, promptRead } from '@/lib/live-sessions'
+import { AboutPopup } from '@/components/about-popup'
+import { pageGrid } from '@/components/page-grid'
 import { LiveRateChart } from './live-rate-chart'
 
 type Slot = View['slots'][number]
+
+// One column template for the header and every row, so a value always sits under
+// its heading. The progress column takes the spare width and its content wraps.
+const columns =
+  'grid grid-cols-[2.5rem_4rem_minmax(6rem,1fr)_5.5rem_4.5rem] gap-x-3'
 
 function PromptRead({ slot }: { slot: Slot }) {
   const progress = promptRead(slot)
@@ -11,8 +18,8 @@ function PromptRead({ slot }: { slot: Slot }) {
     return <span className="text-muted-foreground">Progress unavailable</span>
   const { total, cached, read, percent } = progress
   return (
-    <div className="min-w-56 space-y-1">
-      <div className="flex items-baseline justify-between gap-4 font-mono text-sm tabular-nums">
+    <div className="min-w-0 space-y-1">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-4 font-mono text-sm tabular-nums">
         <span>
           {number(read, 0)} / {number(total, 0)}
         </span>
@@ -65,33 +72,34 @@ export function PromptProgress({ view }: { view: View }) {
   if (!slots.length && !groups.size) return null
   return (
     <section aria-label="Live requests" className="space-y-3">
-      <h2 className="text-lg">Live requests</h2>
-      <p className="text-xs text-muted-foreground">
-        Counts and rates update with server samples. Cached tokens are already
-        read. Elapsed time starts when Bubo first observes the active request.
-      </p>
+      <div className="flex items-center justify-between gap-1">
+        <h2 className="text-lg">Live requests</h2>
+        <AboutPopup label="Live requests" className="text-sm">
+          <p>Counts and rates update with server samples.</p>
+          <p>Cached tokens are already read.</p>
+          <p>
+            Elapsed time starts when Bubo first observes the active request.
+          </p>
+        </AboutPopup>
+      </div>
       {!!slots.length && (
         <div className="overflow-x-auto">
-          <div
-            role="table"
-            aria-label="Active sessions"
-            className="min-w-[36rem] text-sm"
-          >
+          <div role="table" aria-label="Active sessions" className="text-sm">
             <div
               role="row"
-              className="grid grid-cols-[4rem_5rem_minmax(14rem,1fr)_7rem_8rem] gap-3 border-b pb-2 text-muted-foreground"
+              className={`${columns} border-b pb-2 text-muted-foreground`}
             >
               <span role="columnheader">Session</span>
               <span role="columnheader">Phase</span>
               <span role="columnheader">Progress</span>
               <span role="columnheader">Live tok/s</span>
-              <span role="columnheader">Observed elapsed</span>
+              <span role="columnheader">Elapsed</span>
             </div>
             {slots.map((slot) => (
               <div
                 role="row"
                 key={slot.id}
-                className="grid grid-cols-[4rem_5rem_minmax(14rem,1fr)_7rem_8rem] items-start gap-3 border-b py-3"
+                className={`${columns} items-start border-b py-3`}
               >
                 <span role="cell" className="font-mono tabular-nums">
                   {number(slot.id + 1, 0)}
@@ -112,7 +120,7 @@ export function PromptProgress({ view }: { view: View }) {
                   ) : slot.state === 'generating' ? (
                     <span className="font-mono tabular-nums">
                       {slot.generated_tokens == null
-                        ? '-'
+                        ? '—'
                         : number(slot.generated_tokens, 0)}{' '}
                       tokens written
                     </span>
@@ -131,7 +139,7 @@ export function PromptProgress({ view }: { view: View }) {
                 </span>
                 <span role="cell" className="font-mono tabular-nums">
                   {slot.elapsed_ms == null
-                    ? '-'
+                    ? '—'
                     : `${number(slot.elapsed_ms / 1000, 1)} s`}
                 </span>
               </div>
@@ -139,7 +147,7 @@ export function PromptProgress({ view }: { view: View }) {
           </div>
         </div>
       )}
-      <div className="grid gap-4 xl:grid-cols-2">
+      <div className={pageGrid}>
         {[...groups].map(([key, group]) => (
           <LiveRateChart
             key={key}

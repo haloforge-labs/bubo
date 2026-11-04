@@ -1,7 +1,10 @@
 import { Link } from '@tanstack/react-router'
+import { TriangleAlert } from 'lucide-react'
+import { cn } from '@/lib/utils'
 import { actions, type View } from '@/lib/bindings'
 import { ActionError, useActionTask } from '@/components/action-feedback'
 import { number } from '@/lib/format'
+import { AboutPopup } from '@/components/about-popup'
 import { Button } from '@/components/ui/button'
 
 export function MemoryFit({
@@ -51,13 +54,54 @@ export function MemoryFit({
         /lower.memory/i.test(row.display_name),
     )
   const numbers = [
-    ['GPU left after cache growth', estimate?.free_after_growth_gib],
-    ['System memory left after spill', estimate?.host_free_after_spill_gib],
-    ['Free system memory', estimate?.host?.available?.gib],
+    ['GPU memory left', estimate?.free_after_growth_gib],
+    ['System memory left', estimate?.host_free_after_spill_gib],
+    ['Available system memory', estimate?.host?.available?.gib],
   ] as const
+  // A fit is one line: the verdict and the figures. The other verdicts say why.
+  if (fit.class === 'fits')
+    return (
+      <section
+        aria-label="Memory fit"
+        className="flex flex-wrap items-baseline gap-x-5 gap-y-1 text-sm"
+      >
+        <h3 className="text-base">Fits</h3>
+        {numbers.map(([label, value]) =>
+          value == null ? null : (
+            <span key={label} className="whitespace-nowrap">
+              <span className="text-xs text-muted-foreground">{label}</span>{' '}
+              <span className="tabular-nums">{number(value, 0)} GiB</span>
+            </span>
+          ),
+        )}
+        {numbers.some(([, value]) => value != null) && (
+          <AboutPopup label="the memory figures">
+            <p>
+              GPU memory left is what remains after the KV cache has grown to
+              its full size. System memory left is what remains if the engine
+              spills part of its cache to system memory.
+            </p>
+          </AboutPopup>
+        )}
+      </section>
+    )
   return (
-    <section aria-label="Memory fit" className="space-y-3 rounded border p-4">
-      <h3 className="text-lg">
+    <section
+      aria-label="Memory fit"
+      className={cn(
+        'space-y-3 rounded border p-4',
+        noFit && 'border-destructive',
+      )}
+    >
+      <h3
+        className={cn(
+          'text-lg',
+          noFit && 'flex items-center gap-2 text-destructive',
+        )}
+      >
+        {noFit && (
+          <TriangleAlert aria-hidden="true" className="size-5 shrink-0" />
+        )}
         {tight
           ? 'Tight'
           : anyContext
@@ -66,22 +110,41 @@ export function MemoryFit({
               ? "Doesn't fit"
               : 'Fits'}
       </h3>
-      <p className="text-sm">{fit.sentence}</p>
+      {/* A fit says it once, in the heading; the other verdicts say why. */}
+      {fit.class !== 'fits' && (
+        <div className="flex items-start gap-2 text-sm">
+          <p>{fit.sentence}</p>
+          {tight && (
+            <AboutPopup label="tight memory">
+              <p>
+                The KV cache holds the conversation and grows as it gets longer.
+                If memory runs out, the server stops with an out-of-memory
+                error, or Windows slows down.
+              </p>
+            </AboutPopup>
+          )}
+        </div>
+      )}
       {numbers.some(([, value]) => value != null) && (
-        <table className="text-sm">
-          <tbody>
+        <div className="flex items-start gap-3">
+          <dl className="flex flex-wrap gap-x-8 gap-y-2 text-sm">
             {numbers.map(([label, value]) =>
               value == null ? null : (
-                <tr key={label}>
-                  <th className="pr-6 text-left font-normal">{label}</th>
-                  <td className="text-right tabular-nums">
-                    {number(value, 0)} GiB
-                  </td>
-                </tr>
+                <div key={label}>
+                  <dt className="text-xs text-muted-foreground">{label}</dt>
+                  <dd className="tabular-nums">{number(value, 0)} GiB</dd>
+                </div>
               ),
             )}
-          </tbody>
-        </table>
+          </dl>
+          <AboutPopup label="the memory figures">
+            <p>
+              GPU memory left is what remains after the KV cache has grown to
+              its full size. System memory left is what remains if the engine
+              spills part of its cache to system memory.
+            </p>
+          </AboutPopup>
+        </div>
       )}
       {tight && (
         <label className="flex items-start gap-2 text-sm">

@@ -11,6 +11,7 @@ import {
 } from '@/components/core-page-test-support'
 import { downloadFolderHelp } from '@/components/download-folder'
 import { PlanSummary } from '@/components/model-download'
+import { openDiscover } from '@/features/models/discover-test-support'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -164,6 +165,7 @@ async function openConsent(view: View) {
   view2.prepared_models = []
   view2.models!.prepared_models = []
   mountCorePage('/models', view2)
+  await openDiscover()
   await page
     .getByRole('button', { name: 'Download', exact: true })
     .first()

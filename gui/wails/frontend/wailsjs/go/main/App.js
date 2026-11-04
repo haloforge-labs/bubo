@@ -22,6 +22,10 @@ export function BrowseModelFolder() {
   return window['go']['main']['App']['BrowseModelFolder']();
 }
 
+export function BrowseSideFile(arg1) {
+  return window['go']['main']['App']['BrowseSideFile'](arg1);
+}
+
 export function Cancel() {
   return window['go']['main']['App']['Cancel']();
 }

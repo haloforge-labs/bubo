@@ -93,7 +93,7 @@ func TestModelsListKeepsBothPathsOfEveryRecordedPackage(t *testing.T) {
 // estimate depends on it.
 func TestSavedSetupEstimatePassesTheProfile(t *testing.T) {
 	r := newModelRig(t, "")
-	if _, err := r.svc.estimateRuntime(e21Flash, 0, 0, "", "exact"); err != nil {
+	if _, err := r.svc.estimateRuntime(e21Flash, 0, 0, "", "exact", nil); err != nil {
 		t.Fatal(err)
 	}
 	args := r.argv(t, "models", 1)
@@ -101,7 +101,7 @@ func TestSavedSetupEstimatePassesTheProfile(t *testing.T) {
 	if !strings.Contains(joined, "--profile exact") {
 		t.Fatalf("no --profile: %q", joined)
 	}
-	if _, err := r.svc.estimateRuntime(e21Flash, 0, 0, "", ""); err != nil {
+	if _, err := r.svc.estimateRuntime(e21Flash, 0, 0, "", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(strings.Join(r.argv(t, "models", 2), " "), "--profile") {

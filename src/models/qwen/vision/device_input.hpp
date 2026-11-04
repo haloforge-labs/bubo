@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/models/qwen/continuation_hooks.hpp"
 #include "src/models/qwen/vision/encoder.hpp"
 #include "src/models/qwen/vision/prompt.hpp"
 #include "src/models/qwen/vision/rope.hpp"
@@ -27,10 +28,18 @@ public:
     is_cancelled_ = std::move(check);
   }
   void RestoreLayout(const RopeLayout& layout, hipStream_t stream);
+  /// Reserve the stable empty descriptor before capturing text graphs in a
+  /// session that can later receive images. Existing graphs then keep the
+  /// same pointer when the image layout is installed.
+  void PrepareRope(hipStream_t stream);
   void Inject(float* hidden, std::uint32_t position, std::uint32_t count,
               std::uint32_t width, std::uint32_t hc, hipStream_t stream);
   [[nodiscard]] const DeviceRope* rope() const noexcept { return descriptor_; }
   [[nodiscard]] const RopeLayout& layout() const noexcept { return layout_; }
+  [[nodiscard]] const std::shared_ptr<const Prompt>& PromptAttachment()
+      const noexcept {
+    return prompt_;
+  }
   [[nodiscard]] std::size_t Bytes() const noexcept {
     std::size_t bytes = capacity_ * 3 * sizeof(std::int32_t) +
                         (descriptor_ == nullptr ? 0 : sizeof(DeviceRope));
@@ -43,6 +52,8 @@ public:
   }
 
 private:
+  friend class models::qwen::ContinuationAdapter;
+  models::qwen::ContinuationHooks* continuation_hooks_{nullptr};
   RopeLayout layout_;
   std::shared_ptr<const Prompt> prompt_;
   std::shared_ptr<Encoder> encoder_;

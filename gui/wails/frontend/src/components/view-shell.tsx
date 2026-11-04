@@ -5,6 +5,8 @@ import { NativeWindowActions } from '@/components/native-window-actions'
 import { serverAddresses } from '@/lib/format'
 import { useRouterState } from '@tanstack/react-router'
 import { GUIError } from '@/components/gui-error'
+import { StatusLine } from '@/components/status-line'
+import { guiError } from '@/lib/gui-errors'
 import { GPUHistoryCollector } from '@/lib/gpu-history'
 
 export function ViewShell({ children }: { children: ReactNode }) {
@@ -49,14 +51,27 @@ export function ViewShell({ children }: { children: ReactNode }) {
         </p>
       ))}
       {children}
-      {view.data?.notice && (
-        <GUIError
-          error={{
-            code: view.data.notice.code,
-            remedy: view.data.notice.detail,
-          }}
-        />
-      )}
+      {view.data?.notice &&
+        // A saved support bundle is confirmed by the Logs page itself; nothing
+        // else in the shell repeats it.
+        view.data.notice.code !== 'support_bundle_saved' &&
+        (view.data.notice.code === 'settings_saved' ? (
+          <StatusLine>
+            {
+              guiError({
+                code: view.data.notice.code,
+                remedy: view.data.notice.detail,
+              }).message
+            }
+          </StatusLine>
+        ) : (
+          <GUIError
+            error={{
+              code: view.data.notice.code,
+              remedy: view.data.notice.detail,
+            }}
+          />
+        ))}
       {view.data && <NativeWindowActions window={view.data.window} />}
     </AppShell>
   )

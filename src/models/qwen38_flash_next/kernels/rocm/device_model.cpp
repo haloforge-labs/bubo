@@ -3,11 +3,14 @@
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
+#include <map>
 #include <thread>
 #include <vector>
 
@@ -20,9 +23,12 @@
 
 #include "src/core/hip/weight_upload.hpp"
 #include "src/core/platform/tuning.hpp"
+#include "src/core/quant/bf16_q8_0.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
+#include "src/models/qwen38_flash_next/hc_load_q8_policy.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
+#include "src/models/qwen38_flash_next/native_dispatch.hpp"
 
 namespace gufo::models::qwen38_flash_next::rocm {
 namespace {
@@ -40,33 +46,162 @@ struct Conversion {
   std::size_t count;
 };
 
-/// Re-encodes Q6_K rows as Q8_0 (fp16 scale + 32 int8 per block).
-/// Q8_0's per-32 step is about a quarter of Q6_K's per-16 step, so the added
-/// rounding is small next to the Q6_K quantization it sits on.
-void Q6KRowsToQ8_0(const std::uint8_t* src, std::uint8_t* dst, std::size_t rows,
-                   std::size_t cols) {
-  const std::size_t src_row = cols / 256 * 210;
-  const std::size_t dst_row = cols / 32 * 34;
-  std::vector<float> values(cols);
-  for (std::size_t r = 0; r < rows; ++r) {
-    gufo::quant::DequantizeQ6_K(src + r * src_row, values.data(), cols);
-    std::uint8_t* out = dst + r * dst_row;
-    for (std::size_t b = 0; b < cols / 32; ++b) {
-      const float* x = values.data() + b * 32;
-      float amax = 0.0F;
-      for (int i = 0; i < 32; ++i)
-        amax = std::max(amax, std::fabs(x[i]));
-      const auto scale = static_cast<_Float16>(amax / 127.0F);
-      const float d = static_cast<float>(scale);
-      const float inverse = d != 0.0F ? 1.0F / d : 0.0F;
-      std::memcpy(out + b * 34, &scale, sizeof(scale));
-      auto* q = reinterpret_cast<std::int8_t*>(out + b * 34 + 2);
-      for (int i = 0; i < 32; ++i) {
-        const float v = std::nearbyint(x[i] * inverse);
-        q[i] = static_cast<std::int8_t>(std::clamp(v, -127.0F, 127.0F));
-      }
+/// GUFO_HC_LOAD_Q8_POISON: ends the life of a weight stager. With the switch on
+/// the pinned staging buffers are overwritten with the poison pattern and kept
+/// allocated; otherwise the stager is destroyed as before (bit-identical).
+void RetireStager(std::unique_ptr<hip::WeightUpload>& stager,
+                  hc_load_q8::PoisonLedger* poison) {
+  if (poison == nullptr || stager == nullptr) {
+    return;  // switch off: the stager is destroyed where it always was
+  }
+  const std::size_t bytes = stager->PoisonAndRetainStaging(hc_load_q8::kPoisonByte);
+  // one event per staging slot (each is 16 MiB + one page)
+  poison->host_events += bytes / ((std::size_t{16} << 20) + 4096);
+  poison->host_bytes += bytes;
+  poison->kept_host_bytes += bytes;
+  stager.reset();
+}
+
+/// The same for the stagers of the optional uploads (draft output head, decode
+/// twin, shadow): prints its own line, does nothing when the switch is off.
+void RetireOptionalStager(std::unique_ptr<hip::WeightUpload>& stager, const char* what) {
+  bool on = false;
+  try {
+    on = hc_load_q8::PoisonEnabled();
+  } catch (const std::exception&) {
+    return;  // Upload() already reported the bad value
+  }
+  if (!on) {
+    return;
+  }
+  hc_load_q8::PoisonLedger ledger;
+  RetireStager(stager, &ledger);
+  std::fprintf(stderr,
+               "[loader-poison] %s poisoned_host=%zu bytes=%zu kept_device=0 bytes=0 "
+               "kept_host_bytes=%zu\n",
+               what, ledger.host_events, ledger.host_bytes, ledger.kept_host_bytes);
+}
+
+/// GUFO_HC_LOAD_Q8: the device tensors of every BF16 hyper-connection tensor,
+/// made BEFORE the weight stager exists (see PreloadHc), keyed by the address
+/// of the mapped BF16 payload they replace.
+struct HcPreload {
+  std::map<const void*, DeviceTensor> tensors;
+  std::size_t down{0}, up{0}, inject{0};
+  std::size_t bf16_bytes{0}, q8_bytes{0}, inject_added_bytes{0};
+  double ms{0};
+};
+
+/// Converts and uploads every BF16 HC down/up (-> Q8_0) and inject (-> F32)
+/// tensor of `w` and `mtp`, one synchronous host-to-device copy per tensor that
+/// carries the zero tail with it, then synchronizes the device. It runs before
+/// `hip::WeightUpload::Create`, so no stager thread, stream or pending queue
+/// exists while these null-stream copies happen: the conversion cannot
+/// interleave with the asynchronous upload of any other tensor. Nothing is kept
+/// on the host after its copy returned; no BF16 copy is ever allocated.
+bool PreloadHc(const ModelWeights& w, const MtpWeights* mtp,
+               std::vector<void*>& allocations, std::size_t& bytes,
+               std::size_t& max_q8_cols, HcPreload& out, std::string* error,
+               hc_load_q8::PoisonLedger* poison) {
+  const auto fail = [&](const std::string& message) {
+    if (error != nullptr) {
+      *error = message;
+    }
+    return false;
+  };
+  std::vector<std::uint8_t> image;  // reused: every byte is rewritten per tensor
+  const auto upload = [&](const TensorRef& t, bool inject) {
+    if (t.empty()) {
+      return true;
+    }
+    if (t.type != core::GgmlType::kBF16) {
+      return true;  // Q8_0 / F32 tensors take the ordinary stager path
+    }
+    if (t.experts != 1 || (!inject && t.cols % 32 != 0)) {
+      return fail("GUFO_HC_LOAD_Q8: " + std::string(t.name) +
+                  " is not a single BF16 matrix with 32-aligned rows");
+    }
+    const auto begin = std::chrono::steady_clock::now();
+    std::string message;
+    if (inject ? !quant::BuildBf16F32Image(t.data, t.cols * t.rows, kTailMargin,
+                                           image, &message)
+               : !quant::BuildBf16Q8_0Image(t.data, t.rows, t.cols, kTailMargin,
+                                            hc_load_q8::kQuantizeThreads, image,
+                                            &message)) {
+      return fail("GUFO_HC_LOAD_Q8: " + std::string(t.name) + ": " + message);
+    }
+    const std::size_t size = image.size() - kTailMargin;
+    void* ptr = nullptr;
+    if (hipMalloc(&ptr, image.size()) != hipSuccess) {
+      return fail("hipMalloc failed for " + std::string(t.name) + " (" +
+                  std::to_string(image.size()) + " bytes)");
+    }
+    allocations.push_back(ptr);
+    bytes += image.size();
+    // Tensor and zero tail in one synchronous copy.
+    if (hipMemcpy(ptr, image.data(), image.size(), hipMemcpyHostToDevice) !=
+        hipSuccess) {
+      return fail("GUFO_HC_LOAD_Q8: upload failed for " + std::string(t.name));
+    }
+    // GUFO_HC_LOAD_Q8_POISON: the host image is released right here (the next
+    // tensor rewrites it); if hipMemcpy had returned before its DMA read the
+    // buffer, the device would now hold NaN and the trunk would break.
+    if (poison != nullptr) {
+      poison->Host(image.data(), image.size());
+    }
+    DeviceTensor d;
+    d.data = ptr;
+    d.type = inject ? core::GgmlType::kF32 : core::GgmlType::kQ8_0;
+    d.cols = static_cast<std::uint32_t>(t.cols);
+    d.rows = static_cast<std::uint32_t>(t.rows);
+    d.experts = 1;
+    d.name = t.name;
+    out.tensors.emplace(t.data, std::move(d));
+    if (inject) {
+      ++out.inject;
+      out.inject_added_bytes += size - t.SizeBytes();
+    } else {
+      out.bf16_bytes += t.SizeBytes();
+      out.q8_bytes += size;
+      max_q8_cols = std::max<std::size_t>(max_q8_cols, t.cols);
+    }
+    out.ms += std::chrono::duration<double, std::milli>(
+                  std::chrono::steady_clock::now() - begin)
+                  .count();
+    return true;
+  };
+  const auto mixer = [&](const HcMixer& m) {
+    const std::size_t before_down = out.tensors.size();
+    if (!upload(m.down, false)) {
+      return false;
+    }
+    out.down += out.tensors.size() - before_down;
+    const std::size_t before_up = out.tensors.size();
+    if (!upload(m.up, false)) {
+      return false;
+    }
+    out.up += out.tensors.size() - before_up;
+    return upload(m.inject, true);
+  };
+  if (!mixer(w.hc_head)) {
+    return false;
+  }
+  for (const auto& l : w.layers) {
+    if (!mixer(l.hc_attn) || !mixer(l.hc_ffn)) {
+      return false;
     }
   }
+  if (mtp != nullptr &&
+      (!mixer(mtp->block.hc_attn) || !mixer(mtp->block.hc_ffn) ||
+       !mixer(mtp->block.nextn_head))) {
+    return false;
+  }
+  const auto status = hipDeviceSynchronize();
+  if (status != hipSuccess) {
+    return fail("GUFO_HC_LOAD_Q8: device synchronize failed: " +
+                std::string(hipGetErrorString(status)));
+  }
+  return true;
 }
 
 struct Uploader {
@@ -76,11 +211,25 @@ struct Uploader {
   std::size_t& bytes;
   std::size_t& max_half_cols;
   std::size_t& max_q8_cols;
+  std::size_t& max_native_gemm_cols;
+  std::size_t& max_native_gemm_rows;
   std::string* error;
   bool ok{true};
   std::uint32_t shard_base{0};
   /// Layer() leaves the routed experts for a later Experts() pass.
   bool defer_experts{false};
+  // Legacy F32 packages retain their established F16 stack arithmetic.
+  // Published BF16-router packages preserve every type, including sidecars.
+  // The one exception is the opt-in GUFO_HC_LOAD_Q8 narrowing below: it never
+  // enters `conversions`, it quantises on the host while uploading.
+  bool preserve_types{false};
+  /// GUFO_HC_LOAD_Q8 decided to narrow (hc_load_q8::Decide): PreloadHc already
+  /// made the device tensors; Mixer() takes them from here instead of copying
+  /// the BF16 payload.
+  HcPreload* hc_preload{nullptr};
+  /// GUFO_HC_LOAD_Q8_POISON: non-null = poison what the loader releases and
+  /// do not free device buffers.
+  hc_load_q8::PoisonLedger* poison{nullptr};
 
   void Fail(const std::string& message) {
     if (ok && error != nullptr) {
@@ -115,68 +264,20 @@ struct Uploader {
     d.cols = static_cast<std::uint32_t>(t.cols);
     d.rows = static_cast<std::uint32_t>(t.rows);
     d.experts = static_cast<std::uint32_t>(t.experts);
+    d.name = t.name;
     if (t.type == core::GgmlType::kBF16 || t.type == core::GgmlType::kF16) {
       max_half_cols = std::max<std::size_t>(max_half_cols, t.cols);
     }
-    if (t.type == core::GgmlType::kQ8_0 && t.experts == 1) {
+    if ((t.type == core::GgmlType::kQ8_0 || NativeQuantDense(t.type)) &&
+        t.experts == 1) {
       max_q8_cols = std::max<std::size_t>(max_q8_cols, t.cols);
     }
-    return d;
-  }
-
-  /// A Q6_K matrix (the output head of unsloth UD-IQ4_XS) re-encoded as
-  /// Q8_0 on the host, so it runs on the tuned Q8_0 dense tier instead of a
-  /// path the HIP kernels do not have.
-  DeviceTensor CopyQ6KAsQ8_0(const TensorRef& t) {
-    DeviceTensor d;
-    if (t.empty() || !ok) {
-      return d;
+    // Pad sizes of the native prefill GEMM (a pass under 96 rows runs on a
+    // zero-padded 96-row copy); native types are never stacked.
+    if (t.experts == 1 && NativeWmmaGemm(t.type, t.rows, t.cols, true)) {
+      max_native_gemm_cols = std::max<std::size_t>(max_native_gemm_cols, t.cols);
+      max_native_gemm_rows = std::max<std::size_t>(max_native_gemm_rows, t.rows);
     }
-    if (t.cols % 256 != 0 || t.experts != 1) {
-      Fail("Q6_K tensor " + std::string(t.name) + " has an unsupported shape");
-      return d;
-    }
-    const std::size_t src_row = t.cols / 256 * 210;
-    const std::size_t dst_row = t.cols / 32 * 34;
-    const std::size_t size = dst_row * t.rows;
-    void* ptr = nullptr;
-    if (hipMalloc(&ptr, size + kTailMargin) != hipSuccess) {
-      Fail("hipMalloc failed for " + std::string(t.name));
-      return d;
-    }
-    allocations.push_back(ptr);
-    bytes += size + kTailMargin;
-    const auto* src = static_cast<const std::uint8_t*>(t.data);
-    constexpr std::size_t kChunkRows = 16384;
-    std::vector<std::uint8_t> host(kChunkRows * dst_row);
-    const std::size_t workers =
-        std::max<std::size_t>(1, std::thread::hardware_concurrency());
-    for (std::size_t r0 = 0; r0 < t.rows; r0 += kChunkRows) {
-      const std::size_t rows = std::min<std::size_t>(kChunkRows, t.rows - r0);
-      const std::size_t per = (rows + workers - 1) / workers;
-      std::vector<std::jthread> pool;
-      for (std::size_t w = 0; w < workers && w * per < rows; ++w) {
-        const std::size_t begin = w * per;
-        const std::size_t count = std::min(per, rows - begin);
-        pool.emplace_back([&, begin, count] {
-          Q6KRowsToQ8_0(src + (r0 + begin) * src_row,
-                        host.data() + begin * dst_row, count, t.cols);
-        });
-      }
-      pool.clear();
-      if (hipMemcpy(static_cast<std::uint8_t*>(ptr) + r0 * dst_row, host.data(),
-                    rows * dst_row, hipMemcpyHostToDevice) != hipSuccess) {
-        Fail("upload failed for " + std::string(t.name));
-        return d;
-      }
-    }
-    (void)hipMemset(static_cast<std::uint8_t*>(ptr) + size, 0, kTailMargin);
-    d.data = ptr;
-    d.type = core::GgmlType::kQ8_0;
-    d.cols = static_cast<std::uint32_t>(t.cols);
-    d.rows = static_cast<std::uint32_t>(t.rows);
-    d.experts = 1;
-    max_q8_cols = std::max<std::size_t>(max_q8_cols, t.cols);
     return d;
   }
 
@@ -213,6 +314,18 @@ struct Uploader {
         return;
       }
     }
+    if (poison != nullptr) {
+      // GUFO_HC_LOAD_Q8_POISON: the staging tensor is poisoned and NOT freed;
+      // it stays in `allocations` (the destructor frees it) and in `bytes`,
+      // because it is still resident.
+      const std::size_t whole = t.SizeBytes() + kTailMargin;
+      if (hipMemset(combined.data, hc_load_q8::kPoisonByte, whole) != hipSuccess) {
+        Fail("MTP staging tensor poisoning failed");
+        return;
+      }
+      poison->KeptDevice(whole);
+      return;
+    }
     std::erase(allocations, combined.data);
     (void)hipFree(combined.data);
     bytes -= t.SizeBytes() + kTailMargin;
@@ -233,8 +346,11 @@ struct Uploader {
     const core::GgmlType type = (*parts.begin())->type;
     for (const TensorRef* t : parts) {
       if (t->empty() || t->type != type || t->cols != (*parts.begin())->cols ||
-          (type != core::GgmlType::kF32 && type != core::GgmlType::kQ8_0)) {
-        Fail("stacked upload needs F32 or Q8_0 tensors of one shape");
+          (type != core::GgmlType::kF32 && type != core::GgmlType::kQ8_0 &&
+           type != core::GgmlType::kBF16 && type != core::GgmlType::kF16)) {
+        Fail("tensor " + std::string(t->name) + " type=" +
+             std::string(core::ToString(t->type)) +
+             " pass=decode/verify/prefill: stacked projection types differ");
         return d;
       }
       rows += t->rows;
@@ -256,14 +372,18 @@ struct Uploader {
       }
       offset += t->SizeBytes();
     }
-    if (type == core::GgmlType::kQ8_0) {
+    if (StackedProjectionType(type, preserve_types) == type) {
       (void)hipMemsetAsync(static_cast<std::uint8_t*>(ptr) + size, 0,
                            kTailMargin, nullptr);
       d.data = ptr;
       d.type = type;
       d.cols = static_cast<std::uint32_t>((*parts.begin())->cols);
       d.rows = static_cast<std::uint32_t>(rows);
-      max_q8_cols = std::max<std::size_t>(max_q8_cols, d.cols);
+      d.name = (*parts.begin())->name;
+      if (type == core::GgmlType::kQ8_0)
+        max_q8_cols = std::max<std::size_t>(max_q8_cols, d.cols);
+      if (type == core::GgmlType::kBF16 || type == core::GgmlType::kF16)
+        max_half_cols = std::max<std::size_t>(max_half_cols, d.cols);
       return d;
     }
     const std::size_t count = size / sizeof(float);
@@ -284,12 +404,42 @@ struct Uploader {
     d.type = core::GgmlType::kF16;
     d.cols = static_cast<std::uint32_t>((*parts.begin())->cols);
     d.rows = static_cast<std::uint32_t>(rows);
+    d.name = (*parts.begin())->name;
     max_half_cols = std::max<std::size_t>(max_half_cols, d.cols);
     return d;
   }
 
+  /// A tensor PreloadHc already made (BF16 HC projection -> Q8_0, BF16 inject
+  /// -> F32), or the ordinary stager copy for everything else (the MTP
+  /// sidecar's Q8_0 mixers, F32 norms, a Q8_0 inject).
+  DeviceTensor Hc(const TensorRef& t) {
+    if (t.empty() || !ok) {
+      return {};
+    }
+    if (hc_preload != nullptr) {
+      const auto it = hc_preload->tensors.find(t.data);
+      if (it != hc_preload->tensors.end()) {
+        return it->second;
+      }
+      if (t.type == core::GgmlType::kBF16) {
+        Fail("GUFO_HC_LOAD_Q8: BF16 tensor " + std::string(t.name) +
+             " was not converted although the plan covered every mixer");
+        return {};
+      }
+    }
+    return Copy(t);
+  }
+
   DeviceMixer Mixer(const HcMixer& m) {
-    return {Copy(m.norm), Copy(m.down), Copy(m.up), Copy(m.inject)};
+    if (hc_preload == nullptr) {
+      return {Copy(m.norm), Copy(m.down), Copy(m.up), Copy(m.inject)};
+    }
+    DeviceMixer out;
+    out.norm = Copy(m.norm);
+    out.down = Hc(m.down);
+    out.up = Hc(m.up);
+    out.inject = Hc(m.inject);
+    return out;
   }
 
   DeviceLayer Layer(const LayerWeights& l) {
@@ -381,26 +531,6 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     std::shared_ptr<npu::ServerPrefill> prefill
 #endif
 ) {
-  // The CPU reference also reads Q6_K, but the production embedding, dense
-  // and routed kernels do not. Reject it before allocating device weights;
-  // the embedding and output head are re-encoded as Q8_0 instead.
-  const auto supported = [&](const TensorRef& t) {
-    if (t.type != core::GgmlType::kQ6_K || &t == &w.token_embd ||
-        &t == &w.output)
-      return true;
-    if (error_msg != nullptr)
-      *error_msg = "unsupported HIP tensor format Q6_K: " + std::string(t.name);
-    return false;
-  };
-  const auto layer_supported = [&](const LayerWeights& l) {
-    return supported(l.ffn_gate_exps) && supported(l.ffn_up_exps) &&
-           supported(l.ffn_down_exps);
-  };
-  if (!supported(w.token_embd) || !supported(w.output) ||
-      !std::all_of(w.layers.begin(), w.layers.end(), layer_supported) ||
-      (mtp != nullptr && !layer_supported(mtp->block))) {
-    return nullptr;
-  }
   std::unique_ptr<DeviceModel> m(new DeviceModel());
   m->config_ = w.config;
 #ifdef GUFO_NPU
@@ -515,15 +645,95 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     const auto extra = mtp_reader->GetMappedRegions();
     shards.insert(shards.end(), extra.begin(), extra.end());
   }
+  const bool preserve_types = std::any_of(
+      w.layers.begin(), w.layers.end(), [](const LayerWeights& l) {
+        return l.router.type == core::GgmlType::kBF16;
+      });
+  // GUFO_HC_LOAD_Q8 (default on): one decision for every mixer, taken before
+  // any HC tensor is uploaded, so the model is never half converted.
+  hc_load_q8::Plan hc_plan;
+  bool hc_switch = false;
+  bool hc_verify = false;
+  bool hc_poison = false;
+  try {
+    hc_switch = hc_load_q8::Enabled();
+    hc_verify = hc_load_q8::VerifyEnabled();
+    hc_poison = hc_load_q8::PoisonEnabled();
+  } catch (const std::exception& e) {
+    if (error_msg != nullptr)
+      *error_msg = e.what();
+    return nullptr;
+  }
+  if (hc_switch) {
+    std::vector<hc_load_q8::Tensor> listing;
+    std::uint32_t mixer_id = 0;
+    const auto list = [&](hc_load_q8::Group group, const HcMixer& mixer) {
+      if (mixer.down.empty() && mixer.up.empty() && mixer.inject.empty())
+        return;  // a trunk layer has no draft-head mixer
+      ++mixer_id;
+      const std::pair<hc_load_q8::Role, const TensorRef*> parts[] = {
+          {hc_load_q8::Role::kDown, &mixer.down},
+          {hc_load_q8::Role::kUp, &mixer.up},
+          {hc_load_q8::Role::kInject, &mixer.inject}};
+      for (const auto& [role, ref] : parts)
+        if (!ref->empty())
+          listing.push_back(
+              {mixer_id, group, role, ref->type, ref->rows, ref->cols});
+    };
+    list(hc_load_q8::Group::kOutputHead, w.hc_head);
+    for (const auto& l : w.layers) {
+      list(hc_load_q8::Group::kTrunkAttn, l.hc_attn);
+      list(hc_load_q8::Group::kTrunkFfn, l.hc_ffn);
+    }
+    if (mtp != nullptr) {
+      list(hc_load_q8::Group::kMtpAttn, mtp->block.hc_attn);
+      list(hc_load_q8::Group::kMtpFfn, mtp->block.hc_ffn);
+      list(hc_load_q8::Group::kMtpHead, mtp->block.nextn_head);
+    }
+    if (!preserve_types) {
+      hc_plan.reason = "not a published-types (BF16 router) package";
+    } else if (w.config.hc_count != hc_load_q8::kHcCount ||
+               w.config.hidden_size % 32 != 0 ||
+               w.config.hc_low_rank != hc_load_q8::kLowRank) {
+      hc_plan.reason = "hc_count/hidden_size/hc_low_rank is not 4/32k/320";
+    } else {
+      hc_plan = hc_load_q8::Decide(listing);
+    }
+    if (!hc_plan.convert) {
+      std::fprintf(stderr,
+                   "[hcq8] switch=1 active=0 %s reason=\"%s\" tensors=0 "
+                   "resident_saved=0\n",
+                   hc_plan.nothing_to_do ? "noop=1" : "refused=1",
+                   hc_plan.reason.c_str());
+    }
+  }
+  // The conversion runs BEFORE the stager exists: no stager thread, stream or
+  // queued copy is alive while the null-stream copies of the converted tensors
+  // and the device synchronize happen (decode-hcq8 intermittent-draft review:
+  // the interleaved form could not be shown safe, this one needs no argument).
+  HcPreload hc_pre;
+  hc_load_q8::PoisonLedger poison_ledger;
+  hc_load_q8::PoisonLedger* const poison = hc_poison ? &poison_ledger : nullptr;
+  if (hc_plan.convert &&
+      !PreloadHc(w, mtp, m->allocations_, m->bytes_, m->max_q8_cols_, hc_pre,
+                 error_msg, poison)) {
+    return nullptr;
+  }
   auto stager = hip::WeightUpload::Create(shards, error_msg);
   if (!stager) {
     return nullptr;
   }
   std::vector<Conversion> conversions;
   Uploader up{*stager,           conversions,     m->allocations_, m->bytes_,
-              m->max_half_cols_, m->max_q8_cols_, error_msg};
+              m->max_half_cols_, m->max_q8_cols_, m->max_native_gemm_cols_,
+              m->max_native_gemm_rows_, error_msg};
+  up.preserve_types = preserve_types;
+  up.poison = poison;
+  if (hc_plan.convert) {
+    up.hc_preload = &hc_pre;
+  }
   const auto head = [&](const TensorRef& t) {
-    return t.type == core::GgmlType::kQ6_K ? up.CopyQ6KAsQ8_0(t) : up.Copy(t);
+    return up.Copy(t);
   };
 
 
@@ -576,6 +786,11 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
   if (!up.ok || !stager->Finish(error_msg)) {
     return nullptr;
   }
+  if (up.preserve_types && !conversions.empty()) {
+    if (error_msg != nullptr)
+      *error_msg = "native weights pass=upload: persistent type conversion is forbidden";
+    return nullptr;
+  }
   for (const auto& c : conversions) {
     NarrowActivations(static_cast<const float*>(c.source), c.destination, false,
                       c.count, nullptr);
@@ -589,11 +804,351 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     return nullptr;
   }
   for (const auto& c : conversions) {
+    if (poison != nullptr) {
+      // GUFO_HC_LOAD_Q8_POISON: the F32 source of a narrowed stack is poisoned
+      // and kept (still in allocations_ and bytes_), not freed.
+      const std::size_t whole = c.count * sizeof(float) + kTailMargin;
+      if (hipMemset(c.source, hc_load_q8::kPoisonByte, whole) != hipSuccess) {
+        if (error_msg != nullptr)
+          *error_msg = "GUFO_HC_LOAD_Q8_POISON: poisoning a narrowed stack source failed";
+        return nullptr;
+      }
+      poison->KeptDevice(whole);
+      continue;
+    }
     std::erase(m->allocations_, c.source);
     (void)hipFree(c.source);
     m->bytes_ -= c.count * sizeof(float) + kTailMargin;
   }
+  // The weight stager's pinned staging buffers end their life here (the
+  // executor allocates its own pinned memory later).
+  RetireStager(stager, poison);
+  if (hc_plan.convert) {
+    // Every HC projection must now be Q8_0 on the device; the consumers branch
+    // on DeviceTensor::type alone and no BF16 copy was ever allocated.
+    std::size_t down = 0, up_count = 0, injects = 0, f32_injects = 0;
+    std::array<std::size_t, hc_load_q8::kGroups> mixers{};
+    bool all_q8 = true;
+    const auto verify = [&](hc_load_q8::Group group, const DeviceMixer& mixer) {
+      if (mixer.down.empty() && mixer.up.empty())
+        return;
+      all_q8 = all_q8 && mixer.down.type == core::GgmlType::kQ8_0 &&
+               mixer.up.type == core::GgmlType::kQ8_0;
+      down += mixer.down.empty() ? 0 : 1;
+      up_count += mixer.up.empty() ? 0 : 1;
+      if (!mixer.inject.empty()) {
+        ++injects;
+        f32_injects += mixer.inject.type == core::GgmlType::kF32 ? 1 : 0;
+        all_q8 = all_q8 && mixer.inject.type != core::GgmlType::kBF16;
+      }
+      ++mixers[static_cast<std::size_t>(group)];
+    };
+    verify(hc_load_q8::Group::kOutputHead, m->hc_head_);
+    for (const auto& l : m->layers_) {
+      verify(hc_load_q8::Group::kTrunkAttn, l.hc_attn);
+      verify(hc_load_q8::Group::kTrunkFfn, l.hc_ffn);
+    }
+    if (m->has_mtp_) {
+      verify(hc_load_q8::Group::kMtpAttn, m->mtp_.hc_attn);
+      verify(hc_load_q8::Group::kMtpFfn, m->mtp_.hc_ffn);
+      verify(hc_load_q8::Group::kMtpHead, m->mtp_.nextn_head);
+    }
+    const auto& st = hc_pre;
+    if (!all_q8 || st.down != hc_plan.down || st.up != hc_plan.up ||
+        st.inject != hc_plan.inject || st.bf16_bytes != hc_plan.bf16_bytes ||
+        st.q8_bytes != hc_plan.q8_bytes ||
+        st.inject_added_bytes != hc_plan.inject_added_bytes ||
+        m->max_q8_cols_ < hc_load_q8::kHcDim) {
+      if (error_msg != nullptr)
+        *error_msg = "GUFO_HC_LOAD_Q8: loaded state differs from the plan (a "
+                     "HC tensor is not Q8_0, counts or bytes differ, or "
+                     "max_q8_cols < 10240)";
+      return nullptr;
+    }
+    m->hc_load_q8_active_ = true;
+    std::fprintf(
+        stderr,
+        "[hcq8] tensors=%zu bf16_bytes=%zu q8_bytes=%zu resident_saved=%zu "
+        "load_ms=%.1f switch=1 active=1 down=%zu up=%zu inject_f32=%zu "
+        "inject_added_bytes=%zu resident_net_saved=%zu mixers(trunk_attn=%zu "
+        "trunk_ffn=%zu mtp_attn=%zu mtp_ffn=%zu mtp_head=%zu output_head=%zu) "
+        "verified_q8_down_up=%zu max_q8_cols=%zu max_half_cols=%zu "
+        "resident_bytes=%zu bf16_dense_kernel=idle(no BF16 HC tensor)\n",
+        st.down + st.up + st.inject, st.bf16_bytes, st.q8_bytes,
+        st.bf16_bytes - st.q8_bytes, st.ms, st.down, st.up, st.inject,
+        st.inject_added_bytes,
+        st.bf16_bytes - st.q8_bytes - st.inject_added_bytes,
+        mixers[static_cast<std::size_t>(hc_load_q8::Group::kTrunkAttn)],
+        mixers[static_cast<std::size_t>(hc_load_q8::Group::kTrunkFfn)],
+        mixers[static_cast<std::size_t>(hc_load_q8::Group::kMtpAttn)],
+        mixers[static_cast<std::size_t>(hc_load_q8::Group::kMtpFfn)],
+        mixers[static_cast<std::size_t>(hc_load_q8::Group::kMtpHead)],
+        mixers[static_cast<std::size_t>(hc_load_q8::Group::kOutputHead)],
+        down + up_count, m->max_q8_cols_, m->max_half_cols_, m->bytes_);
+  }
+  if (up.preserve_types) {
+    std::fprintf(stderr, "[native-upload] published_types=1 converted_weights=0 resident_bytes=%zu",
+                 m->bytes_);
+    // converted_weights counts the F32 -> F16 `conversions` list, which the
+    // guard above keeps empty; the opt-in HC narrowing is in memory at upload
+    // time and reported by the [hcq8] line.
+    if (hc_plan.convert)
+      std::fprintf(stderr, " hc_load_q8_converted=%zu",
+                   hc_pre.down + hc_pre.up + hc_pre.inject);
+    std::fputc('\n', stderr);
+  }
+  if (poison != nullptr) {
+    std::size_t free_bytes = 0, total_bytes = 0;
+    (void)hipMemGetInfo(&free_bytes, &total_bytes);
+    std::fprintf(stderr,
+                 "[loader-poison] on poisoned_host=%zu bytes=%zu kept_device=%zu "
+                 "bytes=%zu kept_host_bytes=%zu pattern=0xFF gpu_free_mib=%zu "
+                 "gpu_total_mib=%zu\n",
+                 poison_ledger.host_events, poison_ledger.host_bytes,
+                 poison_ledger.kept_device, poison_ledger.kept_device_bytes,
+                 poison_ledger.kept_host_bytes, free_bytes >> 20, total_bytes >> 20);
+  }
+  // GUFO_HC_LOAD_Q8_VERIFY (debug, default off): read the converted tensors and
+  // the whole MTP block back from the device and compare with the file.
+  if (hc_verify && !m->VerifyContent(w, mtp, "upload", error_msg)) {
+    return nullptr;
+  }
   return m;
+}
+
+namespace {
+
+/// One reference range on the host: bytes the device tensor must hold, in order.
+struct RefPart {
+  const std::uint8_t* data;
+  std::size_t size;
+};
+
+enum class VerifyKind : std::size_t { kConverted, kHc, kMtp, kHead, kCount };
+
+struct VerifyState {
+  static constexpr std::size_t kChunk = 32u << 20;
+  std::vector<std::uint8_t> chunk = std::vector<std::uint8_t>(kChunk);
+  std::array<std::size_t, static_cast<std::size_t>(VerifyKind::kCount)> count{};
+  std::size_t bytes{0}, skipped{0};
+  std::vector<std::string> bad;
+  std::string read_failure;
+};
+
+/// Reads `size` device bytes at `device` in chunks and compares with
+/// `reference`; `first_diff` is the offset of the first differing byte.
+bool CompareRange(VerifyState& s, const void* device, const std::uint8_t* reference,
+                  std::size_t size, std::size_t& first_diff) {
+  for (std::size_t offset = 0; offset < size;) {
+    const std::size_t n = std::min(s.chunk.size(), size - offset);
+    const auto status =
+        hipMemcpy(s.chunk.data(), static_cast<const std::uint8_t*>(device) + offset,
+                  n, hipMemcpyDeviceToHost);
+    if (status != hipSuccess) {
+      s.read_failure = std::string("device read-back failed: ") + hipGetErrorString(status);
+      first_diff = offset;
+      return false;
+    }
+    if (std::memcmp(s.chunk.data(), reference + offset, n) != 0) {
+      std::size_t i = 0;
+      while (s.chunk[i] == reference[offset + i]) {
+        ++i;
+      }
+      first_diff = offset + i;
+      return false;
+    }
+    offset += n;
+  }
+  return true;
+}
+
+/// The device tensor at `device` must hold the concatenation of `parts`, then
+/// kTailMargin zero bytes.
+void CheckParts(VerifyState& s, VerifyKind kind, const std::string& name,
+                const void* device, std::span<const RefPart> parts) {
+  std::size_t total = 0;
+  for (const RefPart& p : parts) {
+    total += p.size;
+  }
+  ++s.count[static_cast<std::size_t>(kind)];
+  s.bytes += total;
+  std::size_t offset = 0;
+  for (const RefPart& p : parts) {
+    std::size_t diff = 0;
+    if (!CompareRange(s, static_cast<const std::uint8_t*>(device) + offset, p.data,
+                      p.size, diff)) {
+      s.bad.push_back(name + "@" + std::to_string(offset + diff) + "/" +
+                      std::to_string(total));
+      return;
+    }
+    offset += p.size;
+  }
+  const std::vector<std::uint8_t> zeros(kTailMargin, 0);
+  std::size_t diff = 0;
+  if (!CompareRange(s, static_cast<const std::uint8_t*>(device) + total,
+                    zeros.data(), kTailMargin, diff)) {
+    s.bad.push_back(name + "@tail+" + std::to_string(diff));
+  }
+}
+
+}  // namespace
+
+bool DeviceModel::VerifyContent(const ModelWeights& w, const MtpWeights* mtp,
+                                const char* phase, std::string* error_msg) const {
+  const auto begin = std::chrono::steady_clock::now();
+  VerifyState s;
+  std::vector<std::uint8_t> image;
+  const auto file = [](const TensorRef& t) {
+    return RefPart{static_cast<const std::uint8_t*>(t.data), t.SizeBytes()};
+  };
+  // The device tensor `d` must equal the file bytes of `t` (same type).
+  const auto plain = [&](VerifyKind kind, const TensorRef& t, const DeviceTensor& d) {
+    if (t.empty()) {
+      return;
+    }
+    if (d.empty()) {
+      s.bad.push_back(std::string(t.name) + "@missing");
+      return;
+    }
+    if (d.type != t.type) {
+      ++s.skipped;  // narrowed on purpose (not for a published-types package)
+      return;
+    }
+    const RefPart p = file(t);
+    CheckParts(s, kind, std::string(t.name), d.data, {&p, 1});
+  };
+  // A BF16 HC tensor that was converted: compare with a fresh SERIAL conversion
+  // of the file payload (independent of the threaded path the loader used).
+  const auto hc_tensor = [&](const TensorRef& t, const DeviceTensor& d, bool inject) {
+    if (t.empty()) {
+      return;
+    }
+    if (!hc_load_q8_active_ || t.type != core::GgmlType::kBF16) {
+      plain(VerifyKind::kHc, t, d);
+      return;
+    }
+    if (d.empty()) {
+      s.bad.push_back(std::string(t.name) + "@missing");
+      return;
+    }
+    std::string message;
+    const bool built =
+        inject ? quant::BuildBf16F32Image(t.data, t.cols * t.rows, 0, image, &message)
+               : quant::BuildBf16Q8_0Image(t.data, t.rows, t.cols, 0, 1, image, &message);
+    if (!built) {
+      s.bad.push_back(std::string(t.name) + "@reference:" + message);
+      return;
+    }
+    const RefPart p{image.data(), image.size()};
+    CheckParts(s, VerifyKind::kConverted, std::string(t.name), d.data, {&p, 1});
+  };
+  const auto hc_mixer = [&](const HcMixer& t, const DeviceMixer& d) {
+    plain(VerifyKind::kHc, t.norm, d.norm);
+    hc_tensor(t.down, d.down, false);
+    hc_tensor(t.up, d.up, false);
+    hc_tensor(t.inject, d.inject, true);
+  };
+  hc_mixer(w.hc_head, hc_head_);
+  for (std::size_t i = 0; i < w.layers.size() && i < layers_.size(); ++i) {
+    hc_mixer(w.layers[i].hc_attn, layers_[i].hc_attn);
+    hc_mixer(w.layers[i].hc_ffn, layers_[i].hc_ffn);
+  }
+  // The draft path's inputs outside the block: embedding and output head.
+  plain(VerifyKind::kHead, w.token_embd, token_embd_);
+  if (w.output.data != w.token_embd.data) {
+    plain(VerifyKind::kHead, w.output, output_);
+  }
+  if (mtp != nullptr && has_mtp_) {
+    const LayerWeights& b = mtp->block;
+    const DeviceLayer& l = mtp_;
+    const auto mtp_plain = [&](const TensorRef& t, const DeviceTensor& d) {
+      plain(VerifyKind::kMtp, t, d);
+    };
+    for (const auto& [t, d] : {std::pair{&b.hc_attn, &l.hc_attn},
+                               std::pair{&b.hc_ffn, &l.hc_ffn},
+                               std::pair{&b.nextn_head, &l.nextn_head}}) {
+      mtp_plain(t->norm, d->norm);
+      mtp_plain(t->down, d->down);
+      mtp_plain(t->up, d->up);
+      mtp_plain(t->inject, d->inject);
+    }
+    mtp_plain(b.attn_out, l.attn_out);
+    mtp_plain(b.attn_q_norm, l.attn_q_norm);
+    mtp_plain(b.attn_k_norm, l.attn_k_norm);
+    mtp_plain(b.indexer_q, l.indexer_q);
+    mtp_plain(b.indexer_k, l.indexer_k);
+    mtp_plain(b.indexer_q_norm, l.indexer_q_norm);
+    mtp_plain(b.indexer_k_norm, l.indexer_k_norm);
+    mtp_plain(b.shexp_gate, l.shexp_gate);
+    mtp_plain(b.shexp_up, l.shexp_up);
+    mtp_plain(b.shexp_down, l.shexp_down);
+    mtp_plain(b.nextn_enorm, l.nextn_enorm);
+    mtp_plain(b.nextn_hnorm, l.nextn_hnorm);
+    mtp_plain(b.ffn_gate_exps, l.ffn_gate_exps);
+    mtp_plain(b.ffn_up_exps, l.ffn_up_exps);
+    mtp_plain(b.ffn_down_exps, l.ffn_down_exps);
+    if (!l.attn_qkv.empty()) {  // q | k | v stacked
+      const RefPart parts[] = {file(b.attn_q), file(b.attn_k), file(b.attn_v)};
+      CheckParts(s, VerifyKind::kMtp, std::string(b.attn_q.name) + "+k+v",
+                 l.attn_qkv.data, parts);
+    } else {
+      mtp_plain(b.attn_q, l.attn_q);
+      mtp_plain(b.attn_k, l.attn_k);
+      mtp_plain(b.attn_v, l.attn_v);
+    }
+    if (!l.router.empty()) {  // router | shared-expert gate stacked
+      if (l.router.type == b.router.type) {
+        const RefPart parts[] = {file(b.router), file(b.shexp_gate_inp)};
+        CheckParts(s, VerifyKind::kMtp, std::string(b.router.name) + "+shexp_gate_inp",
+                   l.router.data, parts);
+      } else {
+        ++s.skipped;
+      }
+    }
+    if (!b.nextn_eh_proj.empty()) {  // [embedding | hidden] split by column halves
+      const TensorRef& t = b.nextn_eh_proj;
+      const std::size_t row_bytes = t.SizeBytes() / t.rows / 2;
+      for (int half = 0; half < 2; ++half) {
+        std::vector<RefPart> rows;
+        rows.reserve(t.rows);
+        for (std::uint64_t r = 0; r < t.rows; ++r) {
+          rows.push_back({static_cast<const std::uint8_t*>(t.data) +
+                              r * 2 * row_bytes + half * row_bytes,
+                          row_bytes});
+        }
+        CheckParts(s, VerifyKind::kMtp,
+                   std::string(t.name) + (half == 0 ? ".embedding" : ".hidden"),
+                   (half == 0 ? l.nextn_fc_embedding : l.nextn_fc_hidden).data, rows);
+      }
+    }
+  }
+  const double ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - begin)
+                        .count();
+  const auto n = [&](VerifyKind k) { return s.count[static_cast<std::size_t>(k)]; };
+  if (s.bad.empty() && s.read_failure.empty()) {
+    std::fprintf(stderr,
+                 "[hcq8-verify] ok phase=%s converted=%zu hc_plain=%zu mtp=%zu head=%zu "
+                 "skipped=%zu bytes=%zu ms=%.1f\n",
+                 phase, n(VerifyKind::kConverted), n(VerifyKind::kHc),
+                 n(VerifyKind::kMtp), n(VerifyKind::kHead), s.skipped, s.bytes, ms);
+    return true;
+  }
+  std::string list;
+  for (std::size_t i = 0; i < s.bad.size() && i < 6; ++i) {
+    list += (i ? "," : "") + s.bad[i];
+  }
+  std::fprintf(stderr,
+               "[hcq8-verify] MISMATCH phase=%s bad=%zu first=[%s] %s checked: converted=%zu "
+               "hc_plain=%zu mtp=%zu head=%zu ms=%.1f\n",
+               phase, s.bad.size(), list.c_str(), s.read_failure.c_str(),
+               n(VerifyKind::kConverted), n(VerifyKind::kHc), n(VerifyKind::kMtp),
+               n(VerifyKind::kHead), ms);
+  if (error_msg != nullptr) {
+    *error_msg = std::string("GUFO_HC_LOAD_Q8_VERIFY: device content differs from the file (phase ") +
+                 phase + "): " + list + (s.read_failure.empty() ? "" : " " + s.read_failure);
+  }
+  return false;
 }
 
 bool DeviceModel::UploadDraftOut(const TensorRef& ref,
@@ -614,7 +1169,8 @@ bool DeviceModel::UploadDraftOut(const TensorRef& ref,
   std::vector<Conversion> conversions;
   const std::size_t before = bytes_;
   Uploader up{*stager,        conversions,  allocations_, bytes_,
-              max_half_cols_, max_q8_cols_, error_msg};
+              max_half_cols_, max_q8_cols_, max_native_gemm_cols_, max_native_gemm_rows_,
+              error_msg};
   DeviceTensor t = up.Copy(ref);
   if (!up.ok)
     return fail(error_msg != nullptr ? *error_msg : "upload failed");
@@ -622,6 +1178,7 @@ bool DeviceModel::UploadDraftOut(const TensorRef& ref,
     return false;
   if (!conversions.empty())
     return fail("converted during upload (forbidden)");
+  RetireOptionalStager(stager, "draft-out");
   if (t.type != core::GgmlType::kQ4_K && t.type != core::GgmlType::kQ5_K)
     return fail("not a 4/5-bit K-quant");
   const auto status = hipDeviceSynchronize();
@@ -701,6 +1258,19 @@ bool DeviceModel::UploadTwinImpl(const TwinWeights& twin,
     return fail("already uploaded");
   if (twin.layers.size() != layers_.size())
     return fail("layer count differs from the trunk");
+  if (hc_load_q8_active_) {
+    // A twin HC tensor would replace a Q8_0 trunk projection with the twin's
+    // own type and leave the wide route chosen from layer 0 inconsistent.
+    const auto has_hc = [](const HcMixer& mixer) {
+      return !mixer.down.empty() || !mixer.up.empty();
+    };
+    bool twin_hc = has_hc(twin.hc_head);
+    for (const auto& l : twin.layers)
+      twin_hc = twin_hc || has_hc(l.hc_attn) || has_hc(l.hc_ffn);
+    if (twin_hc)
+      return fail("GUFO_HC_LOAD_Q8=1 narrowed the trunk HC tensors to Q8_0; a "
+                  "twin that replaces HC tensors would mix types");
+  }
   const auto regions = twin_reader.GetMappedRegions();
   std::vector<core::GgufMappedRegion> shards(regions.begin(), regions.end());
   auto stager = hip::WeightUpload::Create(shards, error_msg);
@@ -709,7 +1279,8 @@ bool DeviceModel::UploadTwinImpl(const TwinWeights& twin,
   std::vector<Conversion> conversions;
   const std::size_t before = bytes_;
   Uploader up{*stager,        conversions,  allocations_, bytes_,
-              max_half_cols_, max_q8_cols_, error_msg};
+              max_half_cols_, max_q8_cols_, max_native_gemm_cols_, max_native_gemm_rows_,
+              error_msg};
   std::vector<DeviceLayer> built;
   built.reserve(layers_.size());
   for (std::size_t il = 0; il < layers_.size(); ++il) {
@@ -717,8 +1288,10 @@ bool DeviceModel::UploadTwinImpl(const TwinWeights& twin,
                                   // tensor that is not twinned
     const LayerWeights& t = twin.layers[il];
     const auto put = [&](DeviceTensor& dst, const TensorRef& src) {
-      if (!src.empty())
+      if (!src.empty()) {
         dst = up.Copy(src);
+        dst.decode_twin = true;
+      }
     };
     // a stacked trunk tensor is split only when all its members come from the
     // twin (or were never stacked): a kept (8-bit) member of a split group has
@@ -760,15 +1333,24 @@ bool DeviceModel::UploadTwinImpl(const TwinWeights& twin,
       return fail(error_msg != nullptr ? *error_msg : "upload failed");
     built.push_back(std::move(d));
   }
+  if (primary) {
+    twin_hc_head_ = hc_head_;
+    if (!twin.hc_head.down.empty()) {
+      twin_hc_head_.down = up.Copy(twin.hc_head.down);
+      twin_hc_head_.down.decode_twin = true;
+    }
+    if (!twin.hc_head.up.empty()) {
+      twin_hc_head_.up = up.Copy(twin.hc_head.up);
+      twin_hc_head_.up.decode_twin = true;
+    }
+    if (!up.ok)
+      return false;
+  }
   if (!stager->Finish(error_msg))
     return false;
   if (!conversions.empty())
     return fail("a twin tensor was converted during upload (forbidden)");
-  const char* allow_q8_env =
-      std::getenv("GUFO_DENSE_TWIN_ALLOW_Q8");  // DEBUG controls only (see
-                                                // TwinWeights::Bind)
-  const bool allow_q8_twin =
-      allow_q8_env != nullptr && *allow_q8_env != '\0' && *allow_q8_env != '0';
+  RetireOptionalStager(stager, "twin");
   for (std::size_t il = 0; il < built.size(); ++il) {
     const LayerWeights& t = twin.layers[il];
     const DeviceLayer& d = built[il];
@@ -781,8 +1363,8 @@ bool DeviceModel::UploadTwinImpl(const TwinWeights& twin,
         {&t.hc_ffn.up, &d.hc_ffn.up},   {&t.shexp_gate, &d.shexp_gate},
         {&t.shexp_up, &d.shexp_up},     {&t.shexp_down, &d.shexp_down}};
     for (const auto& [src, dev] : pairs)
-      if (!allow_q8_twin && !src->empty() && dev->type == core::GgmlType::kQ8_0)
-        return fail("a twinned tensor is still Q8_0");
+      if (!src->empty() && dev->type != src->type)
+        return fail("a twinned tensor changed type during upload");
   }
   const auto status = hipDeviceSynchronize();
   if (status != hipSuccess)
@@ -794,11 +1376,12 @@ bool DeviceModel::UploadTwinImpl(const TwinWeights& twin,
   twin_bytes_ = bytes_ - before;
   std::fprintf(stderr,
                "[twin] loaded tensors=%zu resident_4bit_bytes=%zu (incl. 4 KiB "
-               "tail pads) mirrors_8bit_bytes=%zu saved_per_pass_bytes=%zu "
+               "tail pads) mirrors_trunk_bytes=%zu saved_per_pass_bytes=%lld "
                "kept_q8_tensors=%zu kept_q8_bytes=%zu\n",
                twin.tensors, twin_bytes_, twin.bytes_8bit,
-               twin.bytes_8bit - twin.bytes_4bit, twin.kept_tensors,
-               twin.kept_bytes);
+               static_cast<long long>(twin.bytes_8bit) -
+                   static_cast<long long>(twin.bytes_4bit),
+               twin.kept_tensors, twin.kept_bytes);
   return true;
 }
 

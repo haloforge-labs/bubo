@@ -36,7 +36,18 @@ def main():
     env["APPDATA"] = env["LOCALAPPDATA"]
     env["XDG_CACHE_HOME"] = os.path.join(temporary.name, "cache")
 
+    def own_port(args):
+        """The default endpoint start mutex is per user: another server (the
+        owner's, or a parallel test's) makes a serve start exit 13. A start
+        that reaches the endpoint lease takes an OS-assigned port instead."""
+        if (args[:1] == ["serve"] and "--port" not in args and
+                not any(a.startswith("--port=") for a in args) and
+                not {"--help", "-h", "help"} & set(args)):
+            return [args[0], "--port", "0", *args[1:]]
+        return args
+
     def check(args, status, message):
+        args = own_port(args)
         result = subprocess.run([binary, *args], env=env, text=True,
                                 capture_output=True, timeout=10)
         output = result.stdout + result.stderr
@@ -45,29 +56,41 @@ def main():
         return output
 
     def run(args):
+        args = own_port(args)
         return subprocess.run([binary, *args], env=env, text=True,
                               capture_output=True, timeout=10)
 
-    for modality in ("llm", "tts", "asr", "video", "image"):
+    for modality in ("llm", "tts", "asr", "video", "image", "embedding"):
         check(["serve", "--port", "0", modality, "--help"], 0, "--api-key")
         check(["serve", modality, "--port=0", "--help"], 0, "--api-key")
         check(["serve", modality, "--help"], 0, "--log-level")
-        if modality in ("tts", "asr", "image"):
+        if modality in ("tts", "asr", "image", "embedding"):
             help_text = check(["serve", modality, "--help"], 0,
                               "--model")
             assert "--sessions" not in help_text
             check(["serve", modality, "--sessions", "2"], 2, "Unknown option")
             check(["serve", "--sessions", "2", modality], 2, "Unknown option")
-        elif modality == "llm":
-            check(["serve", modality, "--sessions", "0"], 2,
-                  "--sessions: invalid value '0'")
         else:
-            check(["serve", modality, "--sessions", "0"], 2,
-                  "server limits must be positive")
+            # The release registry now rejects --sessions 0 before the server's own limit check runs.
+            sessions0 = run(["serve", modality, "--sessions", "0"])
+            output = sessions0.stdout + sessions0.stderr
+            assert sessions0.returncode == 2 and (
+                "server limits must be positive" in output or
+                "--sessions: invalid value '0'" in output), (
+                modality, sessions0.returncode, output)
         check(["serve", modality, "unexpected"], 2, "Unexpected argument")
         check(["serve", modality, "--port", "65536"], 2, "--port must")
         check(["serve", modality, "--host", "bad.address"], 2, "--host must")
     check(["serve", "image"], 2, "--model <DIR> is required")
+    check(["serve", "embedding"], 2, "--model <DIR> is required")
+    text = check(["serve", "embedding", "--help"], 0, "--served-model-name")
+    assert "--context" not in text and "--sessions" not in text
+    assert "--default-prompt-name" in text
+    check(["serve", "embedding", "--context", "8"], 2, "Unknown option")
+    check(["serve", "help", "embedding"], 0, "EmbeddingGemma 2")
+    check(["serve", "embedding", "--model", "/missing"], 1,
+          "Error enabling EmbeddingGemma 2 service")
+    check(["serve", "--help"], 0, "/v1/embeddings")
     for modality in ("tts", "asr"):
         check(["serve", modality], 2, "--model <DIR> is required")
         check(["serve", modality, "--model", "/missing", "--context", "0"],
@@ -90,7 +113,7 @@ def main():
                  ["--api-key", "test-key", "llm", "--model", "audio"],
                  ["llm", "--served-model-name", "--verbose", "--model", "audio"]):
         check(["serve", *args], 2,
-              "cannot read model header: Failed to open file: audio")
+              "cannot read model header: Failed to open or map file: audio")
     check(["serve", "help", "unknown"], 2, "unknown serve command")
     help_text = check(["serve", "llm", "--help"], 0, "model native context")
     assert "-1 = until EOS or context full" in help_text
@@ -102,6 +125,64 @@ def main():
     assert "8589934592" in help_text
     assert "0 = auto, at most the disk budget and 1/8 available RAM" in help_text
     assert "--log-progress" in help_text
+    assert "--enable-yarn" in help_text
+    assert "--cache-ram-bytes <N|off>" in help_text
+    for value in ("off", "0", "536870912"):
+        check(["serve", "llm", "--cache-ram-bytes", value,
+               "--model", STUB], 1,
+              f"Error loading model '{STUB}'")
+    for value in ("OFF", "-1", "16G"):
+        check(["serve", "llm", "--cache-ram-bytes", value], 2,
+              "--cache-ram-bytes must be off or a byte count")
+    assert "--kv-cache-type" in help_text
+    # The registry text names the supported spellings; q8_0-rotated stays
+    # accepted (and in the error text below) but is not advertised.
+    assert "f16 (default) or q8_0" in help_text
+    assert "lossy" in help_text
+    types = ("f16", "q8_0", "q8_0-rotated")
+    type_error = "--kv-cache-type must be f16, q8_0 or q8_0-rotated"
+    for value in types:
+        check(["serve", "llm", "--kv-cache-type", value, "--model",
+               STUB], 1, f"Error loading model '{STUB}'")
+    invalid_types = ("", "q8", "Q8_0", "bf16", "q4_0", "q8_0_rotated", "q8_0-plain")
+    for value in invalid_types:
+        check(["serve", "llm", "--kv-cache-type", value], 2, type_error)
+    for command in ("prompt", "chat", "bench"):
+        check([command, "--help"], 0, "--kv-cache-type")
+        check([command, "--kv-cache-type", "q4_0"], 2, type_error)
+    assert "it applies to every request" in help_text
+    # Architecture-only GGUF fixtures prove unsupported families fail before
+    # tokenizer/weight/device loading, including in a CPU-only CLI build.
+    with tempfile.TemporaryDirectory() as directory:
+        def gguf_string(value):
+            data = value.encode()
+            return struct.pack("<Q", len(data)) + data
+
+        for architecture in ("qwen2", "qwen3", "qwen3next", "deepseek4", "qwen4exp"):
+            path = os.path.join(directory, architecture + ".gguf")
+            data = (struct.pack("<4sIQQ", b"GGUF", 3, 0, 1)
+                    + gguf_string("general.architecture")
+                    + struct.pack("<I", 8) + gguf_string(architecture))
+            with open(path, "wb") as fixture:
+                fixture.write(data + b"\0" * (-len(data) % 32))
+            if architecture != "qwen4exp":
+                for command in ("prompt", "chat", "bench"):
+                    for value in types[1:]:
+                        check([command, "--model", path, "--kv-cache-type", value],
+                              1, "requires Qwen3.8-Flash-Next")
+    # The flag is a plain switch: it must not swallow the next argument.
+    check(["serve", "llm", "--enable-yarn", "--model", STUB], 1,
+          f"Error loading model '{STUB}'")
+    # One process can answer under several names; the first is primary.
+    name_help = next(line for line in help_text.splitlines()
+                     if "--served-model-name" in line)
+    assert "repeatable" in name_help, name_help
+    check(["serve", "llm", "--served-model-name", "a", "--served-model-name",
+           "b", "--model", STUB], 1,
+          f"Error loading model '{STUB}'")
+    check(["serve", "llm", "--served-model-name", "a", "--served-model-name",
+           "a", "--model", STUB], 2,
+          "duplicate --served-model-name")
 
     # Verbosity must change the output, not merely parse. The config line is
     # emitted at the debug tier before the model file is opened, so these all
@@ -140,6 +221,7 @@ def main():
     # BUBO_API_KEY keeps the key off the command line. The flag wins on a
     # conflict, a notice names the variable only, and no value is printed.
     def run_with(args, extra):
+        args = own_port(args)
         return subprocess.run([binary, *args], env={**env, **extra}, text=True,
                               capture_output=True, timeout=10)
     planted = "env-key-planted-5531"
@@ -157,6 +239,10 @@ def main():
     empty = run_with(load + ["-v"], {"BUBO_API_KEY": ""})
     assert "api_key=unset" in empty.stderr, empty.stderr
     assert "--api-key" in check(["serve", "llm", "--help"], 0, "BUBO_API_KEY")
+    # Structured output is prepared automatically, without a separate option.
+    assert "--prepare-structured-output" not in help_text
+    check(["serve", "llm", "--model", STUB,
+           "--prepare-structured-output"], 2, "Unknown option")
     for bad in ("trace", "Debug", "", "info,debug"):
         check(["serve", "llm", "--log-level", bad, "--model", STUB],
               2, "--log-level must be error, warn, info or debug")
@@ -186,7 +272,7 @@ def main():
         result = run(load + ["--trace", trace])
         assert result.returncode == 1, result.stderr
         assert "[WARN] [trace] event=trace_enabled" in result.stderr
-        if os.name != "nt":  # Windows has no POSIX mode bits
+        if os.name != "nt":
             assert stat.S_IMODE(os.stat(trace).st_mode) == 0o600
     # Every help variant groups verbosity the same way: a "Logging:" section,
     # with no hand-written "Server Options:" list to drift from the parser.

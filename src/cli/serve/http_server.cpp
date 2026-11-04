@@ -1,14 +1,6 @@
 #include "src/cli/serve/http_server.hpp"
 #include "src/core/platform/memory_guard.hpp"
 
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <unistd.h>
-
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
@@ -17,6 +9,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <csignal>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -37,6 +30,8 @@
 #include "src/cli/serve/audio_asr_api.hpp"
 #include "src/cli/serve/audio_tts_api.hpp"
 #include "src/cli/serve/audio_websocket.hpp"
+#include "src/cli/serve/embedding_service.hpp"
+#include "src/cli/serve/embeddings_api.hpp"
 #include "src/cli/serve/debug_request.hpp"
 #include "src/cli/serve/debug_response.hpp"
 #include "src/cli/serve/diffusion_read_api.hpp"
@@ -55,7 +50,8 @@
 #include "src/cli/serve/websocket.hpp"
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/json.hpp"
-#include "src/core/platform/socket.hpp"
+#include "src/core/platform/net.hpp"
+#include "src/core/platform/shutdown_signal.hpp"
 #include "src/core/utf8.hpp"
 #include "src/models/qwen/chat_template.hpp"
 
@@ -76,46 +72,14 @@ void RequestShutdown(int signal) noexcept {
 class ShutdownSignals {
 public:
   ShutdownSignals() {
+    // Reset before installation: a signal landing between the previous
+    // guard's uninstall and this store must not be erased afterwards.
     shutdown_signal.store(0, std::memory_order_relaxed);
-    struct sigaction action{};
-    action.sa_handler = RequestShutdown;
-    ::sigemptyset(&action.sa_mask);
-    if (::sigaction(SIGINT, &action, &previous_interrupt_) != 0)
-      throw std::system_error(errno, std::generic_category(),
-                              "install SIGINT handler");
-#ifdef SIGBREAK
-    if (::sigaction(SIGBREAK, &action, &previous_break_) != 0) {
-      (void)::sigaction(SIGINT, &previous_interrupt_, nullptr);
-      throw std::system_error(errno, std::generic_category(),
-                              "install SIGBREAK handler");
-    }
-#endif
-    if (::sigaction(SIGTERM, &action, &previous_terminate_) != 0) {
-      const int error = errno;
-#ifdef SIGBREAK
-      (void)::sigaction(SIGBREAK, &previous_break_, nullptr);
-#endif
-      (void)::sigaction(SIGINT, &previous_interrupt_, nullptr);
-      throw std::system_error(error, std::generic_category(),
-                              "install SIGTERM handler");
-    }
+    guard_ = platform::ShutdownSignalGuard(&RequestShutdown);
   }
-  ~ShutdownSignals() {
-#ifdef SIGBREAK
-    (void)::sigaction(SIGBREAK, &previous_break_, nullptr);
-#endif
-    (void)::sigaction(SIGTERM, &previous_terminate_, nullptr);
-    (void)::sigaction(SIGINT, &previous_interrupt_, nullptr);
-  }
-  ShutdownSignals(const ShutdownSignals&) = delete;
-  ShutdownSignals& operator=(const ShutdownSignals&) = delete;
 
 private:
-  struct sigaction previous_interrupt_{};
-#ifdef SIGBREAK
-  struct sigaction previous_break_{};
-#endif
-  struct sigaction previous_terminate_{};
+  platform::ShutdownSignalGuard guard_;
 };
 
 // ---------------------------------------------------------------------------
@@ -125,7 +89,9 @@ private:
 bool ReadUntil(std::string& out, int fd, std::string_view delim) {
   char buf[4096];
   while (out.find(delim) == std::string::npos) {
-    const ssize_t n = gufo::platform::SocketRead(fd, buf, sizeof(buf));
+    const std::intptr_t n = net::Receive(fd, buf, sizeof(buf), 0);
+    if (n < 0 && net::IsSocketInterrupted())
+      continue;
     if (n <= 0)
       return false;
     out.append(buf, static_cast<std::size_t>(n));
@@ -141,7 +107,9 @@ bool ReadN(std::string& out, int fd, std::size_t n) {
   char buf[4096];
   while (got < n) {
     const std::size_t want = std::min(sizeof(buf), n - got);
-    const ssize_t r = gufo::platform::SocketRead(fd, buf, want);
+    const std::intptr_t r = net::Receive(fd, buf, want, 0);
+    if (r < 0 && net::IsSocketInterrupted())
+      continue;
     if (r <= 0)
       return false;
     out.append(buf, static_cast<std::size_t>(r));
@@ -153,13 +121,10 @@ bool ReadN(std::string& out, int fd, std::size_t n) {
 bool SendAll(int fd, std::string_view data) {
   std::size_t sent = 0;
   while (sent < data.size()) {
-#ifdef MSG_NOSIGNAL
-    const int flags = MSG_NOSIGNAL;
-#else
-    const int flags = 0;
-#endif
-    const ssize_t n = gufo::platform::SocketSend(fd, data.data() + sent,
-                                                 data.size() - sent, flags);
+    const std::intptr_t n =
+        net::SendNoSignal(fd, data.data() + sent, data.size() - sent);
+    if (n < 0 && net::IsSocketInterrupted())
+      continue;
     if (n <= 0)
       return false;
     sent += static_cast<std::size_t>(n);
@@ -191,30 +156,7 @@ bool SendChunk(int fd, std::string_view data, std::string_view prefix = {}) {
 }
 
 bool IsPeerDisconnected(int fd) noexcept {
-  pollfd descriptor{
-      .fd = static_cast<decltype(pollfd::fd)>(fd),
-      .events = POLLIN | POLLERR | POLLHUP,
-      .revents = 0,
-  };
-#ifdef POLLRDHUP
-  descriptor.events |= POLLRDHUP;
-#endif
-  const int ready = ::poll(&descriptor, 1, 0);
-  if (ready <= 0)
-    return false;
-  if ((descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0)
-    return true;
-#ifdef POLLRDHUP
-  if ((descriptor.revents & POLLRDHUP) != 0)
-    return true;
-#endif
-  if ((descriptor.revents & POLLIN) == 0)
-    return false;
-  char byte;
-  const auto count =
-      gufo::platform::SocketRecv(fd, &byte, 1, MSG_PEEK | MSG_DONTWAIT);
-  return count == 0 || (count < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
-                        errno != EINTR);
+  return net::IsPeerDisconnected(fd);
 }
 
 // ---------------------------------------------------------------------------
@@ -283,6 +225,15 @@ std::optional<std::size_t> ParseContentLength(const HttpRequest& request) {
     length = parsed;
   }
   return length.value_or(0);
+}
+
+/// RFC 9110 10.1.1: a client that sends "Expect: 100-continue" (curl does for
+/// bodies over 1 MiB) waits for an interim 100 response before the body.
+bool ExpectsContinue(const HttpRequest& request) {
+  return std::ranges::any_of(request.headers, [](const auto& header) {
+    return ToLower(header.first) == "expect" &&
+           ToLower(header.second) == "100-continue";
+  });
 }
 
 std::string CredentialHash(std::string_view value) {
@@ -641,7 +592,10 @@ tokenization::ChatRole RoleFrom(const std::string& r) {
 // Messages replays assistant reasoning as thinking blocks. Restore it as the
 // turn's thought so the prompt reproduces the generated tokens.
 bool ReadTextContent(const json::Value* content, std::string* out,
-                     std::string* thought = nullptr) {
+                     std::string* thought = nullptr,
+                     tokenization::ChatMessage* image_message = nullptr,
+                     core::ImageReadBudget* image_budget = nullptr,
+                     std::string* error = nullptr) {
   if (content == nullptr)
     return false;
   if (content->is_string()) {
@@ -654,6 +608,16 @@ bool ReadTextContent(const json::Value* content, std::string* out,
         if (thinking == nullptr || !thinking->is_string())
           return false;
         *thought += thinking->str();
+        continue;
+      }
+      // Messages images ride along with the text of a user turn; `out` is
+      // that message's content, so the image lands at its current end.
+      if (image_message != nullptr && part.is_object() &&
+          part.member_str("type") == "image") {
+        std::string ignored;
+        if (!ParseAnthropicImage(part, image_message, *image_budget,
+                                 error != nullptr ? error : &ignored))
+          return false;
         continue;
       }
       const auto* text = part.find("text");
@@ -698,7 +662,7 @@ bool ReadTextMessages(const json::Value* input,
                                       part.member_str("type") == "tool_result");
                             })) {
       std::string error;
-      if (!ParseAnthropicToolMessage(item, messages, &error)) {
+      if (!ParseAnthropicToolMessage(item, messages, image_budget, &error)) {
         if (parse_error && !error.empty())
           *parse_error = std::move(error);
         return false;
@@ -766,12 +730,21 @@ bool ReadTextMessages(const json::Value* input,
           *parse_error = std::move(error);
         return false;
       }
-    } else if (!ReadTextContent(
-                   item.find("content"), &message.content,
-                   message.role == tokenization::ChatRole::kAssistant
-                       ? &message.thought
-                       : nullptr))
-      return false;
+    } else {
+      std::string error;
+      if (!ReadTextContent(item.find("content"), &message.content,
+                           message.role == tokenization::ChatRole::kAssistant
+                               ? &message.thought
+                               : nullptr,
+                           message.role == tokenization::ChatRole::kUser
+                               ? &message
+                               : nullptr,
+                           &image_budget, &error)) {
+        if (parse_error && !error.empty())
+          *parse_error = std::move(error);
+        return false;
+      }
+    }
     if (responses &&
         (message.role == tokenization::ChatRole::kSystem ||
          message.role == tokenization::ChatRole::kDeveloper) &&
@@ -815,6 +788,15 @@ struct CompatibilityAllowances {
   bool tools{false};
 };
 
+// The served name a validated request selected; responses echo it. A request
+// without one is answered under the primary name.
+std::string RequestedModel(const json::Value& body,
+                           const TextGenerationBackend& backend) {
+  const auto* model = body.find("model");
+  return model != nullptr && model->is_string() ? model->str()
+                                                : backend.model_id();
+}
+
 // Validate the text subset before dispatch so a client never gets an answer
 // to a different request. Responses also supports streamed output.
 std::optional<HttpResponse> ReadCompatibilityOptions(
@@ -827,7 +809,7 @@ std::optional<HttpResponse> ReadCompatibilityOptions(
   if (const auto* model = body.find("model"); model != nullptr) {
     if (!model->is_string())
       return InvalidCompatibilityRequest("'model' must be a string");
-    if (!AcceptsServedModel(model->str(), backend.model_id()))
+    if (!backend.serves_model(model->str()))
       return Err(404, "Not Found",
                  ("requested model is not loaded: this process serves '" +
                   backend.model_id() + "'")
@@ -931,13 +913,15 @@ HttpResponse ListModels(TextGenerationBackend* backend,
                         const VideoJobService* video_jobs,
                         const TtsService* tts, const AsrService* asr,
                         const ImageService* images,
+                        const EmbeddingService* embeddings,
                         const json::Value* settings = nullptr) {
   json::Value resp = json::Value::object();
   resp["object"] = "list";
   json::Value data = json::Value::array();
-  if (backend != nullptr) {
+  for (const auto& id :
+       backend != nullptr ? backend->model_ids() : std::vector<std::string>{}) {
     json::Value model = json::Value::object();
-    model["id"] = backend->model_id();
+    model["id"] = id;
     model["object"] = "model";
     model["created"] = Now();
     model["owned_by"] = "bubo";
@@ -1009,6 +993,15 @@ HttpResponse ListModels(TextGenerationBackend* backend,
     model["created"] = Now();
     model["owned_by"] = "operator-supplied-qwen";
     model["capability"] = "image";
+    data.push_back(std::move(model));
+  }
+  if (embeddings != nullptr && embeddings->ready()) {
+    json::Value model = json::Value::object();
+    model["id"] = embeddings->model_id();
+    model["object"] = "model";
+    model["created"] = Now();
+    model["owned_by"] = "operator-supplied-gemma";
+    model["capability"] = "embedding";
     data.push_back(std::move(model));
   }
   resp["data"] = std::move(data);
@@ -1177,7 +1170,7 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
                              debug_timeline, cache_prompt);
   const std::string id = "cmpl-" + RandomId();
   const long long created = Now();
-  const std::string model = b.model_id();
+  const std::string model = RequestedModel(body, b);
   if (stream && requested_logprobs >= 0 && !prompt_score)
     return ScoredOpenAiStream(generation, b, id, created, false, include_usage,
                               UsageJson);
@@ -1515,7 +1508,8 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
   chat.client_id = req.client_id;
   return CreateOpenAiResponse(
       req, b, chat, max_tokens, sampling_config,
-      body.find("stream") != nullptr && body.find("stream")->as_bool());
+      body.find("stream") != nullptr && body.find("stream")->as_bool(),
+      RequestedModel(body, b));
 } catch (const std::length_error& error) {
   return Err(400, "Bad Request", error.what(), "invalid_request_error",
              "context_length_exceeded");
@@ -1525,8 +1519,9 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
 }
 
 // Messages selects reasoning with thinking.type; adaptive leaves the choice to
-// the server's default. budget_tokens has no native equivalent, so enabled
-// thinking keeps the server's effort unless output_config.effort sets it.
+// the server's default. With enabled thinking, budget_tokens caps the
+// reasoning tokens, as llama.cpp does; enabled thinking keeps the server's
+// effort unless output_config.effort sets it.
 // Reasoning is returned for every display, because replayed thinking blocks
 // restore the cached thought.
 std::optional<HttpResponse> ReadThinking(const json::Value& body,
@@ -1542,10 +1537,15 @@ std::optional<HttpResponse> ReadThinking(const json::Value& body,
         "'thinking.type' must be enabled, adaptive, or disabled");
   if (const auto* budget = thinking->find("budget_tokens");
       budget != nullptr &&
-      (!budget->is_number() || budget->as_double() < 1 ||
+      (!budget->is_number() || !std::isfinite(budget->as_double()) ||
+       budget->as_double() < 1 ||
+       budget->as_double() > std::numeric_limits<std::int32_t>::max() ||
        std::floor(budget->as_double()) != budget->as_double()))
     return InvalidCompatibilityRequest(
-        "'thinking.budget_tokens' must be a positive integer");
+        "'thinking.budget_tokens' must be a positive integer at most "
+        "2147483647");
+  else if (budget != nullptr && type->str() == "enabled")
+    reasoning->budget_tokens = static_cast<std::size_t>(budget->as_double());
   if (const auto* display = thinking->find("display");
       display != nullptr &&
       (!display->is_string() ||
@@ -1626,8 +1626,8 @@ std::optional<HttpResponse> ReadAnthropicChat(
         {tokenization::ChatRole::kSystem, std::move(text), "", ""});
   }
   std::string messages_error =
-      "'messages' must contain text, thinking, tool_use or tool_result "
-      "blocks; use /v1/chat/completions for images";
+      "'messages' must contain text, image, thinking, tool_use or tool_result "
+      "blocks";
   if (!ReadTextMessages(body.find("messages"), &messages, b.supports_images(),
                         false, &messages_error)) {
     return InvalidCompatibilityRequest(messages_error);
@@ -1659,7 +1659,8 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
   chat.client_id = req.client_id;
   return CreateAnthropicMessage(
       req, b, chat, max_tokens, sampling_config,
-      body.find("stream") != nullptr && body.find("stream")->as_bool());
+      body.find("stream") != nullptr && body.find("stream")->as_bool(),
+      RequestedModel(body, b));
 } catch (const std::length_error& error) {
   return Err(400, "Bad Request", error.what(), "invalid_request_error",
              "context_length_exceeded");
@@ -1731,7 +1732,6 @@ HttpResponse LlamaCompletion(const HttpRequest& req,
   if (const auto error = ParseStopSequences(
           body.find("stop"), StopSequenceFormat::kOpenAi, &stop_sequences))
     return InvalidCompatibilityRequest(*error);
-
   bool cache_prompt = true;
   if (const auto* value = body.find("cache_prompt");
       value != nullptr && !value->is_null()) {
@@ -1771,24 +1771,57 @@ HttpResponse LlamaCompletion(const HttpRequest& req,
              "invalid_prompt");
 }
 
+/// llama-server props for a single-model server: what it runs, so a client
+/// can record which model, build and settings answered it. `?model=` is
+/// accepted and not required, as in llama-server outside router mode. Fields
+/// the backend does not report are omitted rather than sent as zero.
 HttpResponse LlamaProps(const HttpRequest& req, TextGenerationBackend& b) {
-  // Without `?model=` the answer describes the model this server serves, as
-  // llama-server clients expect. A named model is echoed as before.
-  std::string model = req.query_param("model");
-  if (model.empty())
-    model = b.model_id();
+  const std::string requested = req.query_param("model");
   json::Value resp = json::Value::object();
-  resp["model"] = model;
+  resp["model"] = requested.empty() ? b.model_id() : requested;
+  resp["model_alias"] = b.model_id();
   resp["template"] = "";
-  json::Value model_info = json::Value::object();
-  resp["model_info"] = std::move(model_info);
-  json::Value settings = json::Value::object();
-  settings["n_ctx"] = static_cast<std::size_t>(b.max_context());
-  resp["default_generation_settings"] = std::move(settings);
-  resp["total_slots"] =
-      std::max<std::size_t>(b.session_states().size(), std::size_t{1});
+  resp["model_info"] = json::Value::object();
+  if (auto path = b.model_path(); !path.empty()) {
+    resp["model_path"] = std::move(path);
+  }
+  if (auto build = b.build_info(); !build.empty()) {
+    resp["build_info"] = std::move(build);
+  }
+  if (const auto sessions = b.session_states().size(); sessions > 0) {
+    resp["total_slots"] = sessions;
+  }
+
+  // What a request without sampling fields gets.
+  const auto defaults = b.sampling_defaults();
+  const auto sampling = defaults.Resolve(b.reasoning_defaults().enabled);
+  json::Value params = json::Value::object();
+  params["temperature"] = static_cast<double>(sampling.temperature);
+  params["top_k"] = static_cast<int>(sampling.top_k);
+  params["top_p"] = static_cast<double>(sampling.top_p);
+  params["min_p"] = static_cast<double>(sampling.min_p);
+  params["seed"] = static_cast<long long>(sampling.seed);
+  params["repeat_penalty"] = static_cast<double>(sampling.repeat_penalty);
+  params["repeat_last_n"] = sampling.repeat_last_n;
+  params["frequency_penalty"] = static_cast<double>(sampling.frequency_penalty);
+  params["presence_penalty"] = static_cast<double>(sampling.presence_penalty);
+  // -1 means no default limit, as in llama-server, which reports both keys.
+  const auto n_predict = defaults.max_tokens > 0
+                             ? static_cast<std::int64_t>(defaults.max_tokens)
+                             : std::int64_t{-1};
+  params["max_tokens"] = n_predict;
+  params["n_predict"] = n_predict;
+  json::Value generation = json::Value::object();
+  if (const std::size_t context = b.max_context(); context > 0) {
+    generation["n_ctx"] = context;
+  }
+  generation["params"] = std::move(params);
+  resp["default_generation_settings"] = std::move(generation);
+
   json::Value modalities = json::Value::object();
   modalities["vision"] = b.supports_images();
+  modalities["video"] = false;
+  modalities["audio"] = false;
   resp["modalities"] = std::move(modalities);
   return Ok(resp);
 }
@@ -1899,6 +1932,17 @@ HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend& b) {
       << "llamacpp:spec_decode_num_accepted_tokens_total "
       << detail::TotalDraftAcceptedTokens().load(std::memory_order_relaxed)
       << "\n"
+      << "# HELP gufo_spec_lookup_tokens_total Total prompt-lookup copies "
+         "proposed\n"
+      << "# TYPE gufo_spec_lookup_tokens_total counter\n"
+      << "gufo_spec_lookup_tokens_total "
+      << detail::TotalLookupTokens().load(std::memory_order_relaxed) << "\n"
+      << "# HELP gufo_spec_lookup_accepted_tokens_total Total prompt-lookup "
+         "copies accepted\n"
+      << "# TYPE gufo_spec_lookup_accepted_tokens_total counter\n"
+      << "gufo_spec_lookup_accepted_tokens_total "
+      << detail::TotalLookupAcceptedTokens().load(std::memory_order_relaxed)
+      << "\n"
       << "# HELP llamacpp:prompt_tokens_seconds Prompt processing speed in "
          "tokens per second\n"
       << "# TYPE llamacpp:prompt_tokens_seconds gauge\n"
@@ -1929,7 +1973,199 @@ HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend& b) {
           .headers = {{"Content-Type", "text/plain; version=0.0.4"}}};
 }
 
+// Numeric literals only, so the listener never depends on name resolution.
+// IPv4 is parsed strictly, without inet_aton shorthand such as `127.1`; IPv6
+// goes through getaddrinfo so link-local scopes (`fe80::1%eth0`) resolve.
+bool ParseListenAddress(const std::string& host, int port,
+                        sockaddr_storage* address, net::SocklenT* length) {
+  *address = {};
+  // Bracketed literals are a URI convention, not a listen host; Winsock's
+  // getaddrinfo would accept them and glibc would not.
+  if (host.find('[') != std::string::npos ||
+      host.find(']') != std::string::npos)
+    return false;
+  const auto network_port = htons(static_cast<std::uint16_t>(port));
+  auto* ipv4 = reinterpret_cast<sockaddr_in*>(address);
+  if (::inet_pton(AF_INET, host.c_str(), &ipv4->sin_addr) == 1) {
+    ipv4->sin_family = AF_INET;
+    ipv4->sin_port = network_port;
+    *length = sizeof(sockaddr_in);
+    return true;
+  }
+  addrinfo hints{};
+  hints.ai_family = AF_INET6;
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_flags = AI_NUMERICHOST;
+  addrinfo* result = nullptr;
+  if (::getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0) {
+    // Another host's interface name in a link-local scope (`fe80::1%eth0` on
+    // a machine without it) still names a well-formed listener; validate the
+    // address part and resolve the zone best effort. An unknown zone fails
+    // at bind() with the usual error instead of here.
+    const auto zone = host.rfind('%');
+    if (zone == std::string::npos)
+      return false;
+    const std::string bare = host.substr(0, zone);
+    const std::string scope = host.substr(zone + 1);
+    auto* ipv6 = reinterpret_cast<sockaddr_in6*>(address);
+    if (scope.empty() ||
+        ::inet_pton(AF_INET6, bare.c_str(), &ipv6->sin6_addr) != 1)
+      return false;
+    ipv6->sin6_family = AF_INET6;
+    ipv6->sin6_port = network_port;
+    ipv6->sin6_scope_id =
+        std::ranges::all_of(
+            scope,
+            [](char character) {
+              return std::isdigit(static_cast<unsigned char>(character));
+            })
+            ? static_cast<std::uint32_t>(
+                  std::strtoul(scope.c_str(), nullptr, 10))
+            : ::if_nametoindex(scope.c_str());
+    *length = sizeof(sockaddr_in6);
+    return true;
+  }
+  const bool parsed = result != nullptr && result->ai_family == AF_INET6 &&
+                      result->ai_addrlen <= sizeof(sockaddr_storage);
+  if (parsed) {
+    std::memcpy(address, result->ai_addr, result->ai_addrlen);
+    reinterpret_cast<sockaddr_in6*>(address)->sin6_port = network_port;
+    *length = static_cast<net::SocklenT>(result->ai_addrlen);
+  }
+  ::freeaddrinfo(result);
+  return parsed;
+}
+
+// Client IDs key per-client scheduling, so one client keeps one ID whichever
+// listener it reaches: an IPv4 peer of a dual-stack `::` listener arrives as
+// `::ffff:a.b.c.d` and is reported as `a.b.c.d`. Empty when unavailable.
+std::string PeerAddress(int client_fd) {
+  sockaddr_storage peer{};
+  net::SocklenT length = sizeof(peer);
+  if (::getpeername(client_fd, reinterpret_cast<sockaddr*>(&peer), &length) !=
+      0)
+    return {};
+  if (peer.ss_family == AF_INET6) {
+    const auto& ipv6 = reinterpret_cast<const sockaddr_in6&>(peer);
+    if (IN6_IS_ADDR_V4MAPPED(&ipv6.sin6_addr)) {
+      sockaddr_in ipv4{};
+      ipv4.sin_family = AF_INET;
+      ipv4.sin_port = ipv6.sin6_port;
+      std::memcpy(&ipv4.sin_addr, &ipv6.sin6_addr.s6_addr[12],
+                  sizeof(ipv4.sin_addr));
+      std::memcpy(&peer, &ipv4, sizeof(ipv4));
+      length = sizeof(ipv4);
+    }
+  }
+  char text[NI_MAXHOST]{};
+  if (::getnameinfo(reinterpret_cast<const sockaddr*>(&peer), length, text,
+                    sizeof(text), nullptr, 0, NI_NUMERICHOST) != 0)
+    return {};
+  return text;
+}
+
 }  // namespace
+
+LoadingResponder::LoadingResponder(const std::string& host, int port) {
+  net::EnsureSocketRuntimeStarted();
+  sockaddr_storage addr{};
+  net::SocklenT addr_length = 0;
+  if (port <= 0 || port > 65535 ||
+      !ParseListenAddress(host, port, &addr, &addr_length))
+    return;
+  const int fd = static_cast<int>(net::CreateStreamSocket(addr.ss_family));
+  if (fd < 0)
+    return;
+  // Match HttpServer::start, which binds the same address after stop().
+  if (!net::SetExclusiveListenerReuse(fd)) {
+    net::CloseSocket(fd);
+    return;
+  }
+  if ((addr.ss_family == AF_INET6 && !net::ClearIpv6Only(fd)) ||
+      ::bind(fd, reinterpret_cast<sockaddr*>(&addr), addr_length) < 0 ||
+      ::listen(fd, 16) < 0) {
+    const int error = net::LastSocketError();
+    Logger::Debug("server", "event=loading_listener_unavailable host=" + host +
+                                " port=" + std::to_string(port) +
+                                " errno=" + std::to_string(error));
+    net::CloseSocket(fd);
+    return;
+  }
+  listen_fd_ = fd;
+  thread_ = std::thread([this] { serve(); });
+}
+
+LoadingResponder::~LoadingResponder() {
+  stop();
+}
+
+void LoadingResponder::stop() {
+  stopped_.store(true, std::memory_order_release);
+  if (thread_.joinable())
+    thread_.join();
+  if (listen_fd_ >= 0) {
+    net::CloseSocket(listen_fd_);
+    listen_fd_ = -1;
+  }
+}
+
+void LoadingResponder::serve() {
+  HttpResponse loading = Err(503, "Service Unavailable", "Loading model",
+                             "unavailable_error", "loading");
+  loading.headers.emplace_back("Retry-After", "1");
+  const std::string reply = BuildResponse(loading);
+  // One connection at a time is enough for probes. Read the request head
+  // before replying, and after replying read what the client still sends (a
+  // request body) until it closes: closing with unread data resets the
+  // connection, and the client can lose the reply. Bound both waits: a client
+  // that connects and sends nothing must not delay stop().
+  constexpr auto kRequestWait = std::chrono::milliseconds(500);
+  while (!stopped_.load(std::memory_order_acquire)) {
+    if (net::PollReadable(listen_fd_, 100) <= 0)
+      continue;
+    const int client_fd = static_cast<int>(net::AcceptClientSocket(listen_fd_));
+    if (client_fd < 0)
+      continue;
+    // Appends one read to `into` (when set); false once the deadline passes,
+    // the client closes or stop() runs.
+    const auto receive = [&](std::chrono::steady_clock::time_point deadline,
+                             std::string* into) {
+      const auto remaining =
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              deadline - std::chrono::steady_clock::now())
+              .count();
+      if (stopped_.load(std::memory_order_acquire) || remaining <= 0 ||
+          net::PollReadable(client_fd, static_cast<int>(remaining)) <= 0)
+        return false;
+      char buffer[4096];
+      const std::intptr_t received =
+          net::Receive(client_fd, buffer, sizeof(buffer), 0);
+      if (received <= 0)
+        return false;
+      if (into != nullptr)
+        into->append(buffer, static_cast<std::size_t>(received));
+      return true;
+    };
+    std::string head;
+    const auto head_deadline = std::chrono::steady_clock::now() + kRequestWait;
+    while (head.find("\r\n\r\n") == std::string::npos && head.size() < 8192 &&
+           receive(head_deadline, &head)) {
+    }
+    (void)SendAll(client_fd, reply);
+    (void)net::ShutdownSocket(client_fd, net::ShutdownHow::kWrite);
+    const auto drain_deadline = std::chrono::steady_clock::now() + kRequestWait;
+    while (receive(drain_deadline, nullptr)) {
+    }
+    net::CloseSocket(client_fd);
+  }
+}
+
+bool IsListenAddress(const std::string& host) {
+  net::EnsureSocketRuntimeStarted();
+  sockaddr_storage address{};
+  net::SocklenT length = 0;
+  return ParseListenAddress(host, 0, &address, &length);
+}
 
 // ---------------------------------------------------------------------------
 // HttpRequest
@@ -1960,6 +2196,10 @@ std::string HttpRequest::query_param(const std::string& key) const {
 
 struct HttpServer::ConnectionWorker {
   int fd{-1};  // Protected by workers_mutex_, including shutdown and close.
+  // Set after the final response is written. The server reads nothing more,
+  // so the connection only logs and closes and no longer counts toward the
+  // limit.
+  std::atomic<bool> response_sent{false};
   std::atomic<bool> done{false};
   std::jthread thread;
 };
@@ -1970,14 +2210,17 @@ HttpServer::HttpServer(std::string host, int port,
                        std::shared_ptr<TtsService> tts,
                        std::shared_ptr<AsrService> asr,
                        HttpServerOptions options,
-                       std::shared_ptr<ImageService> images)
+                       std::shared_ptr<ImageService> images,
+                       std::shared_ptr<EmbeddingService> embeddings)
     : host_(std::move(host)),
+      bound_host_(host_),
       port_(port),
       backend_(std::move(backend)),
       video_jobs_(std::move(video_jobs)),
       tts_(std::move(tts)),
       asr_(std::move(asr)),
       images_(std::move(images)),
+      embeddings_(std::move(embeddings)),
       options_(std::move(options)) {
   if (options_.max_request_body_bytes == 0 || options_.max_connections == 0) {
     throw std::invalid_argument("HTTP server limits must be positive");
@@ -1991,7 +2234,7 @@ HttpServer::HttpServer(std::string host, int port,
 HttpServer::~HttpServer() {
   stop();
   if (listen_fd_ >= 0) {
-    gufo::platform::CloseSocket(listen_fd_);
+    net::CloseSocket(listen_fd_);
   }
 }
 
@@ -2095,6 +2338,7 @@ void HttpServer::register_routes() {
   add("POST", "/rerank", NotImplemented);
   add("POST", "/infill", NotImplemented);
   add("POST", "/completion", LlamaCompletion);
+  add("POST", "/apply-template", HandleApplyTemplate);
   add("GET", "/props", LlamaProps);
   add("GET", "/slots", LlamaSlots);
   add("GET", "/v1/slots", LlamaSlots);
@@ -2108,6 +2352,7 @@ void HttpServer::register_routes() {
 }
 
 bool HttpServer::start(std::string* error) {
+  net::EnsureSocketRuntimeStarted();
   if (listen_fd_ >= 0 || stopped_.load(std::memory_order_acquire)) {
     if (error != nullptr) {
       *error = "HTTP server has already been started or stopped";
@@ -2115,95 +2360,64 @@ bool HttpServer::start(std::string* error) {
     return false;
   }
   sockaddr_storage addr{};
-  auto* ipv4 = reinterpret_cast<sockaddr_in*>(&addr);
-  auto* ipv6 = reinterpret_cast<sockaddr_in6*>(&addr);
-  const auto bind_host =
-      host_ == "localhost" ? std::string("127.0.0.1") : host_;
-  int family = AF_INET;
-  socklen_t address_size = sizeof(sockaddr_in);
-  if (::inet_pton(AF_INET, bind_host.c_str(), &ipv4->sin_addr) == 1) {
-    ipv4->sin_family = AF_INET;
-    ipv4->sin_port = htons(static_cast<unsigned short>(port_));
-  } else if (::inet_pton(AF_INET6, bind_host.c_str(), &ipv6->sin6_addr) == 1) {
-    family = AF_INET6;
-    address_size = sizeof(sockaddr_in6);
-    ipv6->sin6_family = AF_INET6;
-    ipv6->sin6_port = htons(static_cast<unsigned short>(port_));
-  } else {
-    if (error)
+  net::SocklenT addr_length = 0;
+  if (port_ < 0 || port_ > 65535 ||
+      !ParseListenAddress(host_, port_, &addr, &addr_length)) {
+    if (error != nullptr) {
       *error =
-          "host must be an IPv4 address and port must be between 0 and 65535";
+          "host must be an IPv4 or IPv6 address and port must be between "
+          "0 and 65535";
+    }
     return false;
   }
-  if (port_ < 0 || port_ > 65535) {
-    if (error)
-      *error =
-          "host must be an IPv4 address and port must be between 0 and 65535";
-    return false;
-  }
-  (void)::signal(SIGPIPE, SIG_IGN);
-  listen_fd_ = ::socket(family, SOCK_STREAM, 0);
+  platform::IgnoreSocketPipeSignal();
+  listen_fd_ = static_cast<int>(net::CreateStreamSocket(addr.ss_family));
   if (listen_fd_ < 0) {
     if (error != nullptr)
       *error = "socket() failed";
     return false;
   }
-  const int yes = 1;
-#ifdef _WIN32
-  // Windows SO_REUSEADDR lets another process steal a bound port; exclusive
-  // use is the Linux SO_REUSEADDR behavior for a listening server.
-  gufo::platform::SetSocketOption(listen_fd_, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
-                                  yes);
-#else
-  ::setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-#endif
+  (void)net::SetReuseAddr(listen_fd_);
+  // `::` serves IPv4 clients too. Set it explicitly: the kernel default
+  // follows net.ipv6.bindv6only, which differs between hosts.
+  if (addr.ss_family == AF_INET6 && !net::ClearIpv6Only(listen_fd_)) {
+    if (error != nullptr)
+      *error = "setsockopt(IPV6_V6ONLY) failed";
+    net::CloseSocket(listen_fd_);
+    listen_fd_ = -1;
+    return false;
+  }
 
-  if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), address_size) <
-      0) {
+  if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), addr_length) < 0) {
     if (error != nullptr) {
       *error = "bind() failed on " + host_ + ":" + std::to_string(port_);
     }
-    gufo::platform::CloseSocket(listen_fd_);
+    net::CloseSocket(listen_fd_);
     listen_fd_ = -1;
     return false;
   }
   if (::listen(listen_fd_, 16) < 0) {
     if (error != nullptr)
       *error = "listen() failed";
-    gufo::platform::CloseSocket(listen_fd_);
+    net::CloseSocket(listen_fd_);
     listen_fd_ = -1;
     return false;
   }
-  {
+  if (port_ == 0) {
     sockaddr_storage bound{};
-    socklen_t length = sizeof(bound);
+    net::SocklenT length = sizeof(bound);
     if (::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&bound),
                       &length) != 0) {
       if (error != nullptr) {
         *error = "getsockname() failed";
       }
-      gufo::platform::CloseSocket(listen_fd_);
+      net::CloseSocket(listen_fd_);
       listen_fd_ = -1;
       return false;
     }
-    port_ = family == AF_INET
-                ? ntohs(reinterpret_cast<sockaddr_in*>(&bound)->sin_port)
-                : ntohs(reinterpret_cast<sockaddr_in6*>(&bound)->sin6_port);
-    char text[INET6_ADDRSTRLEN]{};
-    const void* address =
-        family == AF_INET
-            ? static_cast<const void*>(
-                  &reinterpret_cast<const sockaddr_in*>(&bound)->sin_addr)
-            : static_cast<const void*>(
-                  &reinterpret_cast<const sockaddr_in6*>(&bound)->sin6_addr);
-    if (!::inet_ntop(family, address, text, sizeof(text))) {
-      if (error)
-        *error = "cannot format bound address";
-      gufo::platform::CloseSocket(listen_fd_);
-      listen_fd_ = -1;
-      return false;
-    }
-    bound_host_ = text;
+    port_ = ntohs(bound.ss_family == AF_INET6
+                      ? reinterpret_cast<sockaddr_in6&>(bound).sin6_port
+                      : reinterpret_cast<sockaddr_in&>(bound).sin_port);
   }
   return true;
 }
@@ -2214,7 +2428,8 @@ bool HttpServer::ready() {
          ((backend_ != nullptr && backend_->ready()) ||
           (video_jobs_ != nullptr && video_jobs_->ready()) ||
           (tts_ != nullptr && tts_->ready()) ||
-          (asr_ != nullptr && asr_->ready()) || images_ != nullptr);
+          (asr_ != nullptr && asr_->ready()) ||
+          (embeddings_ != nullptr && embeddings_->ready()) || images_ != nullptr);
 }
 
 void HttpServer::run(bool handle_signals) {
@@ -2222,16 +2437,22 @@ void HttpServer::run(bool handle_signals) {
   if (handle_signals) {
     signals.emplace();
   }
-  // Winsock accepted sockets inherit listener mode; handlers need blocking I/O.
-#ifndef _WIN32
-  const int flags = ::fcntl(listen_fd_, F_GETFL, 0);
-  if (flags < 0 || ::fcntl(listen_fd_, F_SETFL, flags | O_NONBLOCK) != 0)
-    throw std::system_error(errno, std::generic_category(),
+  // Poll even without signal handling so device loss is observed while a
+  // request worker is blocked writing to a slow client. Nonblocking accept
+  // also keeps a vanished connection from wedging this observation loop.
+  if (!net::SetNonBlocking(listen_fd_))
+    throw std::system_error(net::LastSocketError(), std::system_category(),
                             "configure HTTP listener");
-#endif
   Logger::Info(
       "server",
-      "event=listening address=http://" + host_ + ":" + std::to_string(port_) +
+      "event=listening monotonic_us=" +
+          std::to_string(
+              std::chrono::duration_cast<std::chrono::microseconds>(
+                  std::chrono::steady_clock::now().time_since_epoch())
+                  .count()) +
+          " address=http://" +
+          (host_.find(':') == std::string::npos ? host_ : "[" + host_ + "]") +
+          ":" + std::to_string(port_) +
           " auth=" + (options_.api_key.empty() ? "off" : "bearer") +
           " max_connections=" + std::to_string(options_.max_connections) +
           " max_body_bytes=" + std::to_string(options_.max_request_body_bytes));
@@ -2246,24 +2467,17 @@ void HttpServer::run(bool handle_signals) {
                                    std::to_string(signal));
         Logger::FlushSync(std::chrono::milliseconds(0));
         stop();
+        platform::NotifyShutdownHandled();
         break;
       }
     }
-    pollfd descriptor{.fd = static_cast<decltype(pollfd::fd)>(listen_fd_),
-                      .events = POLLIN,
-                      .revents = 0};
-    const int ready = ::poll(&descriptor, 1, 100);
-    if (ready < 0 && errno != EINTR)
-      throw std::system_error(errno, std::generic_category(),
+    const int ready = net::PollReadable(listen_fd_, 100);
+    if (ready < 0 && !net::IsSocketInterrupted())
+      throw std::system_error(net::LastSocketError(), std::system_category(),
                               "poll HTTP listener");
     if (ready <= 0)
       continue;
-#ifdef _WIN32
-    const int client_fd =
-        static_cast<int>(::accept(listen_fd_, nullptr, nullptr));
-#else
-    const int client_fd = ::accept(listen_fd_, nullptr, nullptr);
-#endif
+    const int client_fd = static_cast<int>(net::AcceptClientSocket(listen_fd_));
     if (client_fd < 0) {
       if (stopped_.load(std::memory_order_acquire)) {
         break;
@@ -2271,7 +2485,7 @@ void HttpServer::run(bool handle_signals) {
       continue;
     }
     if (stopped_.load(std::memory_order_acquire)) {
-      gufo::platform::CloseSocket(client_fd);
+      net::CloseSocket(client_fd);
       break;
     }
 
@@ -2281,15 +2495,19 @@ void HttpServer::run(bool handle_signals) {
     bool overloaded = false;
     {
       const std::lock_guard<std::mutex> lock(workers_mutex_);
+      const auto serving = static_cast<std::size_t>(std::ranges::count_if(
+          workers_, [](const std::unique_ptr<ConnectionWorker>& existing) {
+            return !existing->response_sent.load(std::memory_order_acquire);
+          }));
       overloaded = stopped_.load(std::memory_order_acquire) ||
-                   workers_.size() >= options_.max_connections;
+                   serving >= options_.max_connections;
       if (!overloaded) {
         worker_ptr->fd = client_fd;
         worker_ptr->thread = std::jthread([this, worker_ptr, client_fd] {
-          handle_connection(client_fd);
+          handle_connection(client_fd, worker_ptr->response_sent);
           {
             const std::lock_guard<std::mutex> lock(workers_mutex_);
-            gufo::platform::CloseConnection(worker_ptr->fd);
+            net::CloseSocket(worker_ptr->fd);
             worker_ptr->fd = -1;
           }
           worker_ptr->done.store(true, std::memory_order_release);
@@ -2303,7 +2521,7 @@ void HttpServer::run(bool handle_signals) {
               "server_error", "overloaded");
       response.headers.emplace_back("Retry-After", "1");
       (void)SendAll(client_fd, BuildResponse(response));
-      gufo::platform::CloseConnection(client_fd);
+      net::CloseSocket(client_fd);
     }
   }
   reap_workers();
@@ -2314,7 +2532,7 @@ void HttpServer::stop() {
   if (!was_stopped && listen_fd_ >= 0) {
     // Keep the descriptor owned until destruction: run() may still be inside
     // accept(). Closing here allows it to observe a reused descriptor.
-    (void)::shutdown(listen_fd_, SHUT_RDWR);
+    (void)net::ShutdownSocket(listen_fd_, net::ShutdownHow::kReadWrite);
   }
 
   std::vector<std::unique_ptr<ConnectionWorker>> workers;
@@ -2323,7 +2541,7 @@ void HttpServer::stop() {
     workers = std::move(workers_);
     for (const auto& worker : workers) {
       if (worker->fd >= 0) {
-        (void)::shutdown(worker->fd, SHUT_RDWR);
+        (void)net::ShutdownSocket(worker->fd, net::ShutdownHow::kReadWrite);
       }
     }
   }
@@ -2331,7 +2549,7 @@ void HttpServer::stop() {
 
 void HttpServer::request_stop() noexcept {
   if (!stopped_.exchange(true, std::memory_order_acq_rel) && listen_fd_ >= 0)
-    (void)::shutdown(listen_fd_, SHUT_RDWR);
+    (void)net::ShutdownSocket(listen_fd_, net::ShutdownHow::kReadWrite);
 }
 
 void HttpServer::reap_workers() {
@@ -2385,6 +2603,8 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
       body["model"] = asr_->model_id();
     } else if (tts_ != nullptr && tts_->ready()) {
       body["model"] = tts_->model_id();
+    } else if (embeddings_ != nullptr && embeddings_->ready()) {
+      body["model"] = embeddings_->model_id();
     } else if (images_ != nullptr) {
       body["model"] = images_->model_id();
     } else {
@@ -2395,7 +2615,7 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
   if (req.method == "GET" &&
       (req.path == "/v1/models" || req.path == "/models")) {
     return ListModels(backend_.get(), video_jobs_.get(), tts_.get(), asr_.get(),
-                      images_.get(),
+                      images_.get(), embeddings_.get(),
                       options_.debug_hooks && DebugLoopbackListener(host_)
                           ? options_.debug_settings.get()
                           : nullptr);
@@ -2442,6 +2662,23 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
     }
     return HandleAudioAsrApiRequest(req, *asr_);
   }
+  // Handled before the route table. An embedding-only server has no text
+  // backend, and the stub route below must not shadow the service when a
+  // backend exists.
+  if (embeddings_ != nullptr && IsEmbeddingsApiPath(req.path)) {
+    if (device_lost())
+      return DeviceLost();
+    if (!embeddings_->ready()) {
+      return Err(503, "Service Unavailable",
+                 "EmbeddingGemma 2 service is not ready", "server_error",
+                 "embedding_service_unavailable");
+    }
+    auto response = HandleEmbeddingsApiRequest(req, *embeddings_);
+    // The request that finds the device lost runs the shutdown hook.
+    if (device_lost())
+      return DeviceLost();
+    return response;
+  }
   for (const auto& entry : routes_) {
     if (entry.first.first == req.method && entry.first.second == req.path) {
       if (req.method == "POST" && device_lost())
@@ -2454,7 +2691,9 @@ HttpResponse HttpServer::handle_request(const HttpRequest& req) {
 }
 
 bool HttpServer::device_lost() {
-  if (backend_ == nullptr || !backend_->device_lost())
+  const bool lost = (backend_ != nullptr && backend_->device_lost()) ||
+                    (embeddings_ != nullptr && embeddings_->device_lost());
+  if (!lost)
     return false;
   if (options_.on_device_lost &&
       !device_lost_reported_.exchange(true, std::memory_order_acq_rel)) {
@@ -2527,29 +2766,15 @@ std::string LogErrorDetail(std::string_view code, std::string_view text) {
 
 }  // namespace
 
-void HttpServer::handle_connection(int client_fd) {
-  constexpr std::chrono::seconds kSocketTimeout{120};
-  gufo::platform::SetSocketTimeout(client_fd, SO_RCVTIMEO, kSocketTimeout);
-  gufo::platform::SetSocketTimeout(client_fd, SO_SNDTIMEO, kSocketTimeout);
+void HttpServer::handle_connection(int client_fd,
+                                   std::atomic<bool>& response_sent) {
+  (void)net::SetSocketTimeouts(client_fd, 120'000);
 
   const auto start_time = std::chrono::steady_clock::now();
   HttpRequest req;
   static std::atomic<std::uint64_t> next_request{0};
-  sockaddr_storage peer{};
-  socklen_t peer_size = sizeof(peer);
-  char peer_address[INET6_ADDRSTRLEN]{};
-  if (::getpeername(client_fd, reinterpret_cast<sockaddr*>(&peer),
-                    &peer_size) == 0) {
-    const void* address =
-        peer.ss_family == AF_INET
-            ? static_cast<const void*>(
-                  &reinterpret_cast<const sockaddr_in*>(&peer)->sin_addr)
-            : static_cast<const void*>(
-                  &reinterpret_cast<const sockaddr_in6*>(&peer)->sin6_addr);
-    if (::inet_ntop(peer.ss_family, address, peer_address,
-                    sizeof(peer_address)))
-      req.client_id = peer_address;
-  }
+  if (auto peer = PeerAddress(client_fd); !peer.empty())
+    req.client_id = std::move(peer);
   req.request_id = "r" + std::to_string(next_request.fetch_add(1) + 1);
   json::Value completion_metrics;
   const HttpResultScope result_scope(completion_metrics);
@@ -2690,7 +2915,10 @@ void HttpServer::handle_connection(int client_fd) {
           payload_too_large = true;
         } else if (content_length > 0) {
           if (remaining > 0) {
-            ok = ReadN(body, client_fd, remaining);
+            // A HTTP/1.0 request's expectation is ignored (RFC 9110 10.1.1).
+            ok = (!http11 || !ExpectsContinue(req) ||
+                  SendAll(client_fd, "HTTP/1.1 100 Continue\r\n\r\n")) &&
+                 ReadN(body, client_fd, remaining);
           } else {
             ok = true;
           }
@@ -2704,18 +2932,12 @@ void HttpServer::handle_connection(int client_fd) {
         }
         if (ok) {
           req.body = std::move(body);
-#ifdef _WIN32
           // WSAPoll does not report a connection that stop() shut down
           // locally, so a stopping server cancels its generations directly.
           req.is_cancelled = [this, client_fd] {
             return stopped_.load(std::memory_order_acquire) ||
                    IsPeerDisconnected(client_fd);
           };
-#else
-          req.is_cancelled = [client_fd] {
-            return IsPeerDisconnected(client_fd);
-          };
-#endif
         }
       }
     }
@@ -2856,6 +3078,7 @@ void HttpServer::handle_connection(int client_fd) {
       response_started = true;
       connected = SendAll(client_fd, payload);
     }
+    response_sent.store(true, std::memory_order_release);
     std::string outcome = connected ? "completed" : "disconnected";
     if (resp.stream_log) {
       resp.log_details = resp.stream_log->details;
@@ -2951,6 +3174,7 @@ void HttpServer::handle_connection(int client_fd) {
     trace_failure(resp);
     if (!response_started)
       (void)SendAll(client_fd, BuildResponse(resp));
+    response_sent.store(true, std::memory_order_release);
   } catch (const std::exception& e) {
     completion_outcome = response_started ? "stream_error" : "failed";
     completion_status = response_started ? 200 : 500;
@@ -2958,8 +3182,11 @@ void HttpServer::handle_connection(int client_fd) {
     const auto duration_ms = std::chrono::duration<double, std::milli>(
                                  std::chrono::steady_clock::now() - start_time)
                                  .count();
-    HttpResponse resp = Err(500, "Internal Server Error",
-                            *e.what() ? e.what() : "generation failed",
+    const char* message = *e.what() ? e.what() : "generation failed";
+    // Retain the cause in logs alongside the client's stable code.
+    Logger::Error("http", "request=" + req.request_id +
+                              " event=server_exception reason=" + message);
+    HttpResponse resp = Err(500, "Internal Server Error", message,
                             "internal_error", "server_exception");
     resp.headers.emplace_back("X-Request-ID", req.request_id);
     // Name the exception type so the cause stays visible (10-09 L4 arm A:
@@ -2975,6 +3202,7 @@ void HttpServer::handle_connection(int client_fd) {
     trace_failure(resp);
     if (!response_started)
       (void)SendAll(client_fd, BuildResponse(resp));
+    response_sent.store(true, std::memory_order_release);
   } catch (...) {
     completion_outcome = response_started ? "stream_error" : "failed";
     completion_status = response_started ? 200 : 500;
@@ -2994,6 +3222,7 @@ void HttpServer::handle_connection(int client_fd) {
     trace_failure(resp);
     if (!response_started)
       (void)SendAll(client_fd, BuildResponse(resp));
+    response_sent.store(true, std::memory_order_release);
   }
   // Act on a loss found by this request now, not at the next health probe.
   (void)device_lost();

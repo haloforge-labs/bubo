@@ -21,7 +21,9 @@ test('one Server save combines core and inference settings and resets atomically
     bridgeReply({ estimate: { ...view.saved_estimate }, fit: view.fit }),
   )
   mountCorePage('/', view)
-  await page.getByLabelText('Context per session').fill(String(nextContext))
+  await page
+    .getByRole('spinbutton', { name: 'Context per session', exact: true })
+    .fill(String(nextContext))
   await page
     .getByRole('spinbutton', { name: 'Temperature', exact: true })
     .fill('0.8')
@@ -51,23 +53,28 @@ test('promoted effort map uses CLI default levels and suggested bounds, then res
   const save = vi.spyOn(actions, 'PatchPreferences').mockResolvedValue({})
   mountCorePage('/', view)
   await expect
-    .element(page.getByLabelText('low', { exact: true }))
+    .element(page.getByRole('spinbutton', { name: 'Low', exact: true }))
     .toHaveValue(-2)
   await expect
-    .element(page.getByLabelText('low', { exact: true }))
+    .element(page.getByRole('spinbutton', { name: 'Low', exact: true }))
     .toHaveAttribute('min', '-2')
   await expect
-    .element(page.getByLabelText('xhigh', { exact: true }))
+    .element(page.getByRole('spinbutton', { name: 'Extra high', exact: true }))
     .toHaveAttribute('max', '0')
-  await page.getByLabelText('low', { exact: true }).fill('-1.5')
+  await page.getByRole('spinbutton', { name: 'Low', exact: true }).fill('-1.5')
   await page.getByRole('button', { name: 'Save server setup' }).click()
   expect(save).toHaveBeenCalledExactlyOnceWith({
     set: {},
     clear: [],
     switch_values: [{ name: row.name, value: 'low:-1.5,medium:-1,xhigh:0' }],
   })
+  // Reset shows once the value differs from the saved one.
+  await page.getByRole('spinbutton', { name: 'Low', exact: true }).fill('-1.25')
   await page
-    .getByRole('button', { name: `Reset ${row.label} to default`, exact: true })
+    .getByRole('button', {
+      name: 'Reset Rethinking penalty to default',
+      exact: true,
+    })
     .click()
   await page.getByRole('button', { name: 'Save server setup' }).click()
   expect(save).toHaveBeenLastCalledWith({ set: {}, clear: [row.name] })
@@ -84,13 +91,13 @@ test('effort fields merge partial overrides with recorded default levels and bou
     'low:-1.5'
   mountCorePage('/', view)
   await expect
-    .element(page.getByLabelText('low', { exact: true }))
+    .element(page.getByRole('spinbutton', { name: 'Low', exact: true }))
     .toHaveValue(-1.5)
   await expect
-    .element(page.getByLabelText('xhigh', { exact: true }))
+    .element(page.getByRole('spinbutton', { name: 'Extra high', exact: true }))
     .toHaveValue(0)
   await expect
-    .element(page.getByLabelText('xhigh', { exact: true }))
+    .element(page.getByRole('spinbutton', { name: 'Extra high', exact: true }))
     .toHaveAttribute('min', '-2')
 })
 

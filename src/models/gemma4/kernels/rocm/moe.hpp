@@ -6,22 +6,13 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "src/core/hip/half_kquant_format.hpp"
+
 namespace gufo::models::gemma4::rocm {
 
-/// Routed expert weight formats with decode and verification kernels.
-/// 32 bits wide: the value crosses from GCC-built host code into clang-built
-/// HIP code, and clang assumes a narrower argument arrives zero-extended where
-/// GCC leaves the upper bits undefined.
-enum class ExpertFormat : std::uint32_t {
-  kQ4_K,
-  kQ5_K,
-  kQ6_K,
-  kQ8_0,
-  kQ5_1,
-  kF16,
-  kQ4_0,
-  kQ5_0,
-};
+/// Routed expert weight formats with decode and verification kernels (32 bits
+/// wide; defined with the binary16 K-quant GEMM both model lanes share).
+using ::gufo::hip::half_kquant::ExpertFormat;
 
 /// Rows whose assignments one expert group can hold: an expert appears at
 /// most once per row, so this bounds the rows of a grouped (decode or

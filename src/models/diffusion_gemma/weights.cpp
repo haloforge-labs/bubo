@@ -1,8 +1,6 @@
 #include "src/models/diffusion_gemma/weights.hpp"
 
-#include <fcntl.h>
 #include <hip/hip_runtime_api.h>
-#include <unistd.h>
 
 #include <algorithm>
 #include <cstring>
@@ -12,6 +10,7 @@
 #include <stdexcept>
 
 #include "src/core/json.hpp"
+#include "src/core/platform/mapped_file.hpp"
 #include "src/models/diffusion_gemma/hip_check.hpp"
 #include "src/models/diffusion_gemma/kernels.hpp"
 #include "src/models/diffusion_gemma/upload.hpp"
@@ -85,24 +84,24 @@ private:
 }  // namespace
 
 float ReadF32Scalar(const TensorEntry& t) {
-  const int fd = ::open(t.file.c_str(), O_RDONLY);
-  if (fd < 0)
+  const auto file = platform::OpenReadFile(t.file);
+  if (!platform::FileValid(file))
     throw std::runtime_error("cannot open " + t.file.string());
   float value = 0;
-  const auto got = ::pread(fd, &value, 4, static_cast<off_t>(t.offset));
-  ::close(fd);
+  const auto got = platform::ReadFileAt(file, &value, sizeof(value), t.offset);
+  platform::CloseFile(file);
   if (got != 4)
     throw std::runtime_error("short read of a tensor scale");
   return value;
 }
 
 float ReadBf16Scalar(const TensorEntry& t) {
-  const int fd = ::open(t.file.c_str(), O_RDONLY);
-  if (fd < 0)
+  const auto file = platform::OpenReadFile(t.file);
+  if (!platform::FileValid(file))
     throw std::runtime_error("cannot open " + t.file.string());
   std::uint16_t raw = 0;
-  const auto got = ::pread(fd, &raw, 2, static_cast<off_t>(t.offset));
-  ::close(fd);
+  const auto got = platform::ReadFileAt(file, &raw, sizeof(raw), t.offset);
+  platform::CloseFile(file);
   if (got != 2)
     throw std::runtime_error("short read of a layer scalar");
   const std::uint32_t bits = static_cast<std::uint32_t>(raw) << 16;

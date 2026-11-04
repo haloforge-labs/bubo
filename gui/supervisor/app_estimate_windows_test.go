@@ -111,7 +111,6 @@ func TestSavedEstimateDoesNotClaimUnsupportedSavedPreferences(t *testing.T) {
 		{ModelPath: "cli-model", ManifestPath: `C:\different\package.json`},
 		{ModelPath: "cli-model", NPUPrefill: "not-applied"},
 		{ModelPath: "cli-model", Effort: "not-applied"},
-		{ModelPath: "cli-model", SwitchOverrides: map[string]string{"FUTURE_ENV": "not-applied"}},
 	} {
 		m := newModelsApp(t, "")
 		m.b.view = actionTestInput(Stopped).Snapshot
@@ -126,6 +125,87 @@ func TestSavedEstimateDoesNotClaimUnsupportedSavedPreferences(t *testing.T) {
 		if !v.Actions.Start.Allowed {
 			t.Fatal("saved setting locked out of Start", saved, v.Actions.Start)
 		}
+	}
+}
+
+// The owner's walk-through: a stopped server with a saved q8 cache and fast
+// prefill. The page must show the fit at launch, with nothing edited.
+func TestSavedCacheTypeAndPrefillModeStillGetAFitAtLaunch(t *testing.T) {
+	m := newModelsApp(t, "")
+	st := actionTestInput(Stopped).Snapshot
+	st.Status.MemoryEstimate = nil
+	st.Status.EffectiveSwitches = nil
+	m.b.view = st
+	m.a.settings = Settings{
+		ManifestPath:    filepath.Join(e21Folder(t, e21Flash), "bubo-package.json"),
+		SwitchOverrides: map[string]string{"--kv-cache-type": "q8_0", "--prefill-mode": "fast"},
+	}
+	v := waitSavedEstimate(t, m.a)
+	if v.SavedEstimate.Error != nil || v.SavedEstimate.MemoryEstimate == nil || v.Fit.Class == "fit_unknown" || !v.Actions.Start.Allowed {
+		t.Fatalf("a saved q8 cache and fast prefill left the launch without a fit: %+v %+v %+v", v.SavedEstimate.Error, v.Fit, v.Actions.Start)
+	}
+}
+
+// Every saved serve override reaches the estimate, as `--switch NAME=VALUE` in name
+// order, so the fit is the one the launch will have: the cache type, the side files,
+// a bare flag and an environment row alike. None asks for a restart to be judged.
+func TestSavedEstimateAsksForEverySavedOverride(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		overrides map[string]string
+		want      []string
+	}{
+		{"q8 cache and fast prefill", map[string]string{"--prefill-mode": "fast", "--kv-cache-type": "q8_0"},
+			[]string{"--switch", "--kv-cache-type=q8_0", "--switch", "--prefill-mode=fast"}},
+		{"f16 is sent too", map[string]string{"--kv-cache-type": "f16"},
+			[]string{"--switch", "--kv-cache-type=f16"}},
+		{"side files, a bare flag and an environment row", map[string]string{
+			"--mtp-model": `C:mmtp.gguf`, "--mmproj": `C:mmmproj.gguf`, "--no-cache": "", "GUFO_MAX_IMAGE_TOKENS": "1024"},
+			[]string{"--switch", `--mmproj=C:mmmproj.gguf`, "--switch", `--mtp-model=C:mmtp.gguf`, "--switch", "--no-cache=", "--switch", "GUFO_MAX_IMAGE_TOKENS=1024"}},
+		{"the think-marker placeholder is not a file", map[string]string{"GUFO_THINK_MARKER_LIST": "none"}, nil},
+		{"nothing saved", nil, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newModelsApp(t, "")
+			st := actionTestInput(Stopped).Snapshot
+			st.Status.MemoryEstimate = nil
+			st.Status.EffectiveSwitches = nil
+			m.b.view = st
+			folder := e21Folder(t, e21Flash)
+			m.a.settings = Settings{ManifestPath: filepath.Join(folder, "bubo-package.json"), SwitchOverrides: tc.overrides}
+			v := waitSavedEstimate(t, m.a)
+			if v.SavedEstimate.Error != nil && v.SavedEstimate.Error.Code == "estimate_needs_restart" {
+				t.Errorf("a saved override asked for a restart to be estimated: %+v", v.SavedEstimate.Error)
+			}
+			estimates := recordedEstimates(t, m.dir)
+			want := append([]string{"models", "estimate", "--model", folder, "--json"}, tc.want...)
+			if len(estimates) != 1 || !reflect.DeepEqual(estimates[0], want) {
+				t.Errorf("estimate arguments %v, want %v", estimates, want)
+			}
+		})
+	}
+}
+
+// The recorded answer of `models estimate --kv-cache-type q8_0` parses, says which
+// cache type its numbers assume, and needs less memory than the f16 answer.
+func TestRecordedQ8EstimateNamesItsCacheTypeAndNeedsLess(t *testing.T) {
+	read := func(file string) *ModelEstimate {
+		raw, err := os.ReadFile(filepath.Join("..", "tests", "scenarios", "recordings", "v12", file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		event, err := ParseEvent(raw)
+		if err != nil {
+			t.Fatalf("%s: %v", file, err)
+		}
+		return event.Value.(*ModelEstimate)
+	}
+	q8, f16 := read("estimate-flash-catalogue-id-q8.json"), read("estimate-flash-catalogue-id.json")
+	if string(q8.FitInputs["kv_cache_type"]) != `"q8_0"` {
+		t.Fatalf("fit_inputs: %s", q8.FitInputs)
+	}
+	if q8.MemoryEstimate == nil || f16.MemoryEstimate == nil || q8.MemoryEstimate.TotalRange.Max.Bytes >= f16.MemoryEstimate.TotalRange.Max.Bytes {
+		t.Fatal("a q8 cache must need less memory than the f16 answer")
 	}
 }
 

@@ -43,7 +43,7 @@ test('V12 review: an unrecommended context is not offered', async () => {
         .element(page.getByRole('button', { name: 'Use largest context' }))
         .not.toBeInTheDocument()
       page
-        .getByLabelText('Context per session')
+        .getByRole('spinbutton', { name: 'Context per session', exact: true })
         .element()
         .scrollIntoView({ block: 'center' })
     },

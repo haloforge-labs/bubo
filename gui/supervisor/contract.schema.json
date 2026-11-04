@@ -26,7 +26,8 @@
         "request_completed",
         "support_bundle",
         "models",
-        "model_estimate"
+        "model_estimate",
+        "side_file_check"
       ]
     },
     "operation_id": {
@@ -4892,7 +4893,10 @@
                   "also": {
                     "type": "array",
                     "items": {
-                      "type": "number"
+                      "type": [
+                        "number",
+                        "string"
+                      ]
                     }
                   },
                   "format": {
@@ -5985,6 +5989,9 @@
               "type": "null"
             }
           ]
+        },
+        "capabilities": {
+          "$ref": "#/$defs/model_capabilities"
         }
       },
       "required": [
@@ -6486,6 +6493,9 @@
             "path",
             "catalogue"
           ]
+        },
+        "capabilities": {
+          "$ref": "#/$defs/model_capabilities"
         }
       },
       "required": [
@@ -6499,6 +6509,109 @@
         "subject",
         "subject_kind"
       ]
+    },
+    "model_capabilities": {
+      "type": "object",
+      "properties": {
+        "routed_experts": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "prefill_mode_fast": {
+          "type": "object",
+          "properties": {
+            "available": {
+              "type": "boolean"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "available",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        "kv_cache_q8": {
+          "type": "object",
+          "properties": {
+            "available": {
+              "type": "boolean"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "available",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        "refusal_direction": {
+          "type": "object",
+          "properties": {
+            "available": {
+              "type": "boolean"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "available",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "prefill_mode_fast",
+        "kv_cache_q8",
+        "refusal_direction"
+      ],
+      "additionalProperties": false
+    },
+    "side_file_check": {
+      "type": "object",
+      "properties": {
+        "role": {
+          "enum": [
+            "mtp",
+            "mmproj",
+            "draft_head"
+          ]
+        },
+        "fits": {
+          "type": "boolean"
+        },
+        "kind_ok": {
+          "type": "boolean"
+        },
+        "family_ok": {
+          "type": "boolean"
+        },
+        "dims_ok": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "role",
+        "fits",
+        "kind_ok",
+        "family_ok",
+        "dims_ok",
+        "reason"
+      ],
+      "additionalProperties": false
     },
     "memory_gpu_budget": {
       "type": "object",
@@ -7142,6 +7255,22 @@
         "properties": {
           "payload": {
             "$ref": "#/$defs/model_estimate"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "side_file_check"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/side_file_check"
           }
         }
       }

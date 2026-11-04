@@ -23,6 +23,27 @@
   src: url('../fonts/et-book-bold-line-figures.woff') format('woff');
 }
 @font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 400 500;
+  font-display: swap;
+  src: url('../fonts/IBMPlexSans-Regular.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: italic;
+  font-weight: 400 500;
+  font-display: swap;
+  src: url('../fonts/IBMPlexSans-Italic.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Sans';
+  font-style: normal;
+  font-weight: 600 700;
+  font-display: swap;
+  src: url('../fonts/IBMPlexSans-SemiBold.woff2') format('woff2');
+}
+@font-face {
   font-family: 'Go Mono';
   font-style: normal;
   font-weight: 400;
@@ -70,6 +91,15 @@
     --wash: #252525;
     --tint: rgba(139, 198, 204, 0.07);
   }
+}
+/* Sans serif: one attribute on the root swaps the typeface token and the size
+   that suits it (the serif face is drawn small). Go Mono stays for code. */
+:root[data-font='sans'] {
+  --serif:
+    'IBM Plex Sans', 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+}
+html[data-font='sans'] {
+  font-size: 16px;
 }
 @custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
 @theme inline {

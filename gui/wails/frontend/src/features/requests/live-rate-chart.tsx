@@ -10,6 +10,7 @@ import type { View } from '@/lib/bindings'
 import { number } from '@/lib/format'
 import { liveRate } from '@/lib/live-sessions'
 import { yTicks } from '@/components/line-chart'
+import { StatusLine } from '@/components/status-line'
 
 type Sample = View['live_samples'][number]
 
@@ -75,101 +76,104 @@ export function LiveRateChart({
         <span>
           Session {session} · Last 60 s{!active && ' · Just completed'}
         </span>
-        <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-          <span
-            className="h-0.5 w-4"
-            style={{ backgroundColor: 'var(--accent)' }}
-          />
-          Decode
-        </span>
-        <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-          <span
-            className="h-0.5 w-4"
-            style={{ backgroundColor: 'var(--brand)' }}
-          />
-          Prefill
-        </span>
-        <span className="text-xs text-muted-foreground">tok/s</span>
+        {known && (
+          <>
+            <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+              <span
+                className="h-0.5 w-4"
+                style={{ backgroundColor: 'var(--accent)' }}
+              />
+              Decode
+            </span>
+            <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+              <span
+                className="h-0.5 w-4"
+                style={{ backgroundColor: 'var(--brand)' }}
+              />
+              Prefill
+            </span>
+            <span className="text-xs text-muted-foreground">tok/s</span>
+          </>
+        )}
       </figcaption>
-      {!known && (
-        <p className="text-xs text-muted-foreground">
-          Rate: - · Waiting for token progress.
-        </p>
+      {!known ? (
+        <StatusLine className="text-xs">Waiting for rate</StatusLine>
+      ) : (
+        <div className="h-36 w-full font-mono text-xs tabular-nums">
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart
+              data={points}
+              margin={{ top: 8, right: 28, bottom: 4, left: 0 }}
+            >
+              <XAxis
+                dataKey="secondsAgo"
+                type="number"
+                reversed
+                domain={[0, 60]}
+                ticks={[0, 30, 60]}
+                interval={0}
+                tickFormatter={(value: number) =>
+                  value === 0 ? 'now' : `${number(value, 0)} s ago`
+                }
+                allowDataOverflow
+              />
+              <YAxis
+                type="number"
+                domain={[0, ticks.at(-1)!]}
+                ticks={ticks}
+                width={64}
+                tickFormatter={(value: number) =>
+                  new Intl.NumberFormat('en', {
+                    notation: 'compact',
+                    maximumFractionDigits: 1,
+                  }).format(value)
+                }
+                allowDataOverflow
+              />
+              <Tooltip
+                content={({ active: hovering, payload, label }) =>
+                  hovering && payload?.length ? (
+                    <div className="rounded border bg-popover p-2 text-xs text-popover-foreground shadow-sm">
+                      <p>{number(Number(label), 1)} s ago</p>
+                      {payload.map((entry) => (
+                        <p key={String(entry.dataKey)}>
+                          {entry.dataKey === 'decode' ? 'Decode' : 'Prefill'} ·{' '}
+                          {liveRate(
+                            typeof entry.value === 'number'
+                              ? entry.value
+                              : undefined,
+                          )}{' '}
+                          tok/s
+                        </p>
+                      ))}
+                    </div>
+                  ) : null
+                }
+              />
+              <Line
+                type="linear"
+                dataKey="decode"
+                stroke="var(--accent)"
+                strokeWidth={2}
+                dot={{ r: 2 }}
+                activeDot={{ r: 3 }}
+                connectNulls={false}
+                isAnimationActive={false}
+              />
+              <Line
+                type="linear"
+                dataKey="prefill"
+                stroke="var(--brand)"
+                strokeWidth={2}
+                dot={{ r: 2 }}
+                activeDot={{ r: 3 }}
+                connectNulls={false}
+                isAnimationActive={false}
+              />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
       )}
-      <div className="h-36 w-full font-mono text-xs tabular-nums">
-        <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart
-            data={points}
-            margin={{ top: 8, right: 28, bottom: 4, left: 0 }}
-          >
-            <XAxis
-              dataKey="secondsAgo"
-              type="number"
-              reversed
-              domain={[0, 60]}
-              ticks={[0, 30, 60]}
-              interval={0}
-              tickFormatter={(value: number) =>
-                value === 0 ? 'now' : `${number(value, 0)} s ago`
-              }
-              allowDataOverflow
-            />
-            <YAxis
-              type="number"
-              domain={[0, ticks.at(-1)!]}
-              ticks={ticks}
-              width={64}
-              tickFormatter={(value: number) =>
-                new Intl.NumberFormat('en', {
-                  notation: 'compact',
-                  maximumFractionDigits: 1,
-                }).format(value)
-              }
-              allowDataOverflow
-            />
-            <Tooltip
-              content={({ active: hovering, payload, label }) =>
-                hovering && payload?.length ? (
-                  <div className="rounded border bg-popover p-2 text-xs text-popover-foreground shadow-sm">
-                    <p>{number(Number(label), 1)} s ago</p>
-                    {payload.map((entry) => (
-                      <p key={String(entry.dataKey)}>
-                        {entry.dataKey === 'decode' ? 'Decode' : 'Prefill'} ·{' '}
-                        {liveRate(
-                          typeof entry.value === 'number'
-                            ? entry.value
-                            : undefined,
-                        )}{' '}
-                        tok/s
-                      </p>
-                    ))}
-                  </div>
-                ) : null
-              }
-            />
-            <Line
-              type="linear"
-              dataKey="decode"
-              stroke="var(--accent)"
-              strokeWidth={2}
-              dot={{ r: 2 }}
-              activeDot={{ r: 3 }}
-              connectNulls={false}
-              isAnimationActive={false}
-            />
-            <Line
-              type="linear"
-              dataKey="prefill"
-              stroke="var(--brand)"
-              strokeWidth={2}
-              dot={{ r: 2 }}
-              activeDot={{ r: 3 }}
-              connectNulls={false}
-              isAnimationActive={false}
-            />
-          </ComposedChart>
-        </ResponsiveContainer>
-      </div>
     </figure>
   )
 }

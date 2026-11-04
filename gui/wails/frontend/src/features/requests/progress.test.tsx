@@ -94,3 +94,50 @@ test('the shared CLI replay keeps coarse prompt counts unchanged between chunks'
     }
   }
 })
+
+// The header and every row use one column template: each value sits under its own
+// heading, and nothing scrolls sideways, at the page widths of a 900 px window
+// with the sidebar open (about 600) and of the 560 px minimum (about 510).
+for (const [name, state] of [
+  ['reading', 'prefilling'],
+  ['writing', 'generating'],
+] as const)
+  for (const width of [600, 510])
+    test(`live ${name} row: values stay under their headings at ${width} px`, async () => {
+      const view = promptReadingView()
+      if (state === 'generating') view.slots = replaySlots('writing')
+      const mounted = renderView(
+        <div style={{ width }}>
+          <RequestsPage />
+        </div>,
+        view,
+      )
+      cleanup = mounted.cleanup
+      const live = page.getByRole('region', { name: 'Live requests' })
+      await expect
+        .element(live.getByRole('columnheader', { name: 'Elapsed' }))
+        .toBeVisible()
+      const headers = [
+        ...live.element().querySelectorAll('[role="columnheader"]'),
+      ]
+      const cells = [
+        ...live
+          .element()
+          .querySelectorAll('[role="row"]:not(:first-child) > *'),
+      ]
+      expect(headers).toHaveLength(5)
+      expect(cells.length).toBeGreaterThanOrEqual(5)
+      headers.forEach((header, index) => {
+        expect(
+          Math.abs(
+            header.getBoundingClientRect().left -
+              cells[index]!.getBoundingClientRect().left,
+          ),
+          `${header.textContent} column`,
+        ).toBeLessThan(1)
+      })
+      const table = live.element().querySelector('[role="table"]')!
+      expect(table.parentElement!.scrollWidth).toBeLessThanOrEqual(
+        table.parentElement!.clientWidth,
+      )
+    })

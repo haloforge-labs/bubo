@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
+#include "src/models/qwen38_flash_next/rope_scaling.hpp"
 
 namespace q = gufo::models::qwen38_flash_next::rocm;
 namespace {
@@ -255,12 +256,73 @@ void CheckQueryPrecisionBoundary() {
     CheckHip(hipFree(p), "free precision probe");
 }
 
-void CheckPooling(unsigned start, unsigned capacity) {
+// The position is a device value while the host sizes the score and mask
+// rows. A position past those rows must select as if its row ended there,
+// without touching the memory that follows either row.
+void CheckPositionPastRows() {
+  constexpr unsigned max_blocks = kBudget + 32, words = max_blocks / 32;
+  constexpr unsigned past = max_blocks + 96, guard = 256;
+  // Negative floats rank above every score as the selector compares bits.
+  constexpr float score_guard = -2.0F;
+  constexpr std::uint32_t word_guard = 0x5A5A5A5AU;
+  const auto queries = MakeValues(kHeads * kDim, 0x51E5E1ECU, 1.0F);
+  const auto keys = MakeValues(std::size_t{past} * kDim, 0x0B10C5U, 1.0F);
+  std::vector<__half> keys_half(keys.size());
+  std::transform(keys.begin(), keys.end(), keys_half.begin(),
+                 [](float value) { return __float2half_rn(value); });
+  auto* dq = Upload(queries);
+  auto* dk = Upload(keys_half);
+  std::vector<float> reference_scores;
+  std::vector<std::uint32_t> reference_mask;
+  // The first launch fills its rows exactly and becomes the reference.
+  for (const unsigned complete : {max_blocks, past}) {
+    for (const unsigned live : {0U, complete}) {
+      auto* dp = Upload(std::vector<unsigned>{complete * kRatio - 1});
+      auto* ds = Upload(std::vector<float>(max_blocks + guard, score_guard));
+      auto* dm = Upload(std::vector<std::uint32_t>(words + guard, word_guard));
+      q::SelectBlocks(dq, dk, dm, ds, 1, dp, 0, kHeads, kDim, kRatio, kBudget,
+                      words, max_blocks, nullptr, live);
+      CheckHip(hipDeviceSynchronize(), "selection past the rows");
+      auto scores = Download(ds, max_blocks + guard);
+      auto mask = Download(dm, words + guard);
+      if (std::any_of(scores.begin() + max_blocks, scores.end(),
+                      [](float value) { return value != score_guard; }))
+        throw std::runtime_error("selection wrote past its score row");
+      if (std::any_of(mask.begin() + words, mask.end(),
+                      [](std::uint32_t word) { return word != word_guard; }))
+        throw std::runtime_error("selection wrote past its mask row");
+      scores.resize(max_blocks);
+      mask.resize(words);
+      if (reference_mask.empty()) {
+        reference_scores = scores;
+        reference_mask = mask;
+      } else if (scores != reference_scores || mask != reference_mask) {
+        throw std::runtime_error(
+            "a position past the rows changed the selection: complete=" +
+            std::to_string(complete) + " live=" + std::to_string(live));
+      }
+      for (void* p : {static_cast<void*>(dp), static_cast<void*>(ds),
+                      static_cast<void*>(dm)})
+        CheckHip(hipFree(p), "free position probe");
+    }
+  }
+  CheckHip(hipFree(dq), "free position queries");
+  CheckHip(hipFree(dk), "free position keys");
+  std::cout << "block selection past " << max_blocks
+            << " score slots: rows and guards kept\n";
+}
+
+void CheckPooling(unsigned start, unsigned capacity, float factor = 1.0F) {
   constexpr unsigned tokens = 7;
   const unsigned first = start / kRatio;
   const unsigned blocks = (start + tokens) / kRatio + 3;
   constexpr unsigned rotary = 64;
   constexpr float theta = 1000000.0F, eps = 1e-6F;
+  const auto yarn =
+      factor == 1.0F
+          ? gufo::models::qwen38_flash_next::YarnRope{}
+          : gufo::models::qwen38_flash_next::MakeYarnRope(
+                {.factor = factor, .original_context = 262144}, rotary, theta);
   const auto raw = MakeValues((start + tokens) * kDim, 0x31415926U, 1.0F);
   const auto gamma = MakeValues(kDim, 0x27182818U, 1.0F);
   const std::vector<__half> initial(blocks * kDim, __float2half(3.0F));
@@ -281,7 +343,8 @@ void CheckPooling(unsigned start, unsigned capacity) {
   const auto run = [&] {
     q::StoreRows(d_input, d_raw, tokens, kDim, d_start, capacity, nullptr);
     q::PoolIndexerBlocks(d_raw, d_gamma, d_blocks, d_first, d_start, tokens, 4,
-                         kRatio, kDim, rotary, theta, eps, capacity, nullptr);
+                         kRatio, kDim, rotary, theta, eps, capacity, nullptr,
+                         nullptr, yarn);
   };
   run();
   const auto actual = Download(d_blocks, initial.size());
@@ -311,12 +374,19 @@ void CheckPooling(unsigned start, unsigned capacity) {
     const double scale = 1.0 / std::sqrt(squares / kDim + eps);
     for (unsigned i = 0; i < kDim; ++i)
       values[i] *= scale * gamma[i];
+    const double mscale = factor == 1.0F ? 1.0 : 0.1 * std::log(factor) + 1.0;
     for (unsigned i = 0; i < rotary / 2; ++i) {
-      const double angle =
-          block * kRatio * std::pow(double(theta), -2.0 * i / rotary);
+      double freq = std::pow(double(theta), -2.0 * i / rotary);
+      if (factor != 1.0F) {
+        const double ramp = std::clamp(
+            (double(i) - yarn.low) / (double(yarn.high) - yarn.low), 0.0, 1.0);
+        freq *= 1.0 - ramp + ramp / factor;
+      }
+      const double angle = block * kRatio * freq;
       const auto a = values[i], b = values[i + rotary / 2];
-      values[i] = a * std::cos(angle) - b * std::sin(angle);
-      values[i + rotary / 2] = a * std::sin(angle) + b * std::cos(angle);
+      values[i] = (a * std::cos(angle) - b * std::sin(angle)) * mscale;
+      values[i + rotary / 2] =
+          (a * std::sin(angle) + b * std::cos(angle)) * mscale;
     }
     for (unsigned i = 0; i < kDim; ++i) {
       const double value = __half2float(actual[block * kDim + i]);
@@ -333,7 +403,7 @@ void CheckPooling(unsigned start, unsigned capacity) {
         static_cast<void*>(d_gamma), static_cast<void*>(d_blocks),
         static_cast<void*>(d_first), static_cast<void*>(d_start)})
     CheckHip(hipFree(pointer), "free pooling input");
-  std::cout << "pooled F16 keys: FP64 error " << worst
+  std::cout << "pooled F16 keys factor=" << factor << ": FP64 error " << worst
             << ", boundaries and replay exact\n";
 }
 
@@ -342,9 +412,11 @@ void CheckPooling(unsigned start, unsigned capacity) {
 int main() {
   try {
     CheckQueryPrecisionBoundary();
+    CheckPositionPastRows();
     CheckPooling(29, 64);
     CheckPooling(29, 16);     // batch wraps the raw-key ring
     CheckPooling(65533, 16);  // many wraps; absolute rotary position retained
+    CheckPooling(65533, 16, 2.5F);
     bool ok = true;
     ok = Run(100, 20000, 0x1234ABCDU) && ok;  // deep, ragged group
     ok = Run(7, 131069, 0x2468ACE0U) && ok;
@@ -365,6 +437,9 @@ int main() {
     ok = Run(1, 20000, 0, false, 256) && ok;
     ok = Run(1, 20000, 0, false, kBudget + 128, false, ScoreLayout::kAligned,
              TiedBlocks::kSuffix) &&
+         ok;
+    // 409,600-token capacity: 3,200 mask words per row (YaRN 1.5625).
+    ok = Run(3, 409533, 0x40960000U, false, 0, true, ScoreLayout::kAligned) &&
          ok;
     return ok ? 0 : 1;
   } catch (const std::exception& error) {

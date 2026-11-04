@@ -55,8 +55,8 @@ bool CallBf16(const void* w, const void* x, float* out, std::size_t batch,
   }
 }
 
-// C4 BF16 absolute K rotation: the summation order of row r must depend on
-// its absolute token position only, never on where the launch started.
+// C4 and upstream #714: a row keeps its K chain across absolute-offset and
+// unpositioned mixed-session launches, never depending on the launch start.
 void CheckBf16AbsoluteOffset() {
   constexpr std::size_t m = 64, k = 2560, total = 700, pad = 600;
   std::vector<std::uint16_t> weights(m * k), input(total * k);
@@ -124,8 +124,22 @@ void CheckBf16AbsoluteOffset() {
                         rows * m * sizeof(float)) == 0,
             "BF16 projection of absolute start " + std::to_string(start) +
                 " differs from the whole launch");
+    // Upstream #714 also covers mixed-session placement, which has no
+    // absolute-offset pointer. The same row still needs the same K chain.
+    fill_canary();
+    Require(CallBf16(w.data, static_cast<const std::uint16_t*>(x.data) +
+                                 std::size_t(start) * k,
+                     base + std::size_t(start) * m, rows, m, k,
+                     static_cast<const std::uint32_t*>(nullptr)),
+            "BF16 mixed-session suffix launch rejected");
+    Check(hipDeviceSynchronize());
+    const auto unpositioned = download();
+    Require(std::memcmp(unpositioned.data() + (pad + start) * m,
+                        full.data() + (pad + start) * m,
+                        rows * m * sizeof(float)) == 0,
+            "BF16 projection changed with mixed-session batch placement");
   }
-  std::cout << "PASS: BF16 absolute K rotation across starts\n";
+  std::cout << "PASS: BF16 fixed K order across positioned and mixed starts\n";
 }
 
 // Shape-stable dispatch: the first rows of a wider batch equal the same rows

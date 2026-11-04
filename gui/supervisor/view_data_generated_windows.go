@@ -531,6 +531,7 @@ func projectLoopBreaker(in LoopBreaker) (out ViewLoopBreaker) {
 }
 
 type ViewMemoryEstimate struct {
+	Capabilities                 *EstimateCapabilities   `json:"capabilities,omitempty"`
 	RecommendationFailures       []RecommendationFailure `json:"recommendation_failures,omitempty"`
 	CacheAtClampBytes            *Count                  `json:"cache_at_clamp_bytes,omitempty"`
 	HostSpillBytes               *Count                  `json:"host_spill_bytes,omitempty"`
@@ -571,6 +572,10 @@ type ViewMemoryEstimate struct {
 }
 
 func projectMemoryEstimate(in MemoryEstimate) (out ViewMemoryEstimate) {
+	if in.Capabilities != nil {
+		out.Capabilities = new(EstimateCapabilities)
+		(*out.Capabilities) = copyEstimateCapabilities((*in.Capabilities))
+	}
 	if in.RecommendationFailures != nil {
 		out.RecommendationFailures = make([]RecommendationFailure, len(in.RecommendationFailures))
 		for i32 := range in.RecommendationFailures {
@@ -681,16 +686,21 @@ func projectModelEstimate(in ModelEstimate) (out ViewModelEstimate) {
 }
 
 type ViewModelEstimateInfo struct {
-	State          string              `json:"estimate_state"`
-	Reason         *string             `json:"reason"`
-	EvidenceLabel  *string             `json:"evidence_label"`
-	FitVerified    bool                `json:"fit_verified"`
-	FitInputs      map[string]Value    `json:"fit_inputs"`
-	Notes          []string            `json:"notes"`
-	MemoryEstimate *ViewMemoryEstimate `json:"memory_estimate"`
+	Capabilities   *EstimateCapabilities `json:"capabilities,omitempty"`
+	State          string                `json:"estimate_state"`
+	Reason         *string               `json:"reason"`
+	EvidenceLabel  *string               `json:"evidence_label"`
+	FitVerified    bool                  `json:"fit_verified"`
+	FitInputs      map[string]Value      `json:"fit_inputs"`
+	Notes          []string              `json:"notes"`
+	MemoryEstimate *ViewMemoryEstimate   `json:"memory_estimate"`
 }
 
 func projectModelEstimateInfo(in ModelEstimateInfo) (out ViewModelEstimateInfo) {
+	if in.Capabilities != nil {
+		out.Capabilities = new(EstimateCapabilities)
+		(*out.Capabilities) = copyEstimateCapabilities((*in.Capabilities))
+	}
 	out.State = in.State
 	if in.Reason != nil {
 		out.Reason = new(string)
@@ -1170,6 +1180,25 @@ func copyEndpoints(in Endpoints) (out Endpoints) {
 }
 func copyEntropyGate(in EntropyGate) (out EntropyGate) {
 	out.Available = in.Available
+	return
+}
+func copyEstimateCapabilities(in EstimateCapabilities) (out EstimateCapabilities) {
+	if in.RoutedExperts != nil {
+		out.RoutedExperts = new(uint32)
+		(*out.RoutedExperts) = (*in.RoutedExperts)
+	}
+	if in.PrefillModeFast != nil {
+		out.PrefillModeFast = new(PrefillModeFast)
+		(*out.PrefillModeFast) = copyPrefillModeFast((*in.PrefillModeFast))
+	}
+	if in.RefusalDirection != nil {
+		out.RefusalDirection = new(RefusalDirection)
+		(*out.RefusalDirection) = copyRefusalDirection((*in.RefusalDirection))
+	}
+	if in.KVCacheQ8 != nil {
+		out.KVCacheQ8 = new(KVCacheQ8)
+		(*out.KVCacheQ8) = copyKVCacheQ8((*in.KVCacheQ8))
+	}
 	return
 }
 func copyFailure(in Failure) (out Failure) {
@@ -1810,6 +1839,10 @@ func copySavedSetupEstimate(in SavedSetupEstimate) (out SavedSetupEstimate) {
 		out.MemoryEstimate = new(ViewMemoryEstimate)
 		(*out.MemoryEstimate) = copyViewMemoryEstimate((*in.MemoryEstimate))
 	}
+	if in.Capabilities != nil {
+		out.Capabilities = new(EstimateCapabilities)
+		(*out.Capabilities) = copyEstimateCapabilities((*in.Capabilities))
+	}
 	if in.Reason != nil {
 		out.Reason = new(string)
 		(*out.Reason) = (*in.Reason)
@@ -2102,6 +2135,8 @@ func copyUserOverrides(in UserOverrides) (out UserOverrides) {
 		out.CheckForUpdates = new(bool)
 		(*out.CheckForUpdates) = (*in.CheckForUpdates)
 	}
+	out.LastSeenVersion = in.LastSeenVersion
+	out.Font = in.Font
 	if in.SwitchOverrides != nil {
 		out.SwitchOverrides = make(map[string]string, len(in.SwitchOverrides))
 		for k72, v72 := range in.SwitchOverrides {
@@ -2225,6 +2260,10 @@ func copyViewLoopBreaker(in ViewLoopBreaker) (out ViewLoopBreaker) {
 	return
 }
 func copyViewMemoryEstimate(in ViewMemoryEstimate) (out ViewMemoryEstimate) {
+	if in.Capabilities != nil {
+		out.Capabilities = new(EstimateCapabilities)
+		(*out.Capabilities) = copyEstimateCapabilities((*in.Capabilities))
+	}
 	if in.RecommendationFailures != nil {
 		out.RecommendationFailures = make([]RecommendationFailure, len(in.RecommendationFailures))
 		for i74 := range in.RecommendationFailures {
@@ -2690,6 +2729,11 @@ func copyJobProgress(in JobProgress) (out JobProgress) {
 	out.BytesTotal = in.BytesTotal
 	return
 }
+func copyKVCacheQ8(in KVCacheQ8) (out KVCacheQ8) {
+	out.Available = in.Available
+	out.Reason = in.Reason
+	return
+}
 func copyLicense(in License) (out License) {
 	out.Path = in.Path
 	out.Text = in.Text
@@ -2723,6 +2767,10 @@ func copyMemoryShortfall(in MemoryShortfall) (out MemoryShortfall) {
 	return
 }
 func copyModelEstimateInfo(in ModelEstimateInfo) (out ModelEstimateInfo) {
+	if in.Capabilities != nil {
+		out.Capabilities = new(EstimateCapabilities)
+		(*out.Capabilities) = copyEstimateCapabilities((*in.Capabilities))
+	}
 	out.State = in.State
 	if in.Reason != nil {
 		out.Reason = new(string)
@@ -2854,6 +2902,11 @@ func copyNumDefault(in NumDefault) (out NumDefault) {
 	out.Source = in.Source
 	return
 }
+func copyPrefillModeFast(in PrefillModeFast) (out PrefillModeFast) {
+	out.Available = in.Available
+	out.Reason = in.Reason
+	return
+}
 func copyPreparedCapabilities(in PreparedCapabilities) (out PreparedCapabilities) {
 	if in.ContextMax != nil {
 		out.ContextMax = new(uint64)
@@ -2909,6 +2962,11 @@ func copyRecommendedContextRow(in RecommendedContextRow) (out RecommendedContext
 		out.Reason = new(string)
 		(*out.Reason) = (*in.Reason)
 	}
+	return
+}
+func copyRefusalDirection(in RefusalDirection) (out RefusalDirection) {
+	out.Available = in.Available
+	out.Reason = in.Reason
 	return
 }
 func copyRequestRefusal(in RequestRefusal) (out RequestRefusal) {
@@ -3248,6 +3306,10 @@ func copyLoopBreaker(in LoopBreaker) (out LoopBreaker) {
 	return
 }
 func copyMemoryEstimate(in MemoryEstimate) (out MemoryEstimate) {
+	if in.Capabilities != nil {
+		out.Capabilities = new(EstimateCapabilities)
+		(*out.Capabilities) = copyEstimateCapabilities((*in.Capabilities))
+	}
 	if in.RecommendationFailures != nil {
 		out.RecommendationFailures = make([]RecommendationFailure, len(in.RecommendationFailures))
 		for i101 := range in.RecommendationFailures {
@@ -3361,6 +3423,10 @@ func copyThinkMarkerBias(in ThinkMarkerBias) (out ThinkMarkerBias) {
 	return
 }
 func copyViewModelEstimateInfo(in ViewModelEstimateInfo) (out ViewModelEstimateInfo) {
+	if in.Capabilities != nil {
+		out.Capabilities = new(EstimateCapabilities)
+		(*out.Capabilities) = copyEstimateCapabilities((*in.Capabilities))
+	}
 	out.State = in.State
 	if in.Reason != nil {
 		out.Reason = new(string)

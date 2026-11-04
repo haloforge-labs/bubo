@@ -53,18 +53,23 @@ inline ReleaseMemoryEstimate BuildReleaseMemoryEstimate(
   if (inputs.context == 0)
     inputs.context = resolved.native_context.value_or(0);
   inputs.sessions = number("--sessions");
-  const bool no_cache = value("--no-cache") == std::optional<std::string>("1");
-  inputs.ram_cache_bytes = no_cache ? 0 : number("--cache-ram-bytes");
-  inputs.cache_automatic = !no_cache && inputs.ram_cache_bytes == 0;
+  // --cache-ram-bytes off (the word the release rule accepts next to a number)
+  // is no RAM cache, like --no-cache.
+  const bool cache_off =
+      value("--no-cache") == std::optional<std::string>("1") ||
+      value("--cache-ram-bytes") == std::optional<std::string>("off");
+  inputs.ram_cache_bytes = cache_off ? 0 : number("--cache-ram-bytes");
+  inputs.cache_automatic = !cache_off && inputs.ram_cache_bytes == 0;
 
 
 
 
 
   inputs.cache_retention_lazy =
-      !no_cache && resolved.model_family == "qwen3.8-flash-next";
+      !cache_off && resolved.model_family == "qwen3.8-flash-next";
   inputs.mtp = !resolved.artefacts.mtp.empty() &&
                value("--speculative") == std::optional<std::string>("mtp");
+  inputs.kv_q8 = value("--kv-cache-type") == std::optional<std::string>("q8_0");
   inputs.twin = !resolved.artefacts.twin.empty();
   inputs.draft_head = !resolved.artefacts.draft_head.empty();
   inputs.vision =
@@ -88,7 +93,7 @@ inline ReleaseMemoryEstimate BuildReleaseMemoryEstimate(
   return result;
 }
 // Catalogue and local package estimates resolve the same default context as
-// serve. Standard 128 GB estimates retain their existing output exactly.
+// serve, for several sessions on every package.
 inline ReleaseMemoryEstimate BuildPlanningReleaseMemoryEstimate(
     gufo::server::ReleaseResolution& resolved, const std::string& package_id,
     std::optional<std::uint64_t> gpu_available,
@@ -97,9 +102,11 @@ inline ReleaseMemoryEstimate BuildPlanningReleaseMemoryEstimate(
   auto result = BuildReleaseMemoryEstimate(resolved, package_id, gpu_available,
                                            host_available, table, budgets);
   const bool memory96 = Is96GiBStrixHalo(budgets);
-  const bool lower =
-      package_id == prepare::PackageId(prepare::ModelSet::LowMemory);
-  if (explicit_context || (!memory96 && !(lower && result.inputs.sessions > 1)))
+  // serve resolves the recommended context for several sessions on every
+  // package (ResolveServeMemoryPolicy); the estimate must judge the same
+  // context, or a start the recommender calls a fit looks tight to a caller
+  // that omits --context.
+  if (explicit_context || (!memory96 && result.inputs.sessions <= 1))
     return result;
   const auto* recommendation = result.value.find("recommended_context");
   const auto* rows =

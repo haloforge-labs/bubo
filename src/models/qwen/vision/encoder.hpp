@@ -57,8 +57,12 @@ public:
   [[nodiscard]] const std::string& identity() const;
   [[nodiscard]] std::size_t ResidentBytes() const noexcept;
   [[nodiscard]] std::vector<platform::LoadedFile> LoadedFiles() const;
+  /// Upload the weights now instead of in the first Encode. Repeated calls
+  /// keep the existing upload.
+  void Upload();
   /// Serialized by the owning model scheduler. Pixel grid is already resized.
-  /// Weights upload on the first image; scratch is bounded by image dimensions.
+  /// Uploads the weights if Upload has not; scratch is bounded by image
+  /// dimensions.
   [[nodiscard]] std::shared_ptr<const Embedding> Encode(
       const core::Image& image, const Observer& observer = {},
       const CancellationCheck& is_cancelled = {});

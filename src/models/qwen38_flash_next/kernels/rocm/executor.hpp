@@ -11,7 +11,6 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <unordered_set>
 #include <mutex>
 #include <span>
 #include <string>
@@ -23,12 +22,17 @@
 #include "src/models/qwen/hip/ops/token.hpp"
 #include "src/models/qwen/vision/device_input.hpp"
 #include "src/models/qwen38_flash_next/batch_draft_head.hpp"
+#include "src/models/qwen38_flash_next/continuation_hooks.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/blaslt.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp"
+#include "src/models/qwen38_flash_next/kernels/rocm/head_two_runtime.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
 #include "src/models/qwen38_flash_next/ngram.hpp"
 #include "src/models/qwen38_flash_next/npu_retry.hpp"
+#include "src/models/qwen38_flash_next/prefill_stageb.hpp"
+#include "src/models/qwen38_flash_next/prefill_telemetry.hpp"
+#include "src/models/qwen38_flash_next/refusal_direction.hpp"
 
 namespace gufo::models::qwen38_flash_next::rocm {
 
@@ -39,6 +43,9 @@ class SnapshotAllocator;
 /// memory its checks see (process-wide; the maximum value removes the cap).
 /// Windows cannot interpose hipMemGetInfo the way upstream's test does.
 void LimitSnapshotDeviceFreeForTest(std::uint64_t bytes);
+void FailNextContinuationResetForTest();
+void FailNextContinuationTransferForTest();
+bool ConsumeContinuationTransferFailureForTest();
 struct ArgmaxCandidate;
 struct SnapshotHeader;
 struct SnapshotRegistry;
@@ -133,11 +140,14 @@ public:
 
   [[nodiscard]] bool mtp_enabled() const noexcept { return mtp_enabled_; }
   [[nodiscard]] std::uint32_t position() const noexcept { return position_; }
+  [[nodiscard]] KvCacheType kv_cache_type() const noexcept {
+    return kv_cache_type_;
+  }
   [[nodiscard]] std::uint32_t max_context() const noexcept {
     return max_context_;
   }
   /// Drops every token; the next Forward starts at position 0.
-  void Reset();
+  void Reset(bool reuse_mtp = false);
   void SetCancellationCheck(std::function<bool()> check);
   [[nodiscard]] bool CheckCancellation(std::string* error) const;
   [[nodiscard]] bool Cancelled() const noexcept { return cancelled_; }
@@ -145,6 +155,12 @@ public:
     return mutation_epoch_;
   }
   [[nodiscard]] std::size_t AllocatedBytes() const noexcept;
+  [[nodiscard]] NgramTotals NgramRowTotals() const noexcept {
+    return ngram_counters_->Load();
+  }
+  [[nodiscard]] const PleAheadTotals& ReadAheadTotals() const noexcept {
+    return ple_ahead_->Totals();
+  }
   [[nodiscard]] bool OwnsSnapshot(
       const SnapshotState& snapshot) const noexcept {
     return snapshots_ == snapshot.registry_;
@@ -152,6 +168,7 @@ public:
   void ConfigureVision(std::shared_ptr<const qwen::vision::Prompt> prompt,
                        std::shared_ptr<qwen::vision::Encoder> encoder,
                        hipStream_t stream);
+  void PrepareVision(hipStream_t stream);
   void RestoreVisionLayout(const qwen::vision::RopeLayout& layout,
                            hipStream_t stream);
   [[nodiscard]] const qwen::vision::RopeLayout& VisionLayout() const noexcept {
@@ -161,6 +178,7 @@ public:
 private:
   friend class Executor;
   friend struct PrefillCheckpoint;
+  friend class gufo::models::qwen38_flash_next::ContinuationAdapter;
   Session() = default;
   std::vector<PrefillDiagPass> prefill_diagnostics_;
   std::uint64_t diagnostic_pass_{0};
@@ -173,8 +191,8 @@ private:
   };
   struct AttentionState {
     const qwen::vision::DeviceRope* rope{nullptr};
-    __half* k_cache{nullptr};  ///< [max_context][kv_heads*d]
-    __half* v_cache{nullptr};  ///< [max_context][kv_heads*d]
+    void* k_cache{nullptr};    ///< [max_context][KvRowBytes(kv_heads*d,type)]
+    void* v_cache{nullptr};    ///< canonical packed rows; never a F16 shadow
     float* index_k{nullptr};   ///< [index_capacity_][indexer_dim] raw ring
     __half* block_k{nullptr};  ///< [max_context/ratio][indexer_dim]
   };
@@ -188,8 +206,8 @@ private:
     std::uint32_t mtp_blocks;    ///< complete predictor indexer blocks
   };
   struct MtpState {
-    __half* k_cache{nullptr};
-    __half* v_cache{nullptr};
+    void* k_cache{nullptr};
+    void* v_cache{nullptr};
     float* index_k{nullptr};
     __half* block_k{nullptr};
     std::uint32_t blocks{0};
@@ -204,17 +222,26 @@ private:
   const Executor* owner_{nullptr};
   qwen::vision::DeviceInput vision_input_;
   std::uint32_t max_context_{0};
+  KvCacheType kv_cache_type_{KvCacheType::kF16};
   bool mtp_enabled_{false};
   /// DraftVocabulary::kAuto: draft with the full head instead of the
   /// Options::draft_vocab subset (set by Executor::SetDraftHeadFull).
   bool draft_head_full_{false};
+  void* headtwo_frontier_{nullptr};
+  bool headtwo_compact_{false};
+  std::uint32_t headtwo_width_{1}, headtwo_row_{0};
   std::uint32_t index_capacity_{0};  ///< power-of-two raw indexer ring rows
   std::uint32_t position_{0};
+  ContinuationHooks* continuation_hooks_{nullptr};
   std::vector<LinearState> linear_;
   std::vector<AttentionState> attention_;
   float* ple_history_{nullptr};  ///< [PleConvHistory()][hc_dim]
   RollbackRows ple_snapshots_;   ///< [max_spec-1][PleConvHistory()][hc_dim]
   NgramHistory ngram_;
+  std::shared_ptr<PleReadAhead> ple_ahead_{std::make_shared<PleReadAhead>()};
+  bool ple_ahead_active_{false};
+  std::shared_ptr<NgramCounters> ngram_counters_{
+      std::make_shared<NgramCounters>()};
   std::vector<NgramHistory> ngram_snapshots_;
   std::uint32_t spec_base_{0};    ///< position before the speculative batch
   std::uint32_t spec_tokens_{0};  ///< tokens of the pending speculative batch
@@ -257,28 +284,76 @@ class Executor {
 public:
   struct Options {
     std::uint32_t max_batch{1};
+    std::filesystem::path head_shortlist_path;
+    std::shared_ptr<const RefusalDirection> refusal_direction;
+    RefusalMode refusal_mode{RefusalMode::kSites};
+    float refusal_strength{1.0F};
+    unsigned refusal_first_layer{4};
+    unsigned refusal_last_layer{44};
     /// Keep twin batch arithmetic when a configured cohort drains to one row.
     bool multi_session_twin{false};
     /// Rows of logits (and hidden states) a Forward call may return.
     std::uint32_t max_logit_rows{1};
     /// Longest speculative batch; bounds the recurrent snapshot storage.
     std::uint32_t max_speculative{1};
+    std::uint32_t max_context{0};
     /// Optional draft vocabulary: token ids the MTP draft head may propose
     /// (it scores only these rows of the output head). Empty = every token.
     std::vector<std::int32_t> draft_vocab;
+    bool ple_readahead{false};
+    bool hc_inject_bf16_fused{true};
+    bool device_accept{false};
+    bool draft_chain{false};
+    bool moe_fusion{false};
+    KvCacheType kv_cache_type{KvCacheType::kF16};
   };
 
   ~Executor();
+  class ScopedMoeFusion {
+  public:
+    ScopedMoeFusion(bool& active, bool& pending, bool enabled)
+        : active_(active), pending_(pending), saved_(active) {
+      active_ = enabled;
+      pending_ = false;
+    }
+    ~ScopedMoeFusion() {
+      active_ = saved_;
+      pending_ = false;
+    }
+    ScopedMoeFusion(const ScopedMoeFusion&) = delete;
+
+  private:
+    bool& active_;
+    bool& pending_;
+    bool saved_;
+  };
+  [[nodiscard]] ScopedMoeFusion ForGreedyDecode(bool greedy) const {
+    if (options_.moe_fusion && !greedy)
+      ++fusion_sampled_fallback_;
+    return ScopedMoeFusion(fusion_active_, fusion_pending_,
+                           options_.moe_fusion && greedy);
+  }
+  void LogMoeFusionCounters() const;
   [[nodiscard]] hipStream_t stream() const noexcept { return primary_stream_; }
   [[nodiscard]] bool UsesMultiSessionTwin() const noexcept {
     return options_.multi_session_twin;
   }
+  /// Speculative row reads start with the target anchor and grow one token
+  /// at a time; the live hash state changes only in Forward/ForwardBatch.
+  void BeginPleReadAhead(Session& session, std::int32_t anchor) const;
+  void AppendPleReadAhead(Session& session, std::int32_t token) const;
   Executor(const Executor&) = delete;
   Executor& operator=(const Executor&) = delete;
 
   [[nodiscard]] static std::unique_ptr<Executor> Create(
       const DeviceModel& model, NgramTable* ngram, Options options,
       std::string* error_msg = nullptr);
+
+  /// GUFO_HC_LOAD_Q8_VERIFY (debug): the draft vocabulary rows that Create
+  /// gathered once from the output head must equal those head rows, and the id
+  /// map must be a sorted list of valid token ids. `summary` receives the
+  /// result; false on a difference. No draft vocabulary: true.
+  [[nodiscard]] bool VerifyDraftVocabulary(std::string* summary) const;
 
   [[nodiscard]] std::unique_ptr<Session> CreateSession(
       core::SessionMode mode, std::uint32_t max_context,
@@ -289,6 +364,14 @@ public:
       core::SessionMode mode, std::uint32_t max_context,
       std::uint32_t rollback_depth) const noexcept;
   [[nodiscard]] std::size_t DeferredScratchBytes() const;
+  // Successful eager allocation payloads, shared by every session. Mapped
+  // host buffers consume UMA too; lazy/session buffers are charged elsewhere.
+  [[nodiscard]] std::size_t ScratchDeviceBytes() const noexcept {
+    return scratch_device_bytes_ + (head_two_ ? head_two_->device_bytes() : 0);
+  }
+  [[nodiscard]] std::size_t ScratchHostBytes() const noexcept {
+    return scratch_host_bytes_ + (head_two_ ? head_two_->host_bytes() : 0);
+  }
   /// Load-time accounting text (GUFO_MEM_ACCOUNTING): SessionBytes split by component.
   [[nodiscard]] std::string SessionBytesBreakdown(
       core::SessionMode mode, std::uint32_t max_context,
@@ -336,18 +419,34 @@ public:
   /// `verify_candidates` (kVerify with null logits): the pass also selects
   /// every row's candidate list for VerifyCandidates inside its own graph,
   /// saving the separate launch and synchronization afterwards.
-  [[nodiscard]] bool Forward(Session& session,
-                             std::span<const std::int32_t> tokens,
-                             std::uint32_t n_logits, float* logits,
-                             ForwardMode mode, std::string* error_msg,
-                             PrefillCheckpoint* checkpoint = nullptr,
-                             bool verify_candidates = false,
-                             std::span<const std::int32_t> next = {}) const;
+  [[nodiscard]] bool Forward(
+      Session& session, std::span<const std::int32_t> tokens,
+      std::uint32_t n_logits, float* logits, ForwardMode mode,
+      std::string* error_msg, PrefillCheckpoint* checkpoint = nullptr,
+      bool verify_candidates = false, std::span<const std::int32_t> next = {},
+      bool apply_prefill_policy = true,
+      HeadTwoReason head_reason = HeadTwoReason::kOther,
+      std::span<const std::uint32_t> head_extras = {}) const;
+
+  /// Rows of the whole prompt the following prefill passes belong to (0: each
+  /// pass counts its own rows). The IQ expert route is chosen from it, so every
+  /// pass of one prompt takes one route, whether it runs cold or after a
+  /// prefix-cache restore. Callers clear it after their prefill.
+  void SetPrefillRouteRows(std::uint32_t rows) const noexcept {
+    prefill_route_rows_ = rows;
+  }
+
+  bool EnsureFullFrontier(Session& session, float* logits,
+                          std::string* error_msg) const;
+  bool HeadTwoEnabled() const { return head_two_ && head_two_->enabled(); }
+  bool HeadTwoActive() const { return headtwo_active_; }
+  std::string_view RefusalIdentity() const { return refusal_identity_; }
 
   struct BatchItem {
     Session* session;
     std::span<const std::int32_t> tokens;
     bool speculative;
+    HeadTwoPlan head_plan;
   };
   /// Packs independent decode chains for shared projections. Every chain
   /// keeps its own recurrent/KV state and the decode arithmetic (<=8 rows).
@@ -360,6 +459,8 @@ public:
   [[nodiscard]] bool ReadVerificationRows(std::uint32_t row,
                                           std::span<float> logits,
                                           std::string* error_msg) const;
+  [[nodiscard]] bool ReadHeadInput(std::span<float> hidden,
+                                   std::string* error_msg) const;
 
   /// Keeps the first `keep` (1..n) tokens of the last speculative batch and
   /// discards the rest. If `logits` is supplied, copies the kept frontier
@@ -387,6 +488,8 @@ public:
     /// Prefill needs only persistent KV. A subsequent full forward with
     /// known trunk hidden rows is required before heads/recursive proposals.
     bool kv_only{false};
+    /// Explicit subset selection; false retains the normal draft policy.
+    bool draft_subset{false};
   };
   struct DraftOutputSelection {
     const DeviceTensor* tensor;
@@ -407,6 +510,7 @@ public:
     Session* session;
     std::span<const std::int32_t> tokens;
     std::int32_t hidden_row;
+    bool kv_only{false};
   };
   /// Runs independent short predictor chains with shared projections and
   /// private attention caches, positions and carried hidden states.
@@ -435,11 +539,24 @@ public:
                                      std::span<float> hidden,
                                      std::string* error_msg) const;
 
+  [[nodiscard]] bool MtpDraftChain(Session& session,
+                                   std::span<const std::int32_t> replay,
+                                   std::int32_t hidden_row,
+                                   std::span<std::int32_t> drafts,
+                                   DraftChainRun* run,
+                                   std::string* error) const;
+  struct GreedyRollback {
+    Session* session{nullptr};
+    GreedyKeepInput input;
+    GreedyKeepResult result;
+    float* logits{nullptr};
+  };
   /// Greedy verification keeps full logit rows on the GPU, including penalties.
   [[nodiscard]] bool GreedyMtpPredictions(
       std::span<ArgmaxCandidate> predictions,
       const sampling::SamplerState& sampler,
-      std::span<const std::int32_t> drafts, std::string* error_msg) const;
+      std::span<const std::int32_t> drafts, std::string* error_msg,
+      GreedyRollback* rollback = nullptr) const;
 
   /// The top kMtpCandidates logits of each of the last forward's first
   /// rows.size() rows, selected on the GPU like the draft candidates. Lets
@@ -461,6 +578,7 @@ public:
   struct SnapshotInfo {
     std::uint32_t position{0};
     std::uint32_t hidden_rows{0};
+    bool mutation_started{false};
   };
   [[nodiscard]] std::uint64_t SnapshotBytes(const Session& session,
                                             std::uint32_t hidden_rows) const;
@@ -496,7 +614,12 @@ public:
       const SnapshotState* deferred = nullptr) const;
 
   /// Rewinds the draft block's own context.
-  void MtpRewind(Session& session, std::uint32_t position) const noexcept {
+  void MtpRewind(Session& session, std::uint32_t position) const {
+    if (session.continuation_hooks_ && position < session.mtp_.position)
+      session.continuation_hooks_->BeforeWrite(
+          true, position, session.mtp_.position,
+          std::min(session.mtp_.blocks, position / config().compress_ratio),
+          session.mtp_.blocks);
     if (session.mtp_.position != position)
       session.mtp_.residual_valid = false;
     session.mtp_.position = position;
@@ -523,6 +646,22 @@ public:
 
 private:
   Executor() = default;
+  const float* RefusalWriter(const DeviceTensor& tensor,
+                             std::uint32_t rows) const;
+  bool RefusalStreamLayer(std::uint32_t layer, std::uint32_t rows) const;
+  void ProjectRefusalStream(float* residual, std::uint32_t rows) const;
+  void LogRefusalCounters(const char* tag) const;
+  float* refusal_r_ = nullptr;
+  std::string refusal_identity_;
+  mutable const float* moe_refusal_r_ = nullptr;
+  mutable const float* deferred_refusal_r_ = nullptr;
+  // decode, verify, prefill, batched; host submissions include captures only.
+  mutable unsigned refusal_phase_ = 0;
+  mutable std::array<std::atomic<std::uint64_t>, 4> refusal_sites_{};
+  mutable std::array<std::atomic<std::uint64_t>, 4> refusal_rows_{};
+  mutable std::atomic<std::uint64_t> refusal_captures_{0};
+  mutable std::mutex refusal_report_mutex_;
+  mutable std::uint64_t refusal_reported_ = 0;
 
   /// Visits every device region of a snapshot in payload order with
   /// (device pointer or null when sizing, payload offset, bytes, name).
@@ -564,6 +703,19 @@ private:
                         std::uint32_t cols) const;
   /// Whether a wide dense Q8_0 projection takes the F16 WMMA GEMM.
   bool DenseF16Route(const DeviceTensor& w, std::uint32_t n_tokens) const;
+  /// The native prefill GEMM (GUFO_PREFILL_NATIVE_GEMM): quantizes and runs
+  /// `w` over `n_tokens` rows. A pass under 96 rows runs on zero-padded
+  /// 96-row copies (allocated on the first one) so every row takes the
+  /// kernel family of a full chunk and the caller's x and out are only
+  /// touched for n_tokens rows.
+  bool NativeGemm(const DeviceTensor& w, const float* x, float* out,
+                  std::uint32_t n_tokens, std::string* error_msg) const;
+  /// The half route (GUFO_PREFILL_NATIVE_GEMM=2): narrows `x` to F16 in
+  /// s_.x_half_kq and runs the dense binary16 K-quant GEMM of `w`
+  /// (NativeHalfGemm tensors only). Touches no other staging buffer.
+  bool NativeHalfKQuantGemm(const DeviceTensor& w, const float* x, float* out,
+                            std::uint32_t n_tokens,
+                            std::string* error_msg) const;
   void RoutedHints(const DeviceTensor& w, std::uint32_t n_tokens) const;
   /// Reads the routing of the current batch back and derives the tile
   /// hints for its expert GEMMs (tiled batches only).
@@ -589,18 +741,23 @@ private:
   bool HcMixBatch(const DeviceMixer& m, const float* res, bool normed,
                   float* mixed, float* inject, std::uint32_t rows,
                   std::string* error, bool multi_session = false) const;
-  void CombineBatch(float* res, const float* gamma, std::uint32_t rows) const;
+  void CombineBatch(float* res, const float* gamma, std::uint32_t rows,
+                    const float* direction = nullptr) const;
   /// Residual update by the block output plus the grouped norm for the next
   /// mixer (`gamma`); wide batches write it as F16 and tiled Q8. With that
   /// mixer's F32 `inject_w`, the fused MoE combine also leaves its inject
   /// partials in s_.inject (inject_fused_).
   void Combine(float* res, const float* gamma, std::uint32_t n_tokens,
-               const float* inject_w = nullptr) const;
+               const float* inject_w = nullptr,
+               const float* direction = nullptr) const;
   /// Hashes the batch's n-gram rows and starts reading them from disk, so
   /// the read overlaps the layers before the PLE one.
   bool PleFetch(Session& s, std::span<const std::int32_t> tokens,
                 bool speculative, std::string* error_msg) const;
   bool WaitPle(std::string* error_msg) const;
+  void DiscardPleClaims() const noexcept;
+  bool StagePleEmbeddings(std::uint32_t tokens, float* dst,
+                          std::string* error_msg) const;
   /// Starts reading `next`'s rows into the prefetch buffer. Best effort: a
   /// prefetch that cannot start is skipped.
   void PrefetchPle(const Session& s, std::span<const std::int32_t> next) const;
@@ -621,6 +778,14 @@ private:
                        bool npu_prefill = false, int layer = -1
 #endif
   ) const;
+  /// Separate cache-only projections: K RMS/RoPE, optional K/V rotation,
+  /// then canonical StoreKv. Full Attention owns its own rotations.
+  /// Keep the caller's existing YaRN policy explicit at this boundary.
+  bool ProduceCacheOnlyKv(const DeviceLayer& l, float* key, float* value,
+                          void* key_cache, void* value_cache,
+                          std::uint32_t rows, const std::uint32_t* position,
+                          const qwen::vision::DeviceRope* rope, YarnRope yarn,
+                          std::string* error_msg) const;
   /// `pos`/`first_block` are device values; `start_pos` and `pool_grid`
   /// are their host-side counterparts for the eager-only decisions.
   bool Attention(const DeviceLayer& l, Session::AttentionState& s,
@@ -661,15 +826,15 @@ private:
                 bool multi_session = false) const;
   /// Selects the greedy token or compact candidates from full MTP logits.
   bool MtpHead(const DeviceMixer& head, const float* res, bool token,
-               bool candidates, std::string* error_msg,
-               bool full_head = false) const;
+               bool candidates, std::string* error_msg, bool full_head = false,
+               bool download_token = true) const;
   /// Enqueues one trunk batch (control and token upload through logits).
   template<bool Diagnostic>
   bool ForwardBody(Session& session, std::uint32_t n, std::uint32_t n_logits,
                    bool download_logits, bool speculative, bool sparse,
                    std::uint32_t start_pos, std::uint32_t pool_grid,
                    std::uint32_t first_layer, std::uint32_t end_layer,
-                   std::string* error_msg,
+                   bool trace_stages, std::string* error_msg,
                    PrefillCheckpoint* checkpoint = nullptr) const;
   /// Decode twin: the layer table a pass of n rows reads. The 4-bit copy serves
   /// exactly the vector-path passes (!MatrixRows(n): n <= 8 outside prefill),
@@ -712,7 +877,8 @@ private:
   mutable std::atomic<std::uint64_t> twin_batch_mixed_{0};
   bool MtpBody(Session& session, std::uint32_t n, std::uint32_t pos, bool token,
                bool candidates, std::string* error_msg, std::uint32_t pool_grid,
-               const float* hidden_source, MtpTrace* trace, bool kv_only) const;
+               const float* hidden_source, MtpTrace* trace, bool kv_only,
+               bool device_input = false, bool download_token = true) const;
   /// Runs `body` eagerly, or as the session's captured graph for `key`
   /// when `graph` is set. A prefix may leave its work queued so the host
   /// can wait for disk reads while the GPU computes it.
@@ -720,7 +886,8 @@ private:
   /// caller waits with WaitBumped instead of Wait.
   bool Run(Session& session, std::uint64_t key, bool graph,
            const std::function<bool()>& body, std::string* error_msg,
-           bool synchronize = true, bool bump = false) const;
+           bool synchronize = true, bool bump = false,
+           bool* graph_launched = nullptr) const;
 
   const DeviceModel* model_{nullptr};
   NgramTable* ngram_{nullptr};
@@ -756,6 +923,18 @@ private:
                                        std::string* error_msg) const;
   hipEvent_t counts_ready_{nullptr};
   bool expert_v2k_{false};  ///< startup-cached opt-in decode expert chain
+  /// Startup-cached opt-in: prefill GEMM over the native-quant trunk tensors
+  /// (GUFO_PREFILL_NATIVE_GEMM=1, see NativeWmmaGemm).
+  bool native_gemm_{false};
+  /// GUFO_PREFILL_NATIVE_GEMM=2 (native_gemm_ is also true): Q4_K / Q5_K / Q6_K
+  /// trunk tensors take the binary16 decode-once GEMM (NativeHalfGemm).
+  bool native_half_{false};
+  /// Zero-padded 96-row input and output of NativeGemm passes under 96 rows;
+  /// allocated on the first one, freed with the executor.
+  mutable float* native_pad_x_{nullptr};
+  mutable float* native_pad_y_{nullptr};
+  std::size_t native_pad_cols_{0};  ///< widest / tallest routed tensor
+  std::size_t native_pad_rows_{0};
   std::uint32_t down_tile_rows_{96};  ///< wide-prefill down projection tile rows
   hipblasHandle_t blas_{nullptr};
   std::unique_ptr<BlasLt> blaslt_;
@@ -773,6 +952,10 @@ private:
     void* gdn_q8_1;  ///< by the GDN epilogue (ssm_out's input)
     void* ctx_q8_1;  ///< by the attention output gate (attn_out's input)
     void* x_q8t;    ///< tiled Q8 activations of a wide batch (W8A8 route)
+    /// F16 activations of the half K-quant route (value 2 only): max_batch
+    /// rows of max_q8_cols halves, row stride = the tensor's k. Only
+    /// NativeHalfKQuantGemm reads or writes it, narrowing before every launch.
+    void* x_half_kq{nullptr};
     float* shadow_out{
         nullptr};  ///< DEBUG shadow check output (16384 x 8 floats)
     std::int32_t* zero_ids{
@@ -853,8 +1036,27 @@ private:
     std::uint32_t* mtp_ids;
     std::uint32_t* mtp_scratch_ids;
     float* mtp_scores;
+    GreedyKeepInput* accept_input;
+    GreedyKeepResult* accept_result;
   };
   mutable Scratch s_{};
+  GreedyKeepInput* accept_input_host_{nullptr};
+  GreedyKeepResult* accept_result_host_{nullptr};
+  DraftChainSlot* draft_chain_host_{nullptr};
+  MoeFusionAudit* fusion_audit_{nullptr};
+  MoeFusionAudit* fusion_audit_host_{nullptr};
+  float* fusion_reference_res_{nullptr};
+  float* fusion_reference_xn_{nullptr};
+  void* fusion_reference_q8_{nullptr};
+  mutable bool fusion_active_{false}, fusion_pending_{false};
+  mutable bool fusion_check_requested_{false}, fusion_checked_this_run_{false};
+  mutable bool fusion_audit_pending_{false};
+  mutable std::uint64_t fusion_sampled_fallback_{0};
+  bool CheckMoeFusionAudit(std::string* error) const;
+  void* accept_predictions_host_{nullptr};  ///< tail of accept_result_host_
+  bool QueueGreedyRollback(GreedyRollback& rollback, std::string* error) const;
+  void CommitRollback(Session& session, std::uint32_t keep) const;
+  std::size_t scratch_device_bytes_{0}, scratch_host_bytes_{0};
   [[nodiscard]] Scratch RowScratch(const Scratch& base,
                                    std::uint32_t offset) const;
   void UseScratch(const Scratch& scratch) const;
@@ -884,16 +1086,51 @@ private:
     return selected_logits_ != nullptr ? selected_logits_ : s_.logits;
   }
   std::uint32_t mask_words_{0};
+  std::uint32_t context_capacity_{0};
+  YarnRope yarn_{};
   /// Bounded score scratch, shared by sequential selector chunks.
   std::size_t select_score_floats_{0};
+  /// One layer's full-prefix view, shared sequentially on stream_. Owned by
+  /// allocations_; never session/checkpoint state or a cross-call cache.
+  /// Sized for configured context; larger supported sessions use packed KV.
+  std::uint32_t q8_prefill_capacity_{0};
+  void* q8_prefill_k_f16_{nullptr};
+  void* q8_prefill_v_f16_{nullptr};
   std::vector<void*> allocations_;
   /// Coherent pinned storage, read directly by the GPU through s_.ple_emb.
   /// Reused only after the preceding forward has drained its stream.
   float* host_emb_{nullptr};
+  std::uint8_t* host_ple_raw_{nullptr};
+  std::uint8_t* device_ple_raw_{nullptr};  ///< mapped raw reader staging
+  struct PleAheadClaim {
+    std::shared_ptr<PleReadAhead> rows;
+    std::size_t tokens, offset;
+  };
+  mutable std::vector<PleAheadClaim> ple_ahead_claims_;
+  mutable bool ple_raw_ready_{false};
   mutable std::vector<std::uint32_t> host_rows_;
   mutable bool ple_pending_{false};
   mutable std::optional<PrefillDiagPass> active_diag_;
+  RoutedExpertAudit* prefill_expert_counters_{nullptr};
+  mutable bool prefill_expert_pass_{false};
+  mutable std::uint64_t prefill_expert_offered_{0};
+  mutable std::uint64_t prefill_expert_active_{0};
+  mutable std::uint64_t prefill_expert_expected_{0};
+  // Selected by the router for the current MoE invocation, including tails.
+  mutable std::uint32_t prefill_expert_keep_{10};
   mutable bool diagnostic_prefill_{false};
+  mutable std::unique_ptr<PrefillTelemetryPass> telemetry_pass_;
+  std::int32_t* telemetry_ids_{nullptr};
+  float* telemetry_weights_{nullptr};
+  mutable std::uint32_t telemetry_layer_{0}, telemetry_row_start_{0};
+  mutable std::unique_ptr<PrefillStageBPass> stageb_pass_;
+  StageBTotal* stageb_totals_{nullptr};
+  StageBRow* stageb_rows_{nullptr};
+  mutable std::uint32_t stageb_layer_{0}, stageb_row_start_{0};
+  // Scoped to a traced ForwardBody layer, never shared draft/batch/prefill.
+  mutable int stage_layer_{-1};
+  void StageMark(std::uint32_t point) const;
+  void PrefillStageMark(std::uint32_t point) const;
   /// The rows a prefill chunk reads are a pure function of its tokens and
   /// the n-gram history before them, so prefetched rows are claimed only by
   /// a batch with exactly those tokens and that history, whichever session
@@ -903,6 +1140,8 @@ private:
     bool pending{false};  ///< read in flight
     bool ready{false};    ///< rows complete in `rows`
     bool claimed{false};  ///< WaitPle collects them for the current batch
+    // A prefetched gather can finish after its source session is released.
+    std::shared_ptr<NgramCounters> owner;
     NgramHistory before;
     NgramHistory after;
     std::vector<std::int32_t> tokens;
@@ -918,6 +1157,14 @@ private:
   std::int32_t* tokens_host_{nullptr};
   std::uint32_t* counts_host_{nullptr};
   std::int32_t* tiles_host_{nullptr};           ///< routed tile map staging
+  /// Routed experts of the layer whose router output is in s_.router: the MTP
+  /// sidecar block can carry more experts than the trunk (the pruned Coder has
+  /// 256, the sidecar 512). Set by Moe/MoeExperts/MoeBatch; 0 = the trunk
+  /// count.
+  mutable std::uint32_t layer_experts_{0};
+  [[nodiscard]] std::uint32_t LayerExperts() const noexcept {
+    return layer_experts_ != 0 ? layer_experts_ : config().num_experts;
+  }
   mutable std::uint32_t routed_max_rows_{0};    ///< 0 = no readback yet
   mutable std::uint32_t routed_n_tiles_{0};     ///< routed_tile_rows_ tiles
   mutable std::uint32_t routed_down_tiles_{0};  ///< wide batches' down tiles
@@ -937,6 +1184,12 @@ private:
   /// of the selected rows of the output head); draft_ids_ maps a subset row
   /// back to its token id. Empty = the full vocabulary.
   DeviceTensor draft_head_{};
+  std::unique_ptr<HeadTwoRuntime> head_two_;
+  mutable bool headtwo_active_{false};
+  mutable std::uint32_t headtwo_offset_{0};
+  mutable std::uint32_t headtwo_rows_{0};
+  bool TargetHead(const float* x, float* out, std::uint32_t rows,
+                  std::string* error_msg) const;
   std::int32_t* draft_ids_{nullptr};
   std::int32_t* mtp_token_host_{nullptr};
   MtpCandidateLogits* mtp_candidates_host_{nullptr};
@@ -968,8 +1221,12 @@ private:
   /// epilogue: that combine may then leave its residual update to the next
   /// one (res_deferred_), which reads s_.block_out and s_.hc_defer_w.
   mutable bool defer_residual_{false};
-  // Chosen once in Forward from the pass's rows, before its layer loop.
+  // Chosen once in Forward from the pass's rows, before its layer loop. A
+  // prefill pass takes it from the rows of the whole prompt it belongs to
+  // (prefill_route_rows_, set by the session around its prefill passes), so a
+  // short pass after a cache restore runs the route the cold passes ran.
   mutable bool iq_route_for_pass_{false};
+  mutable std::uint32_t prefill_route_rows_{0};
   mutable bool res_deferred_{false};
   /// Set by GatedDense when s_.shexp_half holds the SwiGLU rows its F16
   /// down projection reads.

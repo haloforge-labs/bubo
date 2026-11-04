@@ -142,9 +142,24 @@ void TestSchemaFixture() {
   Expect(!first_line.empty(), "allocation benchmark schema is non-empty");
 }
 
+// HIP's multiProcessorCount is the WGP count on RDNA (gfx10/11/12): two CUs each.
+void TestComputeUnits() {
+  using gufo::diagnostics::ComputeUnitsFromMultiprocessors;
+  Expect(ComputeUnitsFromMultiprocessors("gfx1151", 20) == 40,
+         "gfx1151 (Strix Halo): 20 WGPs are 40 CUs");
+  Expect(ComputeUnitsFromMultiprocessors("gfx1100:sramecc-:xnack-", 48) == 96,
+         "gfx11 with feature suffixes: two CUs per WGP");
+  Expect(ComputeUnitsFromMultiprocessors("gfx1030", 36) == 72, "gfx10: two CUs per WGP");
+  Expect(ComputeUnitsFromMultiprocessors("gfx1201", 32) == 64, "gfx12: two CUs per WGP");
+  Expect(ComputeUnitsFromMultiprocessors("gfx942", 304) == 304,
+         "CDNA reports compute units: unchanged");
+  Expect(ComputeUnitsFromMultiprocessors("", 20) == 20, "unknown architecture: unchanged");
+}
+
 }  // namespace
 
 int main() {
+  TestComputeUnits();
   TestSizeParser();
   TestStatistics();
   TestBoundedDiagnostic();

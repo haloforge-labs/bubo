@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,7 +25,17 @@ type Settings struct {
 	TightSetupFingerprint string `json:"tight_setup_fingerprint,omitempty"`
 	// Nil preserves default-on behavior for existing settings files. Only an
 	// explicit user choice is persisted.
-	CheckForUpdates *bool             `json:"check_for_updates,omitempty"`
+	CheckForUpdates *bool `json:"check_for_updates,omitempty"`
+	// LastSeenVersion is the product version whose "What's new" text the user
+	// has closed. Empty on an install made before this was recorded.
+	LastSeenVersion string `json:"last_seen_version,omitempty"`
+	// Font is the interface typeface: "sans" for the sans serif face, empty or
+	// "serif" for the default serif face.
+	Font string `json:"font,omitempty"`
+	// WindowWidth and WindowHeight are the size the user left the window at
+	// (logical pixels); zero means the default size.
+	WindowWidth     int               `json:"window_width,omitempty"`
+	WindowHeight    int               `json:"window_height,omitempty"`
 	Port            int               `json:"port,omitempty"`
 	Profile         string            `json:"profile,omitempty"`
 	Context         uint64            `json:"context,omitempty"`
@@ -51,11 +63,40 @@ type Settings struct {
 	LastError       *Failure `json:"last_error,omitempty"`
 	// Persistence metadata only, never a frontend preference or CLI fact.
 	lastErrorVersion string
+	lastErrorSetup   string
 }
 
 type persistedSettings struct {
 	Settings
 	LastErrorVersion string `json:"last_error_version,omitempty"`
+	LastErrorSetup   string `json:"last_error_setup,omitempty"`
+}
+
+// failureSetup names the setup a failure belongs to: the model the next start
+// would load.
+func (s Settings) failureSetup() string {
+	// The model, and what a memory verdict depends on: context, sessions, profile
+	// and the cache type. A refusal for a setup does not describe a changed one.
+	return strings.Join([]string{s.ManifestPath, s.ModelPath, strconv.FormatUint(s.Context, 10), strconv.FormatUint(uint64(s.Sessions), 10), s.Profile, s.SwitchOverrides["--kv-cache-type"]}, "|")
+}
+
+// savedFailureHolds is true while a saved failure still describes the saved
+// setup: the model is the one that failed, and a setting the failure names is
+// still set. A failure saved without its setup (an older build) is not known to
+// hold.
+func (s Settings) savedFailureHolds() bool {
+	if s.LastError == nil {
+		return true
+	}
+	if s.lastErrorSetup != s.failureSetup() {
+		return false
+	}
+	if name := s.LastError.Switch; name != "" {
+		if _, set := s.SwitchOverrides[name]; !set {
+			return false
+		}
+	}
+	return true
 }
 
 func DefaultSettings() Settings {
@@ -86,6 +127,7 @@ func LoadSettings(path string) (Settings, string) {
 	}
 	s := saved.Settings
 	s.lastErrorVersion = saved.LastErrorVersion
+	s.lastErrorSetup = saved.LastErrorSetup
 	if s.LastError != nil {
 		s.LastError = redactedFailure(s.LastError)
 	}
@@ -113,9 +155,9 @@ func SaveSettings(path string, s Settings) error {
 	}
 	s.LastError = redactedFailure(s.LastError)
 	if s.LastError == nil {
-		s.lastErrorVersion = ""
+		s.lastErrorVersion, s.lastErrorSetup = "", ""
 	}
-	b, err := json.MarshalIndent(persistedSettings{Settings: s, LastErrorVersion: s.lastErrorVersion}, "", "  ")
+	b, err := json.MarshalIndent(persistedSettings{Settings: s, LastErrorVersion: s.lastErrorVersion, LastErrorSetup: s.lastErrorSetup}, "", "  ")
 	if err != nil {
 		return err
 	}

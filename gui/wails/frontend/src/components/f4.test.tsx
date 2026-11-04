@@ -16,7 +16,7 @@ test('preparing recording is consistent and only reports the runtime done', asyn
     .toHaveTextContent('Engine files · Done')
   await expect
     .element(page.getByLabelText('Setup steps'))
-    .toHaveTextContent('(default model) · In progress')
+    .toHaveTextContent('Model · In progress')
 })
 
 test('status controls stay in the first viewport and dirty setup permits save-and-restart while Stop remains available', async () => {
@@ -88,7 +88,7 @@ test('latest completed request owns the large rates and failed rows cannot repla
   await expect
     .element(reported.getByRole('figure', { name: 'Prefill tok/s' }))
     .toHaveTextContent(request.prefill_tps!.toFixed(1))
-  expect(reported.element().querySelectorAll('.text-3xl')).toHaveLength(
+  expect(reported.element().querySelectorAll('.text-2xl')).toHaveLength(
     request.ttft_ms == null ? 2 : 3,
   )
   expect(reported.element().textContent).not.toContain('9999')
@@ -118,9 +118,7 @@ test('the Models page decides on typed fields, never on loader prose', async () 
   )
   await expect
     .element(page.getByRole('region', { name: 'Discover models' }))
-    .toHaveTextContent(
-      "Bubo's server holds the memory now. Stop it to switch models.",
-    )
+    .toHaveTextContent('Selection applies after restart.')
 })
 
 test('port keeps the CLI text control, saved scalar and canonical preference write route', async () => {

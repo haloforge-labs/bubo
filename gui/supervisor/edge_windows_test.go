@@ -34,7 +34,7 @@ func TestKeepDismissAndPersistError(t *testing.T) {
 	c.SettingsPath = filepath.Join(os.Getenv("BUBO_FAKE_DIR"), "settings.json")
 	c.ProductVersion = "fixture-current"
 	settings := DefaultSettings()
-	settings.lastErrorVersion = c.ProductVersion
+	settings.lastErrorVersion, settings.lastErrorSetup = c.ProductVersion, settings.failureSetup()
 	settings.LastError = &Failure{Code: "device_lost", Source: "cli", Time: time.Now().UTC(), Remedy: "synthetic-secret"}
 	if err := SaveSettings(c.SettingsPath, settings); err != nil {
 		t.Fatal(err)

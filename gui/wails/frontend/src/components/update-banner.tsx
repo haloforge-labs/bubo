@@ -3,18 +3,26 @@ import type { View } from '@/lib/bindings'
 import { updatePresentation } from '@/lib/format'
 import { ErrorNote } from '@/components/error-note'
 
+const labels: Record<string, string> = {
+  available: 'Update available',
+  progress: 'Downloading update',
+  ready: 'Update ready',
+  failed: 'Update failed',
+  rollback_pending: "Update didn't finish",
+}
+
+// The words of the banner, or nothing: a failed start of the updater or a failed
+// check is not a failed update, and no update says nothing.
+function bannerLabel(update: View['update']) {
+  return update.check_failed ? undefined : labels[updatePresentation(update)]
+}
+
+export function hasUpdateBanner(update: View['update'] | undefined) {
+  return !!update && !!bannerLabel(update)
+}
+
 export function UpdateBanner({ update }: { update: View['update'] }) {
-  const labels: Record<string, string> = {
-    available: 'Update available',
-    progress: 'Downloading update',
-    ready: 'Update ready',
-    failed: 'Update failed',
-    rollback_pending: "Update didn't finish",
-  }
-  // A failed start of the updater or a failed check is not a failed update.
-  const label = update.check_failed
-    ? undefined
-    : labels[updatePresentation(update)]
+  const label = bannerLabel(update)
   const failed = ['failed', 'rollback_pending'].includes(
     updatePresentation(update),
   )

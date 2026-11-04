@@ -2,12 +2,6 @@ import type { View } from '@/lib/bindings'
 import { coreView } from '@/components/core-page-test-support'
 import { replaySlots } from './progress-scenario'
 
-
-
-
-
-
-
 export function liveRequestView(
   phase: 'reading' | 'writing' = 'writing',
 ): View {

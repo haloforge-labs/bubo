@@ -1,10 +1,22 @@
 #include "src/core/diagnostics/compatibility.h"
 
+#include <cctype>
 #include <sstream>
+#include <string>
+
+#include "src/cli/brand.hpp"
 
 namespace gufo::diagnostics {
 
 namespace {
+
+std::string ProductDisplayName() {
+  std::string name(cli::kProductName);
+  if (!name.empty())
+    name.front() = static_cast<char>(
+        std::toupper(static_cast<unsigned char>(name.front())));
+  return name;
+}
 
 std::string EscapeJsonString(std::string_view str) {
   std::ostringstream oss;
@@ -47,22 +59,18 @@ CompatibilityReport EvaluateCompatibility(const SystemInventory& inventory,
   if (section == "all" || section == "platform" || section == "inventory") {
     CompatibilityItem platform_item;
     platform_item.component = "platform";
-#ifdef _WIN32
-    constexpr std::string_view kHostOs = "-windows";
-#else
-    constexpr std::string_view kHostOs = "-linux";
-#endif
-    platform_item.detected_value =
-        inventory.cpu.architecture + std::string(kHostOs);
-    platform_item.required_value = "x86_64" + std::string(kHostOs);
+    const std::string& target = inventory.toolchain.target_platform;
+    platform_item.detected_value = target;
+    platform_item.required_value = "x86_64-linux or x86_64-windows";
     platform_item.evidence = "CPU architecture / host OS";
-    if (inventory.cpu.architecture == "x86_64") {
+    if (inventory.cpu.architecture == "x86_64" &&
+        (target == "x86_64-linux" || target == "x86_64-windows")) {
       platform_item.verdict = CompatibilityVerdict::kSupported;
       platform_item.remediation_hint = "None";
     } else {
       platform_item.verdict = CompatibilityVerdict::kUnsupported;
       platform_item.remediation_hint =
-          "Bubo only supports Linux or Windows x86-64";
+          ProductDisplayName() + " only supports Linux or Windows x86-64";
       overall = CompatibilityVerdict::kUnsupported;
     }
     report.items.push_back(std::move(platform_item));
@@ -81,7 +89,8 @@ CompatibilityReport EvaluateCompatibility(const SystemInventory& inventory,
     } else {
       gpu_item.verdict = CompatibilityVerdict::kUnsupported;
       gpu_item.remediation_hint =
-          "Bubo requires AMD Strix Halo gfx1151 GPU (Radeon 8060S / "
+          ProductDisplayName() +
+          " requires AMD Strix Halo gfx1151 GPU (Radeon 8060S / "
           "8050S). Detected: " +
           inventory.gpu.architecture;
       overall = CompatibilityVerdict::kUnsupported;
@@ -93,15 +102,16 @@ CompatibilityReport EvaluateCompatibility(const SystemInventory& inventory,
   if (section == "all" || section == "inventory") {
     CompatibilityItem driver_item;
     driver_item.component = "kernel_driver";
-    driver_item.detected_value = "amdgpu: " + inventory.toolchain.amdgpu_status;
-    driver_item.required_value = "amdgpu: loaded";
-    driver_item.evidence = "/sys/class/drm";
+    const bool linux_host = inventory.toolchain.os_name == "Linux";
+    const std::string driver =
+        linux_host ? std::string("amdgpu") : inventory.gpu.driver_name;
+    driver_item.detected_value =
+        driver + ": " + inventory.toolchain.amdgpu_status;
+    driver_item.required_value = driver + ": loaded";
+    driver_item.evidence =
+        linux_host ? "/sys/class/drm" : "HIP device enumeration";
     if (inventory.toolchain.amdgpu_status.starts_with("not applicable")) {
-      // The Linux kernel driver does not exist on Windows. The GPU item above
-      // already checks the architecture through the HIP runtime.
       driver_item.verdict = CompatibilityVerdict::kNotApplicable;
-      driver_item.required_value = "not applicable on this operating system";
-      driver_item.evidence = "host operating system";
       driver_item.remediation_hint = "None";
     } else if (inventory.toolchain.amdgpu_status == "loaded") {
       driver_item.verdict = CompatibilityVerdict::kSupported;
@@ -109,7 +119,9 @@ CompatibilityReport EvaluateCompatibility(const SystemInventory& inventory,
     } else {
       driver_item.verdict = CompatibilityVerdict::kUnsupported;
       driver_item.remediation_hint =
-          "Ensure Linux kernel >= 6.10 with the amdgpu driver loaded";
+          linux_host
+              ? "Ensure Linux kernel >= 6.10 with the amdgpu driver loaded"
+              : "Install an AMD graphics driver with HIP support";
       overall = CompatibilityVerdict::kUnsupported;
     }
     report.items.push_back(std::move(driver_item));

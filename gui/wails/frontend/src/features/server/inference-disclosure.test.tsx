@@ -23,7 +23,7 @@ test('Inference starts collapsed with current values and remembers the accessibl
   expect(summary).toContain('Temperature 1.0')
   expect(summary).toContain('Top-p 0.95')
   expect(summary).toContain('Top-k 20')
-  expect(summary).toContain('Reasoning medium')
+  expect(summary).toContain('Reasoning effort Medium')
   await toggle.click()
   await expect.element(toggle).toHaveAttribute('aria-expanded', 'true')
   await expect

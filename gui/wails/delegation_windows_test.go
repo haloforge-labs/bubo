@@ -92,6 +92,7 @@ func TestNativeActionBindingsReturnStructuredResults(t *testing.T) {
 		{"BrowseDownloadFolder", func() *supervisor.CLIError { return a.BrowseDownloadFolder().Error }},
 		{"BrowseModelFolder", func() *supervisor.CLIError { return a.BrowseModelFolder().Error }},
 		{"BrowseModelFile", func() *supervisor.CLIError { return a.BrowseModelFile().Error }},
+		{"BrowseSideFile", func() *supervisor.CLIError { return a.BrowseSideFile("draft").Error }},
 		{"DismissModelJob", func() *supervisor.CLIError { return a.DismissModelJob().Error }},
 		{"SetVisible", func() *supervisor.CLIError { return a.SetVisible(true).Error }},
 	} {

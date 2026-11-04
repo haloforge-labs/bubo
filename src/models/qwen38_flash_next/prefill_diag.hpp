@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -12,6 +13,8 @@
 #include <sstream>
 #include <string>
 #include <vector>
+
+#include "src/models/qwen38_flash_next/prefill_experts.hpp"
 
 namespace gufo::models::qwen38_flash_next {
 
@@ -32,6 +35,21 @@ inline double MoeGbps(double bytes, double us) {
 inline double MoeFlops(std::uint32_t tokens, std::uint32_t used,
                        std::uint32_t hidden, std::uint32_t ff) {
   return static_cast<double>(tokens) * used * 2.0 * 3.0 * hidden * ff;
+}
+
+inline std::uint64_t CountRoutedExpertSlots(
+    std::span<const std::uint32_t> counts) {
+  std::uint64_t rows = 0;
+  for (auto count : counts)
+    rows += count;
+  return rows;
+}
+
+// Logical live rows, including mass-dependent prefixes and final-layer tails;
+// this does not count padding or hardware instructions.
+inline double MoeFlopsForRows(std::uint64_t rows, std::uint32_t hidden,
+                              std::uint32_t ff) {
+  return static_cast<double>(rows) * 2.0 * 3.0 * hidden * ff;
 }
 
 inline double MoeTflops(double flops, double us) {
@@ -63,7 +81,35 @@ struct TableReadCounters {
   }
 };
 
+inline std::uint64_t PrefillExpertExpectedSlots(
+    const PrefillExpertsSettings& settings, std::uint32_t layer,
+    std::uint32_t rows) {
+  return static_cast<std::uint64_t>(rows) * settings.Keep(layer);
+}
+
+inline bool PrefillExpertActiveSlotsValid(
+    const PrefillExpertsSettings& settings, std::uint64_t token_layers,
+    std::uint64_t expected, std::uint64_t observed) {
+  return settings.mode == PrefillExpertsMode::kMass
+             ? observed >= token_layers && observed <= expected
+             : observed == expected;
+}
+
+inline bool PrefillExpertCountsValid(const PrefillExpertsSettings& settings,
+                                     const RoutedExpertCounters& counters,
+                                     std::uint32_t used,
+                                     std::uint64_t expected) {
+  return used && counters.offered_slots && counters.offered_slots % used == 0 &&
+         PrefillExpertActiveSlotsValid(settings, counters.offered_slots / used,
+                                       expected, counters.active_slots) &&
+         (settings.audit != PrefillExpertsAudit::kFull ||
+          (counters.executed_rows == counters.active_slots &&
+           counters.invalid_rows == 0));
+}
+
 struct PrefillDiagTotals : TableReadCounters {
+  RoutedExpertCounters routed_experts;
+  PrefillExpertsAudit expert_audit{PrefillExpertsAudit::kLean};
   std::uint64_t passes{0}, tokens{0}, expert_bytes{0};
   double fetch_elapsed_us{0}, fetch_hidden_us{0}, fetch_exposed_us{0},
       fetch_wait_us{0};
@@ -75,8 +121,14 @@ struct PrefillDiagTotals : TableReadCounters {
   // Route attribution (review F1): the timed region is the WMMA route for layers that qualify and the GatedExperts/Experts fallback otherwise;
   // kill-rule numbers are only meaningful when moe_fallback_layers == 0. tiles = sum of routed row tiles of the WMMA layers (re-read factor of the weights).
   double moe_wmma_us{0};
+  // Phase split of moe_us (bench only): compact+narrow, gate/up GEMM, down GEMM, rest. moe_gap_us: GPU time from an event before RouteHints to the
+  // first routed event (outside moe_us). moe_host_wall_us: host wall time of RouteHints, which includes the wait for the upstream GPU work.
+  double moe_phase_us[4]{0, 0, 0, 0}, moe_gap_us{0}, moe_host_wall_us{0};
   std::uint64_t moe_wmma_layers{0}, moe_fallback_layers{0}, moe_gated_layers{0}, moe_wide_down_layers{0}, moe_tiles{0};
   std::uint64_t moe_lanerow_layers{0}, moe_lanerow_fallback_layers{0};
+  // GUFO_ROUTED_WMMA_IQ=2: IQ gate/up layers on the register-fed pair kernel,
+  // and those it does not cover (they keep route 1).
+  std::uint64_t moe_iq_pair2_layers{0}, moe_iq_pair2_fallback_layers{0};
   void AddLayer(std::uint32_t distinct, std::uint64_t bytes_per_expert) {
     experts_distinct_min = layer_samples == 0
                                ? distinct
@@ -92,6 +144,12 @@ struct PrefillDiagTotals : TableReadCounters {
                          : 0.0;
   }
   void Add(const PrefillDiagTotals& other) {
+    if (other.routed_experts.offered_slots)
+      expert_audit = other.expert_audit;
+    routed_experts.active_slots += other.routed_experts.active_slots;
+    routed_experts.offered_slots += other.routed_experts.offered_slots;
+    routed_experts.executed_rows += other.routed_experts.executed_rows;
+    routed_experts.invalid_rows += other.routed_experts.invalid_rows;
     TableReadCounters::Add(other);
     if (other.moe_bench) {
       moe_bench = true;
@@ -99,6 +157,10 @@ struct PrefillDiagTotals : TableReadCounters {
       moe_flops += other.moe_flops;
       moe_expert_bytes += other.moe_expert_bytes;
       moe_wmma_us += other.moe_wmma_us;
+      for (int i = 0; i < 4; ++i)
+        moe_phase_us[i] += other.moe_phase_us[i];
+      moe_gap_us += other.moe_gap_us;
+      moe_host_wall_us += other.moe_host_wall_us;
       moe_wmma_layers += other.moe_wmma_layers;
       moe_fallback_layers += other.moe_fallback_layers;
       moe_gated_layers += other.moe_gated_layers;
@@ -107,6 +169,8 @@ struct PrefillDiagTotals : TableReadCounters {
     }
     moe_lanerow_layers += other.moe_lanerow_layers;
     moe_lanerow_fallback_layers += other.moe_lanerow_fallback_layers;
+    moe_iq_pair2_layers += other.moe_iq_pair2_layers;
+    moe_iq_pair2_fallback_layers += other.moe_iq_pair2_fallback_layers;
     passes += other.passes;
     tokens += other.tokens;
     expert_bytes += other.expert_bytes;
@@ -127,6 +191,43 @@ struct PrefillDiagTotals : TableReadCounters {
   }
 };
 
+// Dev-log fields only. Deliberately absent from AddPrefillDiagUsage/HTTP JSON.
+inline std::string PrefillExpertFields(const PrefillDiagTotals& totals) {
+  const auto& c = totals.routed_experts;
+  if (!c.offered_slots)
+    return {};
+  std::ostringstream out;
+  const bool full = totals.expert_audit == PrefillExpertsAudit::kFull;
+  out << " audit=" << (full ? "full" : "lean")
+      << " expert_active_slots=" << c.active_slots
+      << " expert_total_slots=" << c.offered_slots;
+  if (full)
+    out << " expert_rows_executed=" << c.executed_rows
+        << " expert_invalid_rows=" << c.invalid_rows;
+  else
+    out << " expert_rows_counted=" << c.active_slots;
+  return out.str();
+}
+
+inline std::string PrefillExpertLogLine(const PrefillExpertsSettings& settings,
+                                        PrefillDiagTotals totals,
+                                        std::uint32_t start,
+                                        std::uint32_t tokens, double prefill_us,
+                                        bool counter_ok) {
+  if (!settings.active)
+    return {};
+  auto policy = settings.IdentityLine();
+  policy.pop_back();  // Reuse the cache identity's canonical encoding verbatim.
+  totals.expert_audit = settings.audit;
+  auto line = policy + " start=" + std::to_string(start) +
+              " tokens=" + std::to_string(tokens) +
+              " prefill_us=" + std::to_string(prefill_us) +
+              PrefillExpertFields(totals);
+  if (settings.audit == PrefillExpertsAudit::kFull)
+    line += std::string(" expert_counter_ok=") + (counter_ok ? "1" : "0");
+  return line;
+}
+
 // The false path neither constructs counters nor formats/emits output.
 inline void AddPrefillDiag(std::optional<PrefillDiagTotals>& destination,
                            const std::optional<PrefillDiagTotals>& source) {
@@ -140,7 +241,21 @@ inline void AddPrefillDiag(std::optional<PrefillDiagTotals>& destination,
 struct PrefillDiagLayer {
   std::uint32_t layer, routed_tokens, distinct;
   std::uint64_t bytes_per_expert;
+  // Filled only under GUFO_MOE_BENCH: routed-expert span in us, the gate/up/down
+  // GGML type ids and the route (0 wmma, 1 lanerow, 2 mmq, 3 iq-pair2), the phase split of
+  // moe_us (compact+narrow, gate/up, down, rest), the GPU gap before the span
+  // and the host wall time of RouteHints.
+  double moe_us{0};
+  std::uint32_t gate{0}, up{0}, down{0}, route{0};
+  double phase_us[4]{0, 0, 0, 0}, gap_us{0}, host_wall_us{0};
 };
+
+inline const char* PrefillDiagRouteName(std::uint32_t route) {
+  return route == 0   ? "wmma"
+         : route == 1 ? "lanerow"
+         : route == 3 ? "iq-pair2"
+                      : "mmq";
+}
 
 struct PrefillDiagPass {
   std::uint64_t pass{0};
@@ -185,7 +300,10 @@ inline std::string PrefillDiagFields(const PrefillDiagTotals& t) {
   if (t.moe_lanerow_layers || t.moe_lanerow_fallback_layers)
     out << " moe_lanerow_layers=" << t.moe_lanerow_layers
         << " moe_lanerow_fallback_layers=" << t.moe_lanerow_fallback_layers;
-  return out.str();
+  if (t.moe_iq_pair2_layers || t.moe_iq_pair2_fallback_layers)
+    out << " moe_iq_pair2_layers=" << t.moe_iq_pair2_layers
+        << " moe_iq_pair2_fallback_layers=" << t.moe_iq_pair2_fallback_layers;
+  return out.str() + PrefillExpertFields(t);
 }
 
 inline std::string PrefillDiagLine(const PrefillDiagPass& p) {
@@ -193,13 +311,23 @@ inline std::string PrefillDiagLine(const PrefillDiagPass& p) {
   out << "pass=" << p.pass << " tokens=" << p.totals.tokens
       << " start=" << p.start << ' ' << PrefillDiagFields(p.totals)
       << " layers=";
-  // Each tuple is layer:routed_tokens:distinct:bytes_per_expert.
+  // Each tuple is layer:routed_tokens:distinct:bytes_per_expert, and under
+  // moe_bench it continues :us:gate:up:down:route:compact:gateup:down:rest:
+  // gap_us:host_wall_us (whole us; gap_us is outside us, host_wall_us includes
+  // the wait for the upstream GPU work).
   for (std::size_t i = 0; i < p.layers.size(); ++i) {
     const auto& l = p.layers[i];
     if (i)
       out << ',';
     out << l.layer << ':' << l.routed_tokens << ':' << l.distinct << ':'
         << l.bytes_per_expert;
+    if (p.totals.moe_bench)
+      out << ':' << std::llround(l.moe_us) << ':' << l.gate << ':' << l.up
+          << ':' << l.down << ':' << PrefillDiagRouteName(l.route) << ':'
+          << std::llround(l.phase_us[0]) << ':' << std::llround(l.phase_us[1])
+          << ':' << std::llround(l.phase_us[2]) << ':'
+          << std::llround(l.phase_us[3]) << ':' << std::llround(l.gap_us)
+          << ':' << std::llround(l.host_wall_us);
   }
   return out.str();
 }

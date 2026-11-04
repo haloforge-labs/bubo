@@ -141,7 +141,9 @@ constexpr std::uint32_t kWmmaKStride = kHeadDim + 8;
 // and shrinking kKeys in step therefore trades nothing in the tiling but halves
 // the K/V bytes each block pulls per query row -- the dominant cost.
 template<std::uint32_t kQueryRows, std::uint32_t kKeys, bool kHeadMajor = false>
-__launch_bounds__(256, 2) __global__
+// LLVM 24 otherwise uses 241 VGPRs for packed V, crossing the six-wave
+// allocation boundary. Keep six waves resident without changing the tiling.
+__launch_bounds__(256, (__clang_major__ >= 24 && kHeadMajor) ? 6 : 2) __global__
     void WmmaCausalAttention(const float* __restrict__ q,
                              const float* __restrict__ gate,
                              const __half* __restrict__ k_cache_f16,
@@ -149,7 +151,8 @@ __launch_bounds__(256, 2) __global__
                              float* __restrict__ out_context,
                              std::uint32_t start_pos, std::size_t batch_size,
                              float* __restrict__ lse_out,
-                             std::uint32_t key_begin) {
+                             std::uint32_t key_begin,
+                             std::uint32_t first_query) {
   constexpr std::uint32_t kRowBlocks = (kQueryRows / 16) * kWmmaHeads;
   constexpr std::uint32_t kKeyBlocks = kKeys / 16;
   constexpr std::uint32_t kSTiles = kRowBlocks * kKeyBlocks;
@@ -173,7 +176,7 @@ __launch_bounds__(256, 2) __global__
   const std::uint32_t sub = lane & 15u;
   const std::uint32_t half_id = lane >> 4u;
 
-  const std::uint32_t query_start = blockIdx.x * kQueryRows;
+  const std::uint32_t query_start = first_query + blockIdx.x * kQueryRows;
   const std::uint32_t head_pair = blockIdx.y;
   const std::uint32_t kv_head = head_pair / (kGqa / kWmmaHeads);
   const std::uint32_t pair_in_group = head_pair % (kGqa / kWmmaHeads);
@@ -518,6 +521,12 @@ __launch_bounds__(256, 2) __global__
                 next[i] = tail[i];
           }
           o_acc[rb][t] = next;
+#if __clang_major__ >= 24
+          // Bound overlapping LDS fragments in the unpacked tail. LLVM 24
+          // otherwise spills them across the unrolled row/dimension tiles.
+          if constexpr (!kHeadMajor)
+            __builtin_amdgcn_sched_barrier(0);
+#endif
         }
       }
     }
@@ -639,7 +648,8 @@ bool LaunchQwenWmmaAttention(
     std::size_t batch_size, std::uint32_t max_context, std::uint32_t num_heads,
     std::uint32_t num_kv_heads, std::uint32_t head_dim, hipStream_t stream,
     float* lse_out, std::uint32_t key_begin, bool skip_kv_write,
-    std::span<float> packed_k_workspace, std::span<float> packed_v_workspace) {
+    std::span<float> packed_k_workspace, std::span<float> packed_v_workspace,
+    std::size_t first_query) {
   const detail::AttentionSupportParams support_params{
       .batch_size = batch_size,
       .start_pos = start_pos,
@@ -650,7 +660,8 @@ bool LaunchQwenWmmaAttention(
       .has_k_cache_f16 = k_cache_f16 != nullptr,
       .has_v_cache_f16 = v_cache_f16 != nullptr,
   };
-  if (!detail::IsTiledAttentionSupported(support_params)) {
+  if (!detail::IsTiledAttentionSupported(support_params) ||
+      first_query >= batch_size || first_query % kWmmaQueryRows != 0) {
     return false;
   }
 
@@ -679,9 +690,10 @@ bool LaunchQwenWmmaAttention(
         start_pos, batch_size, max_context);
   }
 
-  const dim3 grid(static_cast<unsigned int>((batch_size + kWmmaQueryRows - 1) /
-                                            kWmmaQueryRows),
-                  kKvHeads * (kGqa / kWmmaHeads));
+  const dim3 grid(
+      static_cast<unsigned int>(
+          (batch_size - first_query + kWmmaQueryRows - 1) / kWmmaQueryRows),
+      kKvHeads * (kGqa / kWmmaHeads));
   const auto length = start_pos + static_cast<std::uint32_t>(batch_size);
   const std::size_t key_head_bytes =
       static_cast<std::size_t>(length) * kHeadDim * sizeof(__half);
@@ -713,14 +725,14 @@ bool LaunchQwenWmmaAttention(
               q + query_offset, gate ? gate + query_offset : nullptr, packed_k,
               packed_v, out_context + query_offset, start_pos, batch_size,
               lse_out ? lse_out + first * kGqa * batch_size : nullptr,
-              key_begin);
+              key_begin, static_cast<std::uint32_t>(first_query));
     }
     return true;
   }
   WmmaCausalAttention<kWmmaQueryRows, kWmmaKeys>
-      <<<grid, block_size, 0, stream>>>(q, gate, layer_k, layer_v, out_context,
-                                        start_pos, batch_size, lse_out,
-                                        key_begin);
+      <<<grid, block_size, 0, stream>>>(
+          q, gate, layer_k, layer_v, out_context, start_pos, batch_size,
+          lse_out, key_begin, static_cast<std::uint32_t>(first_query));
   return true;
 }
 

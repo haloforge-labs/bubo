@@ -67,6 +67,25 @@ test('a stalled server makes Restart the primary action and says nothing about m
   )
 })
 
+// The main action keeps one look, whichever state the server is in.
+test('Stop server has the primary look of Start server; Restart stays secondary', async () => {
+  mountCorePage('/', coreView('ready-idle'))
+  const stop = page.getByRole('button', { name: 'Stop server', exact: true })
+  await expect.element(stop).toBeVisible()
+  expect(stop.element().className).toContain('bg-brand')
+  expect(
+    page.getByRole('button', { name: 'Restart server', exact: true }).element()
+      .className,
+  ).not.toContain('bg-brand')
+})
+
+test('Start server has the same primary look', async () => {
+  mountCorePage('/', coreView('stopped-saved-estimate'))
+  const start = page.getByRole('button', { name: 'Start server', exact: true })
+  await expect.element(start).toBeVisible()
+  expect(start.element().className).toContain('bg-brand')
+})
+
 test('a running server shows no memory-check sentence and no absence placeholders', async () => {
   const view = coreView('ready-idle')
   view.requests = []
@@ -120,6 +139,24 @@ test('saved but unchecked setup is one plain line with no red box and no Restart
     .not.toBeInTheDocument()
 })
 
+test('the not-checked line sits where the Fits line goes, above Inference, also when Inference is open', async () => {
+  const view = coreView('saved-fit-unchecked')
+  view.saved.inference_expanded = true
+  mountCorePage('/', view)
+  const line = page.getByText('Not checked: you can still start the server.', {
+    exact: true,
+  })
+  await expect.element(line).toBeVisible()
+  const inference = page.getByRole('region', { name: 'Inference' }).element()
+  expect(
+    line.element().compareDocumentPosition(inference) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy()
+  await expect
+    .element(page.getByRole('region', { name: 'Memory fit' }))
+    .not.toBeInTheDocument()
+})
+
 test('no fit at any size says it once and offers no Check again', async () => {
   mountCorePage('/', coreView('no-fit'))
   await expect
@@ -130,6 +167,52 @@ test('no fit at any size says it once and offers no Check again', async () => {
   await expect
     .element(page.getByRole('button', { name: 'Check again', exact: true }))
     .not.toBeInTheDocument()
+})
+
+// The theme's danger accent (red in light and dark) and a warning icon mark a setup
+// that does not fit. Fits, Tight and Not checked are not errors.
+const memoryHeading = async (scenario: string, name: string) => {
+  mountCorePage('/', coreView(scenario))
+  const heading = page.getByRole('heading', { name, exact: true })
+  await expect.element(heading).toBeVisible()
+  const section = page.getByRole('region', { name: 'Memory fit' }).element()
+  return {
+    red: heading.element().classList.contains('text-destructive'),
+    icon: heading.element().querySelector('svg') !== null,
+    border: section.classList.contains('border-destructive'),
+  }
+}
+
+test.each([
+  ['no-fit', "Doesn't fit at any context"],
+  ['memory-smaller-context', "Doesn't fit"],
+])("%s: '%s' is red with a warning icon", async (scenario, name) => {
+  expect(await memoryHeading(scenario, name)).toEqual({
+    red: true,
+    icon: true,
+    border: true,
+  })
+})
+
+test.each([
+  ['stopped-saved-estimate', 'Fits'],
+  ['memory-gpu-headroom', 'Tight'],
+])("%s: '%s' is not red", async (scenario, name) => {
+  expect(await memoryHeading(scenario, name)).toEqual({
+    red: false,
+    icon: false,
+    border: false,
+  })
+})
+
+test('the not-checked line is neutral, with no red and no icon', async () => {
+  mountCorePage('/', coreView('saved-fit-unchecked'))
+  const line = page.getByText('Not checked: you can still start the server.', {
+    exact: true,
+  })
+  await expect.element(line).toBeVisible()
+  expect(line.element().className).not.toContain('destructive')
+  expect(line.element().querySelector('svg')).toBeNull()
 })
 
 test('a smaller context that fits is offered once, as the button', async () => {

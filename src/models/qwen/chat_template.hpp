@@ -59,11 +59,16 @@ struct ChatMessage {
   std::string name;     ///< Optional function/tool name
   std::string thought;  ///< Optional thinking/reasoning prefix
   std::string tool_call_id;
+  /// `kLow` fits the resized image within 512 pixels per side unless the
+  /// model's minimum size is larger; the other OpenAI `image_url.detail`
+  /// values behave as `kAuto`.
+  enum class ImageDetail : std::uint8_t { kAuto, kLow };
   struct ImagePart {
     /// Insert an image before this byte of content. Equal offsets preserve
     /// input order; image-only messages use offset zero.
     std::size_t offset{0};
     std::shared_ptr<const std::vector<std::uint8_t>> bytes;
+    ImageDetail detail{ImageDetail::kAuto};
   };
   std::vector<ImagePart> images;
 
@@ -89,6 +94,65 @@ struct ChatTool {
   /// Complete validated HTTP tool object, preserving field order/extensions.
   std::string definition_json;
 };
+
+/// The literals that frame a native Qwen tool call. QwenChatTemplate renders
+/// historical calls with these, and ScanQwenToolCall reads the same bytes
+/// back, so the wire format cannot change in one direction only (#290).
+struct QwenToolSyntax {
+  static constexpr std::string_view kCallOpen = "<tool_call>";
+  static constexpr std::string_view kCallClose = "</tool_call>";
+  static constexpr std::string_view kFunctionOpen = "<function=";
+  static constexpr std::string_view kFunctionClose = "</function>";
+  static constexpr std::string_view kParameterOpen = "<parameter=";
+  static constexpr std::string_view kParameterClose = "</parameter>";
+  /// The exact canonical opener the renderer writes. Requests constrained to
+  /// the native dialect admit this spelling as an implicit reasoning boundary.
+  static constexpr std::string_view kNativeCallOpen = "<tool_call>\n<function=";
+};
+
+/// One parameter exactly as the model wrote it, before the API surface decides
+/// whether it is a string or JSON.
+struct QwenToolCallParameter {
+  std::string name;    ///< Spelled between "<parameter=" and ">".
+  std::string value;   ///< Canonical framing newlines removed; all else kept.
+  bool framed{false};  ///< The opening newline frame was present.
+  /// Bytes of the scanned text consumed through this parameter. Recovery
+  /// resumes here when the API surface rejects this parameter.
+  std::size_t progress{0};
+};
+
+/// One call exactly as written, before schema interpretation.
+struct QwenToolCallSyntax {
+  std::string name;
+  std::vector<QwenToolCallParameter> parameters;
+  /// The parameter whose value ran to the end of the scan without a closing
+  /// delimiter. `value` holds back a possible partial closing delimiter.
+  std::optional<QwenToolCallParameter> unfinished;
+  /// False for the "<tool_call>{json}</tool_call>" compatibility form.
+  bool native{true};
+  /// Payload of a JSON-form call whose closing envelope was found.
+  std::string json_payload;
+  /// Opened as the canonical QwenToolSyntax::kNativeCallOpen form.
+  bool canonical_header{false};
+  /// Both closing tags and every parameter delimiter were present.
+  bool complete{false};
+};
+
+/// One scan step over a response. The caller keeps quote state and schema
+/// interpretation; this result carries only the dialect bytes.
+struct QwenToolCallScan {
+  bool matched{false};  ///< `text` begins with QwenToolSyntax::kCallOpen.
+  /// Bytes of `text` consumed before scanning resumes when the call is not
+  /// accepted into the API output.
+  std::size_t progress{0};
+  /// Bytes of `text` belonging to a complete envelope.
+  std::size_t end{0};
+  std::optional<QwenToolCallSyntax> call;  ///< Absent when nothing parsed.
+};
+
+/// Scans the Qwen call beginning at `text[0]`, if any. Schema interpretation,
+/// argument coercion and OpenAI shaping stay with the API surface.
+[[nodiscard]] QwenToolCallScan ScanQwenToolCall(std::string_view text);
 
 enum class QwenReasoningEffort : std::uint8_t {
   kLow,

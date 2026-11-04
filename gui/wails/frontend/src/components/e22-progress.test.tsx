@@ -5,24 +5,6 @@ import { coreView, mountCorePage } from '@/components/core-page-test-support'
 
 afterEach(() => vi.restoreAllMocks())
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 function preparing() {
   const view = coreView('preparing')
   const overall = view.progress!.overall!

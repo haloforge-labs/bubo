@@ -11,7 +11,7 @@
 namespace gufo::hip {
 void QwenGpuExecutor::CheckPrefillCancellation() const {
   if (cancellation_check_ && cancellation_check_())
-    throw std::runtime_error("Qwen prefill cancelled");
+    throw QwenPrefillCancelled();
 }
 
 void QwenGpuExecutor::PrefillLayerCheckpoint(std::uint32_t layer) {
@@ -49,13 +49,15 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptBatch(
   const qwen27::ScopedPromptStep step("target_prefill", prompt_tokens.size());
   replaying_ssm_state_ = false;
   arena_.DisableSsmReplayCapture();
-  arena_.MaterializeSavedState();  // prefill updates the state in place
   if (capture_prompt_hidden_) {
-    h_prompt_hidden_.clear();
+    h_prompt_hidden_.Clear();
     const std::size_t captured_layers =
         std::max<std::size_t>(arena_.GetTargetLayerCapture().size(), 1U);
-    h_prompt_hidden_.reserve(prompt_tokens.size() * captured_layers *
-                             weights_.config.hidden_size);
+    const std::size_t row = captured_layers * weights_.config.hidden_size;
+    // Pinned up to one prompt batch (the serve path's largest call); a longer
+    // prompt from a non-serve caller captures into pageable memory instead.
+    h_prompt_hidden_.Reserve(prompt_tokens.size() * row,
+                             std::size_t{GetMaxPromptBatch()} * row);
   }
 
   const std::size_t end_pos =

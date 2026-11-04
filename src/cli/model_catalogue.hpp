@@ -95,9 +95,14 @@ struct CatalogueEntry {
   std::optional<std::uint64_t> measured_main_resident_bytes;
   // Set for the three Flash Next entries: prepare uses its fixed package path.
   std::optional<prepare::ModelSet> flash_next_set;
+  // Routed experts per layer when the entry is a mixture-of-experts model whose
+  // count the catalogue states (0: not stated). `models estimate` reports it
+  // for an entry whose file is not on this computer.
+  std::uint32_t routed_experts = 0;
 };
 
 struct CatalogueLoad {
+  std::string version;  // the compiled catalogue's catalogue_version
   std::vector<CatalogueEntry> entries;
   std::string error;  // empty when the catalogue is valid
 };

@@ -1,3 +1,5 @@
+// Copyright (c) 2023-2026 The ggml authors
+// SPDX-License-Identifier: MIT
 #ifndef GUFO_CORE_QUANT_GGML_DEQUANT_HPP_
 #define GUFO_CORE_QUANT_GGML_DEQUANT_HPP_
 
@@ -130,6 +132,12 @@ struct block_iq2_xs {
   std::uint8_t scales[8];
 };
 
+struct block_iq1_m {
+  std::uint8_t qs[32];
+  std::uint8_t qh[16];
+  std::uint8_t scales[8];
+};
+
 // IQ2_S: super-block of 256; qs holds 32 grid-index low bytes followed by 32 sign bytes, qh the two high index bits.
 struct block_iq2_s {
   std::uint16_t d;
@@ -167,6 +175,7 @@ static_assert(sizeof(block_q5_1) == 24, "block_q5_1 must be 24 bytes");
 static_assert(sizeof(block_iq3_s) == 110, "block_iq3_s must be 110 bytes");
 static_assert(sizeof(block_iq2_xxs) == 66, "block_iq2_xxs must be 66 bytes");
 static_assert(sizeof(block_iq2_xs) == 74, "block_iq2_xs must be 74 bytes");
+static_assert(sizeof(block_iq1_m) == 56, "block_iq1_m must be 56 bytes");
 static_assert(sizeof(block_iq2_s) == 82, "block_iq2_s must be 82 bytes");
 static_assert(sizeof(block_iq3_xxs) == 98, "block_iq3_xxs must be 98 bytes");
 static_assert(sizeof(block_q2_0) == 18, "block_q2_0 must be 18 bytes");
@@ -194,6 +203,7 @@ inline constexpr std::int8_t kValuesIq4Nl[16] = {
     case core::GgmlType::kIQ2_XXS:
     case core::GgmlType::kIQ2_XS:
     case core::GgmlType::kIQ2_S:
+    case core::GgmlType::kIQ1_M:
     case core::GgmlType::kIQ3_XXS:
     case core::GgmlType::kIQ4_XS:
     case core::GgmlType::kIQ3_S:
@@ -265,6 +275,8 @@ void DequantizeIQ3_S(const void* src, float* dst, std::size_t k);
 // ggml-org/llama.cpp bec4772f). The dot products dequantize the row and are an oracle, not a fast path.
 void DequantizeIQ2_XXS(const void* src, float* dst, std::size_t k);
 void DequantizeIQ2_XS(const void* src, float* dst, std::size_t k);
+void DequantizeIQ1_M(const void* src, float* dst, std::size_t k);
+float DotProductIQ1_M(const void* row_data, std::span<const float> vec, std::size_t k);
 void DequantizeIQ2_S(const void* src, float* dst, std::size_t k);
 void DequantizeIQ3_XXS(const void* src, float* dst, std::size_t k);
 void DequantizeQ2_0(const void* src, float* dst, std::size_t k);

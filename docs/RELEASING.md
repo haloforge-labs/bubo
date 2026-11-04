@@ -71,9 +71,11 @@ of the release version.
 the Conventional Commit history after the latest release and opens or updates
 one release pull request. That pull request updates `version.txt`,
 `CHANGELOG.md` and the release manifest. It receives the same CI as any other
-change. The workflow waits for the pull request title and repository checks,
-and leaves the pull request open without publishing a release if either check
-fails.
+change, plus the complete Devlab functional suite on Strix Halo (other pull
+requests run its smaller PR tier). The workflow waits up to 160 minutes for the
+pull request title, the repository checks and `devlab/functional`. If any of
+them fails, errors or is still pending, it leaves the pull request open without
+publishing a release and comments on it to notify the maintainers.
 
 After the checks pass, the workflow squash-merges the release pull request and
 immediately creates the immutable tag and GitHub Release. A manually dispatched
@@ -100,3 +102,25 @@ After Release Please creates a GitHub Release, the same workflow sends its exact
 from that tag and publishes OCI images tagged `X.Y.Z`, `X.Y` and `latest`.
 Rolling Toolboxes images remain separate: they follow Gufo `main` and use `edge`
 and `sha-<revision>` tags.
+
+In parallel with the OCI builds, Toolboxes calls Gufo's reusable Windows
+workflow from `main`, with the same exact release tag as its source checkout.
+It uses the existing Windows toolchain and host contract suite, sets the
+release version and source revision explicitly, and checks the packaged
+`gufo.exe --version` and platform diagnosis with only the bundled runtime on
+`PATH`. This does not run the manual Windows Devlab GPU/model checks.
+
+The called workflow uploads its artifact to the Toolboxes workflow run.
+Toolboxes then attaches `gufo-vX.Y.Z-windows-x86_64.zip` and its `.sha256`
+checksum to the existing Gufo GitHub Release. The ZIP includes `gufo.exe`,
+the HIP and other runtime DLLs, kernel directories and notices. Extract the
+entire archive before running the executable; use `gufo.exe serve` for the
+HTTP server.
+
+Merge the reusable Windows workflow in Gufo before enabling its Toolboxes
+caller. Toolboxes needs `RELEASE_APP_CLIENT_ID` and
+`RELEASE_APP_PRIVATE_KEY` available to its release workflow. The app must be
+installed on Gufo with Contents write permission; Toolboxes' own
+`GITHUB_TOKEN` cannot upload assets to Gufo. The upload job creates a fresh app
+token after the build and does not overwrite existing release assets.
+Toolboxes' manual release workflow accepts a tag for recovery runs.

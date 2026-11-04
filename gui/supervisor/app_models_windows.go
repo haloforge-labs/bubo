@@ -41,6 +41,12 @@ type BrowseResult struct {
 	Added   bool      `json:"added"`
 	Message string    `json:"message"`
 	Error   *CLIError `json:"error"`
+	// Checked is true when the CLI judged a side file (BrowseSideFile only);
+	// Fits, Reason and Note are its verdict. Unchecked means the CLI could not say.
+	Checked bool   `json:"checked"`
+	Fits    bool   `json:"fits"`
+	Reason  string `json:"reason"`
+	Note    string `json:"note"`
 }
 
 var errModelsUnavailable = appError("internal_error", "Model service is not attached.")
@@ -197,7 +203,10 @@ func (a *AppService) EstimateModel(subject string, contextTokens uint64, session
 	if a.models == nil {
 		return ModelEstimate{}, errModelsUnavailable
 	}
-	return a.models.Estimate(subject, contextTokens, sessions)
+	a.mu.RLock()
+	kv := a.settings.SwitchOverrides["--kv-cache-type"]
+	a.mu.RUnlock()
+	return a.models.EstimateWithCache(subject, contextTokens, sessions, kv)
 }
 
 // AddModelFolder saves a folder to scan for models and refreshes the list. The
@@ -368,6 +377,57 @@ func (a *AppService) browseModelFile() (BrowseResult, error) {
 		return BrowseResult{}, appError("model_folder_not_allowed", "The file is in a folder that cannot be added. "+err.Error())
 	}
 	return BrowseResult{File: chosen, Folder: folder, Added: added, Message: addedMessage(folder, added)}, nil
+}
+
+// BrowseSideFile opens the file dialog for one optional side file of a plain
+// model file: kind "draft" (the MTP draft file) or "image" (the vision file).
+// It only returns the chosen path; unlike BrowseModelFile it adds no folder to
+// the model list, because a side file is not a model.
+func (a *AppService) BrowseSideFile(kind string) BrowseResult {
+	result, err := a.browseSideFile(kind)
+	if err != nil {
+		return BrowseResult{Error: ActionResultFromError(err).Error}
+	}
+	return result
+}
+
+func (a *AppService) browseSideFile(kind string) (BrowseResult, error) {
+	title := map[string]string{"draft": "Choose a draft file", "image": "Choose an image file"}[kind]
+	if title == "" {
+		return BrowseResult{}, appError("invalid_arguments", "Unknown side file kind: "+kind)
+	}
+	if a.dialogs == nil {
+		return BrowseResult{}, appError("internal_error", "The native file dialog is not attached.")
+	}
+	ctx, err := a.dialogContext()
+	if err != nil {
+		return BrowseResult{}, err
+	}
+	chosen, err := a.dialogs.OpenFile(ctx, title)
+	if err != nil {
+		return BrowseResult{}, appError("model_folder_unavailable", "The file dialog failed: "+err.Error())
+	}
+	if chosen == "" {
+		return BrowseResult{Cancelled: true, Message: "No file was chosen."}, nil
+	}
+	if !strings.EqualFold(filepath.Ext(chosen), ".gguf") {
+		return BrowseResult{}, appError("model_file_invalid", "Choose a file that ends in .gguf.")
+	}
+	result := BrowseResult{File: chosen}
+	// The CLI says whether the file fits the saved model; the GUI only shows it.
+	a.mu.RLock()
+	model := a.settings.ModelPath
+	a.mu.RUnlock()
+	if model != "" && a.models != nil {
+		role := map[string]string{"draft": "mtp", "image": "mmproj"}[kind]
+		events, err := a.models.capture(ctx, []string{"models", "check-side-file", "--model", model, "--role", role, "--file", chosen, "--json"}, 1, 30*time.Second)
+		if err == nil && len(events) == 1 {
+			if check, ok := events[0].Value.(*SideFileCheck); ok {
+				result.Checked, result.Fits, result.Reason, result.Note = true, check.Fits, check.Reason, check.Note
+			}
+		}
+	}
+	return result, nil
 }
 
 func addedMessage(folder string, added bool) string {

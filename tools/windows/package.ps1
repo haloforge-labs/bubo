@@ -4,6 +4,7 @@
 #                                  added by assemble-app.ps1) or bin\bubo.exe serve
 #     bin\bubo.exe + DLLs          lazy engine and vcpkg libraries; VC++ v14 x64 is a prerequisite
 #                                  AMD files are acquired by bubo prepare runtime
+#     bin\prefill-fold-L3.txt      tuned expert counts for --prefill-mode fast
 #     tools\windows\vc-runtime.ps1 the VC++ check that start.cmd runs
 #     tools\npu\ NPU prefill kernel files and their sources
 #     README.txt, LICENSE, THIRD-PARTY.txt
@@ -12,7 +13,8 @@
 param(
   [string]$Out = "",
   [string]$BuildName = "release",
-  [string]$Vcpkg = "C:\vcpkg"
+  [string]$Vcpkg = "C:\vcpkg",
+  [string]$RefusalDirection = ""
 )
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path "$PSScriptRoot\..\..").Path
@@ -39,6 +41,23 @@ $bin = Join-Path $stage "bin"
 New-Item -ItemType Directory -Force $bin, (Join-Path $stage "tools\windows") | Out-Null
 
 Copy-Item (Join-Path $build $brand.exe) $bin
+# --prefill-mode fast reads this file from the executable directory.
+if (-not (Test-Path -LiteralPath (Join-Path $build 'prefill-fold-L3.txt') -PathType Leaf)) {
+  throw 'Missing prefill-fold-L3.txt in the build folder; rebuild before packaging'
+}
+Copy-Item (Join-Path $build 'prefill-fold-L3.txt') $bin
+# --refusal-direction on reads the packaged direction file from refusal\ beside the executable.
+$extraManifestFiles = @()
+if ($RefusalDirection) {
+  if (-not (Test-Path -LiteralPath $RefusalDirection -PathType Leaf)) { throw "Missing refusal direction file: $RefusalDirection" }
+  $constant = Get-Content -LiteralPath (Join-Path $root 'src\models\qwen38_flash_next\refusal_direction.hpp') -Raw
+  if ($constant -notmatch 'kPackagedRefusalDirection\s*=\s*"(refusal/[^"]+\.gguf)"') { throw 'Cannot read the packaged refusal direction name from the engine source' }
+  $relative = $matches[1].Replace('/', '\')
+  if ((Split-Path -Leaf $RefusalDirection) -ne (Split-Path -Leaf $relative)) { throw "Refusal direction file name differs from the engine's: $(Split-Path -Leaf $relative)" }
+  New-Item -ItemType Directory -Force (Join-Path $bin (Split-Path -Parent $relative)) | Out-Null
+  Copy-Item -LiteralPath $RefusalDirection -Destination (Join-Path $bin $relative)
+  $extraManifestFiles = @("bin/$($matches[1])")
+}
 if (-not (Test-Path -LiteralPath (Join-Path $build 'bubo-engine.dll'))) {
   throw 'Bubo package requires the matching lazy inference DLL; rebuild bubo'
 }
@@ -48,7 +67,9 @@ if (-not (Test-Path -LiteralPath (Join-Path $build 'bubo-engine.dll'))) {
 # Route B: the archive never redistributes AMD runtime DLLs or kernel data.
 $bootstrapDlls = @('bubo-engine.dll', 'libcurl.dll', 'libcrypto-3-x64.dll',
   'z.dll', 'icudt78.dll', 'icuin78.dll', 'icuuc78.dll', 'libpng16.dll',
-  'jpeg62.dll', 'libwebp.dll', 'libsharpyuv.dll')
+  'jpeg62.dll', 'libwebp.dll', 'libsharpyuv.dll',
+  'sndfile.dll', 'soxr.dll', 'FLAC.dll', 'ogg.dll', 'vorbis.dll', 'vorbisenc.dll',
+  'opus.dll', 'mpg123.dll', 'libmp3lame.dll')
 foreach ($dependency in $bootstrapDlls) {
   if (-not (Test-Path -LiteralPath (Join-Path $build $dependency) -PathType Leaf)) {
     throw "Missing package dependency: $dependency; rebuild before packaging"
@@ -69,11 +90,32 @@ New-Item -ItemType Directory -Force (Join-Path $stage "licenses") | Out-Null
 New-Item -ItemType Directory -Force (Join-Path $stage "tools\npu") | Out-Null
 Copy-Item (Join-Path $root "tools\npu\*") (Join-Path $stage "tools\npu")
 Copy-Item (Join-Path $root "licenses\mlir-aie-Apache-2.0-LLVM-exception.txt"), (Join-Path $root "licenses\strata-MIT.txt"), (Join-Path $root "licenses\gsqhalo-MIT.txt") (Join-Path $stage "licenses")
+foreach ($notice in 'libsndfile', 'libsoxr', 'libflac', 'libogg', 'libvorbis', 'opus', 'mpg123', 'mp3lame',
+    'openssl', 'curl', 'icu', 'libpng', 'libjpeg-turbo', 'libjpeg-turbo-IJG', 'llvm-openmp', 'llama.cpp') {
+  Copy-Item (Join-Path $root "licenses\$notice.txt") (Join-Path $stage "licenses")
+}
+if ($RefusalDirection) {
+  # The direction file is derived from Qwen3.8 Flash Next; its licence is the model licence.
+  Copy-Item (Join-Path $root 'tools\release\model-notices\original\LICENSE') (Join-Path $stage 'licenses\qwen-community-license-1.0.txt')
+}
+Copy-Item (Join-Path $root "licenses\UPSTREAM-ADDITIONS.md") (Join-Path $stage "licenses")
 Copy-Item (Join-Path $Vcpkg "installed\x64-windows\share\libwebp\copyright") (Join-Path $stage "licenses\libwebp.txt")
 Copy-Item (Join-Path $Vcpkg "installed\x64-windows\share\zlib\copyright") (Join-Path $stage "licenses\zlib.txt")
 $commit = (& git -C $root rev-parse --short HEAD 2>$null)
 Add-Content (Join-Path $stage "README.txt") "`r`nBuilt from https://github.com/haloforge-labs/bubo commit $commit ($Version)."
 
+# Every notice file that THIRD-PARTY.txt or the notice index points to must be in the archive.
+$missingNotices = [Collections.Generic.List[string]]::new()
+$thirdParty = Get-Content -LiteralPath (Join-Path $stage 'THIRD-PARTY.txt') -Raw
+foreach ($m in [regex]::Matches($thirdParty, 'licenses/([A-Za-z0-9._-]+\.(?:txt|md))')) {
+  if (-not (Test-Path -LiteralPath (Join-Path $stage ('licenses\' + $m.Groups[1].Value)) -PathType Leaf)) { $missingNotices.Add("THIRD-PARTY.txt -> licenses/$($m.Groups[1].Value)") }
+}
+foreach ($index in Get-ChildItem -LiteralPath (Join-Path $stage 'licenses') -Filter '*.md') {
+  foreach ($m in [regex]::Matches((Get-Content -LiteralPath $index.FullName -Raw), '\]\((?!https?:|#)([^)\s]+)\)')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $index.DirectoryName $m.Groups[1].Value) -PathType Leaf)) { $missingNotices.Add("$($index.Name) -> $($m.Groups[1].Value)") }
+  }
+}
+if ($missingNotices.Count) { throw "Notice files are missing from the archive: $($missingNotices -join '; ')" }
 & "$root\tools\release\check-package.ps1" -PackageFolder $stage
 if ($LASTEXITCODE -ne 0) { throw 'Release import deny-list failed' }
 . "$root\tools\release\pe-imports.ps1"
@@ -91,7 +133,7 @@ foreach ($entry in @($brand.exe, 'bubo-engine.dll')) {
   })
   if ($missing.Count) { throw "Package import closure is incomplete: $($missing.Name -join ', ')" }
 }
-& "$root\tools\release\build-manifest.ps1" -BuildFolder $build -PackageFolder $stage
+& "$root\tools\release\build-manifest.ps1" -BuildFolder $build -PackageFolder $stage -ExtraFiles $extraManifestFiles
 
 $zip = Join-Path $Out "$name.zip"
 if (Test-Path $zip) { Remove-Item -Force $zip }

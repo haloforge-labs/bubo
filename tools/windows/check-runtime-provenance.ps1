@@ -22,7 +22,7 @@ if ($LASTEXITCODE) { throw 'Cannot diff the runtime and release commits' }
 $allowed = @(
   '^gui/', '^\.gitattributes$', '^docs/CLI-CONTRACT\.md$', '^docs/release/THIRD-PARTY-GUI\.md$',
   '^tools/release/(build-manifest|check-package)\.ps1$', '^tools/release/gui-licenses/',
-  '^tools/windows/(assemble-app|proof-app-package|check-runtime-provenance)\.ps1$',
+  '^tools/windows/(assemble-app|test-assemble-app|proof-app-package|check-runtime-provenance)\.ps1$',
   '^tools/windows/ASSEMBLE-APP\.md$', '^tools/windows/prebuilt/THIRD-PARTY\.txt$'
 )
 $engine = @($changed | Where-Object { $path = $_; -not @($allowed | Where-Object { $path -match $_ }).Count })

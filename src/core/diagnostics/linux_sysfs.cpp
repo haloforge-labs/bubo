@@ -1,19 +1,12 @@
 #include "src/core/diagnostics/linux_sysfs.h"
 
-#include <sys/utsname.h>
-#ifdef _WIN32
-#include <cpuid.h>
-#include <unistd.h>
-#include <windows.h>
-
-#include <cstring>
-#endif
-
 #include <charconv>
 #include <fstream>
 #include <set>
 #include <sstream>
 #include <string_view>
+
+#include "src/core/platform/os_info.hpp"
 
 namespace gufo::diagnostics {
 
@@ -42,7 +35,8 @@ LinuxSysfs::LinuxSysfs(const std::filesystem::path& sys_root,
                        const std::filesystem::path& proc_root)
     : sys_root_(std::filesystem::absolute(sys_root)),
       proc_root_(std::filesystem::absolute(proc_root)),
-      native_host_(sys_root == "/sys" && proc_root == "/proc") {}
+      native_host_(sys_root_ == std::filesystem::absolute("/sys") &&
+                   proc_root_ == std::filesystem::absolute("/proc")) {}
 
 std::optional<std::string> LinuxSysfs::ReadFile(
     const std::filesystem::path& path) const {
@@ -61,72 +55,34 @@ std::optional<std::string> LinuxSysfs::ReadFile(
 
 std::optional<HostUnameInfo> LinuxSysfs::QueryUname() const {
   const auto version_opt = ReadFile(proc_root_ / "version");
-  struct utsname uts{};
-  if (uname(&uts) == 0) {
-    HostUnameInfo info;
-    info.sysname = uts.sysname;
-    info.nodename = uts.nodename;
-    info.release = uts.release;
-    info.version = version_opt ? *version_opt : uts.version;
-    info.machine = uts.machine;
-    return info;
+  const auto host = platform::QueryHostIdentity();
+  if (!host) {
+    return std::nullopt;
   }
-  return std::nullopt;
+  HostUnameInfo info;
+  info.sysname = host->sysname;
+  info.nodename = host->nodename;
+  info.release = host->release;
+  info.version = version_opt ? *version_opt : host->version;
+  info.machine = host->machine;
+  return info;
 }
-
-#ifdef _WIN32
-namespace {
-// Windows has no /proc: CPUID supplies the names, the OS the counts.
-HostCpuInfo WindowsCpuInfo() {
-  HostCpuInfo cpu;
-  unsigned regs[4] = {};
-  if (__get_cpuid(0, &regs[0], &regs[1], &regs[2], &regs[3])) {
-    char vendor[13] = {};
-    std::memcpy(vendor, &regs[1], 4);
-    std::memcpy(vendor + 4, &regs[3], 4);
-    std::memcpy(vendor + 8, &regs[2], 4);
-    cpu.vendor_id = vendor;
-  }
-  char brand[49] = {};
-  for (unsigned leaf = 0; leaf < 3; ++leaf) {
-    if (!__get_cpuid(0x80000002U + leaf, &regs[0], &regs[1], &regs[2],
-                     &regs[3]))
-      break;
-    std::memcpy(brand + leaf * 16, regs, 16);
-  }
-  cpu.model_name = Trim(brand);
-  cpu.logical_cores = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
-  DWORD size = 0;
-  GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &size);
-  std::vector<unsigned char> topology(size);
-  if (size && GetLogicalProcessorInformationEx(
-                  RelationProcessorCore,
-                  reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(
-                      topology.data()),
-                  &size)) {
-    for (std::size_t offset = 0; offset < size;) {
-      const auto* row =
-          reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(
-              topology.data() + offset);
-      if (!row->Size || row->Size > size - offset)
-        break;
-      if (row->Relationship == RelationProcessorCore)
-        ++cpu.physical_cores;
-      offset += row->Size;
-    }
-  }
-  return cpu;
-}
-}  // namespace
-#endif
 
 std::optional<HostCpuInfo> LinuxSysfs::QueryCpuInfo() const {
-#ifdef _WIN32
-  if (native_host_)
-    return WindowsCpuInfo();
-#endif
   const auto content_opt = ReadFile(proc_root_ / "cpuinfo");
   if (!content_opt) {
+    if (native_host_ && std::string_view(platform::HostOsName()) != "Linux") {
+      if (const auto native = platform::QueryHostCpu()) {
+        HostCpuInfo cpu_info;
+        cpu_info.model_name = native->model_name;
+        cpu_info.vendor_id = native->vendor;
+        cpu_info.logical_cores = native->logical_cores;
+        cpu_info.physical_cores = native->physical_cores;
+        if (const auto host = platform::QueryHostIdentity())
+          cpu_info.architecture = host->machine;
+        return cpu_info;
+      }
+    }
     return std::nullopt;
   }
 
@@ -172,18 +128,17 @@ std::optional<HostCpuInfo> LinuxSysfs::QueryCpuInfo() const {
 }
 
 std::optional<HostMemInfo> LinuxSysfs::QueryMemInfo() const {
-#ifdef _WIN32
-  if (native_host_) {
-    MEMORYSTATUSEX memory{};
-    memory.dwLength = sizeof(memory);
-    if (!GlobalMemoryStatusEx(&memory))
-      return std::nullopt;
-    return HostMemInfo{memory.ullTotalPhys, memory.ullAvailPhys,
-                       memory.ullAvailPhys, true};
-  }
-#endif
   const auto content_opt = ReadFile(proc_root_ / "meminfo");
   if (!content_opt) {
+    if (native_host_ && std::string_view(platform::HostOsName()) != "Linux") {
+      if (const auto native = platform::QueryHostMemory()) {
+        HostMemInfo mem_info;
+        mem_info.total_bytes = native->total_bytes;
+        mem_info.available_bytes = native->available_bytes;
+        mem_info.free_bytes = native->available_bytes;
+        return mem_info;
+      }
+    }
     return std::nullopt;
   }
 

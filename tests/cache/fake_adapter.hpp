@@ -1,6 +1,8 @@
 #ifndef GUFO_CACHE_TESTING_FAKE_ADAPTER_HPP_
 #define GUFO_CACHE_TESTING_FAKE_ADAPTER_HPP_
 
+#include <array>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -42,6 +44,8 @@ private:
 
 class FakeAdapter final : public Adapter {
 public:
+  // Wider chunks need less capture metadata for the same row bytes.
+  explicit FakeAdapter(Rows rows_per_chunk = 4);
   [[nodiscard]] Capabilities GetCapabilities() const override;
   [[nodiscard]] std::span<const ComponentDescriptor> Components()
       const override;
@@ -52,18 +56,31 @@ public:
   [[nodiscard]] std::vector<Rows> PlanPrefill(const Slot&, Rows first,
                                               Rows end) const override;
   void SetPrefillPassRows(Rows rows);
+  void SetExecutionComplete(Slot&, bool);
+  [[nodiscard]] std::vector<ComponentPosition> PrefillCheckpointPositions(
+      const Slot&, Rows boundary) const override;
   void BeginRestore(Slot&, std::span<const ComponentPosition>) override;
   [[nodiscard]] Completion CapturePrivate(const Slot&, ComponentId,
                                           std::span<std::byte>,
                                           Stream&) override;
   [[nodiscard]] Completion CopyRowsOut(const Slot&, ComponentId, Rows, Rows,
                                        std::span<std::byte>, Stream&) override;
+  [[nodiscard]] std::span<const std::byte> BorrowRowsView(const Slot&,
+                                                          ComponentId, Rows,
+                                                          Rows) const override;
   [[nodiscard]] Completion CopyRowsIn(Slot&, ComponentId, Rows, Rows,
                                       std::span<const std::byte>,
                                       Stream&) override;
   [[nodiscard]] Completion LoadPrivate(Slot&, ComponentId,
                                        std::span<const std::byte>,
                                        Stream&) override;
+  [[nodiscard]] Completion CapturePrivatePiece(const Slot&, ComponentId,
+                                               std::size_t,
+                                               std::span<std::byte>,
+                                               Stream&) override;
+  [[nodiscard]] Completion LoadPrivatePiece(Slot&, ComponentId, std::size_t,
+                                            std::span<const std::byte>,
+                                            Stream&) override;
   [[nodiscard]] bool Validate(Slot&,
                               std::span<const ComponentPosition>) override;
   [[nodiscard]] bool Invalidate(Slot&) noexcept override;
@@ -78,14 +95,19 @@ public:
   void GuardRows(Slot&, ComponentId, Rows first, Rows end);
   void FailNextAllocation() noexcept;
   void FailNextTransfer() noexcept;
+  [[nodiscard]] std::size_t Invalidations() const noexcept {
+    return invalidations_.load(std::memory_order_relaxed);
+  }
 
 private:
   [[nodiscard]] Completion SubmitRead(const Slot&, Stream&,
                                       std::function<TransferResult()>);
   [[nodiscard]] Completion SubmitLoad(Slot&, Stream&,
                                       std::function<TransferResult()>);
+  std::array<ComponentDescriptor, 3> components_;
   bool fail_allocation_{false};
   bool fail_transfer_{false};
+  std::atomic<std::size_t> invalidations_{};
   Rows prefill_pass_rows_{2048};
 };
 

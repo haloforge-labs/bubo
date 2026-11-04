@@ -427,15 +427,26 @@ struct EnvironmentScope {
 #endif
   }
   EnvironmentScope() {
-    for (const char* name :
-         {"GUFO_THINK_EOG_GUARD", "GUFO_THINK_GUARD_ESCALATE",
-          "GUFO_EOG_BOUNDARY", "GUFO_EOG_MIN_PROB_EXACT", "GUFO_EOG_MIN_PROB",
-          "GUFO_EOG_DEFER_P", "GUFO_SPEC_EOG_STOP", "GUFO_LOOP_BREAKER",
-          "GUFO_LOOP_BREAKER_EOG_CLOSE", "GUFO_LOOP_BREAKER_TRANSITION",
-          "GUFO_REASONING_BUDGET", "GUFO_LOGIT_BIAS",
-          "GUFO_MODEL_SUPPRESS_TOKENS", "GUFO_PRODUCTION_SAMPLING",
-          "GUFO_THINK_MARKER_BIAS", "GUFO_THINK_MARKER_BIAS_BY_EFFORT",
-          "GUFO_THINK_MARKER_ENTROPY_GATE"}) {
+    for (const char* name : {"GUFO_THINK_EOG_GUARD",
+                             "GUFO_THINK_GUARD_ESCALATE",
+                             "GUFO_THINK_NUDGE",
+                             "GUFO_THINK_NUDGE_MAX",
+                             "GUFO_THINK_NUDGE_TEXT",
+                             "GUFO_EOG_BOUNDARY",
+                             "GUFO_EOG_MIN_PROB_EXACT",
+                             "GUFO_EOG_MIN_PROB",
+                             "GUFO_EOG_DEFER_P",
+                             "GUFO_SPEC_EOG_STOP",
+                             "GUFO_LOOP_BREAKER",
+                             "GUFO_LOOP_BREAKER_EOG_CLOSE",
+                             "GUFO_LOOP_BREAKER_TRANSITION",
+                             "GUFO_REASONING_BUDGET",
+                             "GUFO_LOGIT_BIAS",
+                             "GUFO_MODEL_SUPPRESS_TOKENS",
+                             "GUFO_PRODUCTION_SAMPLING",
+                             "GUFO_THINK_MARKER_BIAS",
+                             "GUFO_THINK_MARKER_BIAS_BY_EFFORT",
+                             "GUFO_THINK_MARKER_ENTROPY_GATE"}) {
       const char* value = std::getenv(name);
       saved.emplace_back(
           name, value ? std::optional<std::string>(value) : std::nullopt);
@@ -774,6 +785,47 @@ void EntropyEndpointsAndForcedRows() {
   forced.Accept(11);
   CHECK(Counts(forced).hist_all[0] == 1 && Counts(forced).gate_open == 1);
 }
+void ThinkNudgeOptions() {
+  EnvironmentScope environment;
+  const auto parse = [] {
+    return gufo::server::ParseBehaviourOptions(gufo::json::Value::object());
+  };
+  CHECK(!parse());
+  EnvironmentScope::Set("GUFO_THINK_NUDGE", "1");
+  CHECK(parse()->think_nudge && parse()->think_nudge_max == 2);
+  CHECK(parse()->think_nudge_text == "Do I have enough");
+  for (const char* value : {"0", "2", "2147483647"}) {
+    EnvironmentScope::Set("GUFO_THINK_NUDGE_MAX", value);
+    CHECK(parse()->think_nudge_max == std::stoi(value));
+  }
+  for (const char* value : {"-1", "+2", "2.0", "2x", " 2", "2147483648"}) {
+    EnvironmentScope::Set("GUFO_THINK_NUDGE_MAX", value);
+    bool rejected = false;
+    try {
+      (void)parse();
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    CHECK(rejected);
+  }
+  EnvironmentScope::Set("GUFO_THINK_NUDGE_MAX", nullptr);
+  EnvironmentScope::Set("GUFO_THINK_NUDGE_TEXT", "Let me consider");
+  CHECK(parse()->think_nudge_text == "Let me consider");
+  for (const char* value :
+       {"Enough?", "Enough.", "Enough!", "Enough ", "Enough\n"}) {
+    EnvironmentScope::Set("GUFO_THINK_NUDGE_TEXT", value);
+    bool rejected = false;
+    try {
+      (void)parse();
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    CHECK(rejected);
+  }
+  EnvironmentScope::Set("GUFO_THINK_NUDGE_TEXT", nullptr);
+  EnvironmentScope::Set("GUFO_THINK_NUDGE", "0");
+  CHECK(!parse());
+}
 }  // namespace
 
 int main() {
@@ -787,13 +839,14 @@ int main() {
     run("FullCompactEntropyBits", FullCompactEntropyBits);
     run("ThresholdOnlyMarkerStage", ThresholdOnlyMarkerStage);
     run("EnvironmentValidation", EnvironmentValidation);
+    run("ThinkNudgeOptions", ThinkNudgeOptions);
     run("GateOnlyConstrainedThinkingIdentity",
         GateOnlyConstrainedThinkingIdentity);
     run("ObservationCountersAndRollback", ObservationCountersAndRollback);
     run("VerificationAndResidualRows", VerificationAndResidualRows);
     run("StopCutCountersFollowTaken", StopCutCountersFollowTaken);
     run("EntropyEndpointsAndForcedRows", EntropyEndpointsAndForcedRows);
-    std::cout << "think_marker_entropy_test: 10 groups PASS\n";
+    std::cout << "think_marker_entropy_test: 11 groups PASS\n";
   } catch (const std::exception& e) {
     std::cerr << e.what() << '\n';
     return 1;

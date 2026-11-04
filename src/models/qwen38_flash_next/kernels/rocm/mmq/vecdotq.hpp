@@ -1,3 +1,6 @@
+// Copyright (c) 2023-2026 The ggml authors
+// Copyright (c) 2026 Niko1221 and the Strata contributors
+// SPDX-License-Identifier: MIT
 #pragma once
 
 #include "common.hpp"
@@ -723,6 +726,25 @@ static __device__ __forceinline__ float vec_dot_q2_0_q8_1(
     return d2 * d8 * sumi;
 }
 
+static __device__ __forceinline__ float vec_dot_q2_0_q8_1_packed(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1,
+    const int & kbx, const int & iqs) {
+    const auto * w = static_cast<const block_q2_0 *>(vbq) + kbx;
+    const float d2 = w->d;
+    const auto * x = bq8_1 + iqs;
+    const uint32_t v[2] = {uint32_t(get_int_b2(w->qs, 2 * iqs)),
+                          uint32_t(get_int_b2(w->qs, 2 * iqs + 1))};
+    int sumi = 0;
+#pragma unroll
+    for (int j = 0; j < 8; ++j) {
+        const int codes = gufo::models::qwen38_flash_next::iq_decode::ExpandQ2Byte(
+            v[j / 4] >> (8 * (j % 4)));
+        sumi = ggml_hip_dp4a(codes, get_int_b4(x->qs, j), sumi);
+    }
+    const float d8 = __low2float(x->ds);
+    return d2 * d8 * sumi;
+}
+
 static __device__ __forceinline__ float vec_dot_q4_0_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
 
@@ -1104,6 +1126,44 @@ static __device__ __forceinline__ float vec_dot_iq2_xs_q8_1(
     return d * sumi;
 }
 
+template<ggml_type type>
+static __device__ __forceinline__ float vec_dot_iq2_q8_1_packed(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ x,
+    const int & kbx, const int & iqs) {
+    static_assert(type == GGML_TYPE_IQ2_XXS || type == GGML_TYPE_IQ2_XS);
+    namespace bits = gufo::models::qwen38_flash_next::iq_decode;
+    const auto * w0 = static_cast<const block_iq2_xxs *>(vbq) + kbx;
+    const auto * w1 = static_cast<const block_iq2_xs *>(vbq) + kbx;
+    const auto * qs = type == GGML_TYPE_IQ2_XXS ? w0->qs : w1->qs;
+    const uint32_t q0 = get_int_b2(qs, iqs);
+    const uint32_t q1 = get_int_b2(qs, iqs + 1);
+    const auto * grid = type == GGML_TYPE_IQ2_XXS ? iq2xxs_grid : iq2xs_grid;
+    int sum[2] = {};
+#pragma unroll
+    for (int l = 0; l < 4; ++l) {
+        const uint32_t code = type == GGML_TYPE_IQ2_XXS
+            ? ((q0 >> (8*l)) & 255U)
+            : (((l < 2 ? q0 : q1) >> (16*(l%2))) & 65535U);
+        const uint32_t signs = bits::ParitySigns(type == GGML_TYPE_IQ2_XXS
+            ? (q1 >> (7*l)) : (code >> 9));
+        const uint64_t values = grid[code & (type == GGML_TYPE_IQ2_XXS ? 255U : 511U)];
+        const int lo = bits::ApplyIq2Signs(uint32_t(values), signs);
+        const int hi = bits::ApplyIq2Signs(uint32_t(values >> 32), signs >> 4);
+        constexpr bool xs = type == GGML_TYPE_IQ2_XS;
+        const int part = xs ? l/2 : 0;
+        sum[part] = ggml_hip_dp4a(lo, get_int_b4(x[iqs/2].qs, 2*l), sum[part]);
+        sum[part] = ggml_hip_dp4a(hi, get_int_b4(x[iqs/2].qs, 2*l+1), sum[part]);
+    }
+    int integer;
+    if constexpr (type == GGML_TYPE_IQ2_XXS)
+        integer = bits::ScaleIq2Xxs(sum[0], q1);
+    else
+        integer = bits::ScaleIq2S(sum[0], sum[1], w1->scales[iqs/2]);
+    const float d = __half2float(type == GGML_TYPE_IQ2_XXS ? w0->d : w1->d) *
+                    __low2float(x[iqs/2].ds);
+    return d * integer;
+}
+
 #define VDR_IQ2_S_Q8_1_MMVQ 2
 #define VDR_IQ2_S_Q8_1_MMQ  2
 
@@ -1149,6 +1209,41 @@ static __device__ __forceinline__ float vec_dot_iq2_s_q8_1(
     const int sumi = (sumi0*ls0 + sumi1*ls1 + (sumi0 + sumi1)/2)/4;
 
     const float d = __half2float(bq2->d) * __low2float(bq8_1[iqs/2].ds);
+    return d * sumi;
+}
+
+static __device__ __forceinline__ float vec_dot_iq2_s_q8_1_packed(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1,
+    const int & kbx, const int & iqs, const uint64_t * grid) {
+    const auto * w = static_cast<const block_iq2_s *>(vbq) + kbx;
+    const uint32_t qs = get_int_b2(w->qs, iqs / 2);
+    const uint32_t signs = get_int_b2(w->qs, QK_K / 32 + iqs / 2);
+    const int qh = w->qh[iqs / 2];
+    int sumi0 = 0;
+    int sumi1 = 0;
+#pragma unroll
+    for (int l = 0; l < 4; ++l) {
+        const int index = ((qs >> (8 * l)) & 255) |
+                          ((qh << (8 - 2 * l)) & 0x300);
+        const uint64_t values = grid[index];
+        const uint32_t s = signs >> (8 * l);
+        const int lo = gufo::models::qwen38_flash_next::iq_decode::ApplyIq2Signs(
+            uint32_t(values), s);
+        const int hi = gufo::models::qwen38_flash_next::iq_decode::ApplyIq2Signs(
+            uint32_t(values >> 32), s >> 4);
+        const int u0 = get_int_b4(bq8_1[iqs / 2].qs, 2 * l);
+        const int u1 = get_int_b4(bq8_1[iqs / 2].qs, 2 * l + 1);
+        if (l < 2) {
+            sumi0 = ggml_hip_dp4a(lo, u0, sumi0);
+            sumi0 = ggml_hip_dp4a(hi, u1, sumi0);
+        } else {
+            sumi1 = ggml_hip_dp4a(lo, u0, sumi1);
+            sumi1 = ggml_hip_dp4a(hi, u1, sumi1);
+        }
+    }
+    const int sumi = gufo::models::qwen38_flash_next::iq_decode::ScaleIq2S(
+        sumi0, sumi1, w->scales[iqs / 2]);
+    const float d = __half2float(w->d) * __low2float(bq8_1[iqs / 2].ds);
     return d * sumi;
 }
 
@@ -1233,6 +1328,47 @@ static __device__ __forceinline__ float vec_dot_iq3_s_q8_1(
     return d * sumi;
 }
 
+template<ggml_type type>
+static __device__ __forceinline__ float vec_dot_iq3_q8_1_packed(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ x,
+    const int & kbx, const int & iqs) {
+    static_assert(type == GGML_TYPE_IQ3_XXS || type == GGML_TYPE_IQ3_S);
+    namespace bits = gufo::models::qwen38_flash_next::iq_decode;
+    const auto * w0 = static_cast<const block_iq3_xxs *>(vbq) + kbx;
+    const auto * w1 = static_cast<const block_iq3_s *>(vbq) + kbx;
+    const auto * qs = type == GGML_TYPE_IQ3_XXS ? w0->qs : w1->qs;
+    const uint32_t codes[2] = {uint32_t(get_int_b2(qs, iqs)), uint32_t(get_int_b2(qs, iqs+1))};
+    const uint32_t signs_scale = type == GGML_TYPE_IQ3_XXS
+        ? get_int_b2(w0->qs, QK_K/16 + iqs/2) : get_int_b2(w1->signs, iqs/2);
+    const int high = type == GGML_TYPE_IQ3_XXS ? 0 : w1->qh[iqs/2];
+    int sum = 0;
+#pragma unroll
+    for (int l = 0; l < 4; ++l) {
+        const uint32_t c0 = (codes[l/2] >> (16*(l%2))) & 255;
+        const uint32_t c1 = (codes[l/2] >> (16*(l%2)+8)) & 255;
+        uint32_t lo, hi, signs;
+        if constexpr (type == GGML_TYPE_IQ3_XXS) {
+            lo = iq3xxs_grid[c0];
+            hi = iq3xxs_grid[c1];
+            signs = bits::ParitySigns(signs_scale >> (7*l));
+        } else {
+            lo = iq3s_grid[c0 | (((high >> (2*l)) & 1) << 8)];
+            hi = iq3s_grid[c1 | (((high >> (2*l+1)) & 1) << 8)];
+            signs = signs_scale >> (8*l);
+        }
+        sum = ggml_hip_dp4a(bits::ApplyIq2Signs(lo, signs), get_int_b4(x[iqs/2].qs, 2*l), sum);
+        sum = ggml_hip_dp4a(bits::ApplyIq2Signs(hi, signs >> 4), get_int_b4(x[iqs/2].qs, 2*l+1), sum);
+    }
+    int integer;
+    if constexpr (type == GGML_TYPE_IQ3_XXS)
+        integer = bits::ScaleIq3Xxs(sum, signs_scale >> 28);
+    else
+        integer = bits::ScaleIq3S(sum, w1->scales[iqs/4] >> ((iqs << 1) & 4));
+    const float d = __half2float(type == GGML_TYPE_IQ3_XXS ? w0->d : w1->d) *
+                    __low2float(x[iqs/2].ds);
+    return d * integer;
+}
+
 #define VDR_IQ1_S_Q8_1_MMVQ 1
 #define VDR_IQ1_S_Q8_1_MMQ  1
 
@@ -1311,6 +1447,32 @@ static __device__ __forceinline__ float vec_dot_iq1_m_q8_1(
     const int sc0 = 2*((tmp >> 0) & 0x07) + 1;
     const int sc1 = 2*((tmp >> 3) & 0x07) + 1;
     return d * ((sumi[0] + sumf[0]) * sc0 + (sumi[1] + sumf[1]) * sc1);
+}
+
+static __device__ __forceinline__ float vec_dot_iq1_m_q8_1_packed(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ x,
+    const int & kbx, const int & iqs) {
+    namespace bits = gufo::models::qwen38_flash_next::iq_decode;
+    const auto * w = static_cast<const block_iq1_m *>(vbq) + kbx;
+    const uint32_t codes = get_int_b4(w->qs, iqs);
+    int sum[2] = {};
+#pragma unroll
+    for (int l = 0; l < 4; ++l) {
+        const int high = w->qh[2*iqs + l/2] >> (4*(l%2));
+        const int index = ((codes >> (8*l)) & 255) | ((high & 7) << 8);
+        const uint32_t grid = iq1s_grid_gpu[index];
+        const int lo = bits::ExpandIq1(grid, (high & 8) != 0);
+        const int hi = bits::ExpandIq1(grid >> 4, (high & 8) != 0);
+        sum[l/2] = ggml_hip_dp4a(lo, get_int_b4(x[iqs].qs, 2*l), sum[l/2]);
+        sum[l/2] = ggml_hip_dp4a(hi, get_int_b4(x[iqs].qs, 2*l+1), sum[l/2]);
+    }
+    iq1m_scale_t scale;
+    scale.u16 = bits::Iq1Half(w->scales);
+    const float d = __half2float(scale.f16) * __low2float(x[iqs].ds);
+    const float lo = float(sum[0]) * 0.125f;
+    const float hi = float(sum[1]) * 0.125f;
+    return d * (lo * bits::Iq1Scale(w->scales, iqs, 0) +
+                hi * bits::Iq1Scale(w->scales, iqs, 1));
 }
 
 #define VDR_IQ4_NL_Q8_1_MMVQ 2

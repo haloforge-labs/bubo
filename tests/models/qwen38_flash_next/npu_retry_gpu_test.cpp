@@ -308,12 +308,12 @@ void GridArm(Rig& rig, std::span<const std::int32_t> tokens,
   }
 }
 
-
-
-
-
-
-
+// The backup copy as the event pair sees it, under the conditions of a live
+// prefill: back to back (clocks hot, the old measurement), after 300 ms idle
+// (clocks can drop between chunks), behind a few ms of GPU work on the same
+// stream, and with another stream streaming 1 GiB at the same time (memory
+// traffic, like a neighbour or the NPU DMA). The 16 ms limit is 0.5 % of a 3.2
+// s NPU chunk. The live run measured 8.8-49 ms with 73 separate copy launches.
 struct CostStats {
   double median = 0, p95 = 0, max = 0;
 };

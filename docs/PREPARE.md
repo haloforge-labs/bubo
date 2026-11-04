@@ -33,8 +33,13 @@ terms can apply to these files. If you continue, you accept the terms that apply
 
 The complete text-only release notice bundle, including `NOTICE-windows.md`,
 COMGR and hipcc, is saved under `licenses` beside the runtime. Its internal
-folders and links are preserved. Its `OPEN-ITEMS.md` records remaining source
-and notice provenance questions. This does not assert that no other terms apply.
+folders and links are preserved. This does not assert that no other terms
+apply. When a new Bubo version changes only these texts, the runtime files stay
+as they are: the first start of the new version rewrites the `licenses` folder
+and the readiness entry in place from the texts built into `bubo` (no download,
+one log line). Files that an earlier version wrote there and the new texts no
+longer include are removed; files of the user stay. A changed or missing runtime
+file still needs `bubo prepare runtime`.
 
 The archive cache defaults to `ROOT\cache\rocm-10.0.0-gfx1151`. Use
 `--cache-dir PATH` for a separate local folder if the default overlaps the

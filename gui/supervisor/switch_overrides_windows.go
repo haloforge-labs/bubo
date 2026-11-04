@@ -263,6 +263,11 @@ func switchOverrideViews(in ViewInput) []SwitchOverrideView {
 		} else if saved, ok := in.Saved.SwitchOverrides[row.Name]; ok {
 			v.Saved = &saved
 		}
+		// The launch drops a value the model cannot use, so it is never pending.
+		if v.Saved != nil && inapplicableSwitch(in.SavedCapabilities, row.Name, *v.Saved) {
+			out = append(out, v)
+			continue
+		}
 		_, wasSet := in.Snapshot.RunningSwitchOverrides[row.Name]
 		if v.Saved != nil || wasSet {
 			switch {

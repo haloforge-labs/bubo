@@ -68,7 +68,7 @@ export interface SwitchRow {
     minimum?: number;
     maximum?: number;
     exclusive_minimum?: number;
-    also?: number[];
+    also?: (number | string)[];
     format?: string;
     [k: string]: unknown;
   };

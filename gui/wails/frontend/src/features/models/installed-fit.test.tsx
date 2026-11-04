@@ -64,6 +64,9 @@ for (const [width, height] of sizes) {
     const container = region
       .element()
       .querySelector('[data-slot="table-container"]')!
+    // The folder and its actions sit behind each row's "Model folder" fold.
+    for (const fold of Array.from(container.querySelectorAll('details')))
+      fold.open = true
     const box = container.getBoundingClientRect()
     // V1 V2 V5: no sideways scroll.
     expect(container.scrollWidth).toBeLessThanOrEqual(container.clientWidth + 1)

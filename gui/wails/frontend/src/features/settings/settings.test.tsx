@@ -1,6 +1,7 @@
 import { afterEach, expect, test, vi } from 'vitest'
 import { page } from 'vitest/browser'
 import { actions } from '@/lib/bindings'
+import { guiValueLabels, settingLabel } from '@/lib/presentation'
 import { fixture, renderView } from '@/components/test-view'
 import SettingsPage from './index'
 import { RegistrySection } from './registry-section'
@@ -78,6 +79,52 @@ test('Advanced keeps user rows without a Server section reachable once', async (
     .not.toBeInTheDocument()
 })
 
+test('Prefill mode renders from the registry row with plain wording', async () => {
+  const view = fixture()
+  const template = view.switches[0]!
+  view.switches = [
+    {
+      ...template,
+      name: '--prefill-mode',
+      label: 'Prefill mode',
+      purpose:
+        'Experimental. Up to 16 % faster when a prompt has 4,096 or more new tokens; shorter prompts read as normal.',
+      audience: 'user',
+      group: 'Speed',
+      gui_control: true,
+    },
+  ]
+  cleanup = renderView(
+    <RegistrySection view={view} audience="user" />,
+    view,
+  ).cleanup
+  await expect
+    .element(page.getByText('Prefill mode (experimental)', { exact: true }))
+    .toBeVisible()
+  expect(
+    document.querySelectorAll('[data-setting="--prefill-mode"]'),
+  ).toHaveLength(1)
+  // The label carries the mark; the full text is in the row's About popup.
+  expect(page.getByText('Experimental', { exact: true }).query()).toBeNull()
+  await page
+    .getByRole('button', { name: 'About Prefill mode (experimental)' })
+    .click()
+  await expect
+    .element(
+      // The CLI's own text; the GUI adds none.
+      page.getByText(
+        'Experimental. Up to 16 % faster when a prompt has 4,096 or more new tokens; shorter prompts read as normal.',
+        { exact: true },
+      ),
+    )
+    .toBeVisible()
+  expect(guiValueLabels('--prefill-mode', ['normal', 'fast'])).toEqual({
+    normal: 'Normal',
+    fast: 'Fast',
+  })
+  expect(guiValueLabels('--top-k', [])).toEqual({})
+})
+
 test.each([
   '--profile',
   '--port',
@@ -117,17 +164,14 @@ test.each([
       view,
     ).cleanup
     const type = allowed.type?.text
+    const label = settingLabel(row)
     if (type === 'enum')
-      await page
-        .getByRole('combobox', {
-          name: name === '--profile' ? 'Mode' : row.label!,
-        })
-        .selectOptions('0')
+      await page.getByRole('combobox', { name: label }).selectOptions('0')
     else
       await page
         .getByRole(
           type === 'integer' || type === 'number' ? 'spinbutton' : 'textbox',
-          { name: row.label! },
+          { name: label },
         )
         .fill(String(value))
     await expect
@@ -142,9 +186,13 @@ test.each([
       switch_values: [{ name, value: String(value) }],
     })
     expect(override).not.toHaveBeenCalled()
+    // The saved request is there, so the row offers Reset.
     await page
-      .getByRole('button', { name: 'Reset to default', exact: true })
+      .getByRole('button', { name: `Reset ${label} to default`, exact: true })
       .click()
+    await expect
+      .element(page.getByText('Default after saving', { exact: false }))
+      .toBeVisible()
     await page
       .getByRole('button', { name: 'Save changes', exact: true })
       .click()
@@ -224,13 +272,14 @@ test('B5 suggested range is a hint and permits a value beyond the suggestion', a
     <RegistrySection view={view} audience="user" />,
     view,
   ).cleanup
+  const label = settingLabel(row)
   await page
-    .getByRole('button', { name: `About ${row.label}`, exact: true })
+    .getByRole('button', { name: `About ${label}`, exact: true })
     .click()
   await expect
     .element(page.getByText('Suggested:', { exact: false }))
     .toBeVisible()
-  const input = page.getByRole('spinbutton', { name: row.label! })
+  const input = page.getByRole('spinbutton', { name: label })
   expect(input.element().getAttribute('max')).toBeNull()
   await input.fill(String(value))
   await page.getByRole('button', { name: 'Save changes' }).click()
@@ -286,7 +335,7 @@ test('a dummy registry row appears in Settings without any feature code change',
   const field = page.getByRole('spinbutton', { name: 'Synthetic extension' })
   await expect.element(field).toHaveValue(0.5)
   await expect
-    .element(page.getByText('used after restart', { exact: true }))
+    .element(page.getByText('After restart', { exact: true }))
     .toBeVisible()
   await field.fill('0.75')
   await page.getByRole('button', { name: 'Save changes' }).click()
@@ -345,9 +394,10 @@ test('Advanced has a collapsed Debug subsection and obeys audience and gui_contr
   await expect
     .element(page.getByText('Advanced row', { exact: true }))
     .toBeVisible()
+  // Debug is a collapsed disclosure: its rows are in the page but hidden.
   await expect
     .element(page.getByText('Debug row', { exact: true }))
-    .not.toBeInTheDocument()
+    .not.toBeVisible()
   await page.getByRole('button', { name: 'Debug', exact: true }).click()
   await expect
     .element(page.getByText('Debug row', { exact: true }))
@@ -398,7 +448,7 @@ test('App drafts retain edits across a View poll and save only edited fields', a
   await expect
     .element(page.getByRole('switch', { name: 'Check for updates at start' }))
     .toBeChecked()
-  const runtime = page.getByRole('textbox', { name: 'Runtime folder' })
+  const runtime = page.getByRole('textbox', { name: 'Engine folder' })
   await runtime.fill('C:\\fixture-runtime')
   await mounted.client.invalidateQueries()
   await expect.element(runtime).toHaveValue('C:\\fixture-runtime')
@@ -409,7 +459,7 @@ test('App drafts retain edits across a View poll and save only edited fields', a
   })
   await expect
     .element(page.getByRole('status'))
-    .toHaveTextContent('App preferences saved.')
+    .toHaveTextContent('App settings saved.')
 })
 
 test('model folders use the typed add and remove bindings and surface rejection', async () => {
@@ -430,7 +480,7 @@ test('model folders use the typed add and remove bindings and surface rejection'
     .toHaveTextContent('folder_busy: Try again after the scan.')
   expect(remove).toHaveBeenCalledWith('C:\\fixture-models')
   await page
-    .getByRole('textbox', { name: 'Add a model folder' })
+    .getByRole('textbox', { name: 'Add a folder' })
     .fill('C:\\another-fixture')
   await page.getByRole('button', { name: 'Add folder', exact: true }).click()
   expect(add).toHaveBeenCalledWith('C:\\another-fixture')
@@ -505,11 +555,14 @@ test('a registry save preserves typed CLI rejection and an explicit clear restor
     .element(page.getByRole('alert'))
     .toHaveTextContent('fixture_rejected: Review this value.')
   await expect
-    .element(page.getByText('Request saved.', { exact: false }))
+    .element(page.getByText('Settings saved.', { exact: false }))
     .not.toBeInTheDocument()
   save.mockResolvedValue({})
   await page
-    .getByRole('button', { name: 'Reset to default', exact: true })
+    .getByRole('button', {
+      name: 'Reset Fixture control to default',
+      exact: true,
+    })
     .click()
   await page.getByRole('button', { name: 'Save changes' }).click()
   expect(save).toHaveBeenLastCalledWith({
@@ -517,10 +570,11 @@ test('a registry save preserves typed CLI rejection and an explicit clear restor
     clear: ['--fixture-control'],
   })
   await expect
-    .element(page.getByText('Request saved.', { exact: false }))
-    .toHaveTextContent('Validated when the server starts.')
+    .element(page.getByText('Settings saved.', { exact: true }))
+    .toBeVisible()
+  // The hint shares its line with the Reset button.
   await expect
-    .element(page.getByText('used after restart', { exact: false }))
+    .element(page.getByText('After restart', { exact: false }))
     .toBeVisible()
 })
 
@@ -565,7 +619,10 @@ test('write eligibility comes from the View and never from echo or a switch name
 
 test('App writes explicit false and clears defaults without copying the saved snapshot', async () => {
   const save = vi.spyOn(actions, 'PatchPreferences').mockResolvedValue({})
-  cleanup = renderView(<SettingsPage />, fixture()).cleanup
+  // Restore shows only while an app preference differs from its default.
+  const view = fixture()
+  view.saved.close_to_tray = true
+  cleanup = renderView(<SettingsPage />, view).cleanup
   await page.getByRole('tab', { name: 'App', exact: true }).click()
   await page.getByRole('switch', { name: 'Check for updates at start' }).click()
   await page.getByRole('button', { name: 'Save app settings' }).click()
@@ -573,7 +630,13 @@ test('App writes explicit false and clears defaults without copying the saved sn
     set: { check_for_updates: false },
     clear: [],
   })
-  await page.getByRole('button', { name: 'Use app defaults' }).click()
+  // The reset saves at once, and the button says so like the other immediate groups.
+  const restore = page.getByRole('button', { name: 'Restore app defaults' })
+  await expect.element(restore).toBeVisible()
+  expect(restore.element().parentElement!.textContent).toContain(
+    'Saved immediately',
+  )
+  await restore.click()
   expect(save).toHaveBeenLastCalledWith({
     set: {},
     clear: [
@@ -594,14 +657,14 @@ test('App preference rejection remains in place and never shows a saved notice',
   cleanup = renderView(<SettingsPage />, fixture()).cleanup
   await page.getByRole('tab', { name: 'App', exact: true }).click()
   await page
-    .getByRole('textbox', { name: 'Runtime folder' })
+    .getByRole('textbox', { name: 'Engine folder' })
     .fill('D:/fixture/runtime')
   await page.getByRole('button', { name: 'Save app settings' }).click()
   await expect
     .element(page.getByRole('alert'))
     .toHaveTextContent('fixture_rejected: Review app preferences.')
   await expect
-    .element(page.getByText('App preferences saved.'))
+    .element(page.getByText('App settings saved.'))
     .not.toBeInTheDocument()
 })
 
@@ -628,12 +691,12 @@ test('a numeric CLI effective value stays clean and an edit saves through its st
     view,
   ).cleanup
   await expect
-    .element(page.getByRole('textbox', { name: row.label! }))
-    .toHaveValue('1')
+    .element(page.getByRole('spinbutton', { name: row.label! }))
+    .toHaveValue(1)
   await expect
     .element(page.getByRole('button', { name: 'Save changes' }))
     .not.toBeInTheDocument()
-  await page.getByRole('textbox', { name: row.label! }).fill('0.9')
+  await page.getByRole('spinbutton', { name: row.label! }).fill('0.9')
   await page.getByRole('button', { name: 'Save changes' }).click()
   expect(save).toHaveBeenCalledExactlyOnceWith({
     set: {},
@@ -653,10 +716,20 @@ test('the recorded pending environment boolean retains its CLI-declared wire val
     <RegistrySection view={view} audience="user" />,
     view,
   ).cleanup
-  const control = page.getByRole('switch', { name: view.switches[0]!.label! })
+  const label = settingLabel(view.switches[0]!)
+  const control = page.getByRole('switch', { name: label })
   await expect.element(control).not.toBeChecked()
+  // The saved request makes the row offer Reset; the pending state is the hint.
   await expect
-    .element(page.getByText('Set by you: Off', { exact: true }))
+    .element(
+      page.getByRole('button', {
+        name: `Reset ${label} to default`,
+        exact: true,
+      }),
+    )
+    .toBeVisible()
+  await expect
+    .element(page.getByText('After restart', { exact: false }))
     .toBeVisible()
   await control.click()
   await page.getByRole('button', { name: 'Save changes' }).click()
@@ -667,7 +740,7 @@ test('the recorded pending environment boolean retains its CLI-declared wire val
   })
 })
 
-test('the image input switch reads as its label: On means images are disabled', async () => {
+test('a turn-off switch reads as the feature: Image input On or Off', async () => {
   const view = fixture('lan-on')
   view.switches = view.switches
     .filter((row) => row.name === '--no-vision')
@@ -678,10 +751,10 @@ test('the image input switch reads as its label: On means images are disabled', 
     <RegistrySection view={view} audience="user" />,
     view,
   ).cleanup
-  const control = page.getByRole('switch', { name: 'Disable image input' })
-  await expect.element(control).not.toBeChecked()
-  await control.click()
-  await expect.element(control).toBeChecked()
+  expect(document.body.textContent).not.toContain('Disable image input')
+  const control = page.getByRole('combobox', { name: 'Image input' })
+  await expect.element(control).toHaveDisplayValue('On')
+  await control.selectOptions('Off')
   await page.getByRole('button', { name: 'Save changes' }).click()
   expect(save).toHaveBeenCalledExactlyOnceWith({
     set: {},
@@ -730,7 +803,11 @@ test('an unsupported control still permits clearing its saved request', async ()
     )
     .toBeInTheDocument()
   await expect.element(page.getByRole('alert')).not.toBeInTheDocument()
-  await page.getByRole('button', { name: 'Reset to default' }).click()
+  await page
+    .getByRole('button', {
+      name: `Reset ${settingLabel(view.switches[0]!)} to default`,
+    })
+    .click()
   await page.getByRole('button', { name: 'Save changes' }).click()
   expect(save).toHaveBeenCalledExactlyOnceWith({
     set: {},
@@ -750,7 +827,7 @@ test('reasoning bias and loop breaker use the same generic switch write as sampl
   await page
     .getByRole('textbox', { name: 'Filter user settings' })
     .fill(bias.name)
-  await page.getByRole('spinbutton', { name: bias.label! }).fill('-0.5')
+  await page.getByRole('spinbutton', { name: settingLabel(bias) }).fill('-0.5')
   await page.getByRole('button', { name: 'Save changes' }).click()
   expect(save).toHaveBeenLastCalledWith({
     set: {},

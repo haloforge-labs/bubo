@@ -3,6 +3,7 @@
 #include <cassert>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <cstring>
 #include <future>
 #include <mutex>
@@ -171,7 +172,9 @@ void IdleAndZeroIdle() {
     f.Verify();
     const auto metrics = f.slot.Metrics();
     assert(metrics.reassignments == before.reassignments + 1);
-    assert(metrics.residual_wait_ns > before.residual_wait_ns);
+    // A coarse steady_clock (QueryPerformanceCounter on Windows, typically
+    // 100 ns ticks) can measure a fast reassignment as 0 ns.
+    assert(metrics.residual_wait_ns >= before.residual_wait_ns);
     assert(metrics.idle_bytes == (idle ? sizeof(f.tokens) : 0));
     assert(metrics.foreground_bytes == (idle ? 0 : sizeof(f.tokens)));
     assert(f.acquired == 3);  // Fresh stream lease for every bounded piece.
@@ -260,8 +263,13 @@ void ForegroundStreamWait() {
   f.device_idle = false;
   f.streams_available = false;
   f.lease.Commit();
+  const int attempts = f.stream_attempts;
   auto request =
       std::async(std::launch::async, [&] { return f.slot.Acquire(); });
+  // The wait is timed from inside Acquire, so start the 20 ms only once the
+  // request is polling for a stream; a late thread start would shorten it.
+  while (f.stream_attempts == attempts)
+    std::this_thread::yield();
   assert(request.wait_for(20ms) == std::future_status::timeout);
   f.streams_available = true;
   f.adapter.gate.Allow(3);
@@ -367,6 +375,91 @@ void Failure() {
     f.Verify();
   }
 }
+void ManyRangesAndForegroundEdits() {
+  constexpr std::size_t count = 2048;
+  ResourceLedger ledger{{32 << 20, 32 << 20, 0, 32 << 20}};
+  LedgerAudit audit{ledger};
+  AdapterFixture adapter;
+  FakeStream foreground;
+  LeasedSlot slot{
+      ledger, adapter, foreground, SlotId{1},
+      IdleSpillConfig{8, [] { return std::make_unique<FakeStream>(true); },
+                      [] { return true; }}};
+  auto lease = slot.Acquire();
+  std::vector<Token> tokens(2 * count + 5);
+  for (std::size_t i = 0; i < tokens.size(); ++i)
+    tokens[i] = static_cast<Token>(i + 1);
+  adapter.fake.Append(lease.Execution(), tokens, tokens);
+  struct Kept {
+    Rows first, end;
+    std::shared_ptr<BorrowedRows> rows;
+    std::shared_ptr<std::vector<std::byte>> buffer;
+  };
+  std::vector<ResourceCharge> pools;
+  const auto borrow = [&](Rows first, Rows end) {
+    auto buffer =
+        std::make_shared<std::vector<std::byte>>((end - first) * sizeof(Token));
+    auto pool = ledger.Reserve(ResourceCategory::kBackingFree, buffer->size())
+                    .Convert();
+    auto rows =
+        lease.Borrow(kTarget, first, end,
+                     pool.ReserveBacking(ResourceCategory::kBackingAssigned),
+                     buffer, *buffer);
+    pools.push_back(std::move(pool));
+    return Kept{first, end, std::move(rows), std::move(buffer)};
+  };
+  std::vector<Kept> kept;
+  for (std::size_t i = 0; i < count; ++i) {
+    kept.push_back(borrow(2 * i, 2 * i + 2));
+    if (i % 113 == 0)
+      (void)borrow(2 * i, 2 * i + 1);  // Expired registry holes.
+  }
+  // This last range needs three pieces; advancing after its first piece
+  // would leave an incomplete copy even though later registrations finish.
+  kept.push_back(borrow(2 * count, tokens.size()));
+  auto reader = kept.front().rows->Pin();
+  const auto live = lease.Location();
+  adapter.gate.Allow(count + 3);
+  const auto started = std::chrono::steady_clock::now();
+  lease.Commit();
+  adapter.gate.WaitFor(count + 3);
+  while (!slot.PreservationComplete())
+    std::this_thread::yield();
+  const auto elapsed = std::chrono::duration<double, std::milli>(
+                           std::chrono::steady_clock::now() - started)
+                           .count();
+  std::printf("idle %zu retained ranges: %.3f ms\n", kept.size(), elapsed);
+  for (const auto& item : kept) {
+    assert(item.rows->IsValid() && !item.rows->Location());
+    assert(std::memcmp(item.buffer->data(), tokens.data() + item.first,
+                       (item.end - item.first) * sizeof(Token)) == 0);
+  }
+  assert(slot.Metrics().idle_bytes == tokens.size() * sizeof(Token));
+  // A reader admitted before materialization still prevents overwrite.
+  // Foreground erasure can invalidate the parked idle cursor or leave it at
+  // end; releasing this lease must discover the new registration either way.
+  assert(reader.Location());
+  lease = slot.Acquire(live);
+  kept.back().rows.reset();
+  auto guard = std::async(std::launch::async, [&] {
+    adapter.fake.GuardRows(lease.Execution(), kTarget, 0, tokens.size());
+  });
+  assert(guard.wait_for(20ms) == std::future_status::timeout);
+  reader = {};
+  guard.get();
+  auto next = borrow(0, 3);
+  adapter.gate.Allow(2);
+  lease.Commit();
+  adapter.gate.WaitFor(count + 5);
+  while (!slot.PreservationComplete())
+    std::this_thread::yield();
+  assert(!next.rows->Location());
+  assert(std::memcmp(next.buffer->data(), tokens.data(), 3 * sizeof(Token)) ==
+         0);
+  assert(slot.Metrics().idle_bytes == (tokens.size() + 3) * sizeof(Token));
+  assert(slot.Metrics().foreground_bytes == 0);
+  slot.StopIdleSpill();
+}
 void RetainedCheckpoints() {
   for (int mode = 0; mode < 3; ++mode) {
     Fixture f;
@@ -463,6 +556,97 @@ void SlotPreference() {
   assert(fallback.Location().slot == SlotId{1});
   f.Verify();
 }
+void BatchedReassignment() {
+  for (int mode = 0; mode < 4; ++mode) {
+    ResourceLedger ledger{{1 << 20, 1 << 20, 0, 1 << 20}};
+    LedgerAudit audit{ledger};
+    AdapterFixture adapter;
+    FakeStream foreground;
+    std::atomic<int> attempts{};
+    LeasedSlot slot{ledger, adapter, foreground, SlotId{1},
+                    IdleSpillConfig{8,
+                                    [&]() -> std::unique_ptr<Stream> {
+                                      if (++attempts == 4 && mode == 3)
+                                        return {};
+                                      return std::make_unique<FakeStream>(true);
+                                    },
+                                    [] { return false; }, mode == 3 ? 4U : 3U}};
+    auto lease = slot.Acquire();
+    const std::array<Token, 13> tokens{1, 2, 3,  4,  5,  6, 7,
+                                       8, 9, 10, 11, 12, 13};
+    adapter.fake.Append(lease.Execution(), tokens, tokens);
+    struct Kept {
+      Rows first, end;
+      ResourceCharge pool;
+      std::shared_ptr<std::vector<std::byte>> buffer;
+      std::shared_ptr<BorrowedRows> rows;
+    };
+    std::vector<Kept> kept;
+    for (Rows first = 0; first < tokens.size();) {
+      const auto end = first < 8 ? first + 2 : tokens.size();
+      auto buffer = std::make_shared<std::vector<std::byte>>((end - first) *
+                                                             sizeof(Token));
+      auto pool = ledger.Reserve(ResourceCategory::kBackingFree, buffer->size())
+                      .Convert();
+      auto rows =
+          lease.Borrow(kTarget, first, end,
+                       pool.ReserveBacking(ResourceCategory::kBackingAssigned),
+                       buffer, *buffer);
+      kept.push_back({first, end, std::move(pool), buffer, std::move(rows)});
+      first = end;
+    }
+    const auto live = lease.Location();
+    auto reader = kept.front().rows->Pin();
+    lease.Commit();
+    if (mode == 2)
+      adapter.fake.FailNextTransfer();
+    std::stop_source stop;
+    auto replacement = std::async(
+        std::launch::async, [&] { return slot.Acquire({}, stop.get_token()); });
+    // Every copy is gated. Three submissions before the first completion
+    // prove the bounded batch does not synchronize one range at a time.
+    adapter.gate.WaitFor(3);
+    if (mode == 1)
+      stop.request_stop();
+    adapter.gate.Allow(3);
+    if (mode == 0) {
+      const auto deadline = std::chrono::steady_clock::now() + 5s;
+      while (kept[2].rows->Location()) {
+        assert(std::chrono::steady_clock::now() < deadline);
+        std::this_thread::yield();
+      }
+      // Publication of other rows cannot be held behind this earlier pin.
+      assert(replacement.wait_for(20ms) == std::future_status::timeout);
+    }
+    reader = {};
+    adapter.gate.Allow(100);
+    if (mode == 1 || mode == 2) {
+      bool failed = false;
+      try {
+        lease = replacement.get();
+      } catch (const std::runtime_error&) {
+        failed = true;
+      }
+      assert(failed);
+      lease = slot.Acquire(live);
+      const auto bytes = adapter.fake.BorrowRowsView(lease.Execution(), kTarget,
+                                                     0, tokens.size());
+      assert(bytes.size() == sizeof(tokens));
+      assert(std::memcmp(bytes.data(), tokens.data(), sizeof(tokens)) == 0);
+      lease.Commit();
+      lease = slot.Acquire();
+    } else {
+      lease = replacement.get();
+    }
+    for (const auto& k : kept) {
+      assert(k.rows->IsValid() && !k.rows->Location());
+      assert(std::memcmp(k.buffer->data(), tokens.data() + k.first,
+                         k.buffer->size()) == 0);
+    }
+    assert(slot.Metrics().idle_bytes == 0);
+    slot.StopIdleSpill();
+  }
+}
 }  // namespace
 int main() {
   IdleAndZeroIdle();
@@ -470,10 +654,12 @@ int main() {
   CancellationAndPins();
   PriorityAndPoolExhaustion();
   Failure();
+  ManyRangesAndForegroundEdits();
   ForegroundStreamWait();
   CancelForegroundStreamWait();
   CancelColdReassignment();
   SlotPreference();
   RetainedCheckpoints();
   PersistencePublicationRace();
+  BatchedReassignment();
 }

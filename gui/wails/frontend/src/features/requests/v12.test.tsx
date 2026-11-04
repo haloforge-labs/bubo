@@ -23,7 +23,7 @@ test('real completed requests have metric points and factual hover and keyboard 
   await expect.element(details).toHaveTextContent('2,606 prompt tokens')
   await expect.element(details).toHaveTextContent('(0 cached)')
   await expect.element(details).toHaveTextContent('1.9 s to first token')
-  await expect.element(details).toHaveTextContent('cache miss')
+  await expect.element(details).toHaveTextContent('Cache: Miss')
   await userEvent.unhover(point)
   const cached = prefill.getByRole('button', { name: /^r10 ·/ })
   ;(cached.element() as SVGElement).focus()
@@ -52,7 +52,7 @@ test('one reported completed value appears on each applicable chart', async () =
   cleanup = renderView(<RequestsPage />, view).cleanup
   await expect
     .element(page.getByRole('region', { name: 'Request performance' }))
-    .toHaveTextContent('Each point is one completed request.')
+    .toHaveTextContent('Oldest → newest')
   await expect
     .poll(
       () =>
@@ -85,26 +85,26 @@ test('all returned requests remain visible in oldest-first order beyond five min
   await expect.element(page.getByRole('tooltip')).not.toBeInTheDocument()
 })
 
-test('missing measurements have accurate metric-specific empty text', async () => {
+test('a metric with no reported value gets a short note; with none at all there is no chart section', async () => {
   const view = realRequestsView()
   view.requests.forEach((row) => {
-    row.decode_tps = undefined
     row.prefill_tps = undefined
+  })
+  const mounted = renderView(<RequestsPage />, view)
+  cleanup = mounted.cleanup
+  const region = page.getByRole('region', { name: 'Request performance' })
+  await expect.element(region).toHaveTextContent('Prefill: none reported')
+  expect(region.element().textContent).not.toContain('Decode: none reported')
+  const none = structuredClone(view)
+  none.requests.forEach((row) => {
+    row.decode_tps = undefined
     row.ttft_ms = undefined
   })
-  cleanup = renderView(<RequestsPage />, view).cleanup
-  const region = page.getByRole('region', { name: 'Request performance' })
+  mounted.client.setQueryData(viewKey, none)
+  await expect.element(region).not.toBeInTheDocument()
   await expect
-    .element(region)
-    .toHaveTextContent('No decode rates reported for completed requests.')
-  await expect
-    .element(region)
-    .toHaveTextContent('No prefill rates reported for completed requests.')
-  await expect
-    .element(region)
-    .toHaveTextContent(
-      'No time to first token reported for completed requests.',
-    )
+    .element(page.getByRole('region', { name: 'Requests table' }))
+    .toBeVisible()
 })
 
 test('missing completion age uses the recorded completion timeline without inventing an age', async () => {
@@ -116,7 +116,7 @@ test('missing completion age uses the recorded completion timeline without inven
     .toBeVisible()
   await expect
     .element(page.getByRole('region', { name: 'Request performance' }))
-    .toHaveTextContent('Times are relative to the latest completion.')
+    .toHaveTextContent('Times are relative to the latest completion')
   await expect
     .element(
       page.getByRole('figure', {

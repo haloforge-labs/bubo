@@ -1,19 +1,11 @@
 #include "src/cli/serve/continuation_disk_store.hpp"
 
-#include <fcntl.h>
-#include <sys/file.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
-
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
-#include <cstdio>
 #include <chrono>
 #include <condition_variable>
-#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <filesystem>
@@ -36,93 +28,12 @@
 #include <utility>
 #include <vector>
 
-#include "src/cli/serve/logging.hpp"
 #include "src/core/crypto/sha256.hpp"
-#include "src/core/platform/memory_guard.hpp"
+#include "src/core/platform/fs.hpp"
+#include "src/core/platform/os_info.hpp"
 
 namespace gufo::server {
 namespace {
-
-struct WriterSettings {
-  bool evict_idle{false};
-  bool slice{false};
-  std::chrono::milliseconds idle{30000};
-  std::size_t evict_backlog_bytes{2ULL * 1024 * 1024 * 1024};
-  // GUFO_DISK_EVICT_SKIP_TOKENS: an evicted snapshot whose persisted strict prefix (same compatibility identity) is at most this many tokens shorter is not
-  // written again (restore uses the prefix and prefills the tail). 0 = off (every eviction is persisted).
-  std::size_t evict_skip_tokens{0};
-  bool evict_skip_invalid{false};  // GUFO_DISK_EVICT_SKIP_TOKENS set but unusable: warned once, feature stays off, reported in the writer summary
-};
-const WriterSettings& DiskWriterSettings() {
-  static const WriterSettings settings = [] {
-    WriterSettings result;
-    const auto* persist = std::getenv("GUFO_DISK_PERSIST");
-    result.evict_idle = persist && std::strcmp(persist, "evict_idle") == 0;
-    const auto* slice = std::getenv("GUFO_DISK_SLICE");
-    result.slice = slice && std::strcmp(slice, "1") == 0;
-    const auto* idle = std::getenv("GUFO_DISK_IDLE_MS");
-    if (idle && *idle) {
-      char* end = nullptr;
-      const auto value = std::strtol(idle, &end, 10);
-      if (end && !*end && value >= 0 && value <= 600000)
-        result.idle = std::chrono::milliseconds(value);
-    }
-    const auto* backlog = std::getenv("GUFO_DISK_EVICT_BACKLOG_BYTES");
-    if (backlog && *backlog && *backlog != '-') {
-      char* end = nullptr;
-      errno = 0;
-      const auto value = std::strtoull(backlog, &end, 10);
-      if (!errno && end && !*end && value <= SIZE_MAX)
-        result.evict_backlog_bytes = static_cast<std::size_t>(value);
-    }
-    const auto* skip = std::getenv("GUFO_DISK_EVICT_SKIP_TOKENS");
-    if (skip && *skip && *skip != '-') {
-      char* end = nullptr;
-      errno = 0;
-      const auto value = std::strtoull(skip, &end, 10);
-      if (!errno && end && !*end && value <= 1000000) {
-        result.evict_skip_tokens = static_cast<std::size_t>(value);
-      } else {
-        result.evict_skip_invalid = true;
-      }
-    } else if (skip && *skip) {
-      result.evict_skip_invalid = true;
-    }
-    if (result.evict_skip_invalid)
-      std::fprintf(stderr, "[disk-cache] warning: unsupported GUFO_DISK_EVICT_SKIP_TOKENS value '%s' (accepted 0..1000000); using the default 0 (evict-skip off)\n", skip);
-    return result;
-  }();
-  return settings;
-}
-std::int64_t ActivityTime() {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(
-             std::chrono::steady_clock::now().time_since_epoch())
-      .count();
-}
-
-bool DiskDeferEnabled() {
-  static const bool enabled = [] {
-    const char* value = std::getenv("GUFO_DISK_DEFER");
-    return value && std::strcmp(value, "1") == 0;
-  }();
-  return enabled;
-}
-
-// GUFO_DISK_DEFER_MS overrides the idle-gate bound (default 10 s, accepted 0..600000 ms), read once: the A/B can test a bound longer than a typical turn.
-std::chrono::milliseconds DiskDeferMaxWait(std::chrono::milliseconds fallback) {
-  // Only the environment parse is cached; the caller's option value is not (a static capturing `fallback` would pin the first store's bound).
-  static const std::optional<std::chrono::milliseconds> override_wait = []() -> std::optional<std::chrono::milliseconds> {
-    const char* text = std::getenv("GUFO_DISK_DEFER_MS");
-    if (!text || !*text)
-      return std::nullopt;
-    char* end = nullptr;
-    const long parsed = std::strtol(text, &end, 10);
-    if (end && !*end && parsed >= 0 && parsed <= 600000)
-      return std::chrono::milliseconds(parsed);
-    return std::nullopt;
-  }();
-  return override_wait ? *override_wait : fallback;
-}
 
 TextRunnerDescriptor DescriptorForInput(
     const TextModelRunner& runner,
@@ -176,42 +87,44 @@ constexpr std::size_t kMaxTokenCount = std::size_t{16} * 1024U * 1024U;
 constexpr std::string_view kFileSuffix = ".kvc";
 constexpr std::string_view kTemporaryPrefix = ".tmp-";
 
-class ScopedFileDescriptor {
+class ScopedPlatformFile {
 public:
-  ScopedFileDescriptor() = default;
-  explicit ScopedFileDescriptor(int descriptor) noexcept
+  ScopedPlatformFile() = default;
+  explicit ScopedPlatformFile(platform::PlatformFile descriptor) noexcept
       : descriptor_(descriptor) {}
-  ~ScopedFileDescriptor() {
-    if (descriptor_ >= 0) {
-      ::close(descriptor_);
+  ~ScopedPlatformFile() {
+    if (platform::FileValid(descriptor_)) {
+      platform::CloseFile(descriptor_);
     }
   }
 
-  ScopedFileDescriptor(const ScopedFileDescriptor&) = delete;
-  ScopedFileDescriptor& operator=(const ScopedFileDescriptor&) = delete;
+  ScopedPlatformFile(const ScopedPlatformFile&) = delete;
+  ScopedPlatformFile& operator=(const ScopedPlatformFile&) = delete;
 
-  ScopedFileDescriptor(ScopedFileDescriptor&& other) noexcept
-      : descriptor_(std::exchange(other.descriptor_, -1)) {}
-  ScopedFileDescriptor& operator=(ScopedFileDescriptor&& other) noexcept {
+  ScopedPlatformFile(ScopedPlatformFile&& other) noexcept
+      : descriptor_(std::exchange(other.descriptor_, platform::kInvalidFile)) {}
+  ScopedPlatformFile& operator=(ScopedPlatformFile&& other) noexcept {
     if (this != &other) {
-      if (descriptor_ >= 0) {
-        ::close(descriptor_);
+      if (platform::FileValid(descriptor_)) {
+        platform::CloseFile(descriptor_);
       }
-      descriptor_ = std::exchange(other.descriptor_, -1);
+      descriptor_ = std::exchange(other.descriptor_, platform::kInvalidFile);
     }
     return *this;
   }
 
-  [[nodiscard]] int get() const noexcept { return descriptor_; }
-  [[nodiscard]] int release() noexcept {
-    return std::exchange(descriptor_, -1);
+  [[nodiscard]] platform::PlatformFile get() const noexcept {
+    return descriptor_;
+  }
+  [[nodiscard]] platform::PlatformFile release() noexcept {
+    return std::exchange(descriptor_, platform::kInvalidFile);
   }
   [[nodiscard]] explicit operator bool() const noexcept {
-    return descriptor_ >= 0;
+    return platform::FileValid(descriptor_);
   }
 
 private:
-  int descriptor_{-1};
+  platform::PlatformFile descriptor_{platform::kInvalidFile};
 };
 
 class ScopedOperationPermit {
@@ -249,31 +162,28 @@ private:
   bool acquired_{false};
 };
 
-class ScopedFileLock {
+class ScopedDirectoryLock {
 public:
-  ScopedFileLock(int descriptor, int operation) noexcept
-      : descriptor_(descriptor) {
-    int result;
-    do {
-      result = ::flock(descriptor_, operation);
-    } while (result != 0 && errno == EINTR);
-    acquired_ = result == 0;
-  }
+  ScopedDirectoryLock(const platform::Directory& directory,
+                      bool exclusive_nonblocking) noexcept
+      : directory_(directory),
+        acquired_(exclusive_nonblocking
+                      ? platform::TryLockDirectoryExclusive(directory_)
+                      : platform::LockDirectoryShared(directory_)) {}
 
-  ~ScopedFileLock() {
+  ~ScopedDirectoryLock() {
     if (acquired_) {
-      while (::flock(descriptor_, LOCK_UN) != 0 && errno == EINTR) {
-      }
+      platform::UnlockDirectory(directory_);
     }
   }
 
   explicit operator bool() const noexcept { return acquired_; }
 
-  ScopedFileLock(const ScopedFileLock&) = delete;
-  ScopedFileLock& operator=(const ScopedFileLock&) = delete;
+  ScopedDirectoryLock(const ScopedDirectoryLock&) = delete;
+  ScopedDirectoryLock& operator=(const ScopedDirectoryLock&) = delete;
 
 private:
-  int descriptor_;
+  const platform::Directory& directory_;
   bool acquired_{false};
 };
 
@@ -376,13 +286,15 @@ std::string ErrnoMessage(std::string_view operation) {
   return std::string(operation) + ": " + std::strerror(errno);
 }
 
-bool WriteAll(int descriptor, std::span<const std::uint8_t> bytes) noexcept {
+bool WriteAll(platform::PlatformFile descriptor,
+              std::span<const std::uint8_t> bytes) noexcept {
   std::size_t offset = 0;
+  std::error_code ec;
   while (offset < bytes.size()) {
-    const ssize_t written =
-        ::write(descriptor, bytes.data() + offset, bytes.size() - offset);
-    if (written < 0) {
-      if (errno == EINTR) {
+    const std::size_t written = platform::Write(
+        descriptor, bytes.data() + offset, bytes.size() - offset, ec);
+    if (ec) {
+      if (ec == std::errc::interrupted) {
         continue;
       }
       return false;
@@ -390,18 +302,20 @@ bool WriteAll(int descriptor, std::span<const std::uint8_t> bytes) noexcept {
     if (written == 0) {
       return false;
     }
-    offset += static_cast<std::size_t>(written);
+    offset += written;
   }
   return true;
 }
 
-bool ReadAll(int descriptor, std::span<std::uint8_t> bytes) noexcept {
+bool ReadAll(platform::PlatformFile descriptor,
+             std::span<std::uint8_t> bytes) noexcept {
   std::size_t offset = 0;
+  std::error_code ec;
   while (offset < bytes.size()) {
-    const ssize_t count =
-        ::read(descriptor, bytes.data() + offset, bytes.size() - offset);
-    if (count < 0) {
-      if (errno == EINTR) {
+    const std::size_t count = platform::Read(descriptor, bytes.data() + offset,
+                                             bytes.size() - offset, ec);
+    if (ec) {
+      if (ec == std::errc::interrupted) {
         continue;
       }
       return false;
@@ -409,7 +323,7 @@ bool ReadAll(int descriptor, std::span<std::uint8_t> bytes) noexcept {
     if (count == 0) {
       return false;
     }
-    offset += static_cast<std::size_t>(count);
+    offset += count;
   }
   return true;
 }
@@ -654,8 +568,6 @@ struct ContinuationDiskStore::Impl {
     std::vector<std::uint8_t> identity;
     std::size_t retained_bytes;
     bool shared_prefix{false};
-    std::chrono::steady_clock::time_point enqueued;
-    std::string_view trigger{"write_through"};
   };
 
   Impl(ContinuationDiskStoreOptions store_options, EventSink sink,
@@ -663,16 +575,6 @@ struct ContinuationDiskStore::Impl {
       : options(std::move(store_options)),
         event_sink(std::move(sink)),
         key_hash(std::move(hasher)) {
-    options.persist_evict_idle =
-        options.persist_evict_idle.value_or(DiskWriterSettings().evict_idle);
-    options.slice = options.slice.value_or(DiskWriterSettings().slice);
-    options.idle_wait = options.idle_wait.value_or(DiskWriterSettings().idle);
-    options.evict_backlog_bytes = options.evict_backlog_bytes.value_or(
-        DiskWriterSettings().evict_backlog_bytes);
-    options.evict_skip_tokens = options.evict_skip_tokens.value_or(
-        DiskWriterSettings().evict_skip_tokens);
-    if (options.persist_evict_idle.value())
-      superseded = std::make_shared<std::atomic<std::size_t>>(0);
     ValidateOptions();
     InitializeDirectory();
     IndexExistingFiles();
@@ -686,112 +588,13 @@ struct ContinuationDiskStore::Impl {
   Impl& operator=(Impl&&) = delete;
 
   ~Impl() {
-    Shutdown();
-    try {
-      std::ostringstream line;
-      line << "event=disk_cache_writer_summary captures_seen="
-           << captures.load()
-           << " persisted_write_through=" << persisted[0].load()
-           << " persisted_evict=" << persisted[1].load()
-           << " persisted_idle=" << persisted[2].load()
-           << " persisted_shutdown=" << persisted[3].load()
-           << " superseded=" << (superseded ? superseded->load() : 0)
-           << " already_persisted=" << already_persisted.load()
-           << " dropped_evict=" << dropped_evict.load()
-           << " prefix_persisted=" << prefix_covered.load()
-           << " evict_skip_tokens=" << options.evict_skip_tokens.value_or(0)
-           << " evict_skip_env_invalid=" << (DiskWriterSettings().evict_skip_invalid ? 1 : 0)
-           << " skipped=" << skipped->load()
-           << " bytes_written=" << bytes_written.load();
-      Logger::Info("cache", line.str());
-    } catch (...) {
-    }
-    if (directory_fd >= 0) {
-      ::close(directory_fd);
-    }
-  }
-
-  void Shutdown() {
     {
       std::lock_guard lock(queue_mutex);
-      if (!stopping) {
-        shutdown_deadline =
-            std::chrono::steady_clock::now() + options.shutdown_wait;
-        stopping.store(true, std::memory_order_release);
-      }
+      stopping = true;
     }
     queue_changed.notify_all();
     if (writer.joinable())
       writer.join();
-    // Defensive drain: every accepted offer must leave Queued at shutdown.
-    std::lock_guard lock(queue_mutex);
-    for (auto& job : pending) {
-      SkipPersistence(job.snapshot,
-                      ContinuationDiskEventReason::kShutdownDeadline,
-                      job.trigger);
-      if (job.snapshot->persistence)
-        job.snapshot->persistence->state.store(SnapshotPersistence::kAbandoned);
-    }
-    pending.clear();
-    for (auto& job : evict_backlog) {
-      DropEvict(job.snapshot, ContinuationDiskEventReason::kShutdownDeadline);
-    }
-    evict_backlog.clear();
-    backlog_bytes = queued_bytes = 0;
-    queue_changed.notify_all();
-  }
-
-  void SkipPersistence(
-      const std::shared_ptr<const ContinuationSnapshot>& snapshot,
-      ContinuationDiskEventReason reason, std::string_view trigger) {
-    if (!snapshot || !snapshot->persistence) {
-      Emit(ContinuationDiskEventAction::kDroppedEvict, reason, 0,
-           snapshot ? snapshot->PayloadBytes() : 0, 0, 0, 0, trigger);
-      return;
-    }
-    auto& record = *snapshot->persistence;
-    record.state.store(SnapshotPersistence::kFailed);
-    Emit(ContinuationDiskEventAction::kSkipped, reason, 0,
-         snapshot->PayloadBytes(), record.tokens.size(), 0, 0, trigger);
-  }
-
-  void DropEvict(const std::shared_ptr<const ContinuationSnapshot>& snapshot,
-                 ContinuationDiskEventReason reason) {
-    if (snapshot->persistence)
-      snapshot->persistence->state.store(SnapshotPersistence::kAbandoned);
-    Emit(ContinuationDiskEventAction::kDroppedEvict, reason, 0,
-         snapshot->PayloadBytes(),
-         snapshot->persistence ? snapshot->persistence->tokens.size() : 0, 0, 0,
-         "evict");
-  }
-
-  // queue_mutex held. Transfer the charge; never exceed active+queued staging.
-  void PromoteBacklog() {
-    if (stopping && std::chrono::steady_clock::now() >= shutdown_deadline) {
-      for (auto& job : evict_backlog)
-        DropEvict(job.snapshot, ContinuationDiskEventReason::kShutdownDeadline);
-      evict_backlog.clear();
-      backlog_bytes = 0;
-      return;
-    }
-    const auto limit =
-        std::min(options.capacity_bytes, options.staging_capacity_bytes);
-    while (!evict_backlog.empty()) {
-      auto& job = evict_backlog.front();
-      const auto used = queued_bytes + capture_bytes->load();
-      if (used > limit - job.retained_bytes)
-        break;
-      const auto charge = job.retained_bytes;
-      try {
-        pending.push_back(std::move(job));
-        queued_bytes += charge;
-      } catch (...) {
-        DropEvict(job.snapshot,
-                  ContinuationDiskEventReason::kSerializationFailure);
-      }
-      evict_backlog.pop_front();
-      backlog_bytes -= charge;
-    }
   }
 
   void PersistQueued() noexcept {
@@ -799,162 +602,22 @@ struct ContinuationDiskStore::Impl {
       PendingSave job;
       {
         std::unique_lock lock(queue_mutex);
-        PromoteBacklog();
-        while (pending.empty()) {
-          if (options.persist_evict_idle.value() && persistence_source) {
-            const auto now = std::chrono::steady_clock::now();
-            const auto idle_since =
-                std::chrono::steady_clock::time_point(std::chrono::nanoseconds(
-                    last_activity.load(std::memory_order_acquire)));
-            if (stopping ||
-                (active_generations.load(std::memory_order_acquire) == 0 &&
-                 now - idle_since >= options.idle_wait.value())) {
-              // Source locks only the existing RAM metadata mutex. Never hold
-              // queue_mutex across it: eviction may concurrently enqueue.
-              auto source = persistence_source;
-              const bool shutdown = stopping;
-              lock.unlock();
-              std::shared_ptr<const ContinuationSnapshot> snapshot;
-              try {
-                snapshot = source(shutdown);
-              } catch (...) {
-                Emit(ContinuationDiskEventAction::kSkipped,
-                     ContinuationDiskEventReason::kSerializationFailure, 0, 0,
-                     0);
-              }
-              if (snapshot) {
-                if (shutdown &&
-                    std::chrono::steady_clock::now() >= shutdown_deadline) {
-                  // Terminal for this shutdown: source must advance past it.
-                  SkipPersistence(
-                      snapshot, ContinuationDiskEventReason::kShutdownDeadline,
-                      "shutdown");
-                  snapshot->persistence->state.store(
-                      SnapshotPersistence::kAbandoned);
-                } else if (shutdown || active_generations.load(
-                                           std::memory_order_acquire) == 0) {
-                  EnqueuePersistence(snapshot, shutdown ? "shutdown" : "idle");
-                }
-              }
-              lock.lock();
-              if (!pending.empty())
-                break;
-              if (shutdown && !snapshot && evict_backlog.empty()) {
-                writer_exited = true;
-                queue_changed.notify_all();
-                return;
-              }
-              if (stopping && !shutdown)
-                continue;  // Re-query with failed entries included at shutdown.
-              if (snapshot)
-                continue;
-            }
-          }
-          if (stopping && evict_backlog.empty()) {
-            writer_exited = true;
-            queue_changed.notify_all();
-            return;
-          }
-          if (options.persist_evict_idle.value())
-            queue_changed.wait_for(lock, std::chrono::milliseconds(250));
-          else
-            queue_changed.wait(lock,
-                               [this] { return stopping || !pending.empty(); });
-          PromoteBacklog();
-        }
-        if (defer_enabled && !stopping) {
-          const auto deadline = pending.front().enqueued +
-                                DiskDeferMaxWait(options.defer_max_wait);
-          while (flush_waiters == 0 && !stopping &&
-                 active_generations.load(std::memory_order_acquire) != 0 &&
-                 queued_bytes + capture_bytes->load(std::memory_order_relaxed) <
-                     std::min(options.capacity_bytes,
-                              options.staging_capacity_bytes) &&
-                 std::chrono::steady_clock::now() < deadline) {
-            queue_changed.wait_until(
-                lock, std::min(deadline, std::chrono::steady_clock::now() +
-                                             std::chrono::milliseconds(5)));
-          }
-        }
-        // Idle work stays pending if admission raced its final preflight.
-        if (pending.front().trigger == "idle" && !stopping &&
-            flush_waiters == 0 &&
-            (active_generations.load(std::memory_order_acquire) != 0 ||
-             std::chrono::steady_clock::now().time_since_epoch() -
-                     std::chrono::nanoseconds(
-                         last_activity.load(std::memory_order_acquire)) <
-                 options.idle_wait.value())) {
-          queue_changed.wait_for(lock, std::chrono::milliseconds(250));
-          continue;
-        }
+        queue_changed.wait(lock,
+                           [this] { return stopping || !pending.empty(); });
+        if (pending.empty())
+          return;
         job = std::move(pending.front());
         pending.pop_front();
       }
-      const auto record = job.snapshot->persistence;
-      bool stored = false;
       try {
-        if (stopping && options.persist_evict_idle.value() &&
-            std::chrono::steady_clock::now() >= shutdown_deadline) {
-          SkipPersistence(job.snapshot,
-                          ContinuationDiskEventReason::kShutdownDeadline,
-                          job.trigger);
-        } else {
-          // Existing exact files count as persisted without serializing again.
-          bool exists = false;
-          if (record) {
-            const ScopedOperationPermit permit(operation_gate);
-            exists = Touch(*job.runner, job.tokens, job.identity);
-          }
-          // Evict-skip policy: a snapshot whose persisted strict prefix is within GUFO_DISK_EVICT_SKIP_TOKENS tokens is covered by it (restore uses the
-          // prefix and prefills the tail), so the ~1 GB write is skipped; logged as already_persisted/prefix_persisted and counted.
-          bool covered = false;
-          std::size_t covering_len = 0;
-          if (!exists && record && job.trigger == "evict" &&
-              options.evict_skip_tokens.value() > 0) {
-            const ScopedOperationPermit permit(operation_gate);
-            const auto prefix = PersistedPrefixEntry(*job.runner, job.tokens, job.identity);
-            covering_len = prefix.has_value() ? (*prefix)->tokens.size() : 0;
-            covered = prefix.has_value() &&
-                      job.tokens.size() - covering_len <= options.evict_skip_tokens.value();
-            // The covering entry now stands in for this snapshot: refresh its LRU position (as the exact-dedup Touch does) so disk LRU does not
-            // evict it first and leave the session with nothing on disk (review F1).
-            if (covered)
-              TouchEntry(*prefix);
-          }
-          if (covered) {
-            stored = true;
-            Emit(ContinuationDiskEventAction::kAlreadyPersisted,
-                 ContinuationDiskEventReason::kPrefixPersisted, 0,
-                 job.snapshot->PayloadBytes(), job.tokens.size(), 0, 0,
-                 job.trigger, covering_len, job.tokens.size() - covering_len);
-          } else if (exists) {
-            stored = true;
-          } else {
-            stored = Save(*job.runner, job.tokens, *job.snapshot, job.identity,
-                          job.shared_prefix, job.trigger)
-                         .stored;
-            if (!stored && record) {
-              const ScopedOperationPermit permit(operation_gate);
-              exists = Touch(*job.runner, job.tokens, job.identity);
-              stored = exists;
-            }
-          }
-          if (exists)
-            Emit(ContinuationDiskEventAction::kAlreadyPersisted,
-                 ContinuationDiskEventReason::kAlreadyPersisted, 0,
-                 job.snapshot->PayloadBytes(), job.tokens.size(), 0, 0,
-                 job.trigger);
-        }
+        (void)Save(*job.runner, job.tokens, *job.snapshot, job.identity,
+                   job.shared_prefix);
       } catch (...) {
         Emit(ContinuationDiskEventAction::kSkipped,
-             ContinuationDiskEventReason::kIoFailure, 0, 0, job.tokens.size(),
-             0, 0, job.trigger);
+             ContinuationDiskEventReason::kIoFailure, 0, 0, job.tokens.size());
       }
-      if (record)
-        record->state.store(stored ? SnapshotPersistence::kPersisted
-                                   : (stopping ? SnapshotPersistence::kAbandoned
-                                               : SnapshotPersistence::kFailed));
       const auto released = job.retained_bytes;
+      // Release GPU/host snapshot storage before making its budget available.
       job = {};
       {
         std::lock_guard lock(queue_mutex);
@@ -1002,58 +665,27 @@ struct ContinuationDiskStore::Impl {
       }
     }
 
-    struct stat status{};
-    if (::lstat(options.directory.c_str(), &status) != 0) {
-      throw std::runtime_error(
-          ErrnoMessage("failed to inspect continuation disk directory"));
-    }
-    if (!S_ISDIR(status.st_mode) || S_ISLNK(status.st_mode) ||
-        status.st_uid != ::geteuid()) {
+    if (!directory_handle.Open(options.directory, error)) {
       throw std::runtime_error(
           "continuation disk directory is not a private owned directory");
     }
-    if (::chmod(options.directory.c_str(), S_IRWXU) != 0) {
+    if (!platform::RestrictToOwner(options.directory)) {
       throw std::runtime_error(
           ErrnoMessage("failed to secure continuation disk directory"));
     }
-
-    directory_fd = ::open(options.directory.c_str(),
-                          O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    if (directory_fd < 0) {
+    platform::FileInfo status{};
+    if (!platform::StatAt(directory_handle, ".", false, &status, error) ||
+        status.regular || !platform::OwnerOnly(status, 0077, 0700)) {
       throw std::runtime_error(
-          ErrnoMessage("failed to open continuation disk directory"));
+          "continuation disk directory is not a private owned directory");
     }
   }
-
-  // Phase timings of the publish that is currently being reported (Save holds write_mutex across PublishImage and its Emit).
-  mutable double phase_gather_ms_{0.0}, phase_write_ms_{0.0}, phase_hash_ms_{0.0}, phase_fsync_ms_{0.0};
 
   void Emit(ContinuationDiskEventAction action,
             ContinuationDiskEventReason reason, std::size_t file_bytes,
             std::size_t payload_bytes, std::size_t token_count,
-            double elapsed_ms = 0.0, std::size_t staging_used_bytes = 0,
-            std::string_view trigger = "write_through",
-            std::size_t covering_tokens = 0, std::size_t gap_tokens = 0) const noexcept {
-    if (reason == ContinuationDiskEventReason::kPrefixPersisted)
-      prefix_covered.fetch_add(1, std::memory_order_relaxed);
-    if (action == ContinuationDiskEventAction::kSkipped &&
-        (trigger == "evict" || trigger == "idle" || trigger == "shutdown") &&
-        reason != ContinuationDiskEventReason::kExactReplacement)
-      action = ContinuationDiskEventAction::kDroppedEvict;
-    if (action == ContinuationDiskEventAction::kDroppedEvict)
-      dropped_evict.fetch_add(1, std::memory_order_relaxed);
-    if (action == ContinuationDiskEventAction::kAlreadyPersisted)
-      already_persisted.fetch_add(1, std::memory_order_relaxed);
-    if (action == ContinuationDiskEventAction::kSkipped)
-      skipped->fetch_add(1, std::memory_order_relaxed);
-    if (action == ContinuationDiskEventAction::kStored) {
-      bytes_written.fetch_add(payload_bytes, std::memory_order_relaxed);
-      const auto index = trigger == "evict"      ? 1
-                         : trigger == "idle"     ? 2
-                         : trigger == "shutdown" ? 3
-                                                 : 0;
-      persisted[index].fetch_add(1, std::memory_order_relaxed);
-    }
+            double elapsed_ms = 0.0,
+            std::size_t staging_used_bytes = 0) const noexcept {
     if (!event_sink) {
       return;
     }
@@ -1069,27 +701,6 @@ struct ContinuationDiskStore::Impl {
           .staging_capacity_bytes = options.staging_capacity_bytes,
           .staging_used_bytes = staging_used_bytes,
           .elapsed_ms = elapsed_ms,
-          .trigger = trigger,
-          .slice_yields = action == ContinuationDiskEventAction::kStored
-                              ? phase_slice_yields
-                              : 0,
-          .slice_wait_ms = action == ContinuationDiskEventAction::kStored
-                               ? phase_slice_wait_ms
-                               : 0,
-          .phase_gather_ms = action == ContinuationDiskEventAction::kStored
-                                 ? phase_gather_ms_
-                                 : 0,
-          .phase_write_ms = action == ContinuationDiskEventAction::kStored
-                                ? phase_write_ms_
-                                : 0,
-          .phase_hash_ms = action == ContinuationDiskEventAction::kStored
-                               ? phase_hash_ms_
-                               : 0,
-          .phase_fsync_ms = action == ContinuationDiskEventAction::kStored
-                                ? phase_fsync_ms_
-                                : 0,
-          .covering_tokens = covering_tokens,
-          .gap_tokens = gap_tokens,
       });
     } catch (...) {
       return;
@@ -1099,22 +710,15 @@ struct ContinuationDiskStore::Impl {
   /// Called with queue_mutex held. Report capacity rejection before allocation
   /// or enqueue, where it would otherwise look like a successful cache capture.
   [[nodiscard]] bool CanStage(std::size_t bytes, std::size_t payload_bytes,
-                              std::size_t token_count,
-                              std::string_view trigger = "write_through") const {
-    if (writer_exited ||
-        (stopping && (!options.persist_evict_idle.value() ||
-                      std::chrono::steady_clock::now() >= shutdown_deadline))) {
-      Emit(ContinuationDiskEventAction::kSkipped,
-           ContinuationDiskEventReason::kShutdownDeadline, bytes, payload_bytes,
-           token_count, 0.0, 0, trigger);
+                              std::size_t token_count) const {
+    if (stopping)
       return false;
-    }
     const auto used =
         queued_bytes + capture_bytes->load(std::memory_order_relaxed);
     if (bytes > options.capacity_bytes) {
       Emit(ContinuationDiskEventAction::kSkipped,
            ContinuationDiskEventReason::kByteCapacity, bytes, payload_bytes,
-           token_count, 0.0, used, trigger);
+           token_count, 0.0, used);
       return false;
     }
     const auto limit =
@@ -1122,7 +726,7 @@ struct ContinuationDiskStore::Impl {
     if (bytes > limit || used > limit - bytes) {
       Emit(ContinuationDiskEventAction::kSkipped,
            ContinuationDiskEventReason::kStagingCapacity, bytes, payload_bytes,
-           token_count, 0.0, used, trigger);
+           token_count, 0.0, used);
       return false;
     }
     return true;
@@ -1143,20 +747,18 @@ struct ContinuationDiskStore::Impl {
     return Hash(MakeKeyBytes(persistence, tokens));
   }
 
-  [[nodiscard]] bool SafeRegularFile(std::string_view filename,
-                                     struct stat* status) const noexcept {
+  [[nodiscard]] bool SafeRegularFile(
+      std::string_view filename, platform::FileInfo* status) const noexcept {
     if (filename.empty() || filename.find('/') != std::string_view::npos ||
+        filename.find('\\') != std::string_view::npos ||
         filename.find("..") != std::string_view::npos || status == nullptr) {
       return false;
     }
-    if (::fstatat(directory_fd, std::string(filename).c_str(), status,
-                  AT_SYMLINK_NOFOLLOW) != 0) {
+    std::error_code ec;
+    if (!platform::StatAt(directory_handle, filename, false, status, ec)) {
       return false;
     }
-    return S_ISREG(status->st_mode) && !S_ISLNK(status->st_mode) &&
-           status->st_uid == ::geteuid() &&
-           (status->st_mode & (S_IRWXG | S_IRWXO)) == 0 &&
-           (status->st_mode & S_IRUSR) != 0;
+    return status->regular && platform::OwnerOnly(*status, 0077, 0400);
   }
 
   [[nodiscard]] bool ReadImage(std::string_view filename,
@@ -1166,52 +768,57 @@ struct ContinuationDiskStore::Impl {
     if (image == nullptr || failure_reason == nullptr) {
       return false;
     }
-    struct stat status{};
+    platform::FileInfo status{};
     if (!SafeRegularFile(filename, &status)) {
       *failure_reason = ContinuationDiskEventReason::kUnsafeFile;
       return false;
     }
-    if (file_bytes != nullptr && status.st_size > 0)
-      *file_bytes = static_cast<std::size_t>(status.st_size);
-    if (status.st_size <= 0 ||
-        static_cast<std::uint64_t>(status.st_size) >
-            static_cast<std::uint64_t>(options.staging_capacity_bytes)) {
-      *failure_reason = status.st_size > 0
+    if (file_bytes != nullptr && status.size > 0)
+      *file_bytes = static_cast<std::size_t>(status.size);
+    if (status.size == 0 || status.size > static_cast<std::uint64_t>(
+                                              options.staging_capacity_bytes)) {
+      *failure_reason = status.size > 0
                             ? ContinuationDiskEventReason::kStagingCapacity
                             : ContinuationDiskEventReason::kCorrupt;
       return false;
     }
-    const ScopedFileDescriptor file(
-        ::openat(directory_fd, std::string(filename).c_str(),
-                 O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+    std::error_code ec;
+    const ScopedPlatformFile file(platform::OpenAt(
+        directory_handle, filename, platform::FileMode::kRead, ec));
     if (!file) {
       *failure_reason = ContinuationDiskEventReason::kIoFailure;
       return false;
     }
-    image->resize(static_cast<std::size_t>(status.st_size));
+    image->resize(static_cast<std::size_t>(status.size));
     if (!ReadAll(file.get(), *image)) {
       *failure_reason = ContinuationDiskEventReason::kIoFailure;
       return false;
     }
     std::uint8_t trailing = 0;
     while (true) {
-      const ssize_t count = ::read(file.get(), &trailing, 1);
-      if (count < 0 && errno == EINTR) {
-        continue;
+      const std::size_t count = platform::Read(file.get(), &trailing, 1, ec);
+      if (ec) {
+        if (ec == std::errc::interrupted) {
+          continue;
+        }
+        *failure_reason = ContinuationDiskEventReason::kIoFailure;
+        return false;
       }
       if (count != 0) {
-        *failure_reason = count < 0 ? ContinuationDiskEventReason::kIoFailure
-                                    : ContinuationDiskEventReason::kCorrupt;
+        *failure_reason = ContinuationDiskEventReason::kCorrupt;
         return false;
       }
       break;
     }
+    // Restore uses the in-memory copy; drop the page-cache one.
+    platform::Advise(file.get(), platform::AdviseHint::kDontNeed, 0, 0);
     return true;
   }
 
   void RemoveFileOnly(std::string_view filename) const noexcept {
     if (!filename.empty()) {
-      (void)::unlinkat(directory_fd, std::string(filename).c_str(), 0);
+      std::error_code ec;
+      (void)platform::Unlink(directory_handle, filename, ec);
     }
   }
 
@@ -1230,7 +837,7 @@ struct ContinuationDiskStore::Impl {
         // Publishers hold a shared directory lock from before temporary-file
         // creation through rename. Defer orphan cleanup while any is active;
         // readers must not wait for another store's potentially long write.
-        const ScopedFileLock cleanup_lock(directory_fd, LOCK_EX | LOCK_NB);
+        const ScopedDirectoryLock cleanup_lock(directory_handle, true);
         if (cleanup_lock)
           RemoveFileOnly(filename);
         continue;
@@ -1354,8 +961,9 @@ struct ContinuationDiskStore::Impl {
     if (entry == entries.end()) {
       return true;
     }
-    if (::unlinkat(directory_fd, entry->filename.c_str(), 0) != 0 &&
-        errno != ENOENT) {
+    std::error_code ec;
+    if (!platform::Unlink(directory_handle, entry->filename, ec) &&
+        ec != std::errc::no_such_file_or_directory) {
       Emit(ContinuationDiskEventAction::kSkipped,
            ContinuationDiskEventReason::kIoFailure, entry->file_bytes,
            entry->payload_bytes, entry->tokens.size());
@@ -1415,7 +1023,7 @@ struct ContinuationDiskStore::Impl {
         (static_cast<std::uint64_t>(random_device()) << 32U) ^
         static_cast<std::uint64_t>(random_device()) ^
         static_cast<std::uint64_t>(++unique_counter) ^
-        static_cast<std::uint64_t>(::getpid());
+        static_cast<std::uint64_t>(platform::ProcessId());
     std::ostringstream output;
     output << std::hex << std::setfill('0') << std::setw(16) << random_value;
     return output.str();
@@ -1425,10 +1033,10 @@ struct ContinuationDiskStore::Impl {
     for (int attempt = 0; attempt < 64; ++attempt) {
       const std::string filename =
           digest + "-" + UniqueSuffix() + std::string(kFileSuffix);
-      struct stat status{};
-      if (::fstatat(directory_fd, filename.c_str(), &status,
-                    AT_SYMLINK_NOFOLLOW) != 0 &&
-          errno == ENOENT) {
+      platform::FileInfo status{};
+      std::error_code ec;
+      if (!platform::StatAt(directory_handle, filename, false, &status, ec) &&
+          ec == std::errc::no_such_file_or_directory) {
         return filename;
       }
     }
@@ -1442,16 +1050,17 @@ struct ContinuationDiskStore::Impl {
                                   std::size_t payload_bytes) {
     // Save serializes publishers in this instance with write_mutex, and
     // startup indexing completes before its worker starts. Thus no two lock
-    // owners in this instance can share directory_fd's open file description.
-    const ScopedFileLock publication_lock(directory_fd, LOCK_SH);
+    // owners in this instance can share directory_handle's open file
+    // description.
+    const ScopedDirectoryLock publication_lock(directory_handle, false);
     if (!publication_lock)
       return false;
     const std::string temporary_filename =
         std::string(kTemporaryPrefix) + UniqueSuffix();
-    ScopedFileDescriptor temporary(
-        ::openat(directory_fd, temporary_filename.c_str(),
-                 O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
-                 S_IRUSR | S_IWUSR));
+    std::error_code ec;
+    ScopedPlatformFile temporary(
+        platform::OpenAt(directory_handle, temporary_filename,
+                         platform::FileMode::kCreateNew, ec));
     if (!temporary) {
       return false;
     }
@@ -1459,45 +1068,19 @@ struct ContinuationDiskStore::Impl {
     try {
       crypto::Sha256Hasher hasher;
       std::size_t written = 0;
-      using Clock = std::chrono::steady_clock;
-      const auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
-      double write_ms = 0.0, hash_ms = 0.0;
-      phase_gather_ms_ = phase_write_ms_ = phase_hash_ms_ = phase_fsync_ms_ = 0.0;
-      phase_slice_yields = 0;
-      phase_slice_wait_ms = 0;
-      std::size_t slice_bytes = 0;
       const auto sink = [&](std::span<const std::uint8_t> bytes) {
         // Keep write sizes bounded and checksum each byte exactly once.
         while (!bytes.empty()) {
           const auto chunk =
               bytes.first(std::min(bytes.size(), std::size_t{1024 * 1024}));
-          const auto t0 = Clock::now();
           if (!WriteAll(temporary.get(), chunk)) {
             throw std::runtime_error("continuation disk write failed");
           }
-          const auto t1 = Clock::now();
           hasher.Update(chunk);
-          write_ms += ms(t1 - t0);
-          hash_ms += ms(Clock::now() - t1);
           bytes = bytes.subspan(chunk.size());
-          if (options.slice.value()) {
-            slice_bytes += chunk.size();
-            if (slice_bytes >= 16 * 1024 * 1024) {
-              slice_bytes = 0;
-              while (active_generations.load(std::memory_order_acquire) != 0 &&
-                     phase_slice_wait_ms < options.slice_max_wait.count() &&
-                     !stopping) {
-                const auto wait_start = Clock::now();
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                ++phase_slice_yields;
-                phase_slice_wait_ms += ms(Clock::now() - wait_start);
-              }
-            }
-          }
         }
       };
       sink(header);
-      const auto stream_start = Clock::now();
       runner.StreamPersistentSnapshot(snapshot, [&](auto bytes) {
         if (bytes.size() > payload_bytes - written) {
           throw std::runtime_error("snapshot serialization overflow");
@@ -1508,13 +1091,8 @@ struct ContinuationDiskStore::Impl {
       if (written != payload_bytes) {
         throw std::runtime_error("snapshot serialization truncated");
       }
-      phase_write_ms_ = write_ms;
-      phase_hash_ms_ = hash_ms;
-      phase_gather_ms_ =
-          std::max(0.0, ms(Clock::now() - stream_start) - write_ms - hash_ms -
-                            phase_slice_wait_ms);
       const auto checksum = hasher.FinishHex();
-      if (::lseek(temporary.get(), kChecksumOffset, SEEK_SET) < 0 ||
+      if (!platform::SeekTo(temporary.get(), kChecksumOffset, ec) ||
           !WriteAll(temporary.get(),
                     {reinterpret_cast<const std::uint8_t*>(checksum.data()),
                      checksum.size()})) {
@@ -1523,27 +1101,27 @@ struct ContinuationDiskStore::Impl {
     } catch (...) {
       valid = false;
     }
-    const auto fsync_start = std::chrono::steady_clock::now();
-    valid = valid && ::fsync(temporary.get()) == 0;
-    const int raw_descriptor = temporary.release();
-    if (::close(raw_descriptor) != 0) {
-      valid = false;
+    valid = valid && platform::SyncFile(temporary.get(), ec);
+    if (valid) {
+      // The image is durable now. Drop its clean pages so multi-GB snapshots
+      // don't accumulate in the page cache.
+      platform::Advise(temporary.get(), platform::AdviseHint::kDontNeed, 0, 0);
     }
+    platform::CloseFile(temporary.release());
     if (!valid) {
       RemoveFileOnly(temporary_filename);
       return false;
     }
-    if (::renameat(directory_fd, temporary_filename.c_str(), directory_fd,
-                   std::string(final_filename).c_str()) != 0) {
+    if (!platform::Rename(directory_handle, temporary_filename,
+                          directory_handle, final_filename, ec)) {
       RemoveFileOnly(temporary_filename);
       return false;
     }
-    if (::fsync(directory_fd) != 0) {
+    if (!platform::SyncDirectory(directory_handle, ec)) {
       RemoveFileOnly(final_filename);
-      (void)::fsync(directory_fd);
+      (void)platform::SyncDirectory(directory_handle, ec);
       return false;
     }
-    phase_fsync_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fsync_start).count();
     return true;
   }
 
@@ -1551,8 +1129,8 @@ struct ContinuationDiskStore::Impl {
       const TextModelRunner& runner,
       std::span<const TextRunnerToken> checkpoint_tokens,
       const TextRunnerSnapshot& snapshot,
-      std::span<const std::uint8_t> input_identity, bool shared_prefix = false,
-      std::string_view trigger = "write_through") {
+      std::span<const std::uint8_t> input_identity,
+      bool shared_prefix = false) {
     // Serialize writers, but keep existing entries readable during payload
     // serialization, hashing and filesystem durability operations.
     const std::lock_guard write_lock(write_mutex);
@@ -1561,13 +1139,12 @@ struct ContinuationDiskStore::Impl {
     if (!descriptor.persistence.has_value()) {
       Emit(ContinuationDiskEventAction::kSkipped,
            ContinuationDiskEventReason::kUnsupported, 0, 0,
-           checkpoint_tokens.size(), 0, 0, trigger);
+           checkpoint_tokens.size());
       return {};
     }
     if (checkpoint_tokens.empty()) {
       Emit(ContinuationDiskEventAction::kSkipped,
-           ContinuationDiskEventReason::kSerializationFailure, 0, 0, 0, 0, 0,
-           trigger);
+           ContinuationDiskEventReason::kSerializationFailure, 0, 0, 0);
       return {};
     }
     // The same prefix is offered again whenever a restored continuation is
@@ -1582,7 +1159,7 @@ struct ContinuationDiskStore::Impl {
       TouchEntry(existing);
       Emit(ContinuationDiskEventAction::kSkipped,
            ContinuationDiskEventReason::kExactReplacement, existing->file_bytes,
-           existing->payload_bytes, checkpoint_tokens.size(), 0, 0, trigger);
+           existing->payload_bytes, checkpoint_tokens.size());
       return {};
     }
 
@@ -1598,7 +1175,7 @@ struct ContinuationDiskStore::Impl {
         WithinCheckpointStep(runner, checkpoint_tokens, input_identity)) {
       Emit(ContinuationDiskEventAction::kSkipped,
            ContinuationDiskEventReason::kMinStep, 0, 0,
-           checkpoint_tokens.size(), 0, 0, trigger);
+           checkpoint_tokens.size());
       return {};
     }
 
@@ -1617,13 +1194,13 @@ struct ContinuationDiskStore::Impl {
       if (file_bytes > options.staging_capacity_bytes) {
         Emit(ContinuationDiskEventAction::kSkipped,
              ContinuationDiskEventReason::kStagingCapacity, file_bytes,
-             payload_bytes, checkpoint_tokens.size(), 0, 0, trigger);
+             payload_bytes, checkpoint_tokens.size());
         return {};
       }
       if (file_bytes > options.capacity_bytes) {
         Emit(ContinuationDiskEventAction::kSkipped,
              ContinuationDiskEventReason::kByteCapacity, file_bytes,
-             payload_bytes, checkpoint_tokens.size(), 0, 0, trigger);
+             payload_bytes, checkpoint_tokens.size());
         return {};
       }
       header = BuildHeader(*descriptor.persistence, checkpoint_tokens,
@@ -1631,7 +1208,7 @@ struct ContinuationDiskStore::Impl {
     } catch (...) {
       Emit(ContinuationDiskEventAction::kSkipped,
            ContinuationDiskEventReason::kSerializationFailure, file_bytes,
-           payload_bytes, checkpoint_tokens.size(), 0, 0, trigger);
+           payload_bytes, checkpoint_tokens.size());
       return {};
     }
 
@@ -1643,7 +1220,7 @@ struct ContinuationDiskStore::Impl {
     if (!published) {
       Emit(ContinuationDiskEventAction::kSkipped,
            ContinuationDiskEventReason::kIoFailure, file_bytes, payload_bytes,
-           checkpoint_tokens.size(), 0, 0, trigger);
+           checkpoint_tokens.size());
       return {};
     }
     // No visible entry is evicted until its replacement is fully durable.
@@ -1651,7 +1228,7 @@ struct ContinuationDiskStore::Impl {
       RemoveFileOnly(filename);
       Emit(ContinuationDiskEventAction::kSkipped,
            ContinuationDiskEventReason::kByteCapacity, file_bytes,
-           payload_bytes, checkpoint_tokens.size(), 0, 0, trigger);
+           payload_bytes, checkpoint_tokens.size());
       return {};
     }
 
@@ -1675,8 +1252,7 @@ struct ContinuationDiskStore::Impl {
          checkpoint_tokens.size(),
          std::chrono::duration<double, std::milli>(
              std::chrono::steady_clock::now() - started)
-             .count(),
-         0, trigger);
+             .count());
     return {
         .stored = true,
         .file_bytes = file_bytes,
@@ -1729,15 +1305,6 @@ struct ContinuationDiskStore::Impl {
       const EntryIterator candidate = FindLongestInputCandidate(
           runner, prompt, input_identity, input_prefixes);
       if (candidate == entries.end()) {
-        if (!identity_mismatch_reported &&
-            std::ranges::any_of(entries, [&](const auto& entry) {
-              return !entry.persistence.compatibility_identity.empty() &&
-                     entry.persistence != *descriptor.persistence;
-            })) {
-          identity_mismatch_reported = true;
-          Emit(ContinuationDiskEventAction::kSkipped,
-               ContinuationDiskEventReason::kIdentityMismatch, 0, 0, 0);
-        }
         Emit(ContinuationDiskEventAction::kMiss,
              ContinuationDiskEventReason::kNotFound, 0, 0, 0);
         return {};
@@ -1820,8 +1387,7 @@ struct ContinuationDiskStore::Impl {
 
   void TouchEntry(EntryIterator entry) {
     entry->last_access = std::filesystem::file_time_type::clock::now();
-    (void)::utimensat(directory_fd, entry->filename.c_str(), nullptr,
-                      AT_SYMLINK_NOFOLLOW);
+    (void)platform::TouchAt(directory_handle, entry->filename);
   }
 
   [[nodiscard]] std::vector<std::size_t> SharedPrefixBoundaries(
@@ -1850,25 +1416,8 @@ struct ContinuationDiskStore::Impl {
     std::ranges::sort(boundaries);
     boundaries.erase(std::unique(boundaries.begin(), boundaries.end()),
                      boundaries.end());
-    // Prefill chunk boundaries are numerically free only at multiples of 256 tokens (lead 1 quality gate T2b, 2026-10-06: grids 3584 / 3840 identical to
-    // 4096, 4160 / 3500 not): a split at any other position changes the resulting state and so the later output. Round every learned boundary DOWN to a
-    // multiple of the alignment (cost < 256 re-prefilled tokens per hit) so a disk-cache run stays bit-identical to a run without it.
-    // GUFO_DISK_BOUNDARY_ALIGN=0 (or 1) disables the rounding (A/B), any other value N rounds down to a multiple of N.
-    const std::size_t boundary_align = [] {   // read per call: tests switch GUFO_DISK_BOUNDARY_ALIGN
-      const char* e = std::getenv("GUFO_DISK_BOUNDARY_ALIGN");
-      if (e == nullptr || *e == '\0') return std::size_t{256};
-      const auto v = std::strtoull(e, nullptr, 10);
-      return static_cast<std::size_t>(v);
-    }();
-    if (boundary_align > 1) {
-      for (auto& length : boundaries) length -= length % boundary_align;
-      std::ranges::sort(boundaries);
-      boundaries.erase(std::unique(boundaries.begin(), boundaries.end()),
-                       boundaries.end());
-    }
-    std::erase_if(boundaries, [min_tokens](auto length) {
-      return length == 0 || length < min_tokens;
-    });
+    std::erase_if(boundaries,
+                  [min_tokens](auto length) { return length < min_tokens; });
     // Keep the longest ones: they save the most prefill when they hit.
     if (boundaries.size() > max_boundaries) {
       boundaries.erase(
@@ -1908,34 +1457,13 @@ struct ContinuationDiskStore::Impl {
     return true;
   }
 
-  // Length in tokens of the longest persisted entry (same compatibility identity) that is a STRICT prefix of `tokens`; 0 when none. Caller holds the
-  // operation gate. Used by the evict-skip policy.
-  [[nodiscard]] std::optional<EntryIterator> PersistedPrefixEntry(
-      const TextModelRunner& runner, std::span<const TextRunnerToken> tokens,
-      std::span<const std::uint8_t> input_identity) {
-    const auto descriptor = DescriptorForInput(runner, input_identity);
-    if (!descriptor.persistence.has_value()) {
-      return std::nullopt;
-    }
-    const auto found = prefixes.find(PrefixKey(*descriptor.persistence));
-    if (found == prefixes.end()) {
-      return std::nullopt;
-    }
-    const auto match = found->second.Find(tokens);
-    if (!match.longest || (*match.longest)->tokens.size() >= tokens.size()) {
-      return std::nullopt;
-    }
-    return match.longest;
-  }
-
   ContinuationDiskStoreOptions options;
   EventSink event_sink;
   KeyHashFunction key_hash;
-  int directory_fd{-1};
+  platform::Directory directory_handle;
   mutable std::binary_semaphore operation_gate{1};
   std::mutex write_mutex;
   std::list<Entry> entries;
-  bool identity_mismatch_reported = false;
   std::unordered_multimap<std::string, EntryIterator> index;
   std::map<PersistenceKey, PrefixNode> prefixes;
   std::atomic<std::size_t> retained{0};
@@ -1945,37 +1473,10 @@ struct ContinuationDiskStore::Impl {
   mutable std::mutex queue_mutex;
   std::condition_variable queue_changed;
   std::deque<PendingSave> pending;
-  std::list<PendingSave> evict_backlog;
-  std::size_t backlog_bytes{0};
-  bool writer_exited{false};  // queue_mutex serializes exit against offers.
   std::size_t queued_bytes{0};
   std::shared_ptr<std::atomic<std::size_t>> capture_bytes =
       std::make_shared<std::atomic<std::size_t>>(0);
-  const bool defer_enabled{DiskDeferEnabled()};
-  std::atomic<std::size_t> active_generations{0};
-  std::size_t flush_waiters{0};
-  std::atomic<bool> stopping{false};
-  std::chrono::steady_clock::time_point shutdown_deadline;
-  std::atomic<std::int64_t> last_activity{ActivityTime()};
-  std::shared_ptr<const TextModelRunner> persistence_runner;
-  PersistenceSource persistence_source;
-  std::atomic<std::size_t> captures{0};
-  std::shared_ptr<std::atomic<std::size_t>> skipped =
-      std::make_shared<std::atomic<std::size_t>>(0);
-  mutable std::array<std::atomic<std::size_t>, 4> persisted{};
-  mutable std::atomic<std::size_t> bytes_written{0};
-  std::shared_ptr<std::atomic<std::size_t>> superseded;
-  mutable std::atomic<std::size_t> dropped_evict{0}, already_persisted{0}, prefix_covered{0};
-  mutable std::size_t phase_slice_yields{0};
-  mutable double phase_slice_wait_ms{0};
-  std::size_t SaveAsync(std::shared_ptr<const TextModelRunner> runner,
-                        std::vector<TextRunnerToken> tokens,
-                        std::shared_ptr<const TextRunnerSnapshot> snapshot,
-                        std::vector<std::uint8_t> identity,
-                        std::unique_ptr<CaptureReservation> reservation,
-                        bool shared_prefix, std::string_view trigger);
-  void EnqueuePersistence(std::shared_ptr<const ContinuationSnapshot> snapshot,
-                          std::string_view trigger);
+  bool stopping{false};
   std::thread writer;
 };
 
@@ -1987,36 +1488,6 @@ ContinuationDiskStore::ContinuationDiskStore(
 
 ContinuationDiskStore::~ContinuationDiskStore() = default;
 
-ContinuationDiskStore::GenerationActivity::GenerationActivity(Impl* owner)
-    : owner_(owner) {
-  if (owner_)
-    owner_->active_generations.fetch_add(1, std::memory_order_acq_rel);
-}
-
-ContinuationDiskStore::GenerationActivity::~GenerationActivity() {
-  if (owner_) {
-    if (owner_->options.persist_evict_idle.value())
-      owner_->last_activity.store(ActivityTime(), std::memory_order_release);
-    owner_->active_generations.fetch_sub(1, std::memory_order_acq_rel);
-    owner_->queue_changed.notify_all();
-  }
-}
-
-ContinuationDiskStore::GenerationActivity
-ContinuationDiskStore::BeginGeneration() {
-  return GenerationActivity(impl_->defer_enabled ||
-                                    impl_->options.slice.value() ||
-                                    impl_->options.persist_evict_idle.value()
-                                ? impl_.get()
-                                : nullptr);
-}
-
-ContinuationDiskStore::GenerationActivity
-ContinuationDiskStore::BeginAdmission() {
-  return GenerationActivity(
-      impl_->options.persist_evict_idle.value() ? impl_.get() : nullptr);
-}
-
 ContinuationDiskStore::CaptureReservation::~CaptureReservation() {
   counter_->fetch_sub(bytes_, std::memory_order_relaxed);
 }
@@ -2025,9 +1496,6 @@ std::unique_ptr<ContinuationDiskStore::CaptureReservation>
 ContinuationDiskStore::ReserveCapture(
     const TextModelRunner& runner, std::size_t token_count,
     std::size_t snapshot_bytes, std::span<const std::uint8_t> input_identity) {
-  // Memory guard: staging a capture for disk copies device state into host RAM, so it stops with the RAM snapshots.
-  if (const auto* guard = gufo::platform::ProcessMemoryGuard(); guard != nullptr && !guard->SnapshotsAllowed())
-    return {};
   const auto descriptor = DescriptorForInput(runner, input_identity);
   if (!descriptor.persistence || token_count == 0 || snapshot_bytes == 0)
     return {};
@@ -2063,33 +1531,12 @@ std::size_t ContinuationDiskStore::SaveAsync(
     std::vector<TextRunnerToken> checkpoint_tokens,
     std::shared_ptr<const TextRunnerSnapshot> snapshot,
     std::vector<std::uint8_t> input_identity,
-    std::unique_ptr<CaptureReservation> reservation, bool shared_prefix,
-    std::string_view trigger) {
-  return impl_->SaveAsync(std::move(runner), std::move(checkpoint_tokens),
-                          std::move(snapshot), std::move(input_identity),
-                          std::move(reservation), shared_prefix, trigger);
-}
-
-std::size_t ContinuationDiskStore::Impl::SaveAsync(
-    std::shared_ptr<const TextModelRunner> runner,
-    std::vector<TextRunnerToken> checkpoint_tokens,
-    std::shared_ptr<const TextRunnerSnapshot> snapshot,
-    std::vector<std::uint8_t> input_identity,
-    std::unique_ptr<CaptureReservation> reservation, bool shared_prefix,
-    std::string_view trigger) {
-  if (!runner || !snapshot || checkpoint_tokens.empty()) {
-    Emit(ContinuationDiskEventAction::kSkipped,
-         ContinuationDiskEventReason::kSerializationFailure, 0, 0,
-         checkpoint_tokens.size(), 0, 0, trigger);
+    std::unique_ptr<CaptureReservation> reservation, bool shared_prefix) {
+  if (!runner || !snapshot || checkpoint_tokens.empty())
     return 0;
-  }
   const auto descriptor = DescriptorForInput(*runner, input_identity);
-  if (!descriptor.persistence) {
-    Emit(ContinuationDiskEventAction::kSkipped,
-         ContinuationDiskEventReason::kUnsupported, 0, 0,
-         checkpoint_tokens.size(), 0, 0, trigger);
+  if (!descriptor.persistence)
     return 0;
-  }
   const auto file_bytes =
       CheckedFileBytes(descriptor.persistence->compatibility_identity.size(),
                        checkpoint_tokens.size(),
@@ -2100,198 +1547,27 @@ std::size_t ContinuationDiskStore::Impl::SaveAsync(
       std::max(snapshot->PayloadBytes(),
                runner->PersistentSnapshotPayloadBytes(*snapshot)));
   {
-    std::lock_guard lock(queue_mutex);
-    if (trigger == "idle" &&
-        active_generations.load(std::memory_order_acquire) != 0) {
-      if (snapshot->persistence)
-        snapshot->persistence->state.store(SnapshotPersistence::kDirty);
-      return 0;
-    }
+    std::lock_guard lock(impl_->queue_mutex);
     if (reservation) {
-      if (reservation->counter_ != capture_bytes) {
-        Emit(ContinuationDiskEventAction::kSkipped,
-             ContinuationDiskEventReason::kSerializationFailure, 0, 0,
-             checkpoint_tokens.size(), 0, 0, trigger);
+      if (reservation->counter_ != impl_->capture_bytes)
         return 0;
-      }
       reservation.reset();
     }
-    if (options.persist_evict_idle.value() && trigger == "evict") {
-      const auto limit =
-          std::min(options.capacity_bytes, options.staging_capacity_bytes);
-      if (writer_exited ||
-          (stopping && std::chrono::steady_clock::now() >= shutdown_deadline)) {
-        DropEvict(snapshot, writer_exited
-                                ? ContinuationDiskEventReason::kWriterStopped
-                                : ContinuationDiskEventReason::kShutdownDeadline);
-        return 0;
-      }
-      if (charge > limit) {
-        DropEvict(snapshot, charge > options.capacity_bytes
-                                ? ContinuationDiskEventReason::kByteCapacity
-                                : ContinuationDiskEventReason::kStagingCapacity);
-        return 0;
-      }
-      const auto used = queued_bytes + capture_bytes->load();
-      if (!evict_backlog.empty() || used > limit - charge) {
-        const auto bound = options.evict_backlog_bytes.value();
-        if (evict_backlog.size() >= options.evict_backlog_count ||
-            charge > bound || backlog_bytes > bound - charge) {
-          DropEvict(snapshot, ContinuationDiskEventReason::kEvictBacklogCapacity);
-          return 0;
-        }
-        evict_backlog.push_back({std::move(runner), std::move(checkpoint_tokens),
-                                std::move(snapshot), std::move(input_identity),
-                                charge, shared_prefix,
-                                std::chrono::steady_clock::now(), trigger});
-        backlog_bytes += charge;
-        queue_changed.notify_all();
-        return file_bytes;
-      }
-    } else if (!CanStage(charge, snapshot->PayloadBytes(),
-                         checkpoint_tokens.size(), trigger)) {
+    if (!impl_->CanStage(charge, snapshot->PayloadBytes(),
+                         checkpoint_tokens.size()))
       return 0;
-    }
-    pending.push_back({std::move(runner), std::move(checkpoint_tokens),
-                       std::move(snapshot), std::move(input_identity), charge,
-                       shared_prefix,
-                       defer_enabled ? std::chrono::steady_clock::now()
-                                     : std::chrono::steady_clock::time_point{},
-                       trigger});
-    queued_bytes += charge;
+    impl_->pending.push_back({std::move(runner), std::move(checkpoint_tokens),
+                              std::move(snapshot), std::move(input_identity),
+                              charge, shared_prefix});
+    impl_->queued_bytes += charge;
   }
-  queue_changed.notify_one();
+  impl_->queue_changed.notify_one();
   return file_bytes;
-}
-
-bool ContinuationDiskStore::persist_on_evict_idle() const noexcept {
-  return impl_->options.persist_evict_idle.value();
-}
-void ContinuationDiskStore::SetPersistenceSource(
-    std::shared_ptr<const TextModelRunner> runner, PersistenceSource source) {
-  std::lock_guard lock(impl_->queue_mutex);
-  impl_->persistence_runner = std::move(runner);
-  impl_->persistence_source = std::move(source);
-  impl_->queue_changed.notify_all();
-}
-void ContinuationDiskStore::NoteOptionalCopyRefused(
-    std::size_t token_count) noexcept {
-  impl_->Emit(ContinuationDiskEventAction::kSkipped,
-              ContinuationDiskEventReason::kRamNotRetained, 0, 0, token_count);
-}
-void ContinuationDiskStore::Shutdown() {
-  impl_->Shutdown();
-}
-void ContinuationDiskStore::PersistEvicted(
-    std::shared_ptr<const ContinuationSnapshot> snapshot) {
-  if (persist_on_evict_idle())
-    impl_->EnqueuePersistence(std::move(snapshot), "evict");
-}
-
-std::size_t ContinuationDiskStore::Capture(
-    std::shared_ptr<const TextModelRunner> runner,
-    std::vector<TextRunnerToken> tokens,
-    std::shared_ptr<const TextRunnerSnapshot> snapshot,
-    std::vector<std::uint8_t> identity,
-    std::unique_ptr<CaptureReservation> reservation, bool shared_prefix,
-    bool already_persisted, bool retained_in_ram) {
-  if (snapshot)
-    impl_->captures.fetch_add(1, std::memory_order_relaxed);
-  const auto count = tokens.size();
-  try {
-    if (!persist_on_evict_idle())
-      return already_persisted
-                 ? 0
-                 : SaveAsync(std::move(runner), std::move(tokens),
-                             std::move(snapshot), std::move(identity),
-                             std::move(reservation), shared_prefix);
-    reservation.reset();
-    if (!snapshot) {
-      impl_->Emit(ContinuationDiskEventAction::kSkipped,
-                  ContinuationDiskEventReason::kRamNotRetained, 0,
-                  snapshot ? snapshot->PayloadBytes() : 0, tokens.size());
-      return 0;
-    }
-    auto record = std::make_shared<SnapshotPersistence>();
-    record->tokens = std::move(tokens);
-    record->input_identity = std::move(identity);
-    record->shared_prefix = shared_prefix;
-    record->state.store(already_persisted ? SnapshotPersistence::kPersisted
-                                          : SnapshotPersistence::kDirty);
-    auto sink = impl_->event_sink;
-    auto skipped = impl_->skipped;
-    const auto count = record->tokens.size(), bytes = snapshot->PayloadBytes();
-    record->on_discard = [sink, skipped, count, bytes] {
-      skipped->fetch_add(1, std::memory_order_relaxed);
-      if (sink)
-        sink({.action = ContinuationDiskEventAction::kSkipped,
-              .reason = ContinuationDiskEventReason::kRamNotRetained,
-              .payload_bytes = bytes,
-              .token_count = count});
-    };
-    auto superseded = impl_->superseded;
-    record->on_superseded = [sink, superseded, count, bytes] {
-      superseded->fetch_add(1, std::memory_order_relaxed);
-      if (sink)
-        sink({.action = ContinuationDiskEventAction::kSuperseded,
-              .reason = ContinuationDiskEventReason::kSuperseded,
-              .payload_bytes = bytes, .token_count = count, .trigger = "evict"});
-    };
-    snapshot->persistence = std::move(record);
-    impl_->queue_changed.notify_all();
-    if (!retained_in_ram && !already_persisted)
-      impl_->EnqueuePersistence(snapshot, "evict");
-    return 0;
-  } catch (...) {
-    impl_->Emit(ContinuationDiskEventAction::kSkipped,
-                ContinuationDiskEventReason::kSerializationFailure, 0, 0,
-                count);
-    return 0;
-  }
-}
-
-void ContinuationDiskStore::Impl::EnqueuePersistence(
-    std::shared_ptr<const ContinuationSnapshot> snapshot,
-    std::string_view trigger) {
-  if (!snapshot || !snapshot->persistence)
-    return;
-  auto record = snapshot->persistence;
-  auto state = record->state.load();
-  if ((state != SnapshotPersistence::kDirty &&
-       state != SnapshotPersistence::kFailed) ||
-      !record->state.compare_exchange_strong(state,
-                                             SnapshotPersistence::kQueued))
-    return;
-  bool accepted = false;
-  try {
-    auto text = std::dynamic_pointer_cast<const TextRunnerSnapshot>(snapshot);
-    if (!persistence_runner || !text)
-      throw std::runtime_error("persistent RAM snapshot has no text runner");
-    accepted = SaveAsync(persistence_runner, record->tokens, std::move(text),
-                         record->input_identity, {}, record->shared_prefix,
-                         trigger) != 0;
-  } catch (...) {
-    Emit(ContinuationDiskEventAction::kSkipped,
-         ContinuationDiskEventReason::kSerializationFailure, 0,
-         snapshot->PayloadBytes(), record->tokens.size(), 0, 0, trigger);
-  }
-  if (!accepted && record->state.load() == SnapshotPersistence::kQueued)
-    record->state.store(stopping ? SnapshotPersistence::kAbandoned
-                                 : SnapshotPersistence::kFailed);
-  queue_changed.notify_all();
 }
 
 void ContinuationDiskStore::Flush() {
   std::unique_lock lock(impl_->queue_mutex);
-  if (impl_->defer_enabled || impl_->options.persist_evict_idle.value()) {
-    ++impl_->flush_waiters;
-    impl_->queue_changed.notify_all();
-  }
-  impl_->queue_changed.wait(lock, [this] {
-    return impl_->queued_bytes == 0 && impl_->evict_backlog.empty();
-  });
-  if (impl_->defer_enabled || impl_->options.persist_evict_idle.value())
-    --impl_->flush_waiters;
+  impl_->queue_changed.wait(lock, [this] { return impl_->queued_bytes == 0; });
 }
 
 ContinuationDiskStore::SaveResult ContinuationDiskStore::Save(
@@ -2366,10 +1642,6 @@ std::size_t ContinuationDiskStore::capacity_bytes() const noexcept {
 
 std::size_t ContinuationDiskStore::staging_capacity_bytes() const noexcept {
   return impl_->options.staging_capacity_bytes;
-}
-
-const ContinuationDiskStoreOptions& ContinuationDiskStore::options() const noexcept {
-  return impl_->options;
 }
 
 }  // namespace gufo::server

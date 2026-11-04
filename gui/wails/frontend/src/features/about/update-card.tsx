@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { ActionButton, ActionError } from '@/components/action-feedback'
-import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
+import { AboutPopup } from '@/components/about-popup'
+import { Disclosure } from '@/components/disclosure'
 import { Progress } from '@/components/ui/progress'
 import { actions, type View } from '@/lib/bindings'
 import { bytes, updatePresentation } from '@/lib/format'
@@ -74,219 +75,223 @@ export function UpdateCard({
     not_checked: 'Updates have not been checked.',
   }
   return (
-    <Card data-update={state}>
-      <CardHeader>
-        <CardTitle>Updates</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {/* After an update the one line is the result: "Updated to 0.1.2." */}
-        {checkError ? (
-          <ErrorNote>
-            <p>{checkFailureSentence(checkError)}</p>
-          </ErrorNote>
-        ) : labels[state] !== '' && !updated ? (
-          <p>{labels[state] ?? 'Update state unavailable.'}</p>
-        ) : null}
-        {/* Two versions are shown only when they are being compared. */}
-        {update.available_version && state !== 'rollback_pending' && (
-          <p className="text-sm text-muted-foreground">
-            Installed:{' '}
-            <span className="tabular-nums">{update.current_version}</span> ·
-            Available:{' '}
-            <span className="tabular-nums">{update.available_version}</span>
-          </p>
-        )}
-        {notice && (
-          <p role="status">{notice.replace(/candidate/gi, 'new version')}</p>
-        )}
-        {(offer ||
-          state === 'progress' ||
-          update.runtime_followup_required) && (
-          <div className="space-y-1 text-sm">
-            {update.runtime_download_bytes === 0 && (
-              <p>Engine files: not redownloaded.</p>
-            )}
-            {update.models_download_bytes === 0 && (
-              <p>Models: not redownloaded.</p>
-            )}
-            {update.size_bytes != null && (
-              <p>Download size: {bytes(update.size_bytes)}.</p>
-            )}
-          </div>
-        )}
-        {update.runtime_followup_required && (
-          <GUIError
-            error={{
-              code: 'runtime_missing',
-              remedy:
-                'Prepare the engine files for this Bubo version before starting.',
-            }}
-          />
-        )}
-        {state !== 'not_checked' &&
-          state !== 'rollback_pending' &&
-          !checkFailed &&
-          !checkError && (
-            <GUIError error={update.error} recovery={state !== 'failed'} />
+    <section aria-label="Updates" data-update={state} className="space-y-4">
+      <h2 className="text-2xl">Updates</h2>
+      {/* After an update the one line is the result: "Updated to 0.1.2." */}
+      {checkError ? (
+        <ErrorNote>
+          <p>{checkFailureSentence(checkError)}</p>
+        </ErrorNote>
+      ) : labels[state] !== '' && !updated ? (
+        <p>{labels[state] ?? 'Update state unavailable.'}</p>
+      ) : null}
+      {/* Two versions are shown only when they are being compared. */}
+      {update.available_version && state !== 'rollback_pending' && (
+        <p className="text-sm text-muted-foreground">
+          Installed:{' '}
+          <span className="tabular-nums">{update.current_version}</span> ·
+          Available:{' '}
+          <span className="tabular-nums">{update.available_version}</span>
+        </p>
+      )}
+      {notice && (
+        <p role="status">{notice.replace(/candidate/gi, 'new version')}</p>
+      )}
+      {(offer || state === 'progress' || update.runtime_followup_required) && (
+        <div className="space-y-1 text-sm">
+          {update.runtime_download_bytes === 0 && (
+            <p>Engine files: not redownloaded.</p>
           )}
-        {checkError && (
-          <details className="text-xs text-muted-foreground">
-            <summary>Details</summary>
-            <p>{checkError.remedy}</p>
-          </details>
-        )}
-        {!(state in labels) && (
-          <ActionError
-            error={{
-              code: 'internal_error',
-              remedy: `Unknown update state: ${state}`,
-            }}
-          />
-        )}
-        {state === 'progress' && (
-          <div className="space-y-2">
-            <Progress
-              aria-label="Update download progress"
-              value={
-                progress?.bytes_total
-                  ? (progress.bytes_done / progress.bytes_total) * 100
-                  : null
-              }
-            />
-            {progress && (
-              <TransferProgress
-                identity={`update-${update.available_version}-${progress.phase}`}
-                done={progress.bytes_done}
-                total={progress.bytes_total}
-              />
-            )}
-          </div>
-        )}
-        {state === 'ready' && (
-          <p>
-            Installing stops the server and restarts this app. Your models and
-            settings stay.
-          </p>
-        )}
-        {/* The sentence and its one Recover button share one box, as on Server. */}
-        {state === 'rollback_pending' && (
-          <GUIError
-            error={{
-              code: 'rollback_pending',
-              remedy: update.error?.remedy ?? '',
-              label: update.previous_version || undefined,
-              serverStopped: !serverRunning,
-            }}
-            recoverAction={actions.RecoverUpdate}
-          />
-        )}
-        <div className="flex flex-wrap gap-3">
-          {state === 'failed' &&
-            ['stale_manifest', 'filesystem'].includes(
-              update.error?.code || '',
-            ) && (
-              <ActionButton
-                variant="outline"
-                action={actions.ClearReleaseHistory}
-              >
-                Clear saved update history
-              </ActionButton>
-            )}
-          {checkButton && (
-            <Button
-              variant={state === 'current' ? 'outline' : 'default'}
-              onClick={() => void checkTask.run(actions.CheckUpdate)}
-              disabled={
-                checkTask.pending ||
-                (availability ? !availability.check.allowed : false)
-              }
-            >
-              {checkTask.pending
-                ? 'Checking…'
-                : state === 'failed'
-                  ? 'Try again'
-                  : 'Check for updates'}
-            </Button>
+          {update.models_download_bytes === 0 && (
+            <p>Models: not redownloaded.</p>
           )}
-          {state === 'available' && (
-            <ActionButton
-              variant="default"
-              action={actions.DownloadUpdate}
-              busyLabel="Downloading…"
-              onPendingChange={(download) =>
-                setBusy((previous) => ({ ...previous, download }))
-              }
-            >
-              Download update
-            </ActionButton>
-          )}
-          {state === 'progress' && (
-            <ActionButton action={actions.CancelUpdate}>
-              Cancel download
-            </ActionButton>
-          )}
-          {state === 'ready' && (
-            <ActionButton
-              variant="default"
-              action={actions.InstallUpdate}
-              busyLabel="Installing…"
-              onPendingChange={(install) =>
-                setBusy((previous) => ({ ...previous, install }))
-              }
-              disabled={
-                availability ? !availability.install.allowed : undefined
-              }
-            >
-              Install and restart
-            </ActionButton>
-          )}
-          {/* Later and Dismiss do the same thing: one of them shows. A failed
-              update's saved result is dismissed, an offer is put off. */}
-          {dismiss === 'Later' && (
-            <ActionButton
-              variant="outline"
-              action={actions.DismissUpdate}
-              disabled={busy.download || busy.install}
-            >
-              Later
-            </ActionButton>
-          )}
-          {dismiss === 'Dismiss' && (
-            <ActionButton variant="outline" action={actions.DismissUpdate}>
-              Dismiss
-            </ActionButton>
+          {update.size_bytes != null && (
+            <p>Download size: {bytes(update.size_bytes)}.</p>
           )}
         </div>
-        {checkButton && (
-          <p className="text-sm text-muted-foreground">
-            Checking for updates contacts Bubo's GitHub release feed. The
-            request sends your installed version in its User-Agent and no other
-            app data. You can turn automatic checks off in Settings.
-          </p>
+      )}
+      {update.runtime_followup_required && (
+        <GUIError
+          error={{
+            code: 'runtime_missing',
+            remedy:
+              'Prepare the engine files for this Bubo version before starting.',
+          }}
+        />
+      )}
+      {state !== 'not_checked' &&
+        state !== 'rollback_pending' &&
+        !checkFailed &&
+        !checkError && (
+          <GUIError error={update.error} recovery={state !== 'failed'} />
         )}
-        {availability &&
-          !availability.check.allowed &&
-          !checkFailed &&
-          ['none', 'current', 'failed', 'not_checked'].includes(state) && (
-            <GUIError
-              error={{
-                code: availability.check.reason_code,
-                remedy: availability.check.reason,
-              }}
-              recovery={false}
+      {checkError && (
+        <Disclosure
+          summary={<span>Details</span>}
+          className="text-xs text-muted-foreground"
+        >
+          <p>{checkError.remedy}</p>
+        </Disclosure>
+      )}
+      {!(state in labels) && (
+        <ActionError
+          error={{
+            code: 'internal_error',
+            remedy: `Unknown update state: ${state}`,
+          }}
+        />
+      )}
+      {state === 'progress' && (
+        <div className="space-y-2">
+          <Progress
+            aria-label="Update download progress"
+            value={
+              progress?.bytes_total
+                ? (progress.bytes_done / progress.bytes_total) * 100
+                : null
+            }
+          />
+          {progress && (
+            <TransferProgress
+              identity={`update-${update.available_version}-${progress.phase}`}
+              done={progress.bytes_done}
+              total={progress.bytes_total}
             />
           )}
-        {update.notes && state !== 'rollback_pending' && (
-          <details className="border-t pt-3">
-            <summary className="min-h-9 cursor-pointer">
-              {update.available_version
-                ? `Update to ${update.available_version}`
-                : 'Update details'}
-            </summary>
-            <p className="pt-3 whitespace-pre-wrap">{update.notes}</p>
-          </details>
+        </div>
+      )}
+      {state === 'ready' && (
+        <p>
+          Installing stops the server and restarts this app. Your models and
+          settings stay.
+        </p>
+      )}
+      {/* The sentence and its one Recover button share one box, as on Server. */}
+      {state === 'rollback_pending' && (
+        <GUIError
+          error={{
+            code: 'rollback_pending',
+            remedy: update.error?.remedy ?? '',
+            label: update.previous_version || undefined,
+            serverStopped: !serverRunning,
+          }}
+          recoverAction={actions.RecoverUpdate}
+        />
+      )}
+      <div className="flex flex-wrap gap-3">
+        {state === 'failed' &&
+          ['stale_manifest', 'filesystem'].includes(
+            update.error?.code || '',
+          ) && (
+            <ActionButton
+              variant="outline"
+              action={actions.ClearReleaseHistory}
+            >
+              Clear saved update history
+            </ActionButton>
+          )}
+        {checkButton && (
+          <Button
+            variant={state === 'current' ? 'outline' : 'default'}
+            onClick={() => void checkTask.run(actions.CheckUpdate)}
+            disabled={
+              checkTask.pending ||
+              (availability ? !availability.check.allowed : false)
+            }
+          >
+            {checkTask.pending
+              ? 'Checking…'
+              : state === 'failed'
+                ? 'Try again'
+                : 'Check for updates'}
+          </Button>
         )}
-      </CardContent>
-    </Card>
+        {state === 'available' && (
+          <ActionButton
+            variant="default"
+            action={actions.DownloadUpdate}
+            busyLabel="Downloading…"
+            onPendingChange={(download) =>
+              setBusy((previous) => ({ ...previous, download }))
+            }
+          >
+            Download update
+          </ActionButton>
+        )}
+        {state === 'progress' && (
+          <ActionButton action={actions.CancelUpdate}>
+            Cancel download
+          </ActionButton>
+        )}
+        {state === 'ready' && (
+          <ActionButton
+            variant="default"
+            action={actions.InstallUpdate}
+            busyLabel="Installing…"
+            onPendingChange={(install) =>
+              setBusy((previous) => ({ ...previous, install }))
+            }
+            disabled={availability ? !availability.install.allowed : undefined}
+          >
+            Install and restart
+          </ActionButton>
+        )}
+        {/* Later and Dismiss do the same thing: one of them shows. A failed
+              update's saved result is dismissed, an offer is put off. */}
+        {dismiss === 'Later' && (
+          <ActionButton
+            variant="outline"
+            action={actions.DismissUpdate}
+            disabled={busy.download || busy.install}
+          >
+            Later
+          </ActionButton>
+        )}
+        {dismiss === 'Dismiss' && (
+          <ActionButton variant="outline" action={actions.DismissUpdate}>
+            Dismiss
+          </ActionButton>
+        )}
+      </div>
+      {checkButton && (
+        <div className="flex items-center justify-between gap-2 text-sm text-muted-foreground">
+          <p>Checks GitHub releases.</p>
+          <AboutPopup label="update checks">
+            <p>
+              Checking for updates contacts Bubo's GitHub release feed. It sends
+              only your installed version and no other app data.
+            </p>
+            <p>You can turn automatic checks off in Settings.</p>
+          </AboutPopup>
+        </div>
+      )}
+      {availability &&
+        !availability.check.allowed &&
+        !checkFailed &&
+        ['none', 'current', 'failed', 'not_checked'].includes(state) && (
+          <GUIError
+            error={{
+              code: availability.check.reason_code,
+              remedy: availability.check.reason,
+            }}
+            recovery={false}
+          />
+        )}
+      {update.notes && state !== 'rollback_pending' && (
+        <Disclosure
+          className="border-t pt-3"
+          summaryClassName="min-h-9"
+          summary={
+            <span>
+              {update.available_version
+                ? `Release notes for ${update.available_version}`
+                : 'Update details'}
+            </span>
+          }
+        >
+          <p className="pt-3 whitespace-pre-wrap">{update.notes}</p>
+        </Disclosure>
+      )}
+    </section>
   )
 }

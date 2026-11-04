@@ -65,14 +65,26 @@ test('first run uses the recommended catalogue entry and shares the model downlo
   await expect
     .element(
       page.getByText(
-        `Bubo ${view.product!.version} is optimized for Qwen3.8 Flash Next on Strix Halo computers running Windows.`,
+        'Needs a Strix Halo computer running Windows. Download the model below, or try other models on the Models page.',
         { exact: false },
       ),
     )
     .toBeVisible()
-  await expect
-    .element(page.getByLabelText('Setup steps'))
-    .toHaveTextContent(`${model.display_name} (default model)`)
+  // The opening names neither the product nor its version.
+  expect(document.body.textContent).not.toContain(
+    `Bubo ${view.product!.version} is optimized`,
+  )
+  // The selector names the choice; the step line does not repeat it.
+  const choice = page.getByRole('combobox', { name: 'Model to download' })
+  await expect.element(choice).toHaveValue(model.id)
+  const selected = (choice.element() as HTMLSelectElement).selectedOptions[0]!
+  expect(selected.textContent).toContain(model.selection_label)
+  const stepLine = document.querySelectorAll(
+    '[aria-label="Setup steps"] > li',
+  )[1]!.firstElementChild!
+  expect(stepLine.textContent).toContain('Model ·')
+  expect(stepLine.textContent).not.toContain(model.display_name)
+  expect(stepLine.textContent).toContain(bytes(model.download_bytes))
   await page.getByRole('button', { name: 'Download model…' }).click()
   expect(download).toHaveBeenCalledExactlyOnceWith(model.id)
   await page
@@ -82,7 +94,7 @@ test('first run uses the recommended catalogue entry and shares the model downlo
   expect(confirm).toHaveBeenCalledExactlyOnceWith(model.id)
 })
 
-test('requirements link and disk size come from the catalogue', async () => {
+test('the install guide link and the disk size come from the catalogue', async () => {
   const view = coreView('not-prepared')
   const model = view.models!.catalogue.find(
     (entry) =>
@@ -91,15 +103,14 @@ test('requirements link and disk size come from the catalogue', async () => {
   model.download_bytes = 123456789
   mountCorePage('/', view)
   await expect
-    .element(page.getByRole('link', { name: 'install guide' }))
+    .element(page.getByRole('link', { name: 'Install guide', exact: true }))
     .toHaveAttribute('href', 'https://haloforgelabs.com/docs/')
   expect(
     document.querySelector('[aria-label="Setup steps"]')?.textContent,
   ).toContain(bytes(model.download_bytes))
-  expect(
-    page.getByRole('region', { name: 'System requirements' }).element()
-      .textContent,
-  ).not.toContain('memory')
+  // The size sits on the step line; no "System requirements" heading and
+  // sentence stand behind the one link.
+  expect(document.body.textContent).not.toContain('System requirements')
 })
 
 test('a preparing download shows the whole job, with the current file under Details', async () => {
@@ -265,9 +276,7 @@ test('ordinary setup is neutral and has one primary action', async () => {
   await expect.element(page.getByRole('alert')).not.toBeInTheDocument()
   const steps = page.getByLabelText('Setup steps')
   await expect.element(steps).toHaveTextContent('1 Engine files · Next')
-  await expect
-    .element(steps)
-    .toHaveTextContent('(default model) · After step 1')
+  await expect.element(steps).toHaveTextContent('Model · After step 1')
   expect(
     document.querySelectorAll('[aria-label="Get started"] button.bg-brand'),
   ).toHaveLength(1)

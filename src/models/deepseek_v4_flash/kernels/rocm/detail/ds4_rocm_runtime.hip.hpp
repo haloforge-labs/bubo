@@ -1,6 +1,15 @@
+#include <chrono>
+
+#include "src/core/platform/mapped_file.hpp"
+#include "src/core/platform/os_info.hpp"
+
 static const void *g_model_host_base;
 static uint64_t g_model_registered_size;
-static int g_model_fd = -1;
+/* Placement for this model load, decided once from the registered weight size
+ * against the device heap; see gufo::hip::WeightAllocator. */
+static std::unique_ptr<gufo::hip::WeightAllocator> g_model_weight_alloc;
+static gufo::platform::PlatformFile g_model_fd =
+    gufo::platform::kInvalidFile;
 static const void *g_model_fd_host_base;
 static int g_model_cache_full;
 static std::unique_ptr<gufo::hip::WeightUpload> g_model_uploader;
@@ -597,9 +606,8 @@ static int hip_ok(hipError_t err, const char *what) {
 }
 
 static double hip_wall_sec(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1.0e-9;
+    const auto now = std::chrono::steady_clock::now().time_since_epoch();
+    return std::chrono::duration<double>(now).count();
 }
 
 static int hip_model_load_progress_enabled(void) {
@@ -619,7 +627,7 @@ static void hip_model_load_progress_note(uint64_t cached_bytes) {
     const double now = hip_wall_sec();
     if (!g_model_load_progress_started) {
         g_model_load_progress_started = 1;
-        g_model_load_progress_tty = isatty(STDERR_FILENO) != 0;
+        g_model_load_progress_tty = gufo::platform::StderrIsTerminal() ? 1 : 0;
         g_model_load_progress_next = (g_model_load_progress_tty ? 2ull : 16ull) *
                                      1024ull * 1024ull * 1024ull;
         g_model_load_progress_last = now;
@@ -657,6 +665,40 @@ static void hip_model_staging_release(void) {
     g_model_uploader.reset();
 }
 
+/* On a unified-memory machine the driver's device heap is a fraction of system
+ * RAM (about 61 of 122 GiB on gfx1151), so a checkpoint whose weights exceed
+ * it cannot be allocated device-only even though the system has the memory
+ * free. Managed memory is ordinary system memory the GPU can also access, and
+ * is not bounded by that heap -- the same escape hatch used for the KV cache
+ * below and for Qwen weights elsewhere.
+ *
+ * Decide once from the registered weight size against the heap, rather than
+ * discovering the limit one failed span at a time: a per-span fallback drains
+ * the heap to its last byte and leaves nothing for the session's device-only
+ * scratch tensors, which then fail with
+ * "tensor alloc failed: out of memory". Oversized weights therefore go wholly
+ * to managed memory, leaving the heap for session state, which is what the
+ * heap is for.
+ *
+ * gufo::hip::WeightAllocator makes the decision and allocates coarse-grain
+ * managed memory, so the GPU caches weight pages the way it caches hipMalloc
+ * memory. */
+static gufo::hip::WeightAllocator *hip_model_weight_allocator(void) {
+  if (!g_model_weight_alloc) {
+    g_model_weight_alloc = std::make_unique<gufo::hip::WeightAllocator>(
+        g_model_registered_size);
+    if (g_model_weight_alloc->placement() == gufo::hip::Placement::kManaged) {
+      fprintf(stderr,
+              DS4_GPU_LOG_PREFIX
+              "weights (%.2f GiB) do not fit the device heap above its "
+              "%.2f GiB dispatch reserve; placing them in managed memory\n",
+              (double)g_model_registered_size / 1073741824.0,
+              (double)gufo::hip::DispatchReserveBytes() / 1073741824.0);
+    }
+  }
+  return g_model_weight_alloc.get();
+}
+
 static char* hip_model_range_alloc(uint64_t bytes, const char* what) {
   if (bytes == 0)
     return NULL;
@@ -666,7 +708,7 @@ static char* hip_model_range_alloc(uint64_t bytes, const char* what) {
   // Allocate each span exactly: packing them into larger fixed blocks leaves
   // several GiB unused, reducing memory available to concurrent sessions.
   void* dev = NULL;
-  hipError_t err = hipMalloc(&dev, (size_t)bytes);
+  hipError_t err = hip_model_weight_allocator()->Allocate(&dev, (size_t)bytes);
   if (err != hipSuccess) {
     fprintf(stderr,
             DS4_GPU_LOG_PREFIX
@@ -686,7 +728,7 @@ static const char *hip_model_range_ptr_from_fd(
         uint64_t offset,
         uint64_t bytes,
         const char *what, bool wait) {
-    if (g_model_fd < 0 || bytes == 0) return NULL;
+    if (!gufo::platform::FileValid(g_model_fd) || bytes == 0) return NULL;
     if (g_model_fd_host_base != NULL && model_map != g_model_fd_host_base) return NULL;
     char* dev = hip_model_range_alloc(bytes, what);
     if (!dev) {
@@ -724,6 +766,7 @@ static void hip_model_range_release_all(void) {
   g_model_ranges.clear();
   g_model_range_by_offset.clear();
   g_model_range_bytes = 0;
+  g_model_weight_alloc.reset();
   hip_model_load_progress_reset();
 }
 
@@ -803,7 +846,8 @@ extern "C" void ds4_gpu_cleanup(void) {
     hip_model_staging_release();
     g_model_host_base = NULL;
     g_model_registered_size = 0;
-    g_model_fd = -1;
+    g_model_weight_alloc.reset();
+    g_model_fd = gufo::platform::kInvalidFile;
     g_model_cache_full = 0;
 }
 
@@ -955,7 +999,8 @@ static int ds4_gpu_set_model_map(const void *model_map, uint64_t model_size) {
     g_model_host_base = model_map;
     g_model_registered_size = model_size;
     g_model_cache_full = 0;
-    if (g_model_fd >= 0 && g_model_fd_host_base == NULL) {
+    if (gufo::platform::FileValid(g_model_fd) &&
+        g_model_fd_host_base == NULL) {
         g_model_fd_host_base = model_map;
     }
 
@@ -983,7 +1028,7 @@ extern "C" int ds4_gpu_set_model_map_range(const void *model_map, uint64_t model
     return 1;
 }
 
-extern "C" int ds4_gpu_set_model_fd(int fd) {
+extern "C" int ds4_gpu_set_model_fd(gufo::platform::PlatformFile fd) {
     g_model_fd = fd;
     g_model_fd_host_base = g_model_host_base;
     return 1;

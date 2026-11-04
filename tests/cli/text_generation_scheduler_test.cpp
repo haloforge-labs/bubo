@@ -1,10 +1,8 @@
 #include "src/cli/serve/text_generation_scheduler.hpp"
 
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <chrono>
-#include <cmath>
 #include <condition_variable>
 #include <cstdlib>
 #include <filesystem>
@@ -25,14 +23,15 @@
 #include <thread>
 #include <utility>
 #include <vector>
-#include <unistd.h>
 
-#include "src/cli/serve/debug_response.hpp"
 #include "src/cli/serve/generation_metrics.hpp"
 #include "src/cli/serve/http_server.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/stop_sequences.hpp"
 #include "src/cli/serve/trace.hpp"
+#include "src/core/json.hpp"
+#include "src/core/platform/env.hpp"
+#include "src/core/platform/os_info.hpp"
 
 namespace {
 
@@ -67,137 +66,37 @@ void Expect(bool condition, std::string_view message) {
   }
 }
 
-void TestPrefillDiagnosticsHost() {
-  using namespace gufo::models::qwen38_flash_next;
-  Expect(!PrefillDiagValueEnabled(nullptr) && !PrefillDiagValueEnabled("0") &&
-             !PrefillDiagValueEnabled("") && !PrefillDiagValueEnabled("yes") &&
-             !PrefillDiagValueEnabled("01") && PrefillDiagValueEnabled("1"),
-         "only exactly 1 enables prefill diagnostics");
-  PrefillDiagPass pass;
-  pass.pass = 3;
-  pass.start = 4096;
-  pass.totals.passes = 1;
-  pass.totals.tokens = 2048;
-  TableReadCounters reads;
-  reads.table_read_us = 12.25;
-  reads.table_reads = 3;
-  reads.table_bytes = 72;
-  pass.totals.TableReadCounters::Add(reads);
-  pass.totals.fetch_elapsed_us = 20;
-  pass.totals.fetch_hidden_us = 18;
-  pass.totals.fetch_exposed_us = 2;
-  pass.totals.fetch_wait_us = 2.5;
-  const std::array<std::uint32_t, 4> first{4, 0, 1, 0};
-  const std::array<std::uint32_t, 4> last{0, 0, 7, 0};
-  pass.RecordLayer(0, 2048, first, 100, 2048);
-  pass.RecordLayer(1, 128, last, 200, 2048);   // tail-only layer: listed, but not folded into the pass totals
-  Expect(pass.totals.expert_bytes == 200 && pass.totals.layer_samples == 1 &&
-             pass.totals.experts_distinct_min == 2 &&
-             pass.totals.Mean() == 2.0 && pass.totals.experts_distinct_max == 2,
-         "diversity counts nonzero expert buckets of full-width layers only; the tail layer is listed but excluded from the totals");
-  const std::string expected =
-      "pass=3 tokens=2048 start=4096 table_read_us=12.250 table_reads=3 "
-      "table_bytes=72 fetch_elapsed_us=20.000 fetch_hidden_us=18.000 "
-      "fetch_exposed_us=2.000 fetch_wait_us=2.500 "
-      "experts_distinct_min=2 experts_distinct_mean=2.000 "
-      "experts_distinct_max=2 expert_bytes=200 layers=0:2048:2:100,1:128:1:200";
-  Expect(PrefillDiagLine(pass) == expected, "structured pass line is exact");
-  int takes = 0, emits = 0;
-  const auto take = [&] {
-    ++takes;
-    return std::vector{pass};
-  };
-  const auto emit = [&](const std::string& line) {
-    ++emits;
-    Expect(line == expected, "collector emits the pass line");
-  };
-  const auto off = CollectPrefillDiag(false, take, emit);
-  Expect(!off && takes == 0 && emits == 0 && pass.totals.table_reads == 3,
-         "flag off never accesses pass counters or emits diagnostics");
-  const auto on = CollectPrefillDiag(true, take, emit);
-  Expect(on && takes == 1 && emits == 1, "flag on publishes measured passes");
-  std::optional<PrefillDiagTotals> totals;
-  AddPrefillDiag(totals, off);
-  Expect(!totals, "off does not construct request counters");
-  AddPrefillDiag(totals, on);
-  AddPrefillDiag(totals, on);
-  Expect(totals && totals->passes == 2 && totals->tokens == 4096 &&
-             totals->table_read_us == 24.5 && totals->table_reads == 6 &&
-             totals->table_bytes == 144 && totals->fetch_elapsed_us == 40 &&
-             totals->fetch_hidden_us == 36 && totals->fetch_exposed_us == 4 &&
-             totals->fetch_wait_us == 5 && totals->expert_bytes == 400 &&
-             totals->layer_samples == 2 && totals->experts_distinct_sum == 4 &&
-             totals->experts_distinct_min == 2 && totals->Mean() == 2.0 &&
-             totals->experts_distinct_max == 2,
-         "request totals add every counter and weight mean by layer samples");
-  auto metrics = gufo::json::Value::object();
-  gufo::server::AddPrefillDiagUsage(metrics, off);
-  Expect(metrics.empty(), "off serialization adds no usage fields");
-  gufo::server::AddPrefillDiagUsage(metrics, totals);
-  const auto* json = metrics.find("prefill_diag");
-  Expect(json && json->member_size("passes") == 2 &&
-             json->member_size("expert_bytes") == 400 &&
-             json->member_double("table_read_us") == 24.5 &&
-             json->member_double("experts_distinct_mean") == 2.0 &&
-             json->member_size("table_reads") == 6 &&
-             json->member_size("table_bytes") == 144 &&
-             json->member_double("fetch_elapsed_us") == 40 &&
-             json->member_double("fetch_hidden_us") == 36 &&
-             json->member_double("fetch_exposed_us") == 4 &&
-             json->member_double("fetch_wait_us") == 5,
-         "on usage contains measured request totals");
-  gufo::server::TextGenerationBackend::Result result;
-  Expect(gufo::server::GenerationLogDetails(result).find("table_reads=") ==
-             std::string::npos,
-         "off completion log has no diagnostic fields");
-  result.prefill_diag = totals;
-  Expect(gufo::server::GenerationLogDetails(result).find("table_reads=6") !=
-             std::string::npos,
-         "completion log includes diagnostic totals");
-  Expect(MoeGbps(1'000'000'000, 10'000) == 100.0 &&
-             MoeGbps(10, 0) == 0 && MoeTflops(10, 0) == 0,
-         "decimal GB/s and zero-time arithmetic");
-  // 2 tokens * 3 experts * 2 FLOPs/FMA * 3 GEMMs * 4 hidden * 5 FF = 720.
-  Expect(MoeFlops(2, 3, 4, 5) == 720 && MoeTflops(720, 2) == 0.00036,
-         "three GEMMs count two operations per multiply-add");
-  Expect(PrefillDiagFields(*totals).find("moe_us=") == std::string::npos &&
-             !json->find("moe_us"),
-         "ordinary diagnostics emit no benchmark fields");
-  PrefillDiagTotals bench;
-  bench.moe_bench = true;
-  bench.moe_us = 2;
-  bench.moe_flops = MoeFlops(2, 3, 4, 5);
-  bench.moe_expert_bytes = 200;
-  PrefillDiagTotals combined;
-  combined.Add(bench);
-  combined.Add(bench);
-  Expect(combined.moe_bench && combined.moe_us == 4 &&
-             combined.moe_flops == 1440 && combined.moe_expert_bytes == 400,
-         "benchmark aggregation sums time, bytes and FLOPs");
-  std::optional<PrefillDiagTotals> benchmark = combined;
-  auto benchmark_usage = gufo::json::Value::object();
-  gufo::server::AddPrefillDiagUsage(benchmark_usage, benchmark);
-  const auto* benchmark_json = benchmark_usage.find("prefill_diag");
-  Expect(benchmark_json && benchmark_json->member_double("moe_us") == 4 &&
-             benchmark_json->member_double("moe_gbps") == 0.1 &&
-             benchmark_json->member_double("moe_tflops") == 0.00036 &&
-             PrefillDiagFields(combined).find("moe_us=4.000") != std::string::npos,
-         "benchmark usage and logs derive ratios after aggregation");
-  for (const auto width : {730U, 2048U, 8192U}) {
-    PrefillDiagPass grid;
-    grid.RecordLayer(0, width, first, 100, width);
-    grid.RecordLayer(1, 96, last, 200, width);
-    Expect(grid.layers.size() == 2 && grid.totals.expert_bytes == 200 &&
-               MoeFlops(width, 10, 2560, 640) ==
-                   static_cast<double>(width) * 98'304'000,
-           "variable pass widths and tail layers have no fixed-width assumption");
-  }
-  PrefillDiagTotals unequal;
-  unequal.AddLayer(4, 10);
-  totals->Add(unequal);
-  Expect(totals->layer_samples == 3 && std::abs(totals->Mean() - 8.0 / 3.0) < 1e-12 &&
-             totals->experts_distinct_max == 4 && totals->expert_bytes == 440,
-         "aggregation weights unequal layer counts correctly");
+void TestPublicationWaitUsesRecentSubstantialPrefill() {
+  using gufo::server::detail::PublicationWaitEstimate;
+  PublicationWaitEstimate estimate;
+  Expect(!estimate.Limit(55000),
+         "an uncalibrated model must not park admission");
+  for (const auto milliseconds :
+       {0.0, -1.0, std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::quiet_NaN()})
+    estimate.Observe(4096, milliseconds);
+  estimate.Observe(32, 500);
+  estimate.Observe(4096, 0.1);
+  Expect(!estimate.Limit(55000),
+         "invalid timings and tiny/overhead-dominated work cannot calibrate");
+
+  estimate.Observe(55022, 32643.778743);
+  const auto limit = estimate.Limit(55017);
+  Expect(limit && limit->count() > 32640 && limit->count() < 32644,
+         "the reproduced prefix gain costs about 32.64s, not 120s");
+  Expect(estimate.Limit(0)->count() == 0,
+         "no remaining saved prefill work permits no wait");
+  Expect(estimate.Limit(10000000) == PublicationWaitEstimate::kMaximumWait,
+         "large recomputation estimates retain the absolute ceiling");
+
+  // Recent fast prefill must displace slow startup work rather than retain a
+  // process-lifetime average. Token/time weighting ignores sample boundaries.
+  for (int i = 0; i < 16; ++i)
+    estimate.Observe(4096, 100);
+  Expect(estimate.Limit(8192)->count() == 200,
+         "recent prefill replaces stale startup measurements");
+  PublicationWaitEstimate other_model;
+  Expect(!other_model.Limit(8192), "another model/pool starts uncalibrated");
 }
 
 enum class EventKind : std::uint8_t {
@@ -287,10 +186,6 @@ struct FakeControl {
   std::atomic<std::size_t> idle_probes{0};
   std::atomic<TextModelRunner::DeviceProbeStatus> idle_probe_status{
       TextModelRunner::DeviceProbeStatus::kUsable};
-  /// What the fake runner reports to the memory ledger (nullopt: unsupported).
-  std::optional<TextModelRunner::DeviceMemorySample> device_memory;
-  /// Memory guard: what the fake runner reports a request cannot run without.
-  gufo::platform::MemoryNeed memory_need;
   TextRunnerToken advance_gate_label{0};
   TextRunnerToken prefill_gate_label{0};
   bool advance_gate_entered{false};
@@ -299,21 +194,18 @@ struct FakeControl {
   bool release_prefill{false};
   std::atomic<std::size_t> invalidations{0};
   std::atomic<std::size_t> states_created{0};
+  bool structured_output{false};
+  bool vocabulary_failure{false};
+  std::atomic<std::size_t> vocabulary_builds{0};
   std::atomic<std::size_t> decode_calls{0};
   std::atomic<std::size_t> batch_preparations{0};
   std::atomic<std::int64_t> first_request_advance_ns{0};
   bool incremental_prefill{true};
   std::size_t prefill_capacity{std::numeric_limits<std::size_t>::max()};
-  std::optional<gufo::models::qwen38_flash_next::PrefillDiagTotals> prefill_diag;
   bool supports_batched_advance{false};
   bool final_token_advance_required{true};
   bool incremental_text_is_exact{false};
   bool multi_token_decode{false};
-  // Mirrors the Flash-Next MTP runner: a one-token budget uses the base step.
-  bool base_single_token_decode{false};
-  bool timeline_mixed_drafts{false};
-  bool timeline_multi_cycle_step{false};
-  std::atomic<std::size_t> debug_settings_calls{0};
   bool batched_multi_token_decode{false};
   std::size_t actual_batch_width{4};
   bool prefix_reuse{true};
@@ -323,12 +215,6 @@ struct FakeControl {
   std::optional<std::size_t> stop_after;
   std::optional<std::size_t> eos_after;
   std::function<void()> snapshot_callback;
-  bool in_pass_checkpoint{false};
-  bool persistent_snapshots{false};
-  bool score_supported{false};
-  bool omit_score{false};
-  std::atomic<std::size_t> score_calls{0};
-  std::function<void()> score_callback;
 };
 
 class FakeState final : public TextRunnerState {
@@ -391,12 +277,8 @@ public:
                     control_->batched_multi_token_decode,
                 .batched_multi_token_decode_max_width = 4,
                 .prefix_reuse = control_->prefix_reuse,
-                .in_pass_checkpoint = control_->in_pass_checkpoint,
             },
-        .persistence = control_->persistent_snapshots
-            ? std::optional<gufo::server::TextRunnerPersistenceDescriptor>(
-                  {{1, 2, 3}, 1})
-            : std::nullopt,
+        .persistence = std::nullopt,
     };
   }
 
@@ -435,29 +317,23 @@ public:
     return {static_cast<TextRunnerToken>(text.size())};
   }
 
+  [[nodiscard]] std::shared_ptr<const gufo::sampling::ConstraintVocabulary>
+  BuildConstraintVocabulary() const override {
+    if (!control_->structured_output)
+      return TextModelRunner::BuildConstraintVocabulary();
+    if (control_->vocabulary_failure)
+      throw std::runtime_error("vocabulary build failed");
+    control_->vocabulary_builds.fetch_add(1, std::memory_order_relaxed);
+    return std::make_shared<gufo::sampling::ConstraintVocabulary>(
+        256, [](std::uint32_t id) {
+          return gufo::sampling::ConstraintVocabulary::Piece{
+              std::string(1, static_cast<char>(id)), false};
+        });
+  }
+
   [[nodiscard]] std::optional<std::vector<TextRunnerToken>> RenderAndTokenize(
       const ChatRequest&) const override {
     return std::nullopt;
-  }
-
-  [[nodiscard]] std::vector<std::optional<gufo::sampling::TokenLogprob>>
-  ScorePrompt(std::span<const TextRunnerToken> tokens,
-              const gufo::sampling::SamplingConfig& config,
-              const TextRunnerState::CancellationCheck& cancelled) const override {
-    if (!control_->score_supported)
-      return TextModelRunner::ScorePrompt(tokens, config, cancelled);
-    control_->score_calls.fetch_add(1, std::memory_order_relaxed);
-    if (control_->score_callback)
-      control_->score_callback();
-    gufo::sampling::SamplerState sampler(config, {});
-    const std::array<float, 3> row{0.0F, 1.0F, -1.0F};
-    std::vector<std::optional<gufo::sampling::TokenLogprob>> scores(tokens.size());
-    for (std::size_t i = 1; i < tokens.size(); ++i) {
-      if (cancelled && cancelled())
-        throw std::runtime_error("scoring cancelled");
-      scores[i] = sampler.RawLogprobs(row, tokens[i], static_cast<std::size_t>(config.logprobs));
-    }
-    return scores;
   }
 
   [[nodiscard]] std::string Decode(
@@ -523,12 +399,11 @@ public:
     return {
         .consumed_tokens = consumed,
         .decode_ready = ready,
-        .prefill_diag = control_->prefill_diag,
     };
   }
 
   [[nodiscard]] TextDecodeSelection SelectNext(
-      TextRunnerState& state, gufo::sampling::SamplerState& sampler) const override {
+      TextRunnerState& state, gufo::sampling::SamplerState&) const override {
     const auto& fake = RequireFakeState(state);
     if (!fake.frontier.has_value()) {
       throw std::logic_error("scheduler fake has no frontier");
@@ -545,19 +420,11 @@ public:
         return {.stop = true};
       return {.token = *fake.frontier, .piece = control_->output_pieces[index]};
     }
-    TextDecodeSelection selection{
+    return {
         .stop = false,
         .token = *fake.frontier,
         .piece = std::to_string(*fake.frontier),
     };
-    if (sampler.config().logprobs >= 0 && !control_->omit_score) {
-      std::vector<float> row(selection.token + 1, 0.0F);
-      row[selection.token] = 1.0F;
-      selection.logprob = std::make_shared<const gufo::sampling::TokenLogprob>(
-          sampler.RawLogprobs(row, selection.token,
-                             static_cast<std::size_t>(sampler.config().logprobs)));
-    }
-    return selection;
   }
 
   [[nodiscard]] std::optional<TextDecodeSelection> PreviewFirstToken(
@@ -581,31 +448,6 @@ public:
       return sizeof(SnapshotState);
     }
   };
-  std::optional<std::size_t> PrefillCheckpointBytes(
-      const TextRunnerState&, std::span<const TextRunnerToken> prompt,
-      std::size_t offset, std::size_t budget, std::size_t boundary) const override {
-    if (!control_->in_pass_checkpoint || boundary <= offset ||
-        boundary >= offset + std::min(budget, prompt.size() - offset))
-      return std::nullopt;
-    return sizeof(SnapshotState);
-  }
-
-  TextPrefillStep PrefillThrough(
-      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
-      std::size_t offset, std::size_t budget, std::size_t boundary,
-      std::unique_ptr<gufo::server::TextRunnerSnapshot>* checkpoint) const override {
-    auto step = Prefill(state, prompt, offset, budget);
-    const auto started = std::chrono::steady_clock::now();
-    auto saved = std::make_unique<SnapshotState>(RequireFakeState(state));
-    saved->position = boundary;
-    *checkpoint = std::move(saved);
-    step.checkpoint_ms = std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - started).count();
-    if (state.debug_timeline())
-      step.capture_started = started;
-    return step;
-  }
-
   std::size_t SnapshotPayloadBytes(const TextRunnerState&) const override {
     return sizeof(SnapshotState);
   }
@@ -624,46 +466,6 @@ public:
     restored.position = saved.position;
     restored.decode_count = saved.decode_count;
     restored.frontier = saved.frontier;
-  }
-
-  [[nodiscard]] std::size_t PersistentSnapshotPayloadBytes(
-      const gufo::server::TextRunnerSnapshot&) const override {
-    return 5 * sizeof(std::uint64_t);
-  }
-
-  [[nodiscard]] std::size_t SerializePersistentSnapshot(
-      const gufo::server::TextRunnerSnapshot& snapshot,
-      std::span<std::uint8_t> destination) const override {
-    const auto& saved = dynamic_cast<const SnapshotState&>(snapshot);
-    if (destination.size() != 5 * sizeof(std::uint64_t))
-      throw std::invalid_argument("scheduler snapshot payload size mismatch");
-    const std::array<std::uint64_t, 5> fields = {
-        saved.label, saved.position, saved.decode_count,
-        saved.frontier.has_value() ? 1U : 0U, saved.frontier.value_or(0)};
-    for (std::size_t field = 0; field < fields.size(); ++field) {
-      for (std::size_t byte = 0; byte < sizeof(std::uint64_t); ++byte)
-        destination[field * sizeof(std::uint64_t) + byte] =
-            static_cast<std::uint8_t>(fields[field] >> (byte * 8U));
-    }
-    return destination.size();
-  }
-
-  void RestorePersistentSnapshot(TextRunnerState& state,
-      std::span<const std::uint8_t> payload) const override {
-    if (payload.size() != 5 * sizeof(std::uint64_t))
-      throw std::invalid_argument("scheduler snapshot payload size mismatch");
-    std::array<std::uint64_t, 5> fields{};
-    for (std::size_t field = 0; field < fields.size(); ++field) {
-      for (std::size_t byte = 0; byte < sizeof(std::uint64_t); ++byte)
-        fields[field] |= static_cast<std::uint64_t>(
-            payload[field * sizeof(std::uint64_t) + byte]) << (byte * 8U);
-    }
-    auto& restored = RequireFakeState(state);
-    restored.label = fields[0];
-    restored.position = fields[1];
-    restored.decode_count = fields[2];
-    restored.frontier = fields[3] ? std::optional<TextRunnerToken>(fields[4])
-                                  : std::nullopt;
   }
 
   void Advance(TextRunnerState& state, TextRunnerToken token) const override {
@@ -708,26 +510,10 @@ public:
           std::memory_order_relaxed);
   }
 
-  [[nodiscard]] gufo::json::Value DebugSettings() const override {
-    ++control_->debug_settings_calls;
-    auto settings = gufo::json::Value::object();
-    if (control_->timeline_mixed_drafts) {
-      auto policy = gufo::json::Value::object();
-      policy["enabled"] = true;
-      policy["prompt_lookup"] = true;
-      policy["survival"] = true;
-      policy["runner_max_draft_tokens"] = 4;
-      policy["draft_vocabulary"] = "latin_text";
-      settings["mtp_policy"] = std::move(policy);
-    }
-    return settings;
-  }
-
   [[nodiscard]] TextDecodeStep DecodeStep(
       TextRunnerState& state, std::size_t max_tokens,
       gufo::sampling::SamplerState& sampler) const override {
-    if (!control_->multi_token_decode ||
-        (control_->base_single_token_decode && max_tokens == 1)) {
+    if (!control_->multi_token_decode) {
       return TextModelRunner::DecodeStep(state, max_tokens, sampler);
     }
     auto& fake = RequireFakeState(state);
@@ -744,30 +530,11 @@ public:
         break;
       }
       Advance(state, selection.token);
-      if (selection.logprob)
-        step.logprobs.push_back(*selection.logprob);
       step.selections.push_back(std::move(selection));
     }
     step.draft_rounds = 1;
     step.draft_tokens = count + 1;
     step.draft_accepted_tokens = count;
-    if (control_->timeline_mixed_drafts) {
-      step.policy_chosen_length_sum = 4;
-      step.survival_any = sampler.config().uses_random_sampling();
-      step.lookup_tokens = fake.decode_count <= 3 ? 2 : 0;
-      step.draft_accepted_tokens = count - 1;
-      // The second scripted survival cycle stops drafting below its budget.
-      step.draft_tokens = fake.decode_count <= 3 ? count + 1 : count;
-      step.mtp_offered = fake.decode_count <= 3 ? 2 : 4;
-      step.cut = fake.decode_count <= 3 ? 0 : 1;
-      if (control_->timeline_multi_cycle_step && fake.decode_count > 3) {
-        step.draft_rounds = 3;
-        step.policy_chosen_length_sum = 12;
-        step.survival_any = true;
-        step.mtp_offered = 10;
-        step.draft_tokens = 9;
-      }
-    }
     return step;
   }
 
@@ -806,16 +573,6 @@ public:
     control_->idle_probes.fetch_add(1, std::memory_order_relaxed);
     control_->condition.notify_all();
     return control_->idle_probe_status.load(std::memory_order_relaxed);
-  }
-
-  [[nodiscard]] std::optional<DeviceMemorySample> SampleDeviceMemory()
-      const override {
-    return control_->device_memory;
-  }
-
-  [[nodiscard]] gufo::platform::MemoryNeed RequestMemoryNeed(
-      std::size_t, const gufo::server::TextPromptContext*, bool) const override {
-    return control_->memory_need;
   }
 
   [[nodiscard]] bool DeviceUsable() const override {
@@ -887,105 +644,6 @@ std::shared_ptr<FakeControl> SharedPrefixControl(bool snapshots) {
   if (snapshots)
     control->snapshot_callback = [] {};
   return control;
-}
-
-void TestDisabledCacheWithRealPool(bool disabled = true) {
-  auto control = SharedPrefixControl(true);
-  control->prefill_capacity = 4096;
-  control->in_pass_checkpoint = true;
-  std::atomic<std::size_t> captures{0};
-  control->snapshot_callback = [&] { ++captures; };
-  auto runner = std::make_shared<FakeRunner>(control);
-  // The runner is CPU-only; the pool and scheduler are the production classes.
-  auto pool = std::make_shared<TextRunnerPool>(
-      runner, 1, std::nullopt,
-      gufo::server::TextRunnerRamCacheOptions{.disabled = disabled});
-  TextGenerationScheduler scheduler(pool);
-  const auto prompt = SharedPrompt(1200, 7000, 100);
-  TextRequestMetadata metadata;
-  metadata.cache_prompt = true;
-  metadata.cache_prefix_tokens = 1200;
-  control->block_prefill_label = 1;
-  auto first = scheduler.Submit(prompt, 3, 0.0F, {}, false, metadata);
-  control->WaitForPrefill(1);
-  auto second = scheduler.Submit(prompt, 3, 0.0F, {}, false, metadata);
-  Expect(second.phase() == TextRequestPhase::kQueued,
-         "disabled cache single-session pool queues its neighbour");
-  control->ReleasePrefill();
-  const auto a = first.Wait();
-  const auto b = second.Wait();
-  const auto c = scheduler.Submit(prompt, 3, 0.0F, {}, false, metadata).Wait();
-  for (const auto* result : {&a, &b, &c})
-    Expect(result->tokens == ExpectedTokens(1, 3) &&
-               result->cached_prompt_tokens == 0 &&
-               result->prefill_tokens == prompt.size() &&
-               result->shared_prefix_wait_ms == 0,
-           "cache_prompt requests remain cold through the real scheduler pool");
-  Expect(captures.load() == 0 && control->invalidations.load() >= 2,
-         "disabled pool captures nothing and invalidates used state");
-  const auto events = control->Events();
-  std::size_t prefills = 0;
-  for (const auto& event : events)
-    if (event.kind == EventKind::kPrefill) {
-      ++prefills;
-      Expect(event.index == 0 && event.count == prompt.size(),
-             "each cold request uses the whole prompt without cache cuts");
-    }
-  Expect(prefills == 3, "all three requests do a full prefill");
-  std::cout << "PASS: TestDisabledCacheWithRealPool\n";
-}
-
-void TestMemoryLedger() {
-  using Sample = TextModelRunner::DeviceMemorySample;
-  const auto run = [](const char* env, std::optional<Sample> memory) {
-    if (env)
-      ::setenv("GUFO_MEM_ACCOUNTING", env, 1);
-    else
-      ::unsetenv("GUFO_MEM_ACCOUNTING");
-    auto control = std::make_shared<FakeControl>();
-    control->device_memory = memory;
-    std::ostringstream lines;
-    gufo::server::Logger::FlushSync();
-    auto* old_buffer = std::clog.rdbuf(lines.rdbuf());
-    {
-      auto scheduler = MakeScheduler(control, 1);
-      scheduler->Submit({1, 2, 3}, 4, 0.0F, {}, false, {}).Wait();
-    }
-    gufo::server::Logger::FlushSync();
-    std::clog.rdbuf(old_buffer);
-    ::unsetenv("GUFO_MEM_ACCOUNTING");
-    return lines.str();
-  };
-  constexpr std::size_t kGiB = std::size_t{1} << 30;
-  const Sample sample{.free_bytes = 80 * kGiB,
-                      .total_bytes = 96 * kGiB,
-                      .split = true,
-                      .local_used_bytes = 10 * kGiB,
-                      .nonlocal_used_bytes = 1 * kGiB};
-  const auto on = run("1", sample);
-  Expect(on.find("event=mem_ledger phase=prefill used_mib=11264 local_mib=10240 "
-                 "nonlocal_mib=1024 free_mib=81920 total_mib=98304") !=
-             std::string::npos,
-         "ledger logs the prefill phase with split usage when the switch is set");
-  Expect(on.find("phase=decode") != std::string::npos &&
-             on.find("phase=request_end") != std::string::npos &&
-             on.find("overall_peak_mib=11264") != std::string::npos,
-         "ledger logs decode and request_end phases and the overall peak");
-  // The same value again must not log the phase a second time (32 MiB steps).
-  std::size_t prefill_lines = 0;
-  for (std::size_t at = on.find("phase=prefill"); at != std::string::npos;
-       at = on.find("phase=prefill", at + 1))
-    ++prefill_lines;
-  Expect(prefill_lines == 1, "an unchanged phase is logged once");
-  Expect(run(nullptr, sample).find("mem_ledger") == std::string::npos,
-         "ledger is silent without the switch");
-  Expect(run("1", std::nullopt).find("mem_ledger") == std::string::npos,
-         "ledger is silent when the runner cannot sample device memory");
-  // Without a split the used bytes come from total minus free.
-  Sample unsplit = sample;
-  unsplit.split = false;
-  Expect(run("1", unsplit).find("used_mib=16384") != std::string::npos,
-         "ledger falls back to total minus free without the split");
 }
 
 void TestConcurrentSharedPrefixesPrefillOnce() {
@@ -1213,30 +871,6 @@ void TestAwaitedCheckpointSurvivesCachePressure() {
          "a checkpoint peers wait for is retained under cache pressure");
 }
 
-void TestPrefillDiagnosticSchedulerTotals() {
-  for (const bool enabled : {false, true}) {
-    auto control = std::make_shared<FakeControl>();
-    control->prefill_capacity = 2;
-    if (enabled) {
-      control->prefill_diag.emplace();
-      control->prefill_diag->passes = 1;
-      control->prefill_diag->table_reads = 3;
-      control->prefill_diag->AddLayer(2, 100);
-    }
-    auto scheduler = MakeScheduler(control, 1, {.decode_active_tokens = 2});
-    const auto result = scheduler->Submit({7, 70, 71, 72, 73}, 2, 0.0F).Wait();
-    Expect(result.prefill_chunks == 3 && bool(result.prefill_diag) == enabled,
-           "scheduler carries opt-in diagnostics over multiple fake chunks");
-    if (result.prefill_diag) {
-      Expect(result.prefill_diag->passes == 3 &&
-                 result.prefill_diag->table_reads == 9 &&
-                 result.prefill_diag->expert_bytes == 600 &&
-                 result.prefill_diag->layer_samples == 3,
-             "scheduler request totals include every prefill step");
-    }
-  }
-}
-
 void TestIdlePrefillUsesBulkWorkUnit() {
   auto control = std::make_shared<FakeControl>();
   auto scheduler = MakeScheduler(control, 1, {.decode_active_tokens = 2});
@@ -1288,79 +922,6 @@ void TestRunnerCanReuseExactIncrementalText() {
          "exact incremental text avoids duplicate final decoding");
 }
 
-// L-REL-8: the scheduler records where the generated end-of-reasoning tag
-// token begins. The fake tokenizer encodes "</think>" as token 8 (its length),
-// and token N carries output piece N, so token 1 below writes the same
-// characters as ordinary text.
-void TestReasoningEndTrackedByToken() {
-  using Finish = gufo::server::TextGenerationBackend::FinishReason;
-  // A stop sequence after the tag keeps it; one before the tag ends the
-  // request before the tag token, so nothing is recorded.
-  for (const int stop : {0, 1, 2}) {
-    for (const bool multi : {false, true}) {
-      for (const bool preview : {false, true}) {
-        auto control = std::make_shared<FakeControl>();
-        control->incremental_text_is_exact = true;
-        control->multi_token_decode = multi;
-        control->preview_first_token = preview;
-        control->snapshot_callback = [] {};
-        control->output_pieces = {"Use ", "</think>", " here.", "a",
-                                  stop == 2 ? "<STOP>" : "b", "c", "d", "e",
-                                  "</think>", stop == 1 ? "Done<STOP>x" : "Done"};
-        auto scheduler = MakeScheduler(control, 1);
-        TextGenerationScheduler::RequestMetadata metadata;
-        if (stop != 0)
-          metadata.stop_sequences = {"<STOP>"};
-        const auto result =
-            scheduler->Submit({0}, 12, 0.0F, {}, true, metadata).Wait();
-        if (stop == 2)
-          Expect(result.finish_reason == Finish::kStopSequence &&
-                     result.reasoning_end.tracked && !result.reasoning_end.byte,
-                 "a stop before the tag token records no reasoning end");
-        else
-          Expect(result.reasoning_end.byte == std::optional<std::size_t>(23) &&
-                     result.text.substr(23, 8) == "</think>" &&
-                     result.text.ends_with("Done"),
-                 "the tag offset holds with multi-token decode, preview and "
-                 "stop sequences");
-      }
-    }
-  }
-  for (const bool exact : {true, false}) {
-    auto control = std::make_shared<FakeControl>();
-    control->incremental_text_is_exact = exact;
-    control->output_pieces = {"Use ", "</think>", " here.", "a", "b",
-                              "c",    "d",        "e",      "</think>", "Done"};
-    constexpr std::size_t kTagByte = 23;  // "Use </think> here.abcde"
-    auto scheduler = MakeScheduler(control, 1);
-    auto request = scheduler->Submit({0}, 12, 0.0F, {}, true);
-    std::string streamed;
-    bool covered = false;
-    const auto result = request.Wait([&](std::string_view piece) {
-      if (streamed.size() == kTagByte && piece == "</think>")
-        covered = request.CurrentReasoningEnd().byte ==
-                  std::optional<std::size_t>(kTagByte);
-      streamed += piece;
-      return true;
-    });
-    if (exact) {
-      Expect(result.reasoning_end.tracked &&
-                 result.reasoning_end.byte ==
-                     std::optional<std::size_t>(kTagByte) &&
-                 result.text.substr(kTagByte, 8) == "</think>",
-             "the generated tag token, not the quoted text, ends reasoning");
-      Expect(covered, "the tag offset is known when its piece is delivered");
-      Expect(gufo::server::GenerationLogDetails(result).ends_with(
-                 " reasoning_end_byte=23"),
-             "the completion log line names the tag offset");
-    } else {
-      Expect(!result.reasoning_end.tracked && !result.reasoning_end.byte &&
-                 !request.CurrentReasoningEnd().tracked,
-             "inexact incremental text is not tracked (text rule applies)");
-    }
-  }
-}
-
 // An armed `--trace` records each finished request under the HTTP request id
 // bound where it was submitted: the prompt as the runner decodes it, the
 // effective limits and sampling, the cache outcome and the raw output.
@@ -1374,9 +935,9 @@ void TestGenerationTraceRecordsPromptAndOutput() {
   Expect(control->decode_calls.load(std::memory_order_relaxed) == 0,
          "an unarmed trace decodes no prompt");
 
-  const auto path =
-      fs::temp_directory_path() /
-      ("gufo-scheduler-trace-" + std::to_string(::getpid()) + ".jsonl");
+  const auto path = fs::temp_directory_path() /
+                    ("gufo-scheduler-trace-" +
+                     std::to_string(gufo::platform::ProcessId()) + ".jsonl");
   fs::remove(path);
   Expect(!Trace::Open(path.string()).has_value(), "trace file opens");
   gufo::sampling::SamplingConfig sampling;
@@ -2206,15 +1767,6 @@ void TestFifoReplacementAdmissionWithOneSlot() {
   }
   Expect(prefill_order == std::vector<TextRunnerToken>({1, 2, 3}),
          "replacement admission preserves FIFO order");
-  TextRunnerToken last = 1;
-  for (const auto& event : control->Events()) {
-    Expect(
-        event.label >= last,
-        "one session never interleaves prefill or decode of a queued request");
-    last = event.label;
-  }
-  std::cout
-      << "PASS: TestFifoReplacementAdmissionWithOneSlot serial execution\n";
 }
 
 void TestServerMetricsAreLive() {
@@ -3080,12 +2632,69 @@ void TestShutdownCancelsRunnerAcquisition() {
   stopped.get();
 }
 
+void TestStructuredOutputIsPreparedBeforeServing() {
+  // The scheduler is created during model loading, before load_completed and
+  // before the server listens. The vocabulary is ready when
+  // construction returns, and constrained requests reuse it.
+  const auto control = std::make_shared<FakeControl>();
+  control->structured_output = true;
+  std::ostringstream output;
+  auto* previous = std::clog.rdbuf(output.rdbuf());
+  auto scheduler = MakeScheduler(control, 1);
+  // The sink writes on its own thread.
+  (void)gufo::server::Logger::FlushSync();
+  std::clog.rdbuf(previous);
+  Expect(control->vocabulary_builds == 1,
+         "the vocabulary is built before the scheduler admits a request");
+  const auto log = output.str();
+  Expect(log.find("event=structured_output_prepared vocabulary_tokens=256 "
+                  "prepare_ms=") != std::string::npos &&
+             log.find(" rss_delta_kib=") != std::string::npos,
+         "preparation reports its time and memory");
+  const auto grammar = gufo::sampling::JsonConstraint::Compile(
+      gufo::json::parse(
+          R"({"type":"object","properties":{},"additionalProperties":false})"),
+      false);
+  const auto binding = scheduler->runner().BindConstraint(grammar);
+  Expect(binding->vocabulary && control->vocabulary_builds == 1,
+         "a constrained request reuses the prepared vocabulary");
+  Expect(scheduler->Submit({7, 70}, 2, 0.0F).Wait().tokens.size() == 2,
+         "a prepared scheduler serves requests");
+
+  // Runners without structured output can still serve ordinary text, but
+  // reject an explicit constrained request as before.
+  const auto plain = MakeScheduler(std::make_shared<FakeControl>(), 1);
+  Expect(plain->runner().PrepareConstraintVocabulary() == 0 &&
+             plain->Submit({7, 70}, 2, 0.0F).Wait().tokens.size() == 2,
+         "unsupported runners retain ordinary text serving");
+  std::string error;
+  try {
+    (void)plain->runner().BindConstraint(grammar);
+  } catch (const std::invalid_argument& exception) {
+    error = exception.what();
+  }
+  Expect(error.find("does not support structured output") != std::string::npos,
+         "unsupported runners still reject structured output");
+
+  // A supported runner with a broken vocabulary must fail startup.
+  const auto broken = std::make_shared<FakeControl>();
+  broken->structured_output = true;
+  broken->vocabulary_failure = true;
+  error.clear();
+  try {
+    (void)MakeScheduler(broken, 1);
+  } catch (const std::runtime_error& exception) {
+    error = exception.what();
+  }
+  Expect(error == "vocabulary build failed",
+         "vocabulary build failures stop startup");
+}
+
 void TestProgressLoggingIsOptInAndBounded() {
   auto run = [](bool enabled) {
     auto control = std::make_shared<FakeControl>();
     control->prefill_capacity = 2;
     std::ostringstream output;
-    gufo::server::Logger::FlushSync();
     auto* previous = std::clog.rdbuf(output.rdbuf());
     {
       auto scheduler = MakeScheduler(
@@ -3095,7 +2704,8 @@ void TestProgressLoggingIsOptInAndBounded() {
       Expect(result.tokens.size() == 55,
              "progress logging preserves generated tokens");
     }
-    gufo::server::Logger::FlushSync();
+    // The sink writes on its own thread.
+    (void)gufo::server::Logger::FlushSync();
     std::clog.rdbuf(previous);
     return output.str();
   };
@@ -3118,7 +2728,6 @@ void TestAdmissionLoggingIsDebugTierOnly() {
     const auto previous_level = gufo::server::Logger::Level();
     gufo::server::Logger::SetLevel(level);
     std::ostringstream output;
-    gufo::server::Logger::FlushSync();
     auto* previous = std::clog.rdbuf(output.rdbuf());
     bool rejected = false;
     {
@@ -3142,7 +2751,8 @@ void TestAdmissionLoggingIsDebugTierOnly() {
       (void)active.Wait();
       (void)queued.Wait();
     }
-    gufo::server::Logger::FlushSync();
+    // The sink writes on its own thread.
+    (void)gufo::server::Logger::FlushSync();
     std::clog.rdbuf(previous);
     gufo::server::Logger::SetLevel(previous_level);
     Expect(rejected, "admission logging still rejects a full pending queue");
@@ -3373,945 +2983,14 @@ void TestEmptyTokenIsPublished() {
          "an empty streamed piece still charges the output budget");
 }
 
-void TestDebugTimelineOrderCountsAndOffPath() {
-  auto control = std::make_shared<FakeControl>();
-  control->prefill_capacity = 2;
-  auto scheduler = MakeScheduler(control, 1);
-  TextRequestMetadata metadata;
-  metadata.cache_prompt = false;
-  metadata.debug_timeline = true;
-  const auto result = scheduler->Submit({1, 2, 3, 4, 5, 6}, 4, 0.0F, {}, false,
-                                        metadata).Wait();
-  Expect(bool(result.debug_timeline), "opt-in creates a timeline");
-  const auto events = gufo::server::SerializeDebugTimeline(result);
-  Expect(events.items().front().member_str("event") == "admission",
-         "timeline begins at admission");
-  Expect(events.items().back().member_str("event") == "finish",
-         "timeline ends at finish");
-  std::size_t passes = 0, cycles = 0, first = 0, lookup = 0, queue = 0;
-  double previous = -1;
-  double cycle_ms = 0, prefill_ms = 0, restore_ms = 0, queue_ms = 0;
-  for (const auto& event : events.items()) {
-    Expect(event.member_double("t_ms") >= previous,
-           "timeline is chronological");
-    previous = event.member_double("t_ms");
-    const auto name = event.member_str("event");
-    if (name == "prefill") {
-      prefill_ms += event.member_double("ms");
-      Expect(event.member_size("index") == passes &&
-                 event.member_size("start_depth") == passes * 2 &&
-                 event.member_size("tokens") == 2,
-             "scripted prefill pass index, tokens and depth");
-      ++passes;
-    } else if (name == "decode_cycle") {
-      cycle_ms += event.member_double("ms");
-      Expect(event.member_size("verify_width") == 1 &&
-                 event.member_size("drafts") == 0,
-             "AR cycles report width one");
-      ++cycles;
-    } else if (name == "first_token") {
-      ++first;
-    } else if (name == "cache_lookup") {
-      restore_ms += event.member_double("restore_ms");
-      ++lookup;
-      Expect(event.member_str("source") == "none",
-             "cold lookup reports its source");
-    } else if (name == "queue") {
-      queue_ms += event.member_double("wait_ms");
-      ++queue;
-    }
-  }
-  Expect(passes == result.prefill_chunks && passes == 3 && cycles == 4 &&
-             first == 1 && lookup == 1 && queue == 1,
-         "timeline captures every scripted work unit once");
-  const auto* summary = events.items().back().find("summary");
-  Expect(summary && summary->find("prefill_passes")->size() == passes,
-         "summary lists all actual prefill passes");
-  Expect(summary->member_double("cycle_ms") == cycle_ms &&
-             summary->member_double("prefill_ms") == prefill_ms &&
-             summary->member_double("restore_ms") == restore_ms &&
-             summary->member_double("queue_ms") == queue_ms,
-         "summary totals reconcile against independently accumulated event measurements");
-  const double accounted = summary->member_double("cycle_ms") +
-      summary->member_double("prefill_ms") + summary->member_double("restore_ms") +
-      summary->member_double("queue_ms") + summary->member_double("residual_ms");
-  Expect(std::abs(accounted - summary->member_double("wall_ms")) < 1e-8,
-         "raw residual preserves elapsed accounting without hiding overlaps");
-  Expect(summary->member_double("unattributed_ms") ==
-             std::max(0.0, summary->member_double("residual_ms")) &&
-             summary->member_double("overlap_ms") ==
-             std::max(0.0, -summary->member_double("residual_ms")),
-         "gap and overlap retain the sign of independent phase accounting");
-  Expect(!result.debug_timeline->truncated(), "short request is untruncated");
-  metadata.debug_timeline = false;
-  const auto off = scheduler->Submit({1, 2, 3, 4, 5, 6}, 4, 0.0F, {}, false,
-                                     metadata).Wait();
-  Expect(!off.debug_timeline && off.tokens == result.tokens &&
-             off.text == result.text,
-         "timeline OFF has no event storage and identical outputs");
-  auto response = gufo::json::Value::object();
-  response["text"] = off.text;
-  const auto off_bytes = response.dump();
-  gufo::server::AddDebugTimeline(response, off);
-  // Base fake frontier is prompt label * 100, then increments per token.
-  Expect(off_bytes == "{\"text\":\"100,101,102,103\"}" && response.dump() == off_bytes,
-         "OFF response keeps base fake-output bytes and emits no attribution fields");
-  Expect(!response.find("gufo"), "OFF response contains no timeline or summary");
-}
-
-void TestDebugTimelineMixedSourcesAndPolicy() {
-  auto control = std::make_shared<FakeControl>();
-  control->multi_token_decode = true;
-  control->timeline_mixed_drafts = true;
-  auto scheduler = MakeScheduler(control, 1);
-  TextRequestMetadata metadata;
-  metadata.cache_prompt = false;
-  const auto initial_off = scheduler->Submit({1, 2, 3}, 3, 0.0F, {}, false,
-                                             metadata).Wait();
-  Expect(!initial_off.debug_timeline && control->debug_settings_calls == 0,
-         "initial OFF request does not build settings");
-  metadata.debug_timeline = true;
-  gufo::sampling::SamplingConfig config;
-  config.temperature = 1.0F;
-  auto behaviour = std::make_shared<gufo::sampling::BehaviourConfig>();
-  behaviour->think_eog_guard = true;
-  behaviour->spec_eog_stop = true;
-  behaviour->eog_min_prob = 0.25;
-  config.behaviour = behaviour;
-  const auto result = scheduler->Submit({1, 2, 3}, 6, config, {}, false,
-                                        metadata).Wait();
-  const auto events = result.debug_timeline->Serialize();
-  const auto* bundle = events.items().front().find("bundle");
-  Expect(bundle && bundle->find("mtp_policy")->member_str("name") == "survival" &&
-             bundle->find("mtp_policy")->member_size("cap") == 4 &&
-             bundle->find("behaviour")->find("think_eog_guard")->as_bool() &&
-             bundle->find("behaviour")->member_double("eog_min_prob") == 0.25,
-         "header projects configured policy and actual request switches");
-  std::size_t cycles = 0;
-  for (const auto& event : events.items()) {
-    if (event.member_str("event") != "decode_cycle")
-      continue;
-    const auto* sources = event.find("draft_sources");
-    Expect(sources && sources->member_size("prompt_lookup") == (cycles == 0 ? 2 : 0) &&
-               sources->member_size("mtp_head") == (cycles == 0 ? 2 : 3) &&
-               event.member_str("draft_source") == (cycles == 0 ? "mixed" : "mtp_head") &&
-               event.member_size("drafts") == (cycles == 0 ? 4 : 3) &&
-               event.member_size("verify_width") == (cycles == 0 ? 5 : 4) &&
-               event.member_size("accepted_length") == 2 &&
-               event.find("partial_accept")->as_bool() &&
-               event.member_size("policy_chosen_length_sum") == 4 &&
-               !event.contains("policy") &&
-               event.member_str("policy_effective") == "survival" &&
-               event.member_size("accepted_length") + 1 == 3,
-           "scripted mixed and survival-shortened head cycles retain exact budget/source/verify counts");
-    Expect(event.member_size("n_cycles") == 1 &&
-               event.member_size("mtp_offered") == (cycles == 0 ? 2 : 4) &&
-               event.member_size("lookup_offered") == (cycles == 0 ? 2 : 0) &&
-               event.member_size("proposed") == 4 &&
-               event.member_size("cut") == (cycles == 0 ? 0 : 1) &&
-               event.find("survival_any")->as_bool(),
-           "offers include the cut proposal and reconcile with verified drafts");
-    Expect(!event.find("latin_filtered") && !event.find("latin_rejected") &&
-               !event.find("proposed_length") &&
-               !event.find("filter_changed") && !event.find("filter_rejected") &&
-               !event.find("rollback"),
-           "obsolete name and unavailable counterfactual filter/rollback fields are omitted");
-    ++cycles;
-  }
-  Expect(cycles == 2, "scripted multi-token request has two cycles");
-  Expect(bundle->find("mtp_policy")->find("prompt_lookup")->as_bool() &&
-             bundle->find("mtp_policy")->member_str("draft_vocabulary") == "latin_text" &&
-             bundle->find("mtp_policy")->member_str("latin_vocab") == "latin",
-         "default stack settings are resolved in the bundle");
-  config.temperature = 0.0F;
-  const auto deterministic = scheduler->Submit({1, 2, 3}, 3, config, {}, false,
-                                                metadata).Wait();
-  const auto deterministic_events = deterministic.debug_timeline->Serialize();
-  for (const auto& event : deterministic_events.items()) {
-    if (event.member_str("event") == "decode_cycle")
-      Expect(event.member_str("policy_effective") == "length" &&
-                 event.member_size("policy_chosen_length_sum") == 4,
-             "scripted deterministic policy decision reports length and initial budget");
-  }
-  metadata.debug_timeline = false;
-  const auto off = scheduler->Submit({1, 2, 3}, 3, config, {}, false, metadata).Wait();
-  auto response = gufo::json::Value::object();
-  response["text"] = off.text;
-  const auto off_bytes = response.dump();
-  gufo::server::AddDebugTimeline(response, off);
-  // Base fake frontier is prompt label * 100, then increments per token.
-  Expect(off_bytes == "{\"text\":\"100,101,102\"}" && response.dump() == off_bytes,
-         "OFF response keeps base fake-output bytes and emits no attribution fields");
-  Expect(!response.contains("gufo") && control->debug_settings_calls == 1,
-         "settings are built once and all diagnostic fields are absent OFF");
-}
-
-void TestDebugTimelineStepCycleSemantics() {
-  auto control = std::make_shared<FakeControl>();
-  control->multi_token_decode = true;
-  control->timeline_mixed_drafts = true;
-  control->timeline_multi_cycle_step = true;
-  auto scheduler = MakeScheduler(control, 1);
-  TextRequestMetadata metadata;
-  metadata.cache_prompt = false;
-  metadata.debug_timeline = true;
-  const auto result = scheduler->Submit({1, 2, 3}, 6, 1.0F, {}, false,
-                                        metadata).Wait();
-  const auto events = result.debug_timeline->Serialize();
-  std::size_t steps = 0;
-  for (const auto& event : events.items()) {
-    if (event.member_str("event") != "decode_cycle")
-      continue;
-    Expect(event.contains("n_cycles") &&
-               event.member_size("n_cycles") == (steps == 0 ? 1 : 3) &&
-               event.member_size("policy_chosen_length_sum") == (steps == 0 ? 4 : 12) &&
-               !event.contains("policy_chosen_length") &&
-               event.find("survival_any") && event.find("survival_any")->as_bool() &&
-               event.contains("policy_effective") == (steps == 0),
-           "one- and three-cycle steps cannot silently label a budget sum as one cycle");
-    Expect(event.member_size("mtp_offered") == (steps == 0 ? 2 : 10) &&
-               event.member_size("lookup_offered") == (steps == 0 ? 2 : 0) &&
-               event.member_size("proposed") == (steps == 0 ? 4 : 10) &&
-               event.member_size("cut") == (steps == 0 ? 0 : 1) &&
-               event.member_size("drafts") == (steps == 0 ? 4 : 9),
-           "scripted step totals preserve offers and cuts across multiple cycles");
-    ++steps;
-  }
-  Expect(steps == 2 && result.draft_rounds == 4,
-         "two work units report four speculative cycles");
-}
-
-void TestDebugTimelineRamAndLiveRestoreKinds() {
-  auto control = std::make_shared<FakeControl>();
-  control->snapshot_callback = [] {};
-  control->in_pass_checkpoint = true;
-  auto scheduler = MakeScheduler(control, 1);
-  TextRequestMetadata metadata;
-  metadata.debug_timeline = true;
-  metadata.cache_prefix_tokens = 2;
-  const auto first = scheduler->Submit({1, 2, 3, 4, 5, 6}, 1, 0.0F, {}, false,
-                                       metadata).Wait();
-  // Diverge immediately after the in-pass stable checkpoint: the live frontier
-  // does not match, so Acquire must restore the retained RAM snapshot.
-  const auto restored = scheduler->Submit({1, 2, 9, 10}, 1, 0.0F, {}, false,
-                                          metadata).Wait();
-  Expect(restored.cache_hit && restored.cached_prompt_tokens == 2 &&
-             restored.cache_restore_bytes > 0 && !restored.cache_disk_hit,
-         "divergent suffix forces restoration of the in-pass RAM checkpoint");
-  const auto events = restored.debug_timeline->Serialize();
-  const auto* summary = events.items().back().find("summary");
-  const auto& restore = summary->find("restores")->items().front();
-  Expect(restore.member_str("kind") == "RAM" &&
-             restore.member_size("bytes") == restored.cache_restore_bytes &&
-             restore.member_double("ms") == restored.cache_restore_ms &&
-             !restore.find("capture_origin"),
-         "RAM restore uses measured bytes/ms without fabricating lost capture provenance");
-  // Extend the current live token prefix, including its generated token.
-  metadata.cache_prefix_tokens = 0;
-  const auto live = scheduler->Submit({1, 2, 9, 10, 100, 11}, 1, 0.0F, {}, false,
-                                      metadata).Wait();
-  const auto live_events = live.debug_timeline->Serialize();
-  const auto* live_summary = live_events.items().back().find("summary");
-  Expect(live.cache_hit && live.cache_restore_bytes == 0 &&
-             live_summary->find("restores")->items().front().member_str("kind") == "live_slot",
-         "live slot reuse is distinguished from snapshot restoration");
-}
-
-void TestDebugTimelineBatchOmissionsAndAccounting() {
-  const auto start = TextGenerationScheduler::Clock::now();
-  gufo::server::DebugTimeline timeline(start);
-  timeline.Add("admission", start);
-  auto bundle = gufo::json::Value::object();
-  bundle["mtp_policy"] = gufo::json::Value::object();
-  bundle["mtp_policy"]["name"] = "survival";
-  bundle["mtp_policy"]["cap"] = 4;
-  timeline.Header(std::move(bundle));
-  auto queue = gufo::json::Value::object();
-  queue["wait_ms"] = 4.0;
-  queue["queue_ms"] = 20.0;
-  timeline.Add("queue", start, queue);
-  auto lookup = gufo::json::Value::object();
-  lookup["source"] = "RAM";
-  lookup["restore_ms"] = 3.0;
-  lookup["bytes"] = 100;
-  timeline.Add("cache_lookup", start, lookup);
-  auto pass = gufo::json::Value::object();
-  pass["tokens"] = 2;
-  pass["ms"] = 2.0;
-  pass["start_depth"] = 3;
-  pass["end_reason"] = "cap";
-  timeline.Add("prefill", start, pass);
-  timeline.Cycle(start, 5, 5, 4, 2, std::nullopt);
-  timeline.Cycle(start + std::chrono::milliseconds(5), 0, 1, 0, 0);
-  timeline.Add("finish", start + std::chrono::milliseconds(20));
-  const auto events = timeline.Serialize();
-  const auto& cycle = events.items()[4];
-  Expect(!cycle.find("draft_sources") && !cycle.find("draft_source") &&
-             !cycle.contains("policy_effective") && !cycle.contains("policy") &&
-             !cycle.contains("policy_chosen_length_sum") &&
-             events.items()[0].find("bundle")->find("mtp_policy")->member_size("cap") == 4,
-         "batch path omits unavailable source and effective-policy names while retaining the configured cap");
-  Expect(events.items()[5].member_str("policy_effective") == "none",
-         "non-MTP cycle policy is none");
-  const auto* summary = events.items().back().find("summary");
-  Expect(summary->member_double("residual_ms") == 6 &&
-             summary->member_double("overlap_ms") == 0 &&
-             summary->member_double("cycle_ms") == 5 &&
-             summary->member_double("prefill_ms") == 2 &&
-             summary->member_double("restore_ms") == 3 &&
-             summary->member_double("queue_ms") == 4 &&
-             summary->member_double("unattributed_ms") == 6 &&
-             summary->member_double("wall_ms") == 20,
-         "accounting uses queue wait rather than admission duration, excluding duplicate restore/render time");
-}
-
-void TestDebugTimelineOverlappingPhases() {
-  const auto start = TextGenerationScheduler::Clock::time_point{};
-  gufo::server::DebugTimeline timeline(start);
-  auto queue = gufo::json::Value::object();
-  queue["wait_ms"] = 4.0;
-  timeline.Add("queue", start, queue);
-  auto restore = gufo::json::Value::object();
-  restore["source"] = "RAM";
-  restore["restore_ms"] = 3.0;
-  restore["bytes"] = 128;
-  timeline.Add("cache_lookup", start + std::chrono::milliseconds(4), restore);
-  auto pass = gufo::json::Value::object();
-  pass["ms"] = 8.0;
-  timeline.Add("prefill", start + std::chrono::milliseconds(4), pass);
-  timeline.Cycle(start + std::chrono::milliseconds(7), 5, 5, 4, 2,
-                 0, 4, true);
-  timeline.Add("finish", start + std::chrono::milliseconds(12));
-  const auto events = timeline.Serialize();
-  const auto& summary = *events.items().back().find("summary");
-  Expect(summary.member_double("cycle_ms") == 5 &&
-             summary.member_double("prefill_ms") == 8 &&
-             summary.member_double("restore_ms") == 3 &&
-             summary.member_double("queue_ms") == 4 &&
-             summary.member_double("wall_ms") == 12 &&
-             summary.member_double("residual_ms") == -8 &&
-             summary.member_double("overlap_ms") == 8 &&
-             summary.member_double("unattributed_ms") == 0,
-         "overlapping script retains raw negative residual independently of clamping");
-}
-
-void TestDebugTimelineDiskRestoreKind() {
-  std::string pattern = (std::filesystem::temp_directory_path() /
-                         "gufo-timeline-disk-XXXXXX").string();
-  const char* created = ::mkdtemp(pattern.data());
-  Expect(created != nullptr, "fake disk timeline test creates a private directory");
-  const std::filesystem::path directory(created);
-  const gufo::server::TextRunnerDiskCacheOptions disk{
-      .directory = directory, .capacity_bytes = 4096, .staging_capacity_bytes = 4096};
-  auto control = std::make_shared<FakeControl>();
-  control->snapshot_callback = [] {};
-  control->persistent_snapshots = true;
-  TextRequestMetadata metadata;
-  metadata.debug_timeline = true;
-  {
-    auto pool = std::make_shared<TextRunnerPool>(
-        std::make_shared<FakeRunner>(control), 1, disk);
-    TextGenerationScheduler writer(pool);
-    const auto written = writer.Submit({1, 2, 3}, 1, 0.0F, {}, false, metadata).Wait();
-    Expect(written.cache_disk_queued_bytes > 0, "first turn queues a real disk checkpoint");
-  }
-  {
-    auto pool = std::make_shared<TextRunnerPool>(
-        std::make_shared<FakeRunner>(control), 1, disk);
-    TextGenerationScheduler reader(pool);
-    const auto restored = reader.Submit({1, 2, 3, 9}, 1, 0.0F, {}, false,
-                                        metadata).Wait();
-    const auto events = restored.debug_timeline->Serialize();
-    const auto& restore = events.items().back().find("summary")
-        ->find("restores")->items().front();
-    Expect(restored.cache_disk_hit && restore.member_str("kind") == "disk" &&
-               restore.member_size("bytes") == restored.cache_restore_bytes &&
-               restore.member_double("ms") == restored.cache_restore_ms,
-           "restarted fake runner reports a measured disk restore in the timeline");
-  }
-  std::error_code error;
-  std::filesystem::remove_all(directory, error);
-}
-
-void TestDebugTimelineSnapshotsAndCycleCap() {
-  auto control = std::make_shared<FakeControl>();
-  control->snapshot_callback = [] {};
-  auto scheduler = MakeScheduler(control, 1);
-  TextRequestMetadata metadata;
-  metadata.debug_timeline = true;
-  const auto result = scheduler->Submit({1, 2, 3}, 2, 0.0F, {}, false,
-                                        metadata).Wait();
-  bool snapshot = false;
-  const auto events = gufo::server::SerializeDebugTimeline(result);
-  for (const auto& event : events.items()) {
-    if (event.member_str("event") == "snapshot") {
-      snapshot = true;
-      Expect(event.member_size("tokens") == 3 &&
-                 event.member_size("bytes") > 0 && event.contains("ms") &&
-                 event.contains("in_pass") && event.member_str("kind") == "continuation",
-             "snapshot timeline has the measured payload and purpose");
-    }
-  }
-  Expect(snapshot, "prompt snapshot capture is included");
-  const auto& captures = events.items().back().find("summary")->find("captures")->items();
-  Expect(!captures.empty(), "separate capture appears in summary");
-  for (const auto& capture : captures)
-    Expect(capture.find("in_pass") && !capture.find("in_pass")->as_bool() &&
-               capture.member_str("capture_kind") == "separate" &&
-               capture.member_size("tokens") == 3 &&
-               capture.member_size("bytes") == sizeof(FakeRunner::SnapshotState),
-           "summary preserves each separate capture's measured false flag");
-  const auto start = TextGenerationScheduler::Clock::now();
-  gufo::server::DebugTimeline capped(start);
-  for (std::size_t i = 0; i <= gufo::server::DebugTimeline::kMaxDecodeCycles; ++i)
-    capped.Cycle(start + std::chrono::milliseconds(i), 1, 3, 2, 1);
-  capped.Add("finish", start + std::chrono::seconds(5));
-  gufo::server::DebugTimeline failed(start);
-  failed.Failed(std::make_exception_ptr(std::runtime_error("diagnostic failed")));
-  bool surfaced = false;
-  try {
-    (void)failed.Serialize();
-  } catch (const std::runtime_error& error) {
-    surfaced = std::string(error.what()) == "diagnostic failed";
-  }
-  Expect(surfaced, "diagnostic allocation/log failure cannot return a partial success");
-  Expect(capped.truncated() && capped.Serialize().items().size() ==
-             gufo::server::DebugTimeline::kMaxDecodeCycles + 1,
-         "decode cap truncates cycles while retaining finish");
-  const auto capped_events = capped.Serialize();
-  const auto* totals = capped_events.items().back().find("summary");
-  Expect(totals && totals->member_size("cycle_count") == 4097 &&
-             totals->member_double("cycle_ms") == 4097 &&
-             totals->member_double("unattributed_ms") == 903,
-         "summary includes cycle time and count beyond the retained cap");
-}
-
-void TestDebugTimelineRequestTruncation() {
-  auto control = std::make_shared<FakeControl>();
-  control->max_context = 5000;
-  auto scheduler = MakeScheduler(control, 1);
-  TextRequestMetadata metadata;
-  metadata.debug_timeline = true;
-  std::ostringstream lines;
-  gufo::server::Logger::FlushSync();
-  auto* old_buffer = std::clog.rdbuf(lines.rdbuf());
-  const auto result = scheduler->Submit({1, 2},
-      gufo::server::DebugTimeline::kMaxDecodeCycles + 1, 0.0F, {}, false,
-      metadata).Wait();
-  gufo::server::Logger::FlushSync();
-  std::clog.rdbuf(old_buffer);
-  std::size_t cycles = 0;
-  const auto events = gufo::server::SerializeDebugTimeline(result);
-  for (const auto& event : events.items())
-    cycles += event.member_str("event") == "decode_cycle";
-  Expect(result.debug_timeline->truncated() &&
-             cycles == gufo::server::DebugTimeline::kMaxDecodeCycles &&
-             events.items().back().member_str("event") == "finish" &&
-             events.items().back().find("truncated")->as_bool(),
-         "fake request caps cycle events and reports truncation at finish");
-}
-
-void TestDebugTimelineInPassCheckpoint() {
-  auto control = std::make_shared<FakeControl>();
-  control->snapshot_callback = [] {};
-  control->in_pass_checkpoint = true;
-  auto scheduler = MakeScheduler(control, 1);
-  TextRequestMetadata metadata;
-  metadata.debug_timeline = true;
-  metadata.cache_prefix_tokens = 2;
-  const auto result = scheduler->Submit({1, 2, 3, 4, 5, 6}, 1, 0.0F, {}, false,
-                                        metadata).Wait();
-  bool in_pass = false, pass_boundary = false;
-  const auto events = gufo::server::SerializeDebugTimeline(result);
-  for (const auto& event : events.items()) {
-    if (event.member_str("event") == "snapshot" &&
-        event.find("in_pass") && event.find("in_pass")->as_bool()) {
-      in_pass = true;
-      Expect(event.member_size("tokens") == 2 && event.member_size("bytes") > 0 &&
-                 event.member_double("ms") >= 0,
-             "in-pass snapshot exposes its measured stable boundary");
-    }
-    if (event.member_str("event") == "prefill")
-      pass_boundary = event.member_str("end_reason") == "prompt_end" &&
-                      event.find("in_pass_checkpoint") &&
-                      event.find("in_pass_checkpoint")->as_bool();
-  }
-  const auto* summary = events.items().back().find("summary");
-  const auto* captures = summary ? summary->find("captures") : nullptr;
-  bool summary_in_pass = false;
-  Expect(captures && !captures->items().empty(), "summary retains capture records");
-  for (const auto& capture : captures->items()) {
-    if (capture.find("in_pass")->as_bool()) {
-      summary_in_pass = true;
-      Expect(capture.member_str("capture_kind") == "in_pass_checkpoint" &&
-                 capture.member_size("tokens") == 2 &&
-                 capture.member_size("bytes") == sizeof(FakeRunner::SnapshotState),
-             "summary exposes the actual in-pass capture flag and kind");
-    } else {
-      Expect(capture.member_str("capture_kind") == "separate",
-             "separate captures preserve false in-pass flag");
-    }
-  }
-  Expect(summary_in_pass && in_pass && pass_boundary && result.prefill_chunks == 1,
-         "in-pass capture appears without splitting the prefill pass");
-}
-
-void TestPromptScoreDedicatedPathAndCpuReference() {
-  auto control = std::make_shared<FakeControl>();
-  control->score_supported = true;
-  auto scheduler = MakeScheduler(control, 1);
-  gufo::sampling::SamplingConfig config;
-  config.logprobs = 2;
-  const auto states = control->states_created.load();
-  const auto scored = scheduler->ScorePrompt({0, 1, 2}, config).Wait();
-  Expect(scored.prompt_tokens == 3 && scored.completion_tokens == 0 &&
-             scored.tokens == std::vector<TextRunnerToken>({0, 1, 2}) &&
-             scored.text.empty() &&
-             scored.prompt_logprobs.size() == 3 && !scored.prompt_logprobs[0],
-         "teacher-forced scoring generates no tokens and first score is null");
-  const double normalizer = std::log(1.0 + std::exp(1.0) + std::exp(-1.0));
-  Expect(std::abs(scored.prompt_logprobs[1]->logprob - (1.0 - normalizer)) < 1e-12 &&
-             std::abs(scored.prompt_logprobs[2]->logprob - (-1.0 - normalizer)) < 1e-12,
-         "teacher-forced prompt scores equal independent CPU reference");
-  Expect(control->events.empty() && control->states_created.load() == states,
-         "scoring never acquires a continuation state or performs generation");
-  const auto warm = scheduler->Submit({1, 2}, 1, 0.0F).Wait();
-  (void)scheduler->ScorePrompt({0, 1}, config).Wait();
-  const auto hit = scheduler->Submit({1, 2, 100}, 1, 0.0F).Wait();
-  Expect(!warm.cache_hit && hit.cache_hit && hit.cached_prompt_tokens == 3,
-         "scoring preserves the retained continuation");
-  control->score_supported = false;
-  bool unsupported = false;
-  try {
-    (void)scheduler->ScorePrompt({0, 1}, config).Wait();
-  } catch (const std::invalid_argument& error) {
-    unsupported = std::string(error.what()) ==
-                  "prompt logprobs are not supported for this model";
-  }
-  Expect(unsupported, "unsupported scorer produces the explicit error");
-}
-
-void TestScoredGenerationPreservesFakeOutputAndAlignment() {
-  for (const bool multi_token : {false, true}) {
-    auto control = std::make_shared<FakeControl>();
-    control->multi_token_decode = multi_token;
-    auto scheduler = MakeScheduler(control, 1);
-    TextRequestMetadata metadata;
-    metadata.cache_prompt = false;
-    gufo::sampling::SamplingConfig config;
-    config.seed = 123;
-    const auto plain = scheduler->Submit({1, 2}, 5, config, {}, false, metadata).Wait();
-    config.logprobs = 2;
-    const auto scored = scheduler->Submit({1, 2}, 5, config, {}, false, metadata).Wait();
-    Expect(scored.tokens == plain.tokens && scored.text == plain.text &&
-               scored.logprobs.size() == scored.tokens.size(),
-           "fixed-seed fake output and per-token score alignment survive opt-in");
-    for (std::size_t i = 0; i < scored.tokens.size(); ++i) {
-      const auto token = scored.tokens[i];
-      const double reference = 1.0 - std::log(double(token) + std::exp(1.0));
-      Expect(scored.logprobs[i].token == token &&
-                 std::abs(scored.logprobs[i].logprob - reference) < 1e-12,
-             "emitted fake token scores match independent raw-row reference");
-    }
-  }
-}
-
-void TestOneTokenBudgetKeepsLogprobs() {
-  // A 4-token limit decodes 3 tokens, then a one-token budget that the
-  // runner delegates to TextModelRunner::DecodeStep.
-  for (const bool batched : {false, true}) {
-    auto control = std::make_shared<FakeControl>();
-    control->multi_token_decode = true;
-    control->base_single_token_decode = true;
-    control->prefix_reuse = false;
-    control->batched_multi_token_decode = batched;
-    control->supports_batched_advance = batched;
-    if (batched)
-      control->block_prefill_label = 1;
-    auto scheduler = MakeScheduler(control, batched ? 2 : 1);
-    TextRequestMetadata metadata;
-    metadata.cache_prompt = false;
-    gufo::sampling::SamplingConfig config;
-    config.seed = 123;
-    config.logprobs = 2;
-    std::vector<TextGenerationScheduler::Request> requests;
-    requests.push_back(scheduler->Submit({1, 10}, 4, config, {}, false, metadata));
-    if (batched) {
-      control->WaitForPrefill(1);
-      requests.push_back(scheduler->Submit({2, 20}, 4, config, {}, false, metadata));
-      control->ReleasePrefill();
-    }
-    for (std::size_t r = 0; r < requests.size(); ++r) {
-      std::string failure;
-      TextGenerationScheduler::Result result;
-      try {
-        result = requests[r].Wait();
-      } catch (const std::exception& error) {
-        failure = error.what();
-      }
-      Expect(failure.empty(),
-             "one-token budget with logprobs completes (" + failure + ")");
-      const auto label = static_cast<TextRunnerToken>(r + 1);
-      Expect(result.tokens == ExpectedTokens(label, 4) &&
-                 result.logprobs.size() == 4,
-             "one-token budget keeps one score per generated token");
-      for (std::size_t i = 0; i < result.tokens.size(); ++i) {
-        const auto token = result.tokens[i];
-        const double reference = 1.0 - std::log(double(token) + std::exp(1.0));
-        Expect(result.logprobs[i].token == token &&
-                   result.logprobs[i].top_logprobs.size() == 2 &&
-                   std::abs(result.logprobs[i].logprob - reference) < 1e-12,
-               "one-token budget score matches the raw-row reference");
-      }
-      if (batched)
-        Expect(result.execution_plan == "batched-w2",
-               "both one-token budgets ran in one batched decode");
-    }
-  }
-}
-
-void TestPromptScoreSerializationAndCancellation() {
-  auto control = std::make_shared<FakeControl>();
-  control->score_supported = true;
-  control->block_prefill_label = 1;
-  auto scheduler = MakeScheduler(control, 2);
-  auto generated = scheduler->Submit({1, 2}, 4, 0.0F);
-  control->WaitForPrefill(1);
-  gufo::sampling::SamplingConfig config;
-  config.logprobs = 0;
-  auto scored = scheduler->ScorePrompt({0, 1}, config);
-  Expect(
-      control->score_calls.load() == 0 &&
-          scored.phase() == gufo::server::TextRequestPhase::kScoreQueued,
-      "scorer is explicitly queued behind generation on the inference owner");
-  control->score_callback = [&] {
-    Expect(generated.phase() == TextRequestPhase::kTerminal,
-           "scorer cannot pause a resident decoder: it starts only after "
-           "terminal publication");
-    Expect(scored.phase() == TextRequestPhase::kScoring,
-           "owner exposes the explicit scoring phase");
-  };
-  control->ReleasePrefill();
-  (void)generated.Wait();
-  Expect(scored.Wait().prompt_logprobs.size() == 2 && control->score_calls.load() == 1,
-         "queued scorer executes after generation");
-  const auto calls = control->score_calls.load();
-  auto cancelled = scheduler->ScorePrompt({0, 1}, config, [] { return true; });
-  Expect(cancelled.Wait().cancelled && control->score_calls.load() == calls,
-         "cancelled scoring never invokes its dedicated runner");
-}
-
-void TestLiveScoredQueueAndMissingRecords() {
-  {
-    auto control = std::make_shared<FakeControl>();
-    control->block_advance_label = 1;
-    auto scheduler = MakeScheduler(control, 1);
-    gufo::sampling::SamplingConfig config;
-    config.logprobs = 0;
-    auto live = scheduler->Submit({1, 2}, 3, config, {}, true);
-    control->WaitForAdvance(1);
-    std::promise<void> first;
-    auto first_seen = first.get_future();
-    std::size_t count = 0;
-    auto consumed = std::async(std::launch::async, [&] {
-      return live.Wait(
-          {}, {}, {},
-          [&](std::string_view, const gufo::sampling::TokenLogprob&) {
-            if (++count == 1)
-              first.set_value();
-            return true;
-          });
-    });
-    Expect(first_seen.wait_for(kTestTimeout) == std::future_status::ready &&
-               live.phase() != TextRequestPhase::kTerminal,
-           "first scored token reaches consumer while next runner advance is "
-           "blocked");
-    control->ReleaseAdvance();
-    Expect(consumed.get().tokens.size() == 3 && count == 3,
-           "live scored stream completes with exactly three callbacks");
-  }
-
-  for (const bool multi_token : {false, true}) {
-    auto control = std::make_shared<FakeControl>();
-    control->multi_token_decode = multi_token;
-    auto scheduler = MakeScheduler(control, 1);
-    gufo::sampling::SamplingConfig config;
-    config.seed = 123;
-    config.logprobs = 2;
-    TextRequestMetadata metadata;
-    metadata.cache_prompt = false;
-    auto request = scheduler->Submit({1, 2}, 5, config, {}, true, metadata);
-    std::vector<gufo::sampling::TokenId> published;
-    const auto result = request.Wait(
-        {}, {}, {},
-        [&](std::string_view piece, const gufo::sampling::TokenLogprob& score) {
-          Expect(!piece.empty() && score.top_logprobs.size() == 2,
-                 "real queue publishes one scored token at a time");
-          published.push_back(score.token);
-          return true;
-        });
-    Expect(published == result.tokens && published.size() == 5,
-           "real streaming queue has exactly one scored callback per generated "
-           "token");
-    auto diagnostic = result;
-    diagnostic.debug_timeline = std::make_shared<gufo::server::DebugTimeline>(
-        gufo::server::TextGenerationScheduler::Clock::now());
-    auto value = gufo::json::Value::object();
-    gufo::server::AddDebugTimeline(value, diagnostic);
-    const auto& ids = value.find("gufo")->find("token_ids")->items();
-    Expect(ids.size() == result.tokens.size(),
-           "timeline transports actual published ID count");
-    for (std::size_t i = 0; i < ids.size(); ++i)
-      Expect(ids[i].as_size() == result.tokens[i],
-             "timeline IDs are not inferred from output text");
-    control->omit_score = true;
-    auto broken = scheduler->Submit({1, 2}, 3, config, {}, true, metadata);
-    bool failed = false;
-    try {
-      (void)broken.Wait();
-    } catch (const std::logic_error& error) {
-      failed = std::string(error.what()) ==
-               "runner omitted a requested token logprob";
-    }
-    Expect(failed,
-           "short/missing score vector fails explicitly on AR and MTP paths");
-  }
-}
-
-void TestDiskWriterSchedulerPendingAndTerminalLifetime() {
-  std::string pattern =
-      (std::filesystem::temp_directory_path() / "gufo-writer-scheduler-XXXXXX")
-          .string();
-  const auto* created = ::mkdtemp(pattern.data());
-  Expect(created != nullptr, "scheduler writer test creates its store");
-  const std::filesystem::path directory(created);
-  const auto files = [&] {
-    std::size_t count = 0;
-    for (const auto& file : std::filesystem::directory_iterator(directory))
-      if (file.path().extension() == ".kvc")
-        ++count;
-    return count;
-  };
-  std::binary_semaphore scoring(0), release(0);
-  auto control = std::make_shared<FakeControl>();
-  control->snapshot_callback = [] {};
-  control->persistent_snapshots = true;
-  control->score_supported = true;
-  control->score_callback = [&] {
-    scoring.release();
-    release.acquire();
-  };
-  {
-    auto pool = std::make_shared<TextRunnerPool>(
-        std::make_shared<FakeRunner>(control), 1,
-        gufo::server::TextRunnerDiskCacheOptions{
-            .directory = directory,
-            .capacity_bytes = 4096,
-            .staging_capacity_bytes = 4096,
-            .min_checkpoint_step_tokens = 0});
-    TextGenerationScheduler scheduler(pool);
-    auto completed = scheduler.Submit({1, 2, 3}, 1, 0.0F);
-    Expect(completed.Wait().cache_disk_queued_bytes == 0,
-           "scheduler capture remains RAM-only before idle");
-    gufo::sampling::SamplingConfig config;
-    config.logprobs = 2;
-    auto score = scheduler.ScorePrompt({0, 1}, config);
-    Expect(scoring.try_acquire_for(kTestTimeout),
-           "scorer enters without a runner lease");
-    auto pending = scheduler.Submit({2, 3}, 1, 0.0F);
-    pending.Cancel();
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    Expect(files() == 0,
-           "scoring and queued admission prevent idle RAM persistence");
-    release.release();
-    (void)score.Wait();
-    (void)pending.Wait();
-    const auto deadline = std::chrono::steady_clock::now() + kTestTimeout;
-    while (files() == 0 && std::chrono::steady_clock::now() < deadline)
-      std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    Expect(
-        files() == 1,
-        "terminal resets activity even while completed handles remain alive");
-  }
-  std::error_code error;
-  std::filesystem::remove_all(directory, error);
-}
-
-// Memory guard (ProcessMemoryGuard): readings are fake, so a test imitates a small machine.
-struct GuardSource final : gufo::platform::MemoryReadingSource {
-  gufo::platform::MemoryReadings Read() noexcept override {
-    const std::lock_guard<std::mutex> lock(mutex);
-    return readings;
-  }
-  void Set(const gufo::platform::MemoryReadings& value) {
-    const std::lock_guard<std::mutex> lock(mutex);
-    readings = value;
-  }
-  std::mutex mutex;
-  gufo::platform::MemoryReadings readings;
-};
-
-void TestMemoryGuardRefusesMandatoryNeedOnly() {
-  constexpr std::uint64_t GiB = std::uint64_t{1} << 30;
-  GuardSource source;
-  gufo::platform::MemoryReadings low;
-  low.ram_ok = true;
-  low.ram_available = 1 * GiB;   // under the 4 GiB floor, the way the owner's game leaves the machine
-  low.ram_total = 31 * GiB;
-  source.Set(low);
-  gufo::platform::MemoryGuard guard(&source, 4 * GiB);
-  gufo::platform::SetProcessMemoryGuard(&guard);
-  {
-    auto control = std::make_shared<FakeControl>();
-    auto scheduler = MakeScheduler(control, 1);
-    Expect(scheduler->Submit({1, 10}, 2, 0.0F).Wait().tokens == ExpectedTokens(1, 2),
-           "a request with no mandatory bytes is served below the floor");
-
-    control->memory_need = {.mandatory_device_bytes = 1 * GiB};
-    bool transient = false;
-    try {
-      (void)scheduler->Submit({2, 20}, 2, 0.0F).Wait();
-    } catch (const TextGenerationError& error) {
-      transient = error.code() == TextGenerationErrorCode::kInsufficientMemory && error.http_status() == 503 && error.retryable() &&
-                  error.retry_after_seconds() == 5 && error.memory_guard() && error.refusal().has_value() &&
-                  error.refusal()->needed_bytes == 1 * GiB;
-    }
-    Expect(transient, "mandatory bytes that do not fit now are refused: 503 insufficient_memory with the numbers");
-
-    control->memory_need = {.mandatory_host_bytes = 100 * GiB};
-    bool permanent = false;
-    try {
-      (void)scheduler->Submit({3, 30}, 2, 0.0F).Wait();
-    } catch (const TextGenerationError& error) {
-      permanent = error.code() == TextGenerationErrorCode::kInsufficientMemoryPermanent && error.http_status() == 507 && !error.retryable() &&
-                  std::string(error.stable_code()) == "insufficient_memory_permanent";
-    }
-    Expect(permanent, "bytes beyond what the machine could ever give are refused: 507, not retryable");
-
-    low.ram_available = 20 * GiB;
-    source.Set(low);
-    control->memory_need = {.mandatory_device_bytes = 1 * GiB};
-    Expect(scheduler->Submit({4, 40}, 2, 0.0F).Wait().tokens == ExpectedTokens(4, 2), "admitted once memory is free again");
-    const auto counters = guard.counters();
-    Expect(counters.refused_transient == 1 && counters.refused_permanent == 1, "refusals are counted");
-    // The gate hook: every request is charged extra mandatory bytes, so any model can be forced over budget.
-    control->memory_need = {};
-    low.ram_available = 1 * GiB;
-    source.Set(low);
-    guard.SetDebugNeed(1 * GiB);
-    bool forced = false;
-    try {
-      (void)scheduler->Submit({5, 50}, 2, 0.0F).Wait();
-    } catch (const TextGenerationError& error) {
-      forced = error.code() == TextGenerationErrorCode::kInsufficientMemory;
-    }
-    Expect(forced, "the debug extra need forces a refusal on a runner that needs nothing");
-    guard.SetDebugNeed(0);
-    Expect(scheduler->Submit({6, 60}, 2, 0.0F).Wait().tokens == ExpectedTokens(6, 2), "cleared: served below the floor again");
-  }
-  gufo::platform::SetProcessMemoryGuard(nullptr);
-}
-
-void TestMemoryGuardStopsARunningRequestOnTheLowMemoryEvent() {
-  constexpr std::uint64_t GiB = std::uint64_t{1} << 30;
-  GuardSource source;
-  gufo::platform::MemoryReadings fine;
-  fine.ram_ok = true;
-  fine.ram_available = 20 * GiB;
-  fine.ram_total = 31 * GiB;
-  source.Set(fine);
-  gufo::platform::MemoryGuard guard(&source, 4 * GiB);
-  gufo::platform::SetProcessMemoryGuard(&guard);
-  {
-    auto control = std::make_shared<FakeControl>();
-    control->block_advance_label = 1;
-    auto scheduler = MakeScheduler(control, 1);
-    auto active = scheduler->Submit({1, 10}, 4, 0.0F);
-    control->WaitForAdvance(1);
-    // Windows reports low memory and nothing is cached: the monitor needs two readings (about 1 s), then 2 s with nothing to drop,
-    // before it asks for one request to be stopped. The scheduler thread is held in the advance, so release it afterwards.
-    auto low = fine;
-    low.low_memory_signal = true;
-    source.Set(low);
-    for (int i = 0; i < 200 && guard.level() != gufo::platform::GuardLevel::kCancelling; ++i)
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    Expect(guard.level() == gufo::platform::GuardLevel::kCancelling, "persistent low-memory event with nothing to drop reaches cancelling");
-    control->ReleaseAdvance();
-    bool stopped = false;
-    try {
-      (void)active.Wait();
-    } catch (const TextGenerationError& error) {
-      stopped = error.code() == TextGenerationErrorCode::kMemoryPressure && error.http_status() == 503 && error.memory_guard();
-    }
-    Expect(stopped, "the running request ends with 503 memory_pressure");
-    Expect(guard.counters().cancelled >= 1, "the stop is counted");
-    source.Set(fine);
-    Expect(scheduler->Submit({2, 20}, 2, 0.0F).Wait().tokens == ExpectedTokens(2, 2), "the server stays up and serves the next request");
-  }
-  gufo::platform::SetProcessMemoryGuard(nullptr);
-}
-
-int main(int argc, char** argv) {
-  if (argc == 2 && std::string_view(argv[1]) == "--disk-writer-only") {
-    ::setenv("GUFO_DISK_PERSIST", "evict_idle", 1);
-    ::setenv("GUFO_DISK_IDLE_MS", "100", 1);
-    TestDiskWriterSchedulerPendingAndTerminalLifetime();
-    std::cout << "disk writer scheduler tests passed\n";
-    return 0;
-  }
-
-  if (argc == 2 && std::string_view(argv[1]) == "--cache-enabled-control") {
-    TestDisabledCacheWithRealPool(false);
-    return 0;
-  }
-  if (argc == 2 && std::string_view(argv[1]) == "--disabled-cache-only") {
-    TestDisabledCacheWithRealPool();
-    return 0;
-  }
-  TestDisabledCacheWithRealPool();
-  TestPrefillDiagnosticsHost();
-  TestMemoryGuardRefusesMandatoryNeedOnly();
-  TestMemoryGuardStopsARunningRequestOnTheLowMemoryEvent();
-  if (argc == 2 && std::string_view(argv[1]) == "--debug-hooks") {
-    TestLiveScoredQueueAndMissingRecords();
-    TestDebugTimelineOrderCountsAndOffPath();
-    TestDebugTimelineMixedSourcesAndPolicy();
-    TestDebugTimelineStepCycleSemantics();
-    TestDebugTimelineRamAndLiveRestoreKinds();
-    TestDebugTimelineDiskRestoreKind();
-    TestDebugTimelineBatchOmissionsAndAccounting();
-    TestDebugTimelineOverlappingPhases();
-    TestDebugTimelineSnapshotsAndCycleCap();
-    TestDebugTimelineInPassCheckpoint();
-    TestDebugTimelineRequestTruncation();
-    TestScoredGenerationPreservesFakeOutputAndAlignment();
-    TestOneTokenBudgetKeepsLogprobs();
-    TestPromptScoreDedicatedPathAndCpuReference();
-    TestPromptScoreSerializationAndCancellation();
-    return 0;
-  }
-
-  TestLiveScoredQueueAndMissingRecords();
-  TestDebugTimelineOrderCountsAndOffPath();
-  TestDebugTimelineMixedSourcesAndPolicy();
-  TestDebugTimelineStepCycleSemantics();
-  TestDebugTimelineRamAndLiveRestoreKinds();
-  TestDebugTimelineDiskRestoreKind();
-  TestDebugTimelineBatchOmissionsAndAccounting();
-  TestDebugTimelineOverlappingPhases();
-  TestDebugTimelineSnapshotsAndCycleCap();
-  TestDebugTimelineRequestTruncation();
-  TestDebugTimelineInPassCheckpoint();
-  TestPromptScoreDedicatedPathAndCpuReference();
-  TestPromptScoreSerializationAndCancellation();
-  TestScoredGenerationPreservesFakeOutputAndAlignment();
-  TestOneTokenBudgetKeepsLogprobs();
+int main() {
+  TestPublicationWaitUsesRecentSubstantialPrefill();
   // Log assertions in this binary match the plain "[LEVEL] [component]" text
   // captured from a redirected sink; a TTY stderr would tint the level tag.
-  ::setenv("NO_COLOR", "1", 1);
+  gufo::platform::SetEnv("NO_COLOR", "1");
   TestProgressLoggingIsOptInAndBounded();
+  TestStructuredOutputIsPreparedBeforeServing();
   TestAdmissionLoggingIsDebugTierOnly();
-  TestMemoryLedger();
   TestPromptProgressPrecedesStreamedTokens();
   TestStreamStartPrecedesPrefill();
   TestPromptProgressCancellation();
@@ -4368,7 +3047,6 @@ int main(int argc, char** argv) {
   TestShutdownCancelsRunnerAcquisition();
   TestSnapshotDoesNotBlockOtherRequests();
   TestFirstTokenPrecedesSnapshotAndPreservesBudget();
-  TestPrefillDiagnosticSchedulerTotals();
   TestIdlePrefillUsesBulkWorkUnit();
   TestConcurrentSharedPrefixesPrefillOnce();
   TestLeaderCancelledBeforeFollowerIsAdmitted();
@@ -4379,7 +3057,6 @@ int main(int argc, char** argv) {
   TestAwaitedCheckpointSurvivesCachePressure();
   TestRunnerCanSkipUnusedFinalAdvance();
   TestRunnerCanReuseExactIncrementalText();
-  TestReasoningEndTrackedByToken();
   TestGenerationTraceRecordsPromptAndOutput();
   TestMultiTokenDecodePublishesDraftMetricsAndDisablesPrefixReuse();
   TestRequestTotalsDoNotNeedAConsumer();

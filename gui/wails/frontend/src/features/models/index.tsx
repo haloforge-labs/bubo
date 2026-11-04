@@ -33,7 +33,15 @@ import { CopyText } from '@/components/copy-text'
 import { GUIError } from '@/components/gui-error'
 import { guiError } from '@/lib/gui-errors'
 import { Link } from '@tanstack/react-router'
-import { ImportMenu } from './import-menu'
+import { Disclosure } from '@/components/disclosure'
+import { EmptyState } from '@/components/empty-state'
+import { StatusLine } from '@/components/status-line'
+import {
+  additionalModelFolders,
+  modelState,
+  selectionAppliesAfterRestart,
+  stopServerToCheckMemory,
+} from '@/lib/presentation'
 import { ModelInfo } from './model-info'
 
 // What one Installed row's fit cell says. "none": nothing (the row cannot be
@@ -119,6 +127,7 @@ function ModelsLoaded({
           estimate: models.catalogue?.find((entry) => entry.id === model.id)
             ?.estimate,
           runnable: model.prepared_state === 'prepared' && !!start,
+          partsMissing: false,
           vision: model.capabilities.mmproj,
           repairOutput: model.repair_output,
         }
@@ -138,6 +147,8 @@ function ModelsLoaded({
         reason: model.reason,
         estimate: model.estimate,
         runnable: model.runnable,
+        // Fewer shards on disk than the file names: the model is cut short.
+        partsMissing: model.shards_found < model.shards_expected,
         vision: false,
         repairOutput: undefined,
       })),
@@ -189,6 +200,21 @@ function ModelsLoaded({
     if (isCurrent(model) || selected || serverRunning) return undefined
     return estimateSubject({ kind: model.kind, path: model.path })
   }
+  // The server holds the memory, so a row that would have its own estimate has
+  // none; the note under the table says why.
+  const memoryHeld =
+    ownedRunning &&
+    installed.some((model) => {
+      const { selected, inUse } = flags(model)
+      return (
+        !inUse &&
+        !downloading(model) &&
+        model.runnable &&
+        !!model.path &&
+        !isCurrent(model) &&
+        !selected
+      )
+    })
   const estimates = useQueries({
     queries: installed.map((model, index) => {
       const subject = rowSubject(model)
@@ -224,37 +250,26 @@ function ModelsLoaded({
   // One word under the name: the row's own state.
   const statusOf = (model: Installed, inUse: boolean, selected: boolean) =>
     downloading(model)
-      ? 'Downloading'
+      ? modelState.downloading
       : inUse
-        ? 'In use'
+        ? modelState.inUse
         : selected
-          ? 'Selected for next start'
+          ? modelState.selected
           : model.state
             ? installedWord(model.state)
             : model.runnable
               ? ''
-              : 'Incomplete'
+              : // "Incomplete" is for a model with parts missing. A file the engine
+                // cannot run for another reason (an unsupported architecture, a
+                // helper file) "Cannot run"; the CLI's reason is under Details.
+                model.partsMissing
+                ? modelState.incomplete
+                : modelState.cannotRun
   const showAction = installed.some((model) => !flags(model).inUse)
   return (
     <ModelDownloadFlow view={view}>
       {(open, pending) => (
-        <div className="space-y-8">
-          <div className="flex flex-wrap items-center gap-3">
-            <p className="text-sm text-muted-foreground">
-              {(!models.reason_code && models.reason) ||
-                (models.refreshing
-                  ? 'Refreshing models…'
-                  : 'Models on this computer and supported downloads.')}
-            </p>
-            <Button
-              variant="outline"
-              disabled={command.isPending || models.refreshing}
-              onClick={() => command.mutate(actions.RefreshModels)}
-            >
-              Check for model files
-            </Button>
-            <ImportMenu disabled={command.isPending} browse={browse} />
-          </div>
+        <div className="space-y-3">
           {models.reason_code && (
             <GUIError
               error={{
@@ -265,12 +280,29 @@ function ModelsLoaded({
           )}
           <ModelDownloadProgress view={view} retry={open} />
           <ActionError error={command.error} />
-          <section aria-label="Installed models" className="space-y-3">
-            <h2 className="text-xl">Installed</h2>
+          <section aria-label="Installed models" className="space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+              <h2 className="text-lg">Installed</h2>
+              {/* The page names its contents (Installed, Discover): no
+                      introduction. */}
+              {((!models.reason_code && models.reason) ||
+                models.refreshing) && (
+                <StatusLine>
+                  {(!models.reason_code && models.reason) ||
+                    'Refreshing models…'}
+                </StatusLine>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={command.isPending || models.refreshing}
+                onClick={() => command.mutate(actions.RefreshModels)}
+              >
+                Check for model files
+              </Button>
+            </div>
             {!installed.length ? (
-              <p className="text-sm text-muted-foreground">
-                No models installed yet.
-              </p>
+              <EmptyState>No models installed yet.</EmptyState>
             ) : (
               <Table>
                 <TableHeader>
@@ -290,76 +322,69 @@ function ModelsLoaded({
                       <TableRow key={`${model.kind}-${model.path ?? model.id}`}>
                         <TableCell className="whitespace-normal">
                           <p>{model.name}</p>
-                          {status && (
-                            <p className="text-xs text-muted-foreground">
-                              {status}
-                            </p>
-                          )}
-                          {model.reason && (
-                            <div className="text-xs text-muted-foreground">
-                              <details>
-                                <summary>Details</summary>
+                          {/* One line of the row's secondary facts; a fold that
+                              opens takes a line of its own. */}
+                          <div className="flex flex-wrap items-center gap-x-3 text-xs text-muted-foreground">
+                            {status && <span>{status}</span>}
+                            {model.vision && <span>Reads images</span>}
+                            {/* The CLI names the --output of a repair; no row
+                              name, no button. */}
+                            {model.path && model.repairOutput && !inUse && (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className="h-6 px-1 text-xs"
+                                disabled={command.isPending || pending}
+                                onClick={() =>
+                                  open(model.id, 'repair', model.repairOutput)
+                                }
+                              >
+                                Check or repair files
+                              </Button>
+                            )}
+                            {model.reason && (
+                              <Disclosure summary="Details">
                                 <p>{model.reason}</p>
-                              </details>
-                            </div>
-                          )}
-                          {model.vision && (
-                            <p className="text-xs text-muted-foreground">
-                              Reads images
-                            </p>
-                          )}
-                          <div className="mt-1 space-y-1 text-muted-foreground">
-                            <div className="max-w-lg">
-                              {model.path ? (
-                                <PathText path={folderPath(model.path)} />
-                              ) : (
-                                <p className="text-xs">Folder not reported</p>
-                              )}
-                            </div>
-                            {model.path && (
-                              <div className="-ml-2 flex flex-wrap items-center">
-                                <Button
-                                  size="sm"
-                                  variant="ghost"
-                                  className="px-2"
-                                  disabled={command.isPending}
-                                  onClick={() =>
-                                    command.mutate(() =>
-                                      actions.OpenModelFolder(
-                                        folderPath(model.path!),
-                                      ),
-                                    )
-                                  }
-                                >
-                                  Open folder
-                                </Button>
-                                <CopyText
-                                  label="Copy folder path"
-                                  text={folderPath(model.path)}
-                                  compact
-                                  variant="ghost"
-                                />
-                                {/* The CLI names the --output of a repair; no row
-                                    name, no button. */}
-                                {model.repairOutput && !inUse && (
-                                  <Button
-                                    size="sm"
-                                    variant="ghost"
-                                    className="px-2"
-                                    disabled={command.isPending || pending}
-                                    onClick={() =>
-                                      open(
-                                        model.id,
-                                        'repair',
-                                        model.repairOutput,
-                                      )
-                                    }
-                                  >
-                                    Check or repair files
-                                  </Button>
+                              </Disclosure>
+                            )}
+                            {/* The path stays inspectable: it tells two copies of
+                              one model apart. */}
+                            <Disclosure summary="Model folder">
+                              <div className="mt-1 space-y-1">
+                                {model.path ? (
+                                  <>
+                                    <div className="max-w-lg">
+                                      <PathText path={folderPath(model.path)} />
+                                    </div>
+                                    <div className="-ml-2 flex flex-wrap items-center">
+                                      <Button
+                                        size="sm"
+                                        variant="ghost"
+                                        className="px-2"
+                                        disabled={command.isPending}
+                                        onClick={() =>
+                                          command.mutate(() =>
+                                            actions.OpenModelFolder(
+                                              folderPath(model.path!),
+                                            ),
+                                          )
+                                        }
+                                      >
+                                        Open folder
+                                      </Button>
+                                      <CopyText
+                                        label="Copy folder path"
+                                        text={folderPath(model.path)}
+                                        compact
+                                        variant="ghost"
+                                      />
+                                    </div>
+                                  </>
+                                ) : (
+                                  <p>Folder not reported</p>
                                 )}
                               </div>
-                            )}
+                            </Disclosure>
                           </div>
                         </TableCell>
                         <TableCell className="text-right tabular-nums">
@@ -421,6 +446,7 @@ function ModelsLoaded({
                 select them and start the server.
               </p>
             )}
+            {memoryHeld && <StatusLine>{stopServerToCheckMemory}</StatusLine>}
             {installed.some((model) => model.reason) && (
               <p className="text-sm text-muted-foreground">
                 {guiError({ code: 'model_unusable', remedy: '' }).message}
@@ -430,15 +456,16 @@ function ModelsLoaded({
           <section
             id="import"
             aria-label="Import models"
-            className="space-y-3 scroll-mt-6"
+            className="space-y-2 scroll-mt-6"
           >
-            <h2 className="text-xl">Import</h2>
-            <p className="text-sm text-muted-foreground">
-              Use a model file or a model folder already on your drive.
-            </p>
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <h2 className="text-lg">Import</h2>
+              <p className="text-sm text-muted-foreground">
+                Use an existing model.
+              </p>
               <Button
                 variant="outline"
+                size="sm"
                 disabled={command.isPending}
                 onClick={() => browse('file')}
               >
@@ -446,6 +473,7 @@ function ModelsLoaded({
               </Button>
               <Button
                 variant="outline"
+                size="sm"
                 disabled={command.isPending}
                 onClick={() => browse('folder')}
               >
@@ -453,28 +481,38 @@ function ModelsLoaded({
               </Button>
             </div>
             {notice && (
-              <p className="text-sm" role="status">
+              <StatusLine className="text-foreground">
                 {notice}{' '}
                 <Link to="/" className="underline underline-offset-4">
                   Open Server
                 </Link>
-              </p>
+              </StatusLine>
             )}
-            {(models.folders ?? []).map((folder) => (
-              <div key={folder} className="flex items-center gap-2">
-                <code className="min-w-0 break-all text-xs">{folder}</code>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={command.isPending}
-                  onClick={() =>
-                    command.mutate(() => actions.RemoveModelFolder(folder))
-                  }
-                >
-                  Remove folder
-                </Button>
+            {!!models.folders?.length && (
+              <div className="space-y-2">
+                <h3 className="text-base">
+                  {additionalModelFolders.title}{' '}
+                  <span className="text-sm font-normal text-muted-foreground">
+                    · {additionalModelFolders.hint}
+                  </span>
+                </h3>
+                {models.folders.map((folder) => (
+                  <div key={folder} className="flex items-center gap-2">
+                    <code className="min-w-0 break-all text-xs">{folder}</code>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={command.isPending}
+                      onClick={() =>
+                        command.mutate(() => actions.RemoveModelFolder(folder))
+                      }
+                    >
+                      Remove folder
+                    </Button>
+                  </div>
+                ))}
               </div>
-            ))}
+            )}
             {models.scan_warnings?.map((warning, index) => (
               <div key={index} className="text-sm">
                 <p>
@@ -485,161 +523,181 @@ function ModelsLoaded({
                     }).message
                   }
                 </p>
-                <details>
-                  <summary>Details</summary>
+                <Disclosure summary="Details">
                   <p>
                     {warning.folder}: {warning.reason}
                   </p>
-                </details>
+                </Disclosure>
               </div>
             ))}
           </section>
-          <section aria-label="Discover models" className="space-y-3">
-            <h2 className="text-xl">Discover</h2>
-            {ownedRunning && (
-              <p className="text-sm text-muted-foreground">
-                Bubo's server holds the memory now. Stop it to switch models.
-              </p>
-            )}
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Model</TableHead>
-                  <TableHead className="text-right">Size</TableHead>
-                  <TableHead>Action</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {(models.catalogue ?? []).map((entry) => {
-                  const status = packageStatus(entry.prepared_state)
-                  // Prepared status and catalogue identity come from the CLI;
-                  // the catalogue and local scan may have different refresh ages.
-                  const local = installed.find(
-                    (model) =>
-                      model.catalogued &&
-                      model.id === entry.id &&
-                      model.runnable,
-                  )
-                  // Installed reads the list of prepared packages only.
-                  const isInstalled = !!local
-                  const inUse =
-                    serverRunning &&
-                    !!identity &&
-                    (identity.catalogue_id === entry.id ||
-                      (!!local?.path &&
-                        (identity.manifest_path === local.path ||
-                          identity.model_path === local.path)))
-                  const selected =
-                    !!local?.path &&
-                    (local.path === view.saved.manifest_path ||
-                      local.path === view.saved.model_path)
-                  // The model Server already uses or has selected is not offered again.
-                  const current = entry.id === identity?.catalogue_id
-                  const downloading =
-                    models.download?.id === entry.id &&
-                    ['running', 'planning', 'cancelling'].includes(
-                      models.download.state,
+          <section aria-label="Discover models">
+            {/* The catalogue sits below the models in use: folded while there
+                are installed models, open when there are none. */}
+            <Disclosure
+              open={!installed.length || undefined}
+              summary={
+                <>
+                  Discover{' '}
+                  <span className="text-sm text-muted-foreground">
+                    · {models.catalogue?.length ?? 0} supported downloads
+                  </span>
+                </>
+              }
+              summaryClassName="text-lg"
+              className="space-y-2"
+            >
+              {ownedRunning && (
+                <StatusLine>{selectionAppliesAfterRestart}</StatusLine>
+              )}
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Model</TableHead>
+                    <TableHead className="text-right">Size</TableHead>
+                    <TableHead>Action</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {(models.catalogue ?? []).map((entry) => {
+                    const status = packageStatus(entry.prepared_state)
+                    // Prepared status and catalogue identity come from the CLI;
+                    // the catalogue and local scan may have different refresh ages.
+                    const copies = installed.filter(
+                      (model) =>
+                        model.catalogued &&
+                        model.id === entry.id &&
+                        model.runnable,
                     )
-                  return (
-                    <TableRow key={entry.id}>
-                      <TableCell className="min-w-44 whitespace-normal">
-                        {entry.display_name}
-                        <ModelInfo entry={entry} />
-                        {!entry.download_enabled && entry.disabled_reason && (
-                          <p className="text-xs text-muted-foreground">
-                            {entry.disabled_reason}
-                          </p>
-                        )}
-                        {isInstalled && (
-                          <p className="text-xs text-muted-foreground">
-                            Installed
-                          </p>
-                        )}
-                        {/* "Not downloaded" is what the Download button says. */}
-                        {!isInstalled &&
-                          (downloading || status.action !== 'download') && (
+                    const local = copies[0]
+                    // Installed reads the list of prepared packages only.
+                    const isInstalled = !!local
+                    // The same state words as the Installed table, from the same
+                    // flags; any copy in use or selected speaks for the model.
+                    const inUse = copies.some((model) => flags(model).inUse)
+                    const selected = copies.some(
+                      (model) => flags(model).selected,
+                    )
+                    const downloading =
+                      models.download?.id === entry.id &&
+                      ['running', 'planning', 'cancelling'].includes(
+                        models.download.state,
+                      )
+                    return (
+                      <TableRow key={entry.id}>
+                        <TableCell className="min-w-44 whitespace-normal">
+                          {entry.display_name}
+                          <ModelInfo entry={entry} />
+                          {!entry.download_enabled && entry.disabled_reason && (
                             <p className="text-xs text-muted-foreground">
-                              {downloading ? 'Downloading' : status.word}
+                              {entry.disabled_reason}
                             </p>
                           )}
-                        {entry.role === 'recommended' &&
-                          entry.default_status === 'default' && (
-                            <p className="text-xs text-muted-foreground">
-                              Default
+                          {/* One line of the row's states. "Not downloaded" is what
+                            the Download button says. */}
+                          {(isInstalled ||
+                            downloading ||
+                            status.action !== 'download' ||
+                            (entry.role === 'recommended' &&
+                              entry.default_status === 'default')) && (
+                            <p className="flex flex-wrap gap-x-3 text-xs text-muted-foreground">
+                              {isInstalled ? (
+                                <span>
+                                  {inUse
+                                    ? modelState.inUse
+                                    : selected
+                                      ? modelState.selected
+                                      : 'Installed'}
+                                </span>
+                              ) : (
+                                (downloading ||
+                                  status.action !== 'download') && (
+                                  <span>
+                                    {downloading
+                                      ? modelState.downloading
+                                      : status.word}
+                                  </span>
+                                )
+                              )}
+                              {entry.role === 'recommended' &&
+                                entry.default_status === 'default' && (
+                                  <span>Default</span>
+                                )}
                             </p>
                           )}
-                      </TableCell>
-                      <TableCell className="text-right tabular-nums">
-                        {bytes(entry.download_bytes)}
-                      </TableCell>
-                      <TableCell>
-                        {isInstalled &&
-                        (inUse || current || selected) ? null : isInstalled ? (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={command.isPending || !local?.path}
-                            onClick={() =>
-                              command.mutate(async () => {
-                                requireActionSuccess(
-                                  await actions.PatchPreferences(
-                                    modelPreferencePatch(
-                                      local!.kind,
-                                      local!.path!,
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {bytes(entry.download_bytes)}
+                        </TableCell>
+                        <TableCell>
+                          {isInstalled &&
+                          (inUse || selected) ? null : isInstalled ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={command.isPending || !local?.path}
+                              onClick={() =>
+                                command.mutate(async () => {
+                                  requireActionSuccess(
+                                    await actions.PatchPreferences(
+                                      modelPreferencePatch(
+                                        local!.kind,
+                                        local!.path!,
+                                      ),
                                     ),
-                                  ),
+                                  )
+                                  setNotice(
+                                    `${entry.display_name} selected for next start.`,
+                                  )
+                                })
+                              }
+                            >
+                              Select for Server
+                            </Button>
+                          ) : (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={
+                                pending ||
+                                !entry.download_enabled ||
+                                command.isPending ||
+                                downloading ||
+                                status.action === 'none'
+                              }
+                              onClick={() =>
+                                open(
+                                  entry.id,
+                                  status.action === 'check' ||
+                                    status.action === 'repair'
+                                    ? 'repair'
+                                    : 'download',
                                 )
-                                setNotice(
-                                  `${entry.display_name} selected for next start.`,
-                                )
-                              })
-                            }
-                          >
-                            Select for Server
-                          </Button>
-                        ) : (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={
-                              pending ||
-                              !entry.download_enabled ||
-                              command.isPending ||
-                              downloading ||
-                              status.action === 'none'
-                            }
-                            onClick={() =>
-                              open(
-                                entry.id,
-                                status.action === 'check' ||
-                                  status.action === 'repair'
-                                  ? 'repair'
-                                  : 'download',
-                              )
-                            }
-                          >
-                            {downloading ? 'Downloading' : status.actionLabel}
-                          </Button>
-                        )}
-                        {isInstalled && !local?.path && (
-                          <p
-                            data-code="not_reported"
-                            className="text-xs text-muted-foreground"
-                          >
-                            Model path not reported. Check for model files.
-                          </p>
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  )
-                })}
-              </TableBody>
-            </Table>
-            {!models.catalogue?.length && (
-              <p className="text-sm text-muted-foreground">
-                No supported downloads reported.
-              </p>
-            )}
+                              }
+                            >
+                              {downloading
+                                ? modelState.downloading
+                                : status.actionLabel}
+                            </Button>
+                          )}
+                          {isInstalled && !local?.path && (
+                            <p
+                              data-code="not_reported"
+                              className="text-xs text-muted-foreground"
+                            >
+                              Model path not reported. Check for model files.
+                            </p>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    )
+                  })}
+                </TableBody>
+              </Table>
+              {!models.catalogue?.length && (
+                <EmptyState>No supported downloads reported.</EmptyState>
+              )}
+            </Disclosure>
           </section>
         </div>
       )}

@@ -1,8 +1,20 @@
 #pragma once
 #include "common.hpp"
 
+bool mul_mat_dense_kquant_wmma_dispatch(const void* weights, int type,
+                                        const block_q8_1* input, float* output,
+                                        int k, int rows, int n,
+                                        int input_stride, hipStream_t stream);
+
 constexpr int MMVQ_MAX_BATCH_SIZE = 8;
 constexpr int MMVQ_MAX_ROUTED_BATCH = 64;
+bool mul_mat_vec_dense_reuse_dispatch(const void* weights, int type,
+    const block_q8_1* input, float* output, int k, int rows, int n,
+    int input_stride, hipStream_t stream, int variant);
+using IqDecodeVariant = gufo::models::qwen38_flash_next::iq_decode::Variant;
+
+// Resolve the first dense decode function before serving; launches no work.
+int prepare_q8_decode();
 
 // One expert's independent inputs, in groups of eight. The anchor also
 // identifies an inactive slot that must be zeroed.
@@ -26,7 +38,8 @@ void mul_mat_vec_moe_dispatch(const void* weights, ggml_type type,
                              const block_q8_1* input, const int32_t* ids, float* output,
                              int k, int rows, int tokens, int experts_used,
                              int input_stride, hipStream_t stream,
-                             const int32_t* dst_slots = nullptr);
+                             const int32_t* dst_slots = nullptr,
+                             IqDecodeVariant iq_variant = IqDecodeVariant::kPacked2);
 // Scratch ints mul_mat_vec_moe_gated needs for 2..MMVQ_MAX_BATCH_SIZE tokens:
 // a group per slot and two anchor lists.
 constexpr int mmvq_moe_group_ints(int tokens, int experts_used) {

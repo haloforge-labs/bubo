@@ -68,10 +68,9 @@ func mvpEffective(out map[string]any) {
 		n = 1
 	}
 	if flag("--context") == "" {
+		// The contract's source enum is default/profile/user/env; a context
+		// resolved from recommended_context is "default" (real CLI, 04:39).
 		source := "default"
-		if n > 1 {
-			source = "recommended_context"
-		}
 		out["context"] = row(nil, mvpRecommendation(n)["context_per_session"], source, "Fixture: copied from CLI recommendation.")
 		if n == 2 && os.Getenv("BUBO_FAKE_MVP_FAULT") == "wrong-context" {
 			// A valid but incorrect resolution, consistent in ready/discovery

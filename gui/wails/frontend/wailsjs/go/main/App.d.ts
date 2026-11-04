@@ -13,6 +13,8 @@ export function BrowseModelFile():Promise<main.BrowseResult>;
 
 export function BrowseModelFolder():Promise<main.BrowseResult>;
 
+export function BrowseSideFile(arg1:string):Promise<main.BrowseResult>;
+
 export function Cancel():Promise<supervisor.ActionResult>;
 
 export function CancelDownload():Promise<supervisor.ActionResult>;

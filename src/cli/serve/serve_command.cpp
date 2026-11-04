@@ -12,6 +12,7 @@
 #include "src/cli/machine_output.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/release_profile.hpp"
+#include "src/core/platform/os_info.hpp"
 
 namespace gufo::cli {
 ServeCommandOptions ParseServeCommandOptions(
@@ -113,12 +114,10 @@ int RunServeCommand(std::span<const char* const> args,
       writer.Write("capabilities", bubo::cli::Capabilities());
       return 0;
     }
-#ifdef _WIN32
-    lifecycle = std::make_unique<bubo::cli::ServeLifecycle>(machine);
-#else
-    if (machine)
+    if (std::string_view(platform::HostOsName()) == "Windows")
+      lifecycle = std::make_unique<bubo::cli::ServeLifecycle>(machine);
+    else if (machine)
       throw bubo::cli::ControlError(18, "Local control requires Windows.");
-#endif
     if (!log_path && options.supplied_log_flags)
       throw std::invalid_argument("Log rotation requires --log-file.");
     if (log_path)

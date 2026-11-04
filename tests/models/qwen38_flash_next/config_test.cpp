@@ -37,6 +37,16 @@ void CheckSidecarCompatibility() {
   auto sidecar = trunk;
   sidecar.nextn_layers = 1;
   Require(sidecar.MtpMatches(trunk), "matching MTP constants rejected");
+  auto pruned = trunk;
+  pruned.num_experts = 256;
+  // The draft block binds and runs with its own expert count, so the 512-expert
+  // sidecar can draft for a pruned 256-expert trunk (the Coder); every other
+  // constant must still agree.
+  Require(sidecar.MtpMatches(pruned),
+          "512-expert draft rejected for pruned trunk");
+  auto pruned_sidecar = sidecar;
+  pruned_sidecar.num_experts = 256;
+  Require(pruned_sidecar.MtpMatches(pruned), "matching compact draft rejected");
   for (auto member : {&qfn::Config::hc_low_rank, &qfn::Config::context_length,
                       &qfn::Config::rotary_dim, &qfn::Config::num_experts_used,
                       &qfn::Config::shared_expert_ff}) {
@@ -58,6 +68,10 @@ void CheckSidecarCompatibility() {
   trunk.ple_layer = 1;
   Require(sidecar.MtpMatches(trunk),
           "trunk-only PLE incorrectly required in MTP");
+
+  // The MTP sidecar never carries rope scaling; the trunk's governs both.
+  trunk.rope_scaling = {.factor = 2.5F, .original_context = 262144};
+  Require(sidecar.MtpMatches(trunk), "YaRN trunk rejected an unscaled sidecar");
 }
 
 using Value =
@@ -160,6 +174,16 @@ Metadata ValidMetadata() {
 void CheckMalformedMetadata() {
   const auto valid = ValidMetadata();
   assert(Parse(valid));
+  for (const auto experts : {256U, 512U, 128U, 384U, 0U, 513U}) {
+    auto fields = valid;
+    fields["qwen4exp.expert_count"] = experts;
+    const auto result = Parse(fields);
+    Require(result.has_value() == (experts == 256 || experts == 512),
+            "expert count validation");
+    if (result)
+      Require(result->num_experts == experts && result->num_experts_used == 10,
+              "expert metadata was not preserved");
+  }
   for (const auto key : {"qwen4exp.rope.dimension_sections",
                          "qwen4exp.attention.compress_ratios"}) {
     auto wrong = valid;
@@ -239,10 +263,30 @@ void CheckMalformedMetadata() {
   assert(draft && trunk && draft->MtpMatches(*trunk));
 }
 
+void CheckScaledContext() {
+  qfn::Config c;
+  c.context_length = 262144;
+  c.compress_ratio = 4;
+  Require(c.MaxContextLength() == 262144, "scaling off must keep native");
+  Require(c.SparseMaskWords(c.context_length) == 2048,
+          "native mask row width changed");
+  c.rope_scaling = {.factor = 1.5625F, .original_context = 262144};
+  Require(c.MaxContextLength() == 409600, "YaRN 1.5625 must reach 409600");
+  Require(c.SparseMaskWords(409600) == 3200, "mask rows must cover 409600");
+  c.rope_scaling.factor = 2.5F;
+  Require(c.MaxContextLength() == 655360, "YaRN 2.5 must reach 655360");
+  Require(c.SparseMaskWords(655360) == 5120, "mask rows must cover 655360");
+  const auto parsed = Parse(ValidMetadata());
+  Require(parsed && parsed->rope_scaling == qfn::RopeScaling{},
+          "the GGUF loader must default rope scaling off (it sets no such "
+          "keys today)");
+}
+
 }  // namespace
 
 int main() {
   CheckSidecarCompatibility();
   CheckMalformedMetadata();
+  CheckScaledContext();
   std::cout << "Flash-Next metadata checks passed.\n";
 }

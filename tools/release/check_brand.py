@@ -18,8 +18,13 @@ CATEGORIES = {'api', 'api-contract', 'schema', 'resource-path', 'cache-config',
 
 # This is separate from the exact-line brand allow-list: security findings
 # cannot be waived by adding a historic name exception.
+# The CNG rule targets hash and cipher calls (BCryptHash*, BCryptCreateHash,
+# BCryptOpenAlgorithmProvider, ...). BCryptGenRandom is the OS random generator,
+# not a second hash stack, so it and its flag pass; every other BCrypt name stays
+# forbidden (the BCrypt part is case-sensitive, so the bcrypt.h include and prose pass).
 SECOND_STACK = re.compile(
-    r'\b(?:WinHttp\w*|WINHTTP\w*|BCrypt\w*|BCRYPT\w*|'
+    r'\b(?:WinHttp\w*|WINHTTP\w*|'
+    r'(?-i:BCrypt(?!GenRandom\b)\w+|BCRYPT_(?!USE_SYSTEM_PREFERRED_RNG\b)\w+)|'
     r'tinfl\w*|puff|stbi_zlib\w*|Huffman\w*|InflateBits|'
     r'SHA256_Transform|sha256_compress)\b', re.IGNORECASE)
 FIXTURE_OVERRIDE = re.compile(

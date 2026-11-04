@@ -4,9 +4,6 @@
 #error "This driver must not be compiled into a production package"
 #endif
 
-#include <arpa/inet.h>
-#include <sys/socket.h>
-
 #include <charconv>
 #include <chrono>
 #include <cstdlib>
@@ -23,6 +20,7 @@
 #include "src/cli/serve/audio_asr_api.hpp"
 #include "src/cli/serve/audio_tts_api.hpp"
 #include "src/cli/serve/audio_websocket.hpp"
+#include "src/cli/serve/embeddings_api.hpp"
 #include "src/cli/serve/http_server.hpp"
 #include "src/cli/serve/image_api.hpp"
 #include "src/cli/serve/lifecycle.hpp"
@@ -37,7 +35,7 @@
 #include "src/cli/status.hpp"
 #include "src/cli/stop.hpp"
 #include "src/core/image.hpp"
-#include "src/core/platform/socket.hpp"
+#include "src/core/platform/net.hpp"
 #include "tests/cli/contract/fake_serve_backend.hpp"
 
 // HttpServer is built from its production source in this CPU target. It owns
@@ -65,6 +63,15 @@ std::string TtsService::model_id() const {
 bool AsrService::ready() const noexcept {
   return false;
 }
+bool EmbeddingService::ready() const noexcept {
+  return false;
+}
+bool EmbeddingService::device_lost() const noexcept {
+  return false;
+}
+std::string EmbeddingService::model_id() const {
+  return "unsupported_test_modality";
+}
 std::string AsrService::model_id() const {
   return "unsupported_test_modality";
 }
@@ -77,6 +84,9 @@ bool IsAudioTtsApiPath(std::string_view path) noexcept {
 bool IsAudioAsrApiPath(std::string_view path) noexcept {
   return path == "/v1/audio/transcriptions";
 }
+bool IsEmbeddingsApiPath(std::string_view path) noexcept {
+  return path == "/v1/embeddings";
+}
 HttpResponse HandleVideoApiRequest(const HttpRequest&, VideoJobService&) {
   return UnavailableModality();
 }
@@ -84,6 +94,9 @@ HttpResponse HandleAudioTtsApiRequest(const HttpRequest&, TtsService&) {
   return UnavailableModality();
 }
 HttpResponse HandleAudioAsrApiRequest(const HttpRequest&, AsrService&) {
+  return UnavailableModality();
+}
+HttpResponse HandleEmbeddingsApiRequest(const HttpRequest&, EmbeddingService&) {
   return UnavailableModality();
 }
 HttpResponse HandleImageApiRequest(const HttpRequest&, ImageService&) {
@@ -117,11 +130,11 @@ unsigned ParseUnsigned(std::string_view text) {
 }
 
 bool ReadinessCheck(int port) {
-  const int fd = static_cast<int>(::socket(AF_INET, SOCK_STREAM, 0));
-  if (fd < 0)
+  gufo::net::EnsureSocketRuntimeStarted();
+  const auto fd = gufo::net::CreateStreamSocket(AF_INET);
+  if (fd == gufo::net::kInvalidSocket)
     return false;
-  gufo::platform::SetSocketTimeout(fd, SO_RCVTIMEO, 2s);
-  gufo::platform::SetSocketTimeout(fd, SO_SNDTIMEO, 2s);
+  (void)gufo::net::SetSocketTimeouts(fd, 2000);
   sockaddr_in address{};
   address.sin_family = AF_INET;
   address.sin_port = htons(static_cast<unsigned short>(port));
@@ -131,13 +144,12 @@ bool ReadinessCheck(int port) {
       0) {
     constexpr std::string_view request =
         "GET /ready HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
-    if (gufo::platform::SocketSend(fd, request.data(), request.size(), 0) > 0) {
+    if (gufo::net::SendNoSignal(fd, request.data(), request.size()) > 0) {
       std::string response;
       while (response.size() < 4096 &&
              response.find("\r\n") == std::string::npos) {
         char buffer[1024];
-        const auto length =
-            gufo::platform::SocketRead(fd, buffer, sizeof(buffer));
+        const auto length = gufo::net::Receive(fd, buffer, sizeof(buffer));
         if (length <= 0)
           break;
         response.append(buffer, static_cast<std::size_t>(length));
@@ -145,7 +157,7 @@ bool ReadinessCheck(int port) {
       ready = response.starts_with("HTTP/1.1 200 ");
     }
   }
-  gufo::platform::CloseSocket(fd);
+  gufo::net::CloseSocket(fd);
   return ready;
 }
 

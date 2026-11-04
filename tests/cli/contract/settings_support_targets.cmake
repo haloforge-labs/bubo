@@ -18,6 +18,10 @@ add_executable(models_test "${CMAKE_SOURCE_DIR}/tests/cli/contract/models_test.c
 target_link_libraries(models_test PRIVATE bubo_models bubo_prepare gufo_core gufo_logging Threads::Threads)
 add_test(NAME models_test COMMAND models_test)
 set_tests_properties(models_test PROPERTIES LABELS "cpu;cli;contract;models" TIMEOUT 120)
+add_executable(side_file_check_test "${CMAKE_SOURCE_DIR}/tests/cli/contract/side_file_check_test.cpp")
+target_link_libraries(side_file_check_test PRIVATE bubo_models bubo_prepare gufo_core gufo_logging Threads::Threads)
+add_test(NAME side_file_check_test COMMAND side_file_check_test)
+set_tests_properties(side_file_check_test PROPERTIES LABELS "cpu;cli;contract;models" TIMEOUT 120)
 add_test(NAME models_measured_admission_test COMMAND models_test --measured-data
   "${CMAKE_SOURCE_DIR}/tests/cli/contract/data/flash-next-admission.json")
 set_tests_properties(models_measured_admission_test PROPERTIES LABELS "cpu;cli;contract;memory" TIMEOUT 30)
@@ -43,6 +47,10 @@ set_tests_properties(switches_registry_test PROPERTIES LABELS "cpu;cli;contract;
 add_test(NAME switches_recipe_test COMMAND "${Python3_EXECUTABLE}"
   "${CMAKE_SOURCE_DIR}/tests/cli/contract/switches_recipe_test.py" "$<TARGET_FILE:release_profile_test>")
 set_tests_properties(switches_recipe_test PROPERTIES LABELS "cpu;cli;contract;registry" TIMEOUT 60)
+add_test(NAME refusal_default_test COMMAND "${Python3_EXECUTABLE}"
+  "${CMAKE_SOURCE_DIR}/tests/cli/contract/refusal_default_test.py"
+  --resolver "$<TARGET_FILE:release_profile_test>")
+set_tests_properties(refusal_default_test PROPERTIES LABELS "cpu;cli;contract" TIMEOUT 60)
 if(WIN32 AND GUFO_BRAND STREQUAL "bubo")
   add_test(NAME bundle_process_test COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_SOURCE_DIR}/tests/cli/contract/bundle_process_test.py"

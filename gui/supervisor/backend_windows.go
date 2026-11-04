@@ -38,6 +38,7 @@ type NativeBackend struct {
 	exited                                  bool
 	busyDone                                chan struct{}
 	eventSink                               func(StreamEvent)
+	switchGuard                             func(Settings) map[string]string
 }
 
 func NewBackend(c Config, settings Settings, guiExe string) (*NativeBackend, error) {
@@ -75,6 +76,14 @@ func (b *NativeBackend) Registry() *Switches {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.s.Registry()
+}
+
+// SetSwitchGuard keeps the guard for every supervisor the backend makes.
+func (b *NativeBackend) SetSwitchGuard(guard func(Settings) map[string]string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.switchGuard = guard
+	b.s.SetSwitchGuard(guard)
 }
 
 func (b *NativeBackend) SetEventSink(sink func(StreamEvent)) {
@@ -117,8 +126,11 @@ func (b *NativeBackend) Save(settings Settings) error {
 			return err
 		}
 	}
-	settings.LastError = b.s.Snapshot().LastError
-	settings.lastErrorVersion = b.config.ProductVersion
+	// The supervisor writes the failure with the version and setup it happened
+	// under; a settings save carries all three unchanged, so saving never makes an
+	// old failure look new.
+	kept, _ := LoadSettings(b.config.SettingsPath)
+	settings.LastError, settings.lastErrorVersion, settings.lastErrorSetup = kept.LastError, kept.lastErrorVersion, kept.lastErrorSetup
 	if settings.StartGUIAtLogin != b.settings.StartGUIAtLogin {
 		if err := SetLoginStart(settings.StartGUIAtLogin, b.guiExe); err != nil {
 			return appError("login_start_failed", err.Error())
@@ -259,6 +271,7 @@ func (b *NativeBackend) Action(action string, settings Settings, path string) <-
 				b.s = next
 				next.SetModelSelection(settings.ManifestPath, settings.ModelPath)
 				next.SetEventSink(b.eventSink)
+				next.SetSwitchGuard(b.switchGuard)
 				b.config = c
 				b.mu.Unlock()
 				s = next

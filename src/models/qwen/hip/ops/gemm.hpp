@@ -282,6 +282,14 @@ void LaunchBatchedQuantGEMMPreQuantized(core::GgmlType type, const void* w,
                                         std::size_t k,
                                         hipStream_t stream = nullptr);
 
+/// The K-quant/IQ WMMA GEMM LaunchBatchedQuantGEMMPreQuantized falls through
+/// to: one 128 x 128 wave32 tile family, no batch-dependent wave64 route.
+/// `q8_1_x` needs the activation sums (QuantizedActivationBytes). Silently
+/// returns for types it does not list; callers keep an explicit allowlist.
+void LaunchKQuantWmmaGEMM(core::GgmlType type, const void* w,
+                          const void* q8_1_x, float* y, std::size_t batch,
+                          std::size_t m, std::size_t k, hipStream_t stream);
+
 /// Directly computes dual GEMM:
 ///   Y_gate[B, M] = X_q8_1[B, K] * W_gate[M, K]^T
 ///   Y_up[B, M]   = X_q8_1[B, K] * W_up[M, K]^T

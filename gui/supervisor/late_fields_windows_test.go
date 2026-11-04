@@ -78,7 +78,8 @@ func TestNPURuntimeContractAndViewPreserveEveryField(t *testing.T) {
 	}
 }
 
-// The current candidate registry: the same rows as the canonical golden.
+// The v12 recording is a historical one: the canonical registry grew in 0.1.2 (--prefill-mode,
+// --kv-cache-type, --refusal-direction*, ...), so it is a subset of the canonical rows, not equal.
 func TestCurrentRegistrySecretsAreExcludedFromOverrides(t *testing.T) {
 	checkRealRegistrySecrets(t, "v12", true)
 }
@@ -88,7 +89,9 @@ func TestRealF80RegistrySecretsAreExcludedFromOverrides(t *testing.T) {
 	checkRealRegistrySecrets(t, "f80", false)
 }
 
-func checkRealRegistrySecrets(t *testing.T, recording string, sameNamesAsCanonical bool) {
+// recordingIsCanonicalSubset: every recorded row must exist in the canonical registry with the same
+// secret marker (the recording may lack rows added later); canonical rows the recording has must match too.
+func checkRealRegistrySecrets(t *testing.T, recording string, recordingIsCanonicalSubset bool) {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join("..", "tests", "scenarios", "recordings", recording, "switches.json"))
 	if err != nil {
@@ -106,11 +109,19 @@ func checkRealRegistrySecrets(t *testing.T, recording string, sameNamesAsCanonic
 	for _, row := range registry.Switches {
 		actualSecrets[row.Name] = row.Secret
 	}
-	if sameNamesAsCanonical && len(actualSecrets) != len(canonical.Switches) {
-		t.Fatal("recorded registry has different switch names")
+	canonicalSecrets := map[string]bool{}
+	for _, row := range canonical.Switches {
+		canonicalSecrets[row.Name] = row.Secret
+	}
+	if recordingIsCanonicalSubset {
+		for name := range actualSecrets {
+			if _, found := canonicalSecrets[name]; !found {
+				t.Fatal("recorded switch missing from the canonical registry", name)
+			}
+		}
 	}
 	for _, row := range canonical.Switches {
-		if secret, found := actualSecrets[row.Name]; sameNamesAsCanonical && (!found || secret != row.Secret) || found && secret != row.Secret {
+		if secret, found := actualSecrets[row.Name]; found && secret != row.Secret {
 			t.Fatal("recorded secret marker differs from canonical CLI listing", row.Name)
 		}
 	}

@@ -25,6 +25,11 @@ docs/prepare-binding.md text eol=lf
 gui/wails/frontend/** text eol=lf
 gui/wails/frontend/**/*.ttf binary
 gui/wails/frontend/**/*.woff binary
+gui/wails/frontend/**/*.woff2 binary
+# Licence and notice texts are hashed: keep LF in every checkout.
+gui/wails/frontend/src/fonts/*-LICENSE.txt text eol=lf
+gui/wails/frontend/src/vendor/*-LICENSE.txt text eol=lf
+tools/release/gui-licenses/vendored.json text eol=lf
 # Match the sidebar favicon byte for byte on Windows too.
 gui/wails/icons/owl.svg text eol=lf
 # Generators emit LF; byte guards must survive Windows branch checkouts.
@@ -48,3 +53,5 @@ gui/tests/scenarios/recordings/** text eol=lf
 gui/tests/scenarios/recordings/e21/** -text
 gui/tests/scenarios/recordings/e23/** -text
 gui/tests/scenarios/recordings/v12/** -text
+# Fold scalars shipped for --prefill-mode fast: keep LF.
+src/models/qwen38_flash_next/prefill-fold-L3.txt text eol=lf

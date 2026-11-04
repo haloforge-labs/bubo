@@ -10,6 +10,12 @@
 
 namespace gufo::diagnostics {
 
+// HIP's multiProcessorCount counts workgroup processors (WGPs) on gfx10, gfx11 and
+// gfx12 (RDNA; the kernels run in WGP mode): two compute units each. Older
+// architectures report compute units. Returns the compute-unit count.
+std::uint32_t ComputeUnitsFromMultiprocessors(std::string_view gcn_arch_name,
+                                              std::uint32_t multiprocessors);
+
 struct CpuInventory {
   std::string model_name;
   std::string vendor;
@@ -46,10 +52,15 @@ struct GpuInventory {
 };
 
 struct DriverToolchainInventory {
+  // The OS Gufo runs on ("Linux", "Windows") and the target it matches.
+  std::string os_name{"Linux"};
+  std::string target_platform{"x86_64-linux"};
   std::string kernel_release;
   std::string amdgpu_status{"loaded"};
   std::string rocm_version{"7.2.3"};
-  std::string cxx_compiler{"GCC 15.3.0"};
+  // Filled from the compiler that built this library; "unknown" when no
+  // compiler macro names it.
+  std::string cxx_compiler{"unknown"};
   std::string cpp_standard{"C++20"};
   std::string source{"Nix Toolchain Pins + Linux UAPI"};
 };

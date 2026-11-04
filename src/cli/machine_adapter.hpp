@@ -6,6 +6,7 @@
 // source and unit of every value. Nothing here writes power state, VGM,
 // firmware or BIOS settings. The probe interface lets CPU tests use fakes.
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -124,6 +125,19 @@ public:
 
 // The real probe. Missing APIs give unavailable readings, never an error.
 std::unique_ptr<MachineProbe> CreateSystemMachineProbe();
+
+// The same probe with a time limit on each slow driver call (power service,
+// DXGI, ADLX). A call that has not answered in `each`, or after `total` has
+// passed since the probe was made, gives an unavailable reading that names the
+// call and the wait. The call keeps running on a detached thread.
+// MachineProbeHasAbandonedCall() tells the process to end without waiting for
+// it.
+std::unique_ptr<MachineProbe> CreateBoundedSystemMachineProbe(
+    std::chrono::milliseconds each, std::chrono::milliseconds total);
+std::unique_ptr<MachineProbe> MakeBoundedMachineProbe(
+    std::shared_ptr<MachineProbe> inner, std::chrono::milliseconds each,
+    std::chrono::milliseconds total);
+bool MachineProbeHasAbandonedCall();
 
 struct PlanningMemoryBudgets {
   std::optional<std::uint64_t> gpu_available, host_available;

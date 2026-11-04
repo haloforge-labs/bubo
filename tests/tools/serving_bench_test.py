@@ -18,12 +18,54 @@ from gufo.model_bench.charts import render_charts
 from gufo.model_bench.config import BenchConfig, load_config
 from gufo.model_bench.llm import Session, _measure_depth, run_loading, run_multi, run_single, run_table
 from gufo.model_bench.render import _serving_rate, layout_for, parse_table, render_table
-from gufo.model_bench.servers import Server
+from gufo.model_bench.servers import HipMemory, Server
 
 
 def check(condition, message):
     if not condition:
         raise AssertionError(message)
+
+
+with tempfile.TemporaryDirectory() as temporary:
+    directory = Path(temporary)
+    executable = directory / "gufo"
+    native = directory / ".gufo-wrapped"
+    link = directory / "result-gufo"
+    library = directory / "libamdhip64.so"
+    executable.write_bytes(b"#!/bin/sh\n")
+    native.write_bytes(b"\x7fELF")
+    library.touch()
+    try:
+        link.symlink_to(executable)
+    except OSError as error:
+        if getattr(error, "winerror", None) == 1314:
+            print("SKIP: symlink fixtures require Windows symlink privilege")
+            raise SystemExit(77)
+        raise
+    output = MagicMock(stdout=f"libamdhip64.so => {library} (0x0)\n")
+    with patch("gufo.model_bench.servers.subprocess.run", return_value=output) as ldd, \
+            patch("gufo.model_bench.servers.ctypes.CDLL"):
+        check(HipMemory.for_binary(link).library == library, "wrapped HIP library resolution")
+        check(ldd.call_args.args[0] == ["ldd", str(native.resolve())], "inspect the wrapped ELF")
+        executable.write_bytes(b"\x7fELF")
+        check(HipMemory.for_binary(link).library == library, "direct HIP library resolution")
+        check(ldd.call_args.args[0] == ["ldd", str(executable.resolve())], "prefer a direct ELF")
+        executable.write_bytes(b"#!/bin/sh\n")
+        native.unlink()
+        ldd.reset_mock()
+        check(HipMemory.for_binary(link) is None, "unsupported wrapper has no HIP library")
+        check(not ldd.called, "do not inspect shell scripts with ldd")
+
+with tempfile.TemporaryDirectory() as temporary:
+    directory = Path(temporary)
+    executable = directory / "gufo.exe"
+    executable.touch()
+    with patch("gufo.model_bench.servers.sys.platform", "win32"), \
+            patch("gufo.model_bench.servers.ctypes.CDLL"), \
+            patch("gufo.model_bench.servers.subprocess.run") as ldd:
+        (directory / "amdhip64_7.dll").touch()
+        check(HipMemory.for_binary(executable) is None, "no outside memory sampler under WDDM")
+        check(not ldd.called, "Windows resolution does not run ldd")
 
 
 GUFO_USAGE = {
@@ -603,6 +645,24 @@ check(server.failure_exit_code is None and server.stop.called,
 server.process.poll.return_value = -9
 server.__exit__(RuntimeError, RuntimeError("connection closed"), None)
 check(server.failure_exit_code == -9, "an actual process failure remains distinguishable")
+
+# Ctrl-C while the server loads stops it: it runs in its own session, so the
+# terminal's SIGINT never reaches it.
+with tempfile.TemporaryDirectory() as interrupted_dir:
+    interrupted = Server(["sleep", "60"], "/health",
+                         Path(interrupted_dir, "server.log"))
+    with patch("gufo.model_bench.servers.urllib.request.urlopen",
+               side_effect=KeyboardInterrupt):
+        try:
+            interrupted.start()
+        except KeyboardInterrupt:
+            pass
+        else:
+            raise AssertionError("the interrupt must propagate")
+    stopped = (interrupted.process is not None and
+               interrupted.process.poll() is not None)
+    interrupted.stop()
+    check(stopped, "an interrupted start stops the server")
 
 
 def fake_urlopen_diverging(request, timeout):

@@ -38,7 +38,12 @@ func newApp(b supervisor.Backend, settings supervisor.Settings, lease *superviso
 }
 func (a *App) startup(ctx context.Context)          { a.ctx = ctx; a.service.Startup(ctx) }
 func (a *App) domReady(ctx context.Context)         { a.service.DOMReady(ctx) }
-func (a *App) beforeClose(ctx context.Context) bool { return a.service.BeforeClose(ctx) }
+func (a *App) beforeClose(ctx context.Context) bool {
+	// The size the user leaves the window at is the size it opens with next time.
+	width, height := runtime.WindowGetSize(ctx)
+	a.service.RememberWindowSize(width, height)
+	return a.service.BeforeClose(ctx)
+}
 func (a *App) shutdown(ctx context.Context)         { a.service.Shutdown(ctx) }
 func (a *App) emitStream(e supervisor.StreamEvent)  { a.service.EmitStream(e) }
 func (a *App) quitForUpdate()                       { a.service.QuitForUpdate() }
@@ -71,6 +76,9 @@ func (a *App) BrowseModelFolder() BrowseResult {
 }
 func (a *App) BrowseModelFile() BrowseResult {
 	return supervisor.Filled(BrowseResult(a.service.BrowseModelFile()))
+}
+func (a *App) BrowseSideFile(kind string) BrowseResult {
+	return supervisor.Filled(BrowseResult(a.service.BrowseSideFile(kind)))
 }
 func (a *App) OpenModelFolder(path string) supervisor.ActionResult {
 	return supervisor.Filled(a.service.OpenModelFolder(path))

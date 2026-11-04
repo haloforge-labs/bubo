@@ -1,30 +1,30 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+// Stage-ablation and variant bench of the IQ WMMA routed-expert kernel
+// (multislot 2026-10-21; v2 prefill-thread 2026-10-21 after the Sonnet review).
+// The 10-21 prefill ABBA measured the IQ WMMA route (R2p) 0.504 ms per prompt
+// token slower than P and the generic MMQ route (R2p0) 0.326 ms slower. This
+// bench times the production entry points at the executor's real prefill
+// shapes: one chunk of N tokens, 512 experts, 10 used, hidden 2560, expert
+// width 640, 48 layers (gate/up: 20 IQ2_S, 17 IQ3_XXS, 10 IQ3_S, 1 IQ4_XS;
+// down: 39 IQ4_NL, 9 Q2_0). The tile choice copies executor.cpp (RouteHints):
+//   P (Q4_K gate/up, Q5_1 down) runs the lane-row kernels (GUFO_ROUTED_LANEROW=1
+//     is the shipped profile): 64-row tiles, 128-row pair tiles when
+//     tiles128 * 4 <= tiles64 * 3, 96-row down tiles.
+//   The IQ route: wide batches (>= 1024 tokens and >= 16 slots per expert)
+//     use 128-row pair and 96-row down tiles; every other batch uses 64-row
+//     pair tiles and routed_tile_rows (16, or 48 at >= 16 slots per expert)
+//     down tiles.
+// It times the wide and narrow probe instances of RoutedIqWmmaKernel
+// (RoutedIqSetProbe) and the stage ablations. An ablated run computes a wrong
+// result on purpose; each ablation must differ from the reference, which proves
+// that it ran. Ablation deltas are MARGINAL costs (stages overlap, they do not
+// sum to 100 %).
+// Gate and up use separate weight buffers (the engine has two tensors).
+// Weights are random bytes: codebook gathers and LDS bank behaviour are
+// indications only. Not covered: Q2_0 down (9 layers) and IQ4_XS gate (1 layer);
+// the engine-gap line maps them to IQ4_NL and IQ3_S.
+// Probe timing is interleaved by round and normalized to P before and after
+// that round. Usage: qwen38_flash_next_routed_wmma_iq_bench [--tokens N] [--reps 21] [--skew 0]
+//   without --tokens: the sweep 4096, 4096 at skew 1.0, 1024, 512, 128.
 
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
@@ -59,7 +59,7 @@ constexpr std::size_t kExperts = 512, kUsed = 10, kHidden = 2560, kFF = 640;
 constexpr double kLayers = 48, kLayersIq2S = 20, kLayersIq3Xxs = 17,
                  kLayersIq3S = 10 + 1 /* IQ4_XS mapped to IQ3_S */,
                  kLayersDownIq4Nl = 39 + 9 /* Q2_0 mapped to IQ4_NL */;
-
+// Measured by the 10-21 09:04 ABBA (driver 32.0.32015.7029), ms per prompt token over P.
 constexpr double kAbbaGapR2p = 0.504, kAbbaGapR2p0 = 0.326;
 
 int g_failed = 0;
@@ -104,6 +104,8 @@ struct Format {
   int scale_halves;  // fp16 scales at the block start (1: d, 2: d and dmin / m)
 };
 
+constexpr Format kIQ2_XXS{"IQ2_XXS", q::WeightType::kIQ2_XXS, 256, 66, 1};
+constexpr Format kIQ2_XS{"IQ2_XS", q::WeightType::kIQ2_XS, 256, 74, 1};
 constexpr Format kIQ2_S{"IQ2_S", q::WeightType::kIQ2_S, 256, 82, 1};
 constexpr Format kIQ3_XXS{"IQ3_XXS", q::WeightType::kIQ3_XXS, 256, 98, 1};
 constexpr Format kIQ3_S{"IQ3_S", q::WeightType::kIQ3_S, 256, 110, 1};
@@ -142,7 +144,8 @@ struct Probe {
 // The (variant, ablate) pairs that have instances in LaunchRoutedIq.
 // variant bits: 1 = 16-byte activation staging, 2 = register prefetch,
 // 4 = LDS codebooks, 8 = F16 sign XOR, 16 = full output-row tiles,
-// 32 = prefetch the grid/sign gather.
+// 32 = prefetch the grid/sign gather; 64 = the register-fed pair kernel
+// RoutedIqPairKernel (wide gate/up only).
 // ablate bits: 1 = decode skipped (and with it the raw weight fetch of variant 0),
 // 2 = activation staging skipped, 4 = matrix math skipped, 8 = raw weight loads skipped.
 const Probe kProbes[] = {
@@ -165,12 +168,16 @@ const Probe kProbes[] = {
     {7, 1, "all three, decode skipped"},
     {7, 2, "all three, staging skipped"},
     {7, 4, "all three, matrix math skipped"},
-    {7, 9, "all three, decode + raw loads skipped"}};
+    {7, 9, "all three, decode + raw loads skipped"},
+    // pf-iq-pair: RoutedIqPairKernel, not a kVar of the kernel above; its
+    // weights equal the reviewed decode, so it must be bit-identical too.
+    {64, 0, "register-fed pair kernel (pf-iq-pair)"},
+    {65, 0, "register-fed pair kernel, register sign masks"}};
 
 std::vector<Probe> ActiveProbes(bool wide, bool pair) {
   std::vector<Probe> out;
   for (const Probe& p : kProbes) {
-    if (p.variant >= 0 && (p.variant & 32) && (!wide || !pair))
+    if (p.variant >= 0 && (p.variant & (32 | 64)) && (!wide || !pair))
       continue;
     if (wide || p.variant == -1 ||
         (p.ablate == 0 &&
@@ -330,9 +337,9 @@ struct RoundResults {
   std::vector<double> ratio_to_p;
 };
 
-
-
-
+// P is timed on both sides of every round, and probe order rotates each round.
+// The median ratio uses the P reference of the SAME round, not the P median
+// from minutes earlier. Each probe therefore sees every position in the order.
 template<typename PCall, typename IQCall>
 RoundResults TimeRoundRobin(hipEvent_t a, hipEvent_t b, int reps,
                             const std::vector<Probe>& probes,
@@ -462,14 +469,20 @@ SizeResult RunOne(std::size_t tokens, int reps, double skew) {
                 (p_gu.med + p_dn.med) * kLayers / static_cast<double>(tokens), kLayers);
     if (p_gu.max > 1.10 * p_gu.min || p_dn.max > 1.10 * p_dn.min)
       std::printf("WARNING: P timing spread above 10 %% (max/min): inspect same-round ratios\n");
-    // ---- gate/up pairs, IQ types (the P buffers stay alive for the drift re-time at the end)
-    const Format* const gu_formats[3] = {&kIQ2_S, &kIQ3_XXS, &kIQ3_S};
-    for (int fi = 0; fi < 3; ++fi) {
+    // ---- gate/up pairs, IQ types (the P buffers stay alive for the drift re-time at the end).
+    // IQ2_XS and IQ2_XXS (no probe instances of the kernel variants) time the default
+    // dispatch, which is then the reference, against the pair kernel (wide batches).
+    const Format* const gu_formats[5] = {&kIQ2_S, &kIQ3_XXS, &kIQ3_S, &kIQ2_XS, &kIQ2_XXS};
+    const std::vector<Probe> pair_only = {{-1, -1, "DEFAULT dispatch"},
+                                          {64, 0, "register-fed pair kernel (pf-iq-pair)"},
+                                          {65, 0, "register-fed pair kernel, register sign masks"}};
+    for (int fi = 0; fi < 5; ++fi) {
       const Format* f = gu_formats[fi];
       const auto wgi = MakeWeights(*f, kFF, kHidden, 21U);
       const auto wui = MakeWeights(*f, kFF, kHidden, 23U);
       auto *d_wg = Upload(wgi), *d_wu = Upload(wui);
-      const auto probes = ActiveProbes(r.wide, true);
+      const auto probes = fi < 3 ? ActiveProbes(r.wide, true)
+                                 : std::vector<Probe>(pair_only.begin(), pair_only.begin() + (r.wide ? 3 : 1));
       const auto iq_call = [&] {
         if (!q::RoutedGatedF16Gemm(d_wg, d_wu, f->type, d_x,
                                    r.d_tiles_pair, r.n_pair, r.pair_rows,
@@ -479,7 +492,8 @@ SizeResult RunOne(std::size_t tokens, int reps, double skew) {
       };
       const auto rounds = TimeRoundRobin(ea, eb, reps, probes,
                                          [&] { p_gu_call(d_g, d_u); }, iq_call);
-      res.p_gu_round[fi] = rounds.p.med;
+      if (fi < 3)
+        res.p_gu_round[fi] = rounds.p.med;
       std::printf("ROUND REF %s gate/up P %.3f ms (min %.3f max %.3f); probe ratios use same-round P\n",
                   f->name, rounds.p.med, rounds.p.min, rounds.p.max);
       std::vector<__half> reference;
@@ -497,7 +511,8 @@ SizeResult RunOne(std::size_t tokens, int reps, double skew) {
           const auto out = Download(d_up, r.slots * kFF);
           char check[96] = "";
           if (p.ablate <= 0) {
-            if (p.variant == 0) {
+            // The first probe is the reference: v0, or DEFAULT for IQ2_XS / IQ2_XXS.
+            if (reference.empty()) {
               reference = out;
               if (!LooksReal(reference)) Fail("reference output is not a real result (zero/non-finite)");
               std::snprintf(check, sizeof(check), "reference");
@@ -530,8 +545,8 @@ SizeResult RunOne(std::size_t tokens, int reps, double skew) {
           if (p.variant == 7 && p.ablate == 0) t70 = t.med;
           if (p.variant == 7 && p.ablate == 1) t71 = t.med;
           if (p.variant == 7 && p.ablate == 9) t79 = t.med;
-          if (p.variant == 0 && p.ablate == 0) res.iq_gu[fi] = t.med;
-          if (p.variant == -1) res.default_gu[fi] = t.med;
+          if (p.variant == 0 && p.ablate == 0 && fi < 3) res.iq_gu[fi] = t.med;
+          if (p.variant == -1 && fi < 3) res.default_gu[fi] = t.med;
         } catch (const std::exception& e) {
           std::printf("GATE/UP %-8s %-38s FAILED: %s\n", f->name, p.name, e.what());
           Fail("a probe launch failed");
@@ -550,6 +565,19 @@ SizeResult RunOne(std::size_t tokens, int reps, double skew) {
       if (identical_ok != identical_want) Fail("a variant is not bit-identical");
       std::sort(ranking.begin(), ranking.end(),
                 [](const auto& a, const auto& b) { return a.second < b.second; });
+      {
+        // pf-iq-pair stage gate: each pair-kernel probe against route 1 (DEFAULT dispatch), same rounds.
+        double default_ratio = 0, pair_ratio[2] = {0, 0};
+        for (const auto& [index, ratio] : ranking) {
+          if (probes[index].variant == -1) default_ratio = ratio;
+          if (probes[index].variant == 64 || probes[index].variant == 65)
+            pair_ratio[probes[index].variant - 64] = ratio;
+        }
+        for (int v = 0; v < 2; ++v)
+          if (default_ratio > 0 && pair_ratio[v] > 0)
+            std::printf("PAIR GATE %s gate/up %zu tokens: v%d speed vs DEFAULT dispatch x%.3f (stage gate: >= 1.05); v%d %.3fxP, DEFAULT %.3fxP\n",
+                        f->name, tokens, 64 + v, default_ratio / pair_ratio[v], 64 + v, 1.0 / pair_ratio[v], 1.0 / default_ratio);
+      }
       std::printf("RANKING %s gate/up %zu tokens:", f->name, tokens);
       for (const auto& [index, ratio] : ranking) {
         if (probes[index].variant == -1)
@@ -739,7 +767,7 @@ int main(int argc, char** argv) {
     }
     if (reps < 1)
       throw std::runtime_error("--reps must be positive");
-    std::printf("routed_wmma_iq_bench v4; reps %d\n", reps);
+    std::printf("routed_wmma_iq_bench v5 (pf-iq-pair probe v64); reps %d\n", reps);
     PrintEnvironment();
     if (tokens != 0) {
       RunOne(tokens, reps, skew);

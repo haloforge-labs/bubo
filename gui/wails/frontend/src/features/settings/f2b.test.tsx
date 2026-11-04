@@ -24,7 +24,7 @@ test('the registry renderer keeps one sampling editor and preserves the View wri
       () => document.querySelectorAll(`[data-setting="${row.name}"]`).length,
     )
     .toBe(1)
-  await page.getByRole('textbox', { name: row.label! }).fill('0.65')
+  await page.getByRole('spinbutton', { name: row.label! }).fill('0.65')
   await page.getByRole('button', { name: 'Save changes' }).click()
   expect(save).toHaveBeenCalledExactlyOnceWith({
     set: {},
@@ -33,7 +33,20 @@ test('the registry renderer keeps one sampling editor and preserves the View wri
   })
 })
 
-test('a CLI-annotated random seed shows words and saves its exact scalar', async () => {
+test('a CLI-annotated random seed shows an empty field with Random as its placeholder', async () => {
+  const view = fixture()
+  const row = view.switches.find((row) => row.name === '--seed')!
+  view.switches = [row]
+  cleanup = renderView(
+    <RegistrySection view={view} audience="user" />,
+    view,
+  ).cleanup
+  const seed = page.getByRole('spinbutton', { name: 'Seed', exact: true })
+  await expect.element(seed).toHaveAttribute('placeholder', 'Random')
+  await expect.element(seed).toHaveValue(null)
+})
+
+test('a fixed random seed saves its exact scalar', async () => {
   const view = fixture()
   const row = view.switches.find((row) => row.name === '--seed')!
   view.switches = [row]
@@ -43,12 +56,9 @@ test('a CLI-annotated random seed shows words and saves its exact scalar', async
     view,
   ).cleanup
   await expect
-    .element(page.getByRole('textbox', { name: 'Seed', exact: true }))
-    .toHaveValue('random')
-  await expect
     .element(page.getByRole('button', { name: 'Save changes' }))
     .not.toBeInTheDocument()
-  await page.getByRole('textbox', { name: 'Seed', exact: true }).fill('5')
+  await page.getByRole('spinbutton', { name: 'Seed', exact: true }).fill('5')
   await page.getByRole('button', { name: 'Save changes' }).click()
   expect(save).toHaveBeenCalledExactlyOnceWith({
     set: {},
@@ -66,21 +76,24 @@ test('reasoning has an accent slider with supplied endpoints and permits values 
     <RegistrySection view={view} audience="user" />,
     view,
   ).cleanup
-  const range = page.getByRole('slider', {
-    name: `${row.label} suggested range`,
-  })
+  // The label is the registry's own.
+  const label = 'Rethinking penalty (fixed)'
+  const range = page.getByRole('slider', { name: `${label} suggested range` })
   const suggested = row.allowed.properties!.suggested!.properties!
   await expect.element(range).toHaveAttribute('min', suggested.minimum!.text!)
   await expect.element(range).toHaveAttribute('max', suggested.maximum!.text!)
   expect(range.element().classList.contains('accent-primary')).toBe(true)
+  // The suggested range is part of the row's About popup.
+  await page.getByRole('button', { name: `About ${label}` }).click()
+  // The range is said once, not as a range and again as a suggestion.
   await expect
-    .element(page.getByText('Suggested minimum', { exact: false }))
-    .toHaveTextContent(suggested.minimum!.text!)
-  await expect
-    .element(page.getByText('Suggested maximum', { exact: false }))
-    .toHaveTextContent(suggested.maximum!.text!)
+    .element(page.getByText('Suggested:', { exact: false }))
+    .toHaveTextContent(
+      `Suggested: from ${suggested.minimum!.text} up to ${suggested.maximum!.text}. Other values are accepted.`,
+    )
+  expect(document.body.textContent).not.toContain('Suggested range')
   const outside = Number(suggested.maximum!.text) + 1
-  await page.getByRole('spinbutton', { name: row.label! }).fill(String(outside))
+  await page.getByRole('spinbutton', { name: label }).fill(String(outside))
   await expect.element(range).toBeDisabled()
   await page.getByRole('button', { name: 'Save changes' }).click()
   expect(save).toHaveBeenCalledExactlyOnceWith({

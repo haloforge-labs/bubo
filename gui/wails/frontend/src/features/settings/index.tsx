@@ -17,6 +17,11 @@ import { RegistrySection } from './registry-section'
 import { AppSettings } from './app-settings'
 import { RejectedOverride } from '@/components/rejected-override'
 import { GUIError } from '@/components/gui-error'
+import {
+  useEndReveal,
+  useRevealedSetting,
+  useRevealSetting,
+} from '@/lib/reveal'
 
 export default function SettingsPage() {
   const query = useView()
@@ -24,6 +29,18 @@ export default function SettingsPage() {
   const location = useLocation()
   const [tab, setTab] = useState<string>()
   const [dirty, setDirty] = useState(false)
+  const revealed = useRevealedSetting()
+  const shown =
+    tab ?? (revealed || location.hash === 'inference' ? 'advanced' : 'app')
+  const endReveal = useEndReveal()
+  // A link that names a setting shows it, whichever tab was chosen before.
+  // (State follows the link while rendering, once per link: no effect needed.)
+  const [followed, setFollowed] = useState<string>()
+  if (followed !== revealed) {
+    setFollowed(revealed)
+    if (revealed) setTab('advanced')
+  }
+  useRevealSetting(revealed, view && shown)
   const [nextTab, setNextTab] = useState<string>()
   const blocker = useBlocker({
     shouldBlockFn: () => dirty,
@@ -46,10 +63,13 @@ export default function SettingsPage() {
           <GUIError error={view.failure} recovery={!view.failure?.switch} />
           <RejectedOverride failure={view.failure} />
           <Tabs
-            value={tab ?? (location.hash === 'inference' ? 'advanced' : 'app')}
+            value={shown}
             onValueChange={(next) => {
               if (dirty) setNextTab(next)
-              else setTab(next)
+              else {
+                setTab(next)
+                endReveal()
+              }
             }}
             className="space-y-6"
           >
@@ -79,7 +99,7 @@ export default function SettingsPage() {
               <DialogHeader>
                 <DialogTitle>Unsaved changes</DialogTitle>
                 <DialogDescription>
-                  Save your changes before leaving, or discard them.
+                  Keep editing to save, or discard your changes.
                 </DialogDescription>
               </DialogHeader>
               <DialogFooter>
@@ -91,6 +111,7 @@ export default function SettingsPage() {
                     setDirty(false)
                     if (nextTab !== undefined) {
                       setTab(nextTab)
+                      endReveal()
                       setNextTab(undefined)
                     } else blocker.proceed?.()
                   }}

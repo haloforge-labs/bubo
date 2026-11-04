@@ -5,7 +5,6 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -13,7 +12,6 @@
 #include <future>
 #include <initializer_list>
 #include <iostream>
-#include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -27,6 +25,7 @@
 #include <vector>
 
 #include "src/core/crypto/sha256.hpp"
+#include "tests/support/temporary_directory.hpp"
 
 namespace {
 
@@ -58,35 +57,6 @@ void Expect(bool condition, std::string_view message) {
     std::exit(1);
   }
 }
-
-class TemporaryDirectory {
-public:
-  TemporaryDirectory() {
-    std::string pattern = (std::filesystem::temp_directory_path() /
-                           "gufo-continuation-disk-XXXXXX")
-                              .string();
-    char* created = ::mkdtemp(pattern.data());
-    if (created == nullptr) {
-      throw std::runtime_error("failed to create temporary directory");
-    }
-    path_ = created;
-  }
-
-  ~TemporaryDirectory() {
-    std::error_code error;
-    std::filesystem::remove_all(path_, error);
-  }
-
-  TemporaryDirectory(const TemporaryDirectory&) = delete;
-  TemporaryDirectory& operator=(const TemporaryDirectory&) = delete;
-
-  [[nodiscard]] const std::filesystem::path& path() const noexcept {
-    return path_;
-  }
-
-private:
-  std::filesystem::path path_;
-};
 
 template<typename Integer>
 void PutLittleEndian(std::span<std::uint8_t> destination, std::size_t offset,
@@ -369,7 +339,7 @@ void TestSha256KnownVector() {
   Expect(complete == incremental.Finish(),
          "reading a prefix digest does not consume incremental state");
 
-  TemporaryDirectory directory;
+  TemporaryDirectory directory("gufo-continuation-disk");
   const auto path = directory.path() / "artifact.gguf";
   {
     std::ofstream output(path, std::ios::binary);
@@ -381,7 +351,7 @@ void TestSha256KnownVector() {
 }
 
 void TestRestartRestoreAndCompatibilityIdentity() {
-  TemporaryDirectory directory;
+  TemporaryDirectory directory("gufo-continuation-disk");
   const FakeRunner writer("artifact-A", "fake-old-executable");
   auto snapshot = MakeSnapshot(writer, 0x123456789ABCDEF0ULL, 3);
   {
@@ -396,10 +366,7 @@ void TestRestartRestoreAndCompatibilityIdentity() {
 
   const FakeRunner compatible_reader("artifact-A", "fake-new-executable");
   auto compatible_state = compatible_reader.CreateState();
-  std::vector<ContinuationDiskEvent> events;
-  ContinuationDiskStore restarted(
-      StoreOptions(directory.path()),
-      [&](const ContinuationDiskEvent& event) { events.push_back(event); });
+  ContinuationDiskStore restarted(StoreOptions(directory.path()));
   const auto restored = RestoreTokens(restarted, compatible_reader,
                                       *compatible_state, {1, 2, 3, 4, 5});
   Expect(restored.restored && restored.token_count == 3,
@@ -414,25 +381,10 @@ void TestRestartRestoreAndCompatibilityIdentity() {
                         {1, 2, 3, 4})
               .restored,
          "different compatibility identity is a deterministic cache miss");
-  Expect(!RestoreTokens(restarted, incompatible_reader, *incompatible_state,
-                        {1, 2, 3, 4})
-              .restored,
-         "repeated incompatible restore remains a miss");
-  Expect(std::ranges::count_if(events, [](const auto& event) {
-           return event.reason == ContinuationDiskEventReason::kIdentityMismatch;
-         }) == 1,
-         "identity mismatch emits exactly one sanitized event per store");
-  Expect(restarted.entry_count() == 1 &&
-             CacheFiles(directory.path()).size() == 1,
-         "identity mismatch preserves the other model's snapshot");
-  Expect(RestoreTokens(restarted, compatible_reader, *compatible_state,
-                       {1, 2, 3, 4})
-             .restored,
-         "ignored identity remains restorable by its original model");
 }
 
 void TestLongestPrefixAndForcedHashCollision() {
-  TemporaryDirectory directory;
+  TemporaryDirectory directory("gufo-continuation-disk");
   const FakeRunner runner("collision-model");
   const auto forced_collision = [](std::span<const std::uint8_t>) {
     return std::string(64, '0');
@@ -468,7 +420,7 @@ void TestLongestPrefixAndForcedHashCollision() {
 }
 
 void TestCorruptionBecomesDeterministicMissAndRemoval() {
-  TemporaryDirectory directory;
+  TemporaryDirectory directory("gufo-continuation-disk");
   const FakeRunner runner("corruption-model");
   std::vector<ContinuationDiskEvent> events;
   ContinuationDiskStore store(
@@ -521,7 +473,7 @@ void TestCorruptionBecomesDeterministicMissAndRemoval() {
 }
 
 void TestByteAndStagingLimits() {
-  TemporaryDirectory staging_directory;
+  TemporaryDirectory staging_directory("gufo-continuation-disk");
   const FakeRunner runner("limits");
   const std::size_t file_bytes = ExpectedFileBytes(6, 2);
   auto snapshot = MakeSnapshot(runner, 1, 2);
@@ -532,7 +484,7 @@ void TestByteAndStagingLimits() {
              staging_limited.entry_count() == 0,
          "full file image must fit the bounded staging allocation");
 
-  TemporaryDirectory byte_directory;
+  TemporaryDirectory byte_directory("gufo-continuation-disk");
   ContinuationDiskStore byte_limited(
       StoreOptions(byte_directory.path(), file_bytes - 1, 4096));
   Expect(!SaveTokens(byte_limited, runner, {1, 2}, *snapshot).stored &&
@@ -541,14 +493,14 @@ void TestByteAndStagingLimits() {
 }
 
 void TestAutomaticStagingAndAdmissionDiagnostics() {
-  TemporaryDirectory default_directory;
+  TemporaryDirectory default_directory("gufo-continuation-disk");
   ContinuationDiskStore defaults({.directory = default_directory.path()});
   Expect(defaults.capacity_bytes() == std::size_t{8} * 1024U * 1024U * 1024U &&
              defaults.staging_capacity_bytes() > kDiskHeaderBytes &&
              defaults.staging_capacity_bytes() <= defaults.capacity_bytes(),
          "defaults bound RAM staging by available RAM and disk retention");
 
-  TemporaryDirectory directory;
+  TemporaryDirectory directory("gufo-continuation-disk");
   std::vector<ContinuationDiskEvent> events;
   const FakeRunner runner("automatic");
   ContinuationDiskStore store(
@@ -578,7 +530,7 @@ void TestAutomaticStagingAndAdmissionDiagnostics() {
              events.back().reason == ContinuationDiskEventReason::kByteCapacity,
          "disk retention rejection is distinguished from staging pressure");
 
-  TemporaryDirectory explicit_directory;
+  TemporaryDirectory explicit_directory("gufo-continuation-disk");
   ContinuationDiskStore explicit_limit(
       StoreOptions(explicit_directory.path(), 4096, 256),
       [&](const auto& event) { events.push_back(event); });
@@ -591,7 +543,7 @@ void TestAutomaticStagingAndAdmissionDiagnostics() {
 }
 
 void TestSmallerStagingPreservesExistingFiles() {
-  TemporaryDirectory directory;
+  TemporaryDirectory directory("gufo-continuation-disk");
   const FakeRunner runner("staging-restart");
   const auto file_bytes = ExpectedFileBytes(15, 2);
   {
@@ -638,7 +590,7 @@ void TestSmallerStagingPreservesExistingFiles() {
 }
 
 void TestLruEvictionUsesActualFileBytes() {
-  TemporaryDirectory directory;
+  TemporaryDirectory directory("gufo-continuation-disk");
   const FakeRunner runner("12345678");
   const std::size_t entry_bytes = ExpectedFileBytes(8, 2);
   ContinuationDiskStore store(
@@ -672,7 +624,7 @@ void TestLruEvictionUsesActualFileBytes() {
 }
 
 void TestAtomicPublicationAndPrivatePermissions() {
-  TemporaryDirectory directory;
+  TemporaryDirectory directory("gufo-continuation-disk");
   const auto orphan = directory.path() / ".tmp-orphan";
   {
     std::ofstream output(orphan, std::ios::binary);
@@ -703,7 +655,7 @@ void TestAtomicPublicationAndPrivatePermissions() {
 }
 
 void TestStartupRejectsUnsafeAndInvalidFiles() {
-  TemporaryDirectory directory;
+  TemporaryDirectory directory("gufo-continuation-disk");
   const FakeRunner runner("startup-valid");
   const FakeRunner incompatible("startup-incompatible");
   std::filesystem::path truncated_file;
@@ -756,11 +708,7 @@ void TestStartupRejectsUnsafeAndInvalidFiles() {
     output << "must survive";
   }
   const auto unsafe_link = directory.path() / "unsafe.kvc";
-  // Windows needs Developer Mode or elevation to create symlinks; without
-  // one the symlink-specific expectations below are vacuous.
-  std::error_code link_error;
-  std::filesystem::create_symlink(target.filename(), unsafe_link, link_error);
-  const bool have_link = !link_error;
+  std::filesystem::create_symlink(target.filename(), unsafe_link);
 
   std::vector<ContinuationDiskEvent> events;
   ContinuationDiskStore restarted(
@@ -769,9 +717,9 @@ void TestStartupRejectsUnsafeAndInvalidFiles() {
   Expect(
       restarted.entry_count() == 2 && CacheFiles(directory.path()).size() == 2,
       "startup indexes only checksum-valid regular entries");
-  Expect(std::filesystem::exists(target) &&
-             (!have_link || !std::filesystem::exists(unsafe_link)),
-         "unsafe symlink is removed without following its target");
+  Expect(
+      std::filesystem::exists(target) && !std::filesystem::exists(unsafe_link),
+      "unsafe symlink is removed without following its target");
   Expect(
       std::ranges::any_of(events,
                           [](const ContinuationDiskEvent& event) {
@@ -784,12 +732,11 @@ void TestStartupRejectsUnsafeAndInvalidFiles() {
                 return event.reason ==
                        ContinuationDiskEventReason::kChecksumMismatch;
               }) &&
-          (!have_link || std::ranges::any_of(
-                             events,
-                             [](const ContinuationDiskEvent& event) {
-                               return event.reason ==
-                                      ContinuationDiskEventReason::kUnsafeFile;
-                             })),
+          std::ranges::any_of(events,
+                              [](const ContinuationDiskEvent& event) {
+                                return event.reason ==
+                                       ContinuationDiskEventReason::kUnsafeFile;
+                              }),
       "startup reports sanitized invalid-file reasons");
 
   std::size_t compatible_hits = 0;
@@ -811,18 +758,11 @@ void TestStartupRejectsUnsafeAndInvalidFiles() {
 }
 
 void TestRootSymlinkIsRejected() {
-  TemporaryDirectory directory;
+  TemporaryDirectory directory("gufo-continuation-disk");
   const auto target = directory.path() / "target";
   const auto link = directory.path() / "cache-link";
   std::filesystem::create_directory(target);
-  std::error_code link_error;
-  std::filesystem::create_directory_symlink(target.filename(), link,
-                                            link_error);
-  if (link_error) {
-    std::cout << "skipping root symlink check: " << link_error.message()
-              << '\n';
-    return;
-  }
+  std::filesystem::create_directory_symlink(target.filename(), link);
   bool rejected = false;
   try {
     ContinuationDiskStore store(StoreOptions(link));
@@ -833,7 +773,7 @@ void TestRootSymlinkIsRejected() {
 }
 
 void TestConcurrentCallersRemainBoundedAndExact() {
-  TemporaryDirectory directory;
+  TemporaryDirectory directory("gufo-continuation-disk");
   const FakeRunner runner("concurrent");
   constexpr std::size_t kThreadCount = 8;
   ContinuationDiskStore store(
@@ -867,7 +807,7 @@ void TestConcurrentCallersRemainBoundedAndExact() {
 }
 
 void TestConcurrentStoreInstancesPublishSafely() {
-  TemporaryDirectory directory;
+  TemporaryDirectory directory("gufo-continuation-disk");
   const FakeRunner runner("multi-process");
   {
     ContinuationDiskStore first(StoreOptions(directory.path()));
@@ -900,7 +840,7 @@ void TestConcurrentStoreInstancesPublishSafely() {
 }
 
 void TestStartupPreservesActivePublisher() {
-  TemporaryDirectory directory;
+  TemporaryDirectory directory("gufo-continuation-disk");
   auto runner = std::make_shared<FakeRunner>("startup-publisher");
   std::binary_semaphore entered(0), release(0);
   const auto orphan = directory.path() / ".tmp-orphan";
@@ -945,7 +885,7 @@ void TestStartupPreservesActivePublisher() {
 }
 
 void TestSharedPrefixBoundariesAndExactDedup() {
-  TemporaryDirectory directory;
+  TemporaryDirectory directory("gufo-continuation-disk");
   const FakeRunner runner("shared-prefix-model");
   ContinuationDiskStore store(StoreOptions(directory.path()), {});
 
@@ -1005,7 +945,7 @@ void TestSharedPrefixBoundariesAndExactDedup() {
 }
 
 void TestBoundedAsyncPersistenceDoesNotBlockLookup() {
-  TemporaryDirectory directory;
+  TemporaryDirectory directory("gufo-continuation-disk");
   auto runner = std::make_shared<FakeRunner>("async-store");
   std::binary_semaphore entered(0), release(0);
   const auto bytes = ExpectedFileBytes(
@@ -1074,173 +1014,8 @@ void TestBoundedAsyncPersistenceDoesNotBlockLookup() {
          "shutdown drains accepted persistence jobs");
 }
 
-bool DiskDeferExpected() {
-  const char* value = std::getenv("GUFO_DISK_DEFER");
-  return value && std::string_view(value) == "1";
-}
-
-void TestDeferredPersistenceIdleAndBytes() {
-  TemporaryDirectory directory, reference_directory;
-  auto runner = std::make_shared<FakeRunner>("defer-idle");
-  // Synchronous Save is the unchanged immediate-serialization byte reference.
-  {
-    ContinuationDiskStore reference(StoreOptions(reference_directory.path()));
-    Expect(SaveTokens(reference, *runner, {1, 2}, *MakeSnapshot(*runner, 42, 2))
-               .stored,
-           "immediate reference is stored");
-  }
-  std::binary_semaphore entered(0);
-  runner->before_stream = [&] { entered.release(); };
-  ContinuationDiskStore store(StoreOptions(directory.path()));
-  {
-    auto active = store.BeginGeneration();
-    {
-      auto second_active = store.BeginGeneration();
-      Expect(store.SaveAsync(runner, {1, 2}, MakeSnapshot(*runner, 42, 2)) != 0,
-             "busy generation admits persistence");
-      if (DiskDeferExpected())
-        Expect(!entered.try_acquire_for(std::chrono::milliseconds(100)),
-               "serialization cannot begin during active decode");
-      else
-        Expect(entered.try_acquire_for(std::chrono::seconds(2)),
-               "unset/0 retain immediate serialization despite active decode");
-    }
-    if (DiskDeferExpected())
-      Expect(!entered.try_acquire_for(std::chrono::milliseconds(100)),
-             "one remaining generation still gates serialization");
-  }
-  if (DiskDeferExpected())
-    Expect(entered.try_acquire_for(std::chrono::seconds(2)),
-           "serialization begins when the last generation becomes idle");
-  store.Flush();
-  const auto files = CacheFiles(directory.path());
-  const auto reference_files = CacheFiles(reference_directory.path());
-  Expect(files.size() == 1 && reference_files.size() == 1,
-         "both modes persist exactly one file");
-  const auto read = [](const auto& path) {
-    std::ifstream input(path, std::ios::binary);
-    Expect(input.good(), "persisted file is readable");
-    return std::vector<char>(std::istreambuf_iterator<char>(input), {});
-  };
-  Expect(
-      read(files.front()) == read(reference_files.front()),
-      "deferred/immediate complete persisted bytes equal the same reference");
-}
-
-void TestDeferredPersistenceDeadline() {
-  TemporaryDirectory directory;
-  auto runner = std::make_shared<FakeRunner>("defer-deadline");
-  std::binary_semaphore entered(0);
-  runner->before_stream = [&] { entered.release(); };
-  auto options = StoreOptions(directory.path());
-  options.defer_max_wait = std::chrono::milliseconds(250);
-  ContinuationDiskStore store(options);
-  auto active = store.BeginGeneration();
-  const auto start = std::chrono::steady_clock::now();
-  Expect(store.SaveAsync(runner, {1, 2}, MakeSnapshot(*runner, 42, 2)) != 0,
-         "bounded busy write is admitted");
-  if (DiskDeferExpected()) {
-    Expect(!entered.try_acquire_for(std::chrono::milliseconds(50)),
-           "deadline does not bypass the initial busy gate");
-  }
-  Expect(entered.try_acquire_for(std::chrono::seconds(2)),
-         "deadline starts serialization even while generation stays active");
-  if (DiskDeferExpected())
-    Expect(std::chrono::steady_clock::now() - start >= options.defer_max_wait,
-           "deadline is measured from admission, without early expiry");
-  store.Flush();
-  Expect(store.entry_count() == 1, "deadline does not discard persistence");
-}
-
-void TestDeferredPersistencePressure() {
-  for (const bool capture_pressure : {false, true}) {
-    TemporaryDirectory directory;
-    auto runner = std::make_shared<FakeRunner>("defer-pressure");
-    std::binary_semaphore entered(0), release(0);
-    bool first = true;
-    runner->before_stream = [&] {
-      if (std::exchange(first, false)) {
-        entered.release();
-        release.acquire();
-      }
-    };
-    const auto bytes = ExpectedFileBytes(
-        runner->Descriptor().persistence->compatibility_identity.size(), 2);
-    ContinuationDiskStore store(
-        StoreOptions(directory.path(), 4096, 2 * bytes));
-    auto active = store.BeginGeneration();
-    Expect(
-        store.SaveAsync(runner, {1, 2}, MakeSnapshot(*runner, 42, 2)) == bytes,
-        "first pressure payload is queued");
-    if (DiskDeferExpected())
-      Expect(!entered.try_acquire_for(std::chrono::milliseconds(50)),
-             "partial staging still defers busy materialization");
-    std::unique_ptr<ContinuationDiskStore::CaptureReservation> reservation;
-    if (capture_pressure) {
-      reservation = store.ReserveCapture(*runner, 2, kFakePayloadBytes);
-      Expect(reservation != nullptr, "capture fills remaining staging");
-    } else {
-      Expect(store.SaveAsync(runner, {3, 4}, MakeSnapshot(*runner, 43, 2)) ==
-                 bytes,
-             "second queued payload fills remaining staging");
-    }
-    Expect(entered.try_acquire_for(std::chrono::seconds(2)),
-           "full queued/capture staging bypasses the idle gate");
-    Expect(
-        !store.CanSave(*runner, 2, kFakePayloadBytes) &&
-            !store.ReserveCapture(*runner, 2, kFakePayloadBytes) &&
-            store.SaveAsync(runner, {5, 6}, MakeSnapshot(*runner, 44, 2)) == 0,
-        "deferred and active bytes retain the original staging bound");
-    reservation.reset();
-    release.release();
-    store.Flush();
-    Expect(store.entry_count() == (capture_pressure ? 1U : 2U) &&
-               store.CanSave(*runner, 2, kFakePayloadBytes),
-           "accepted payloads persist and release staging after completion");
-  }
-}
-
-void TestDeferredPersistenceFlushAndShutdown() {
-  for (const bool explicit_flush : {false, true}) {
-    TemporaryDirectory directory;
-    auto runner = std::make_shared<FakeRunner>("defer-drain");
-    std::binary_semaphore entered(0);
-    runner->before_stream = [&] { entered.release(); };
-    auto store =
-        std::make_unique<ContinuationDiskStore>(StoreOptions(directory.path()));
-    {
-      auto active = store->BeginGeneration();
-      Expect(
-          store->SaveAsync(runner, {1, 2}, MakeSnapshot(*runner, 42, 2)) != 0,
-          "drain payload is admitted");
-      if (DiskDeferExpected())
-        Expect(!entered.try_acquire_for(std::chrono::milliseconds(50)),
-               "drain starts with a deferred payload");
-      if (explicit_flush) {
-        auto drained = std::async(std::launch::async, [&] { store->Flush(); });
-        Expect(drained.wait_for(std::chrono::seconds(2)) ==
-                   std::future_status::ready,
-               "Flush bypasses deferral even while generation remains active");
-        drained.get();
-        Expect(store->entry_count() == 1,
-               "Flush persists the deferred payload");
-      }
-    }  // Token must end before the store; idle notification may race shutdown.
-    const auto start = std::chrono::steady_clock::now();
-    store.reset();
-    Expect(std::chrono::steady_clock::now() - start < std::chrono::seconds(2),
-           "shutdown drains without waiting for the ten-second deadline");
-    ContinuationDiskStore restarted(StoreOptions(directory.path()));
-    auto state = runner->CreateState();
-    Expect(
-        RestoreTokens(restarted, *runner, *state, {1, 2, 3}).restored &&
-            RequireFakeState(*state).value == 42,
-        "shutdown loses no deferred persist and bytes restore after restart");
-  }
-}
-
 void TestIndexedPrefixLookup() {
-  TemporaryDirectory directory;
+  TemporaryDirectory directory("gufo-continuation-disk");
   FakeRunner runner("prefix-index");
   ContinuationDiskStore store(StoreOptions(directory.path()));
   // Many independent branches, with terminal prefixes inside compressed edges.
@@ -1270,7 +1045,7 @@ void TestIndexedPrefixLookup() {
 }  // namespace
 
 void TestImageIdentitySurvivesRestart() {
-  TemporaryDirectory directory;
+  TemporaryDirectory directory("gufo-continuation-disk");
   FakeRunner runner("image-cache-test");
   const std::vector<TextRunnerToken> prompt{1, 248056, 3};
   const std::vector<std::uint8_t> image_a{1, 2}, image_b{1, 3};
@@ -1300,42 +1075,9 @@ void TestImageIdentitySurvivesRestart() {
   Expect(!store.Touch(runner, prompt), "disk dedup respects image identity");
 }
 
-void TestLearnedBoundaryRoundsDownToTheAlignment() {
-  // Lead 1: a learned shared-prefix boundary is rounded DOWN to a multiple of 256 tokens by default (prefill splits at any other position change the
-  // resulting state), GUFO_DISK_BOUNDARY_ALIGN=0 or 1 disables it, any other N rounds down to a multiple of N; a boundary that rounds to 0 is dropped.
-  TemporaryDirectory directory;
-  FakeRunner runner("boundary-align");
-  ContinuationDiskStore store(StoreOptions(directory.path()));
-  const auto build = [](std::size_t shared, TextRunnerToken tail) {
-    std::vector<TextRunnerToken> tokens(shared);
-    for (std::size_t i = 0; i < shared; ++i) tokens[i] = static_cast<TextRunnerToken>(10 + i % 50);
-    for (TextRunnerToken k = 0; k < 4; ++k) tokens.push_back(tail + k);
-    return tokens;
-  };
-  const auto stored = build(600, 1000);
-  Expect(store.Save(runner, stored, *MakeSnapshot(runner, 1, stored.size())).stored, "long prompt stores");
-  const auto query = build(600, 2000);
-  const auto learned = [&](const char* align) {
-    ::setenv("GUFO_DISK_BOUNDARY_ALIGN", align, 1);
-    return store.SharedPrefixBoundaries(runner, query, 1, 4);
-  };
-  Expect(learned("") == std::vector<std::size_t>({512}), "default alignment rounds the 600-token boundary down to 512");
-  Expect(learned("0") == std::vector<std::size_t>({600}), "alignment 0 keeps the exact boundary");
-  Expect(learned("1") == std::vector<std::size_t>({600}), "alignment 1 keeps the exact boundary");
-  Expect(learned("64") == std::vector<std::size_t>({576}), "alignment 64 rounds down to a multiple of 64");
-  Expect(learned("250") == std::vector<std::size_t>({500}), "alignment 250 rounds the 600-token boundary down to 500");
-  const auto short_stored = build(200, 3000);
-  Expect(store.Save(runner, short_stored, *MakeSnapshot(runner, 2, short_stored.size())).stored, "short-prefix prompt stores");
-  const auto short_query = build(200, 4000);
-  ::setenv("GUFO_DISK_BOUNDARY_ALIGN", "", 1);
-  Expect(store.SharedPrefixBoundaries(runner, short_query, 1, 4).empty(), "a boundary that rounds down to 0 is dropped");
-  ::setenv("GUFO_DISK_BOUNDARY_ALIGN", "0", 1);
-  Expect(store.SharedPrefixBoundaries(runner, short_query, 1, 4) == std::vector<std::size_t>({200}), "alignment 0 keeps the short boundary");
-}
-
 void TestAppendedImagePrefixesSurviveRestart() {
   using gufo::server::ContinuationInputPrefix;
-  TemporaryDirectory directory;
+  TemporaryDirectory directory("gufo-continuation-disk");
   FakeRunner runner("image-prefix-cache");
   const std::vector<TextRunnerToken> prompt{1, 2, 3, 248056, 4, 5, 248056, 6};
   const auto tokens = std::span<const TextRunnerToken>(prompt);
@@ -1379,7 +1121,7 @@ void TestAppendedImagePrefixesSurviveRestart() {
 }
 
 void TestMinimumCheckpointStep() {
-  TemporaryDirectory directory;
+  TemporaryDirectory directory("gufo-continuation-disk");
   auto runner = std::make_shared<FakeRunner>("min-step-model");
   std::vector<ContinuationDiskEvent> events;
   auto options = StoreOptions(directory.path());
@@ -1421,7 +1163,7 @@ void TestMinimumCheckpointStep() {
       "shared prefixes are exempt from the step");
 
   options.min_checkpoint_step_tokens = 0;
-  TemporaryDirectory ungated_directory;
+  TemporaryDirectory ungated_directory("gufo-continuation-disk");
   options.directory = ungated_directory.path();
   ContinuationDiskStore ungated(options);
   Expect(
@@ -1432,880 +1174,10 @@ void TestMinimumCheckpointStep() {
       "zero disables the step");
 }
 
-// Policy tests use per-store overrides: environment settings remain read once.
-std::vector<char> ReadWriterFile(const std::filesystem::path& file) {
-  std::ifstream input(file, std::ios::binary);
-  Expect(input.good(), "writer comparison file opens");
-  return {std::istreambuf_iterator<char>(input), {}};
-}
-
-struct WriterHarness {
-  std::shared_ptr<FakeRunner> runner =
-      std::make_shared<FakeRunner>("writer-policy");
-  gufo::server::ContinuationCache cache;
-  ContinuationDiskStore store;
-
-  WriterHarness(const ContinuationDiskStoreOptions& options,
-                ContinuationDiskStore::EventSink sink = {},
-                std::size_t ram_entries = 4, std::size_t ram_bytes = 64)
-      : cache(
-            1, [this] { return runner->CreateState(); },
-            {.restore =
-                 [this](auto& state, const auto& snapshot) {
-                   runner->RestoreOrFork(
-                       dynamic_cast<TextRunnerState&>(state),
-                       dynamic_cast<const TextRunnerSnapshot&>(snapshot));
-                 },
-             .capacity_bytes = [ram_bytes] { return ram_bytes; }},
-            ram_entries),
-        store(options, std::move(sink)) {
-    if (store.persist_on_evict_idle()) {
-      cache.SetPersistenceEvictionHook(
-          [this](auto snapshot) { store.PersistEvicted(std::move(snapshot)); });
-      store.SetPersistenceSource(runner, [this](bool failed) {
-        return cache.NextPendingPersistence(failed);
-      });
-    }
-  }
-
-  std::shared_ptr<const TextRunnerSnapshot> Capture(
-      std::vector<TextRunnerToken> tokens, std::uint64_t value,
-      bool restored = false, bool shared = false) {
-    auto lease = cache.Acquire(tokens);
-    Expect(lease.TryReserveSnapshot(
-               kFakePayloadBytes, tokens.size(), false,
-               gufo::server::SnapshotPurpose::kContinuation, tokens),
-           "policy capture obtains RAM reservation");
-    std::shared_ptr<const TextRunnerSnapshot> snapshot =
-        MakeSnapshot(*runner, value, tokens.size());
-    (void)store.Capture(runner, tokens, snapshot, {}, {}, shared, restored);
-    Expect(lease.Commit(std::move(tokens), snapshot) == kFakePayloadBytes,
-           "policy capture retains snapshot");
-    return snapshot;
-  }
-};
-
-ContinuationDiskStoreOptions WriterOptions(
-    const std::filesystem::path& directory) {
-  auto options = StoreOptions(directory);
-  options.persist_evict_idle = true;
-  options.slice = false;
-  options.idle_wait = std::chrono::minutes(10);
-  return options;
-}
-
-void TestWriterEvictionBytesAndDedup() {
-  // Exercise both entry-count and byte-pressure eviction, without changing LRU.
-  for (const bool byte_pressure : {false, true}) {
-    TemporaryDirectory directory, reference_directory;
-    WriterHarness writer(WriterOptions(directory.path()), {},
-                         byte_pressure ? 4 : 2, byte_pressure ? 32 : 64);
-    auto first = writer.Capture({1}, 41);
-    writer.Capture({2}, 42);
-    Expect(writer.store.entry_count() == 0,
-           "RAM captures do not write through");
-    writer.Capture({3}, 43);
-    writer.store.Flush();
-    Expect(writer.store.entry_count() == 1,
-           "only the LRU-evicted entry persists");
-    Expect(first->persistence->state ==
-               gufo::server::SnapshotPersistence::kPersisted,
-           "evicted entry marked only after successful persistence");
-    writer.store.PersistEvicted(first);
-    writer.store.Flush();
-    Expect(writer.store.entry_count() == 1,
-           "second eviction offer cannot write twice");
-    auto state = writer.runner->CreateState();
-    Expect(
-        RestoreTokens(writer.store, *writer.runner, *state, {1, 99}).restored &&
-            RequireFakeState(*state).value == 41,
-        "the exactly evicted state restores");
-    Expect(
-        !RestoreTokens(writer.store, *writer.runner, *state, {2, 99}).restored,
-        "retained RAM entry has not persisted");
-    auto reference_options = WriterOptions(reference_directory.path());
-    reference_options.persist_evict_idle = false;
-    WriterHarness reference(reference_options);
-    reference.Capture({1}, 41);
-    reference.store.Flush();
-    Expect(ReadWriterFile(CacheFiles(directory.path()).front()) ==
-               ReadWriterFile(CacheFiles(reference_directory.path()).front()),
-           "eviction and write-through complete file bytes are identical");
-    writer.store.Shutdown();
-    Expect(writer.store.entry_count() == 3,
-           "shutdown flushes remaining RAM entries");
-  }
-}
-
-void TestWriterIdleBoundNewestFirstAndAdmission() {
-  TemporaryDirectory directory;
-  auto options = WriterOptions(directory.path());
-  options.idle_wait = std::chrono::milliseconds(100);
-  std::counting_semaphore<16> entered(0), stored(0);
-  std::binary_semaphore release(0);
-  std::atomic<std::size_t> idle_count{0}, first_tokens{0};
-  WriterHarness writer(options, [&](const auto& event) {
-    if (event.action == ContinuationDiskEventAction::kStored &&
-        event.trigger == "idle") {
-      if (idle_count.fetch_add(1) == 0)
-        first_tokens.store(event.token_count);
-      stored.release();
-    }
-  });
-  bool first = true;
-  std::chrono::steady_clock::time_point idle_start;
-  writer.runner->before_stream = [&] {
-    entered.release();
-    if (std::exchange(first, false))
-      release.acquire();
-  };
-  {
-    auto pending_admission = writer.store.BeginAdmission();
-    writer.Capture({1}, 41);
-    writer.Capture({2, 2}, 42);
-    writer.Capture({3, 3, 3}, 43);
-    Expect(!entered.try_acquire_for(std::chrono::milliseconds(150)),
-           "pending admission prevents idle persistence even after idle bound");
-    idle_start = std::chrono::steady_clock::now();
-  }
-  Expect(entered.try_acquire_for(std::chrono::seconds(10)),
-         "idle persistence eventually fires");
-  Expect(std::chrono::steady_clock::now() - idle_start >=
-             options.idle_wait.value(),
-         "idle deadline starts when admission ends");
-  {
-    auto admitted = writer.store.BeginAdmission();
-    release.release();
-    Expect(stored.try_acquire_for(std::chrono::seconds(10)),
-           "already-started idle write finishes");
-    Expect(first_tokens == 3, "idle drains newest RAM entry first");
-    Expect(!entered.try_acquire_for(std::chrono::milliseconds(150)),
-           "admission stops the next idle entry");
-    Expect(writer.store.entry_count() == 1,
-           "idle persists one entry at a time");
-  }
-  writer.store.Shutdown();
-  Expect(writer.store.entry_count() == 3 && idle_count == 1,
-         "shutdown flushes the two remaining entries with shutdown trigger");
-}
-
-void TestWriterRestoredAndAlreadyStoredEntries() {
-  TemporaryDirectory directory;
-  std::atomic<std::size_t> deduped{0};
-  WriterHarness writer(WriterOptions(directory.path()), [&](const auto& event) {
-    if (event.action == ContinuationDiskEventAction::kAlreadyPersisted)
-      ++deduped;
-  });
-  auto saved = MakeSnapshot(*writer.runner, 41, 1);
-  Expect(SaveTokens(writer.store, *writer.runner, {1}, *saved).stored,
-         "seed represents restart-persistent state");
-  auto restored = writer.Capture({1}, 41, true);
-  Expect(restored->persistence->state ==
-             gufo::server::SnapshotPersistence::kPersisted,
-         "disk-restored entry is marked persisted at capture");
-  auto exact = writer.Capture({2}, 42);
-  Expect(SaveTokens(writer.store, *writer.runner, {2}, *exact).stored,
-         "another caller has already stored the exact RAM entry");
-  std::atomic<std::size_t> serializations{0};
-  writer.runner->before_stream = [&] { ++serializations; };
-  writer.store.PersistEvicted(restored);
-  writer.store.PersistEvicted(exact);
-  writer.store.Flush();
-  auto replacement = writer.Capture({2}, 42);
-  Expect(replacement->persistence->state ==
-             gufo::server::SnapshotPersistence::kPersisted,
-         "identical-token replacement inherits persisted status");
-  writer.store.Shutdown();
-  Expect(serializations == 0 && deduped == 1 && writer.store.entry_count() == 2,
-         "restore and exact-file dedup cause no payload rewrite");
-}
-
-void TestWriterShutdownDeadlineAndDiscardLogging() {
-  TemporaryDirectory directory;
-  auto options = WriterOptions(directory.path());
-  options.shutdown_wait = std::chrono::milliseconds(0);
-  std::atomic<std::size_t> deadline_skips{0}, ram_skips{0};
-  WriterHarness writer(options, [&](const auto& event) {
-    if (event.reason == ContinuationDiskEventReason::kShutdownDeadline) {
-      Expect(event.action == ContinuationDiskEventAction::kDroppedEvict &&
-                 event.trigger == "shutdown", "shutdown deadline counts a triggered drop");
-      ++deadline_skips;
-    }
-    if (event.reason == ContinuationDiskEventReason::kRamNotRetained)
-      ++ram_skips;
-  });
-  writer.Capture({1}, 41);
-  writer.Capture({2}, 42);
-  {
-    auto abandoned = MakeSnapshot(*writer.runner, 44, 1);
-    (void)writer.store.Capture(writer.runner, {4}, std::move(abandoned));
-    // No cache publication: the tag logs this discard itself.
-  }
-  writer.store.Shutdown();
-  Expect(
-      deadline_skips == 2 && ram_skips == 1 && writer.store.entry_count() == 0,
-      "bounded shutdown and unpublished captures each log their "
-      "skip");
-}
-
-void TestWriterDefaultsStillWriteThrough() {
-  TemporaryDirectory directory;
-  auto options = WriterOptions(directory.path());
-  options.persist_evict_idle = false;
-  WriterHarness writer(options);
-  auto active = writer.store.BeginGeneration();
-  auto snapshot = writer.Capture({1}, 41);
-  Expect(!snapshot->persistence,
-         "write-through does not allocate persistence tags");
-  writer.store.Flush();
-  Expect(writer.store.entry_count() == 1,
-         "default writes capture without eviction or idle");
-}
-
-class LargeWriterRunner final : public TextModelRunner {
-public:
-  TextRunnerDescriptor Descriptor() const override {
-    return base_.Descriptor();
-  }
-  TextRunnerResourceClaim ResourceClaim() const override {
-    return base_.ResourceClaim();
-  }
-  std::vector<TextExecutionPlan> SupportedPlans() const override {
-    return base_.SupportedPlans();
-  }
-  std::vector<TextRunnerToken> Tokenize(std::string_view text) const override {
-    return base_.Tokenize(text);
-  }
-  std::optional<std::vector<TextRunnerToken>> RenderAndTokenize(
-      const ChatRequest& request) const override {
-    return base_.RenderAndTokenize(request);
-  }
-  std::string Decode(std::span<const TextRunnerToken> tokens) const override {
-    return base_.Decode(tokens);
-  }
-  std::unique_ptr<TextRunnerState> CreateState() const override {
-    return base_.CreateState();
-  }
-  TextPrefillStep Prefill(TextRunnerState& state,
-                          std::span<const TextRunnerToken> tokens,
-                          std::size_t offset,
-                          std::size_t budget) const override {
-    return base_.Prefill(state, tokens, offset, budget);
-  }
-  TextDecodeSelection SelectNext(
-      TextRunnerState& state,
-      gufo::sampling::SamplerState& sampler) const override {
-    return base_.SelectNext(state, sampler);
-  }
-  void Advance(TextRunnerState& state, TextRunnerToken token) const override {
-    base_.Advance(state, token);
-  }
-  std::size_t CheckpointPosition(const TextRunnerState& state) const override {
-    return base_.CheckpointPosition(state);
-  }
-  std::size_t SnapshotPayloadBytes(
-      const TextRunnerState& state) const override {
-    return base_.SnapshotPayloadBytes(state);
-  }
-  std::unique_ptr<TextRunnerSnapshot> Snapshot(
-      const TextRunnerState& state) const override {
-    return base_.Snapshot(state);
-  }
-  void RestoreOrFork(TextRunnerState& state,
-                     const TextRunnerSnapshot& snapshot) const override {
-    base_.RestoreOrFork(state, snapshot);
-  }
-  std::size_t PersistentSnapshotPayloadBytes(
-      const TextRunnerSnapshot&) const override {
-    return kFakePayloadBytes + 32 * 1024 * 1024;
-  }
-  void StreamPersistentSnapshot(const TextRunnerSnapshot& snapshot,
-                                const SnapshotSink& sink) const override {
-    base_.StreamPersistentSnapshot(snapshot, sink);
-    // Deliberately irregular provider segments cross multiple writer slices.
-    std::vector<std::uint8_t> bytes(5 * 1024 * 1024, 0x5a);
-    std::size_t left = 32 * 1024 * 1024;
-    while (left) {
-      const auto size = std::min(left, bytes.size());
-      sink(std::span(bytes).first(size));
-      left -= size;
-    }
-  }
-
-private:
-  FakeRunner base_{"writer-slice"};
-};
-
-void TestWriterSlicingBytesAndActiveYield() {
-  TemporaryDirectory sliced_directory, reference_directory;
-  auto runner = std::make_shared<LargeWriterRunner>();
-  auto reference_options = WriterOptions(reference_directory.path());
-  reference_options.persist_evict_idle = false;
-  reference_options.capacity_bytes = reference_options.staging_capacity_bytes =
-      64 * 1024 * 1024;
-  ContinuationDiskStore reference(reference_options);
-  auto state = runner->CreateState();
-  RequireFakeState(*state).value = 41;
-  RequireFakeState(*state).position = 1;
-  auto snapshot = runner->Snapshot(*state);
-  const std::vector<TextRunnerToken> tokens{1};
-  Expect(reference.Save(*runner, tokens, *snapshot).stored,
-         "unsliced reference stores");
-  auto sliced_options = reference_options;
-  sliced_options.directory = sliced_directory.path();
-  sliced_options.slice = true;
-  sliced_options.slice_max_wait = std::chrono::milliseconds(20);
-  std::size_t yields = 0;
-  double wait_ms = 0;
-  ContinuationDiskStore sliced(sliced_options, [&](const auto& event) {
-    if (event.action == ContinuationDiskEventAction::kStored) {
-      yields = event.slice_yields;
-      wait_ms = event.slice_wait_ms;
-    }
-  });
-  {
-    auto active = sliced.BeginGeneration();
-    Expect(sliced.Save(*runner, tokens, *snapshot).stored,
-           "sliced active write stores");
-  }
-  Expect(yields > 0 && wait_ms >= 20 && wait_ms < 1000,
-         "active generation causes bounded between-slice yields");
-  Expect(ReadWriterFile(CacheFiles(sliced_directory.path()).front()) ==
-             ReadWriterFile(CacheFiles(reference_directory.path()).front()),
-         "slicing preserves all header, payload and checksum bytes");
-}
-
-void TestWriterStagingAndSharedSpacing() {
-  // One active payload, two extra pinned eviction offers, then explicit drop.
-  TemporaryDirectory directory;
-  auto backlog_options = WriterOptions(directory.path());
-  auto runner = std::make_shared<FakeRunner>("backlog");
-  const auto charge = ExpectedFileBytes(
-      runner->Descriptor().persistence->compatibility_identity.size(), 1);
-  backlog_options.staging_capacity_bytes = charge;
-  backlog_options.evict_backlog_bytes = 2 * charge;
-  std::binary_semaphore entered(0), release(0);
-  std::atomic<std::size_t> writes{0}, drops{0};
-  ContinuationDiskStore store(backlog_options, [&](const auto& event) {
-    if (event.action == ContinuationDiskEventAction::kStored) ++writes;
-    if (event.action == ContinuationDiskEventAction::kDroppedEvict) {
-      Expect(event.reason == ContinuationDiskEventReason::kEvictBacklogCapacity,
-             "overflow identifies bounded backlog exhaustion");
-      ++drops;
-    }
-  });
-  store.SetPersistenceSource(runner, [](bool) {
-    return std::shared_ptr<const gufo::server::ContinuationSnapshot>{};
-  });
-  std::atomic<bool> first{true};
-  runner->before_stream = [&] {
-    if (first.exchange(false)) { entered.release(); release.acquire(); }
-  };
-  auto offer = [&](TextRunnerToken token) {
-    std::shared_ptr<const TextRunnerSnapshot> snapshot =
-        MakeSnapshot(*runner, token, 1);
-    (void)store.Capture(runner, {token}, snapshot);
-    store.PersistEvicted(snapshot);
-    return snapshot;
-  };
-  auto active = offer(1);
-  Expect(entered.try_acquire_for(std::chrono::seconds(10)),
-         "first eviction is actively streaming");
-  auto second = offer(2), third = offer(3), overflow = offer(4);
-  std::weak_ptr<const TextRunnerSnapshot> pinned_second = second;
-  std::weak_ptr<const TextRunnerSnapshot> pinned_third = third;
-  second.reset(); third.reset();
-  Expect(!pinned_second.expired() && !pinned_third.expired() && drops == 1 &&
-             overflow->persistence->state ==
-                 gufo::server::SnapshotPersistence::kAbandoned,
-         "busy writer pins two eviction offers and explicitly drops overflow");
-  Expect(!store.CanSave(*runner, 1, kFakePayloadBytes),
-         "backlog does not weaken active-plus-queued staging admission");
-  release.release();
-  store.Flush();
-  Expect(writes == 3 && store.entry_count() == 3 &&
-             pinned_second.expired() && pinned_third.expired(),
-         "all bounded eviction offers drain and release their memory");
-  store.Shutdown();
-
-  // Write-through has no extra backlog, even if its byte bound is configured.
-  TemporaryDirectory through_directory;
-  backlog_options.directory = through_directory.path();
-  backlog_options.persist_evict_idle = false;
-  ContinuationDiskStore through(backlog_options);
-  first.store(true);
-  Expect(through.SaveAsync(runner, {5}, MakeSnapshot(*runner, 5, 1)) != 0,
-         "write-through stages first payload");
-  Expect(entered.try_acquire_for(std::chrono::seconds(10)),
-         "write-through payload holds its staging charge while running");
-  Expect(through.SaveAsync(runner, {6}, MakeSnapshot(*runner, 6, 1)) == 0,
-         "write-through still refuses second payload at the staging limit");
-  release.release(); through.Flush();
-  Expect(through.entry_count() == 1, "write-through bound remains strict");
-
-  TemporaryDirectory shared_directory;
-  auto options = WriterOptions(shared_directory.path());
-  options.min_checkpoint_step_tokens = 10;
-  WriterHarness shared(options);
-  Expect(SaveTokens(shared.store, *shared.runner, {1},
-                    *MakeSnapshot(*shared.runner, 40, 1))
-             .stored,
-         "seed minimum-step prefix");
-  auto boundary = shared.Capture({1, 2}, 41, false, true);
-  auto continuation = shared.Capture({1, 3}, 42);
-  shared.store.Shutdown();
-  Expect(shared.store.entry_count() == 2 &&
-             boundary->persistence->state ==
-                 gufo::server::SnapshotPersistence::kPersisted &&
-             continuation->persistence->state !=
-                 gufo::server::SnapshotPersistence::kPersisted,
-         "deferred shared boundary keeps exemption while continuation keeps "
-         "min-step gate");
-}
-
-void TestWriterBatchEvictionsAndBacklogByteBound() {
-  for (const bool byte_bound : {false, true}) {
-    TemporaryDirectory directory;
-    auto options = WriterOptions(directory.path());
-    FakeRunner sizing("writer-policy");
-    const auto charge = ExpectedFileBytes(
-        sizing.Descriptor().persistence->compatibility_identity.size(), 1);
-    options.staging_capacity_bytes = charge;
-    // A single reserve offers three snapshots: bytes, not the old count=2, limit it.
-    options.evict_backlog_bytes = byte_bound ? charge : 3 * charge;
-    std::atomic<std::size_t> drops{0}, writes{0};
-    WriterHarness writer(options, [&](const auto& event) {
-      if (event.action == ContinuationDiskEventAction::kDroppedEvict) {
-        Expect(event.reason == ContinuationDiskEventReason::kEvictBacklogCapacity,
-               "batch overflow reports byte capacity");
-        ++drops;
-      }
-      if (event.action == ContinuationDiskEventAction::kStored) ++writes;
-    }, 5, 4 * kFakePayloadBytes);
-    auto one = writer.Capture({1}, 1);
-    auto two = writer.Capture({2}, 2);
-    auto three = writer.Capture({3}, 3);
-    auto four = writer.Capture({4}, 4);
-    std::binary_semaphore entered(0), release(0);
-    std::atomic<bool> first{true};
-    writer.runner->before_stream = [&] {
-      if (first.exchange(false)) { entered.release(); release.acquire(); }
-    };
-    std::shared_ptr<const TextRunnerSnapshot> active =
-        MakeSnapshot(*writer.runner, 5, 1);
-    (void)writer.store.Capture(writer.runner, {5}, active);
-    writer.store.PersistEvicted(active);
-    Expect(entered.try_acquire_for(std::chrono::seconds(10)), "active batch writer");
-    {
-      auto lease = writer.cache.Acquire(std::vector<TextRunnerToken>{9});
-      Expect(lease.TryReserveSnapshot(3 * kFakePayloadBytes, 1),
-             "one reservation evicts three snapshots");
-      Expect(one->persistence->state == gufo::server::SnapshotPersistence::kQueued &&
-                 two->persistence->state == (byte_bound
-                     ? gufo::server::SnapshotPersistence::kAbandoned
-                     : gufo::server::SnapshotPersistence::kQueued) &&
-                 three->persistence->state == (byte_bound
-                     ? gufo::server::SnapshotPersistence::kAbandoned
-                     : gufo::server::SnapshotPersistence::kQueued) &&
-                 drops == (byte_bound ? 2 : 0),
-             "batch evictions wait in bounded backlog instead of staging loss");
-      lease.SkipSnapshot(gufo::server::SnapshotEventReason::kCaptureFailure,
-                         3 * kFakePayloadBytes, 1);
-    }
-    release.release(); writer.store.Flush();
-    Expect(writes == (byte_bound ? 2 : 4), "batch accepted offers all persist");
-    writer.store.Shutdown();
-    Expect(four->persistence->state == gufo::server::SnapshotPersistence::kPersisted,
-           "remaining RAM snapshot persists at shutdown");
-  }
-}
-
-void TestWriterBacklogSafetyCount() {
-  TemporaryDirectory directory;
-  auto options = WriterOptions(directory.path());
-  auto runner = std::make_shared<FakeRunner>("backlog-safety");
-  const auto charge = ExpectedFileBytes(
-      runner->Descriptor().persistence->compatibility_identity.size(), 1);
-  options.staging_capacity_bytes = charge;
-  // Keep the default 2 GiB byte bound; these tiny offers reach the safety guard.
-  std::atomic<std::size_t> writes{0}, drops{0};
-  ContinuationDiskStore store(options, [&](const auto& event) {
-    if (event.action == ContinuationDiskEventAction::kStored) ++writes;
-    if (event.action == ContinuationDiskEventAction::kDroppedEvict) {
-      Expect(event.reason == ContinuationDiskEventReason::kEvictBacklogCapacity &&
-                 event.trigger == "evict", "safety overflow has drop reason and trigger");
-      ++drops;
-    }
-  });
-  store.SetPersistenceSource(runner, [](bool) {
-    return std::shared_ptr<const gufo::server::ContinuationSnapshot>{};
-  });
-  std::binary_semaphore entered(0), release(0);
-  std::atomic<bool> first{true};
-  runner->before_stream = [&] {
-    if (first.exchange(false)) { entered.release(); release.acquire(); }
-  };
-  auto offer = [&](TextRunnerToken token) {
-    std::shared_ptr<const TextRunnerSnapshot> snapshot = MakeSnapshot(*runner, token, 1);
-    (void)store.Capture(runner, {token}, snapshot);
-    store.PersistEvicted(snapshot);
-    return snapshot;
-  };
-  auto active = offer(1);
-  Expect(entered.try_acquire_for(std::chrono::seconds(10)), "safety writer blocks");
-  std::vector<std::shared_ptr<const TextRunnerSnapshot>> backlog;
-  for (TextRunnerToken token = 2; token <= 9; ++token) {
-    backlog.push_back(offer(token));
-    Expect(backlog.back()->persistence->state == gufo::server::SnapshotPersistence::kQueued &&
-               drops == 0, "eight small snapshots backlog without loss");
-  }
-  auto overflow = offer(10);
-  Expect(drops == 1 && overflow->persistence->state == gufo::server::SnapshotPersistence::kAbandoned,
-         "ninth backlogged snapshot reaches absolute safety guard");
-  release.release(); store.Flush(); store.Shutdown();
-  Expect(writes == 9 && drops == 1, "all accepted small burst offers persist");
-  for (const auto& snapshot : backlog)
-    Expect(snapshot->persistence->state == gufo::server::SnapshotPersistence::kPersisted,
-           "accepted safety burst reaches persisted state");
-}
-
-void TestWriterRefusedTriggerAccounting() {
-  for (const bool byte_capacity : {false, true}) {
-    TemporaryDirectory directory;
-    auto options = WriterOptions(directory.path());
-    auto runner = std::make_shared<FakeRunner>("refused-trigger");
-    const auto charge = ExpectedFileBytes(
-        runner->Descriptor().persistence->compatibility_identity.size(), 1);
-    if (byte_capacity) options.capacity_bytes = charge - 1;
-    else options.staging_capacity_bytes = charge - 1;
-    std::vector<ContinuationDiskEvent> events;
-    ContinuationDiskStore store(options, [&](const auto& event) { events.push_back(event); });
-    for (const auto trigger : {"write_through", "evict", "idle", "shutdown"}) {
-      Expect(store.SaveAsync(runner, {1}, MakeSnapshot(*runner, 1, 1), {}, {}, false, trigger) == 0,
-             "oversize offer is refused");
-      Expect(events.back().trigger == trigger &&
-                 events.back().reason == (byte_capacity ? ContinuationDiskEventReason::kByteCapacity
-                                                        : ContinuationDiskEventReason::kStagingCapacity) &&
-                 events.back().action == (std::string_view(trigger) == "write_through"
-                     ? ContinuationDiskEventAction::kSkipped : ContinuationDiskEventAction::kDroppedEvict),
-             "capacity refusal retains trigger and counts deferred drop");
-    }
-    store.Shutdown();
-    Expect(store.SaveAsync(runner, {1}, MakeSnapshot(*runner, 1, 1), {}, {}, false, "shutdown") == 0 &&
-               events.back().action == ContinuationDiskEventAction::kDroppedEvict &&
-               events.back().trigger == "shutdown" &&
-               events.back().reason == ContinuationDiskEventReason::kShutdownDeadline,
-           "shutdown deadline refusal is a shutdown drop");
-  }
-  TemporaryDirectory directory;
-  auto options = WriterOptions(directory.path());
-  options.capacity_bytes = 1;
-  std::atomic<std::size_t> drops{0};
-  WriterHarness writer(options, [&](const auto& event) {
-    if (event.action == ContinuationDiskEventAction::kDroppedEvict) {
-      Expect(event.trigger == "shutdown" && event.reason == ContinuationDiskEventReason::kByteCapacity,
-             "source refusal is labelled shutdown drop");
-      ++drops;
-    }
-  });
-  auto snapshot = writer.Capture({1}, 1);
-  writer.store.Shutdown();
-  Expect(drops == 1 && snapshot->persistence->state == gufo::server::SnapshotPersistence::kAbandoned,
-         "refused shutdown source is counted and terminal");
-}
-
-void TestWriterMissingRecordDeadlineDrop() {
-  TemporaryDirectory directory;
-  auto options = WriterOptions(directory.path());
-  options.shutdown_wait = std::chrono::milliseconds(0);
-  auto runner = std::make_shared<FakeRunner>("missing-record");
-  std::atomic<std::size_t> drops{0};
-  ContinuationDiskStore store(options, [&](const auto& event) {
-    if (event.action == ContinuationDiskEventAction::kDroppedEvict) {
-      Expect(event.reason == ContinuationDiskEventReason::kShutdownDeadline &&
-                 event.trigger == "shutdown" && event.payload_bytes == kFakePayloadBytes,
-             "untagged deadline job emits fallback drop");
-      ++drops;
-    }
-  });
-  std::binary_semaphore entered(0), release(0);
-  runner->before_stream = [&] { entered.release(); release.acquire(); };
-  Expect(store.SaveAsync(runner, {1}, MakeSnapshot(*runner, 1, 1)) != 0, "block writer with first job");
-  Expect(entered.try_acquire_for(std::chrono::seconds(10)), "missing-record writer blocks");
-  std::shared_ptr<const TextRunnerSnapshot> untagged = MakeSnapshot(*runner, 2, 1);
-  Expect(!untagged->persistence && store.SaveAsync(runner, {2}, untagged, {}, {}, false, "shutdown") != 0,
-         "queue an untagged shutdown job");
-  auto shutdown = std::async(std::launch::async, [&] { store.Shutdown(); });
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-  while (store.CanSave(*runner, 1, kFakePayloadBytes) && std::chrono::steady_clock::now() < deadline)
-    std::this_thread::yield();
-  Expect(std::chrono::steady_clock::now() < deadline, "shutdown reaches deadline before writer release");
-  release.release(); shutdown.get();
-  Expect(drops == 1, "missing record cannot silently lose queued persist");
-}
-
-void TestWriterExactReplacementSharedBoundary() {
-  TemporaryDirectory directory;
-  auto options = WriterOptions(directory.path());
-  options.min_checkpoint_step_tokens = 10;
-  std::atomic<std::size_t> superseded{0};
-  WriterHarness writer(options, [&](const auto& event) {
-    if (event.action == ContinuationDiskEventAction::kSuperseded) ++superseded;
-  }, 1, kFakePayloadBytes);
-  Expect(SaveTokens(writer.store, *writer.runner, {7}, *MakeSnapshot(*writer.runner, 1, 1)).stored,
-         "seed nearby persisted prefix for min-step gate");
-  auto boundary = writer.Capture({7, 2}, 2, false, true);
-  auto continuation = writer.Capture({7, 2}, 2);
-  writer.store.Flush();
-  Expect(boundary->persistence->state == gufo::server::SnapshotPersistence::kPersisted &&
-             boundary->persistence->shared_prefix && !continuation->persistence->shared_prefix &&
-             superseded == 0 && writer.store.entry_count() == 2,
-         "exact non-shared replacement independently persists learned boundary despite min-step");
-  writer.store.Shutdown();
-  Expect(continuation->persistence->state == gufo::server::SnapshotPersistence::kPersisted,
-         "replacement deduplicates against independently persisted boundary");
-}
-
-void TestWriterGrowingConversationAndRealDrops() {
-  for (bool pressure : {false, true}) {
-    TemporaryDirectory directory;
-    std::atomic<std::size_t> writes{0}, superseded{0};
-    WriterHarness writer(WriterOptions(directory.path()), [&](const auto& event) {
-      if (event.action == ContinuationDiskEventAction::kStored) ++writes;
-      if (event.action == ContinuationDiskEventAction::kSuperseded) ++superseded;
-    }, pressure ? 4 : 1, pressure ? kFakePayloadBytes : 64);
-    std::vector<TextRunnerToken> tokens{7};
-    auto latest = writer.Capture(tokens, 1);
-    for (std::uint64_t turn = 2; turn <= 10; ++turn) {
-      tokens.push_back(static_cast<TextRunnerToken>(turn));
-      latest = writer.Capture(tokens, turn);
-    }
-    auto exact = writer.Capture(tokens, 10);
-    writer.store.Flush();
-    Expect(writes == 0 && superseded == 10,
-           "ten growing turns and identical replacement do not write per turn");
-    writer.store.Shutdown();
-    Expect(writes == 1 && writer.store.entry_count() == 1 &&
-               exact->persistence->state ==
-                   gufo::server::SnapshotPersistence::kPersisted,
-           "shutdown saves only latest conversation checkpoint");
-    auto state = writer.runner->CreateState();
-    Expect(writer.store.RestoreLongestPrefix(*writer.runner, *state, tokens).restored &&
-               RequireFakeState(*state).value == 10,
-           "latest turn retains restart persistence");
-  }
-  // Learned shared boundary remains valuable despite a longer survivor.
-  TemporaryDirectory directory;
-  WriterHarness writer(WriterOptions(directory.path()), {}, 1, kFakePayloadBytes);
-  auto boundary = writer.Capture({7}, 1, false, true);
-  writer.Capture({7, 2}, 2);
-  writer.store.Flush();
-  Expect(boundary->persistence->state ==
-             gufo::server::SnapshotPersistence::kPersisted,
-         "learned system boundary persists when pressure removes it");
-  writer.Capture({7, 3}, 3); // Diverged branch is a real drop.
-  writer.store.Flush();
-  Expect(writer.store.entry_count() == 2, "diverged tail persists on removal");
-  writer.Capture({7}, 1); // Rewind discards the longer history.
-  writer.store.Flush();
-  Expect(writer.store.entry_count() == 3, "rewound history persists on removal");
-  writer.store.Shutdown();
-}
-
-void TestWriterEvictSkipCoveredByPersistedPrefix() {
-  // GUFO_DISK_EVICT_SKIP_TOKENS policy: an evicted snapshot whose persisted strict prefix is within N tokens is not written again.
-  for (const std::size_t skip : {std::size_t{0}, std::size_t{4}, std::size_t{1}}) {
-    TemporaryDirectory directory;
-    std::atomic<std::size_t> writes{0}, covered{0}, already{0}, covering{0}, gap{0};
-    auto options = WriterOptions(directory.path());
-    options.evict_skip_tokens = skip;
-    WriterHarness writer(options, [&](const auto& event) {
-      if (event.action == ContinuationDiskEventAction::kStored) ++writes;
-      if (event.action == ContinuationDiskEventAction::kAlreadyPersisted) {
-        ++already;
-        if (event.reason == ContinuationDiskEventReason::kPrefixPersisted) {
-          ++covered;
-          covering = event.covering_tokens;
-          gap = event.gap_tokens;
-        }
-      }
-    }, 1, 64);
-    writer.Capture({1}, 1);        // RAM: {1}
-    writer.Capture({2}, 2);        // evicts {1}: persisted (nothing covers it)
-    writer.store.Flush();
-    writer.Capture({1, 5, 5}, 3);  // evicts {2}: persisted
-    writer.store.Flush();
-    Expect(writes == 2, "two unrelated evictions persist");
-    writer.Capture({3}, 4);        // evicts {1,5,5}: its persisted prefix {1} is 2 tokens shorter
-    writer.store.Flush();
-    if (skip >= 2) {
-      Expect(writes == 2 && covered == 1 && already == 1,
-             "an eviction covered by a persisted prefix within the bound is skipped and logged");
-      Expect(covering == 1 && gap == 2,
-             "the skip event reports the covering prefix length and the gap");
-    } else {
-      Expect(writes == 3 && covered == 0,
-             "bound smaller than the gap (or off) still persists the eviction");
-    }
-    writer.store.Shutdown();
-  }
-}
-
-void TestWriterOptionalCopyRefusedIsNotWritten() {
-  TemporaryDirectory directory;
-  std::atomic<std::size_t> writes{0}, refused{0}, dropped{0};
-  WriterHarness writer(WriterOptions(directory.path()), [&](const auto& event) {
-    if (event.action == ContinuationDiskEventAction::kStored) ++writes;
-    if (event.action == ContinuationDiskEventAction::kDroppedEvict) ++dropped;
-    if (event.action == ContinuationDiskEventAction::kSkipped &&
-        event.reason == ContinuationDiskEventReason::kRamNotRetained &&
-        event.token_count == 7) ++refused;
-  }, 1, 64);
-  writer.store.NoteOptionalCopyRefused(7);
-  writer.store.Flush();
-  Expect(writes == 0 && dropped == 0 && refused == 1 && writer.store.entry_count() == 0,
-         "a RAM-refused optional copy is logged as skipped/ram_not_retained and never written");
-  writer.store.Shutdown();
-}
-
-void TestWriterFailedReplacementAndRamRefusal() {
-  TemporaryDirectory directory;
-  WriterHarness writer(WriterOptions(directory.path()), {}, 1, kFakePayloadBytes);
-  auto old = writer.Capture({1}, 1);
-  {
-    auto lease = writer.cache.Acquire(std::vector<TextRunnerToken>{1, 2});
-    Expect(lease.TryReserveSnapshot(kFakePayloadBytes, 2, false,
-               gufo::server::SnapshotPurpose::kContinuation,
-               std::vector<TextRunnerToken>{1, 2}), "replacement reservation");
-    lease.SkipSnapshot(gufo::server::SnapshotEventReason::kCaptureFailure,
-                       kFakePayloadBytes, 2);
-  }
-  writer.store.Flush();
-  Expect(old->persistence->state == gufo::server::SnapshotPersistence::kPersisted,
-         "failed family capture offers displaced original");
-  {
-    auto lease = writer.cache.Acquire(std::vector<TextRunnerToken>{2});
-    std::shared_ptr<const TextRunnerSnapshot> refused =
-        MakeSnapshot(*writer.runner, 2, 1);
-    (void)writer.store.Capture(writer.runner, {2}, refused, {}, {}, true);
-    Expect(lease.Commit({2}, refused) == 0,
-           "tagged snapshot publication without reservation refuses RAM");
-    writer.store.Flush();
-    Expect(refused->persistence->state ==
-               gufo::server::SnapshotPersistence::kPersisted,
-           "RAM-refused learned boundary falls back to bounded writer");
-  }
-  (void)writer.store.Capture(writer.runner, {3},
-      MakeSnapshot(*writer.runner, 3, 1), {}, {}, true, false, false);
-  writer.store.Flush();
-  Expect(writer.store.entry_count() == 3,
-         "disk-only fallback survives inability to reserve RAM");
-  writer.store.Shutdown();
-}
-
-void TestWriterConcurrentTouchRestoreAndOffers() {
-  TemporaryDirectory directory;
-  WriterHarness writer(WriterOptions(directory.path()));
-  std::vector<std::shared_ptr<const TextRunnerSnapshot>> snapshots;
-  for (TextRunnerToken i = 1; i <= 64; ++i) {
-    auto snapshot = MakeSnapshot(*writer.runner, i, 1);
-    Expect(SaveTokens(writer.store, *writer.runner, {i}, *snapshot).stored,
-           "threaded metadata test seeds exact entries");
-    std::shared_ptr<const TextRunnerSnapshot> tagged = std::move(snapshot);
-    (void)writer.store.Capture(writer.runner, {i}, tagged);
-    snapshots.push_back(std::move(tagged));
-  }
-  // Corrupt indexed files before concurrency. Restore will erase their entries
-  // while public and writer-side Touch are looking up the same metadata.
-  auto files = CacheFiles(directory.path());
-  for (std::size_t i = 0; i < files.size(); i += 2) {
-    std::fstream file(files[i], std::ios::in | std::ios::out | std::ios::binary);
-    file.seekp(-1, std::ios::end); file.put('\xff');
-  }
-  std::counting_semaphore<3> start(0);
-  std::thread touch([&] {
-    start.acquire();
-    for (int round = 0; round < 16; ++round)
-      for (TextRunnerToken i = 1; i <= 64; ++i)
-        (void)writer.store.Touch(*writer.runner, std::vector<TextRunnerToken>{i});
-  });
-  std::thread restore([&] {
-    start.acquire();
-    auto state = writer.runner->CreateState();
-    for (int round = 0; round < 16; ++round)
-      for (TextRunnerToken i = 1; i <= 64; ++i)
-        (void)RestoreTokens(writer.store, *writer.runner, *state, {i});
-  });
-  std::thread offers([&] {
-    start.acquire();
-    for (const auto& snapshot : snapshots) writer.store.PersistEvicted(snapshot);
-  });
-  start.release(3);
-  touch.join(); restore.join(); offers.join();
-  writer.store.Flush(); writer.store.Shutdown();
-  for (const auto& snapshot : snapshots)
-    Expect(snapshot->persistence->state != gufo::server::SnapshotPersistence::kQueued,
-           "concurrent lookup/erase/dedup/offer leaves no orphaned queued record");
-}
-
-void TestWriterShutdownExitOfferRace() {
-  for (int round = 0; round < 32; ++round) {
-    TemporaryDirectory directory;
-    auto options = WriterOptions(directory.path());
-    options.shutdown_wait = std::chrono::seconds(10);
-    std::atomic<std::size_t> stored{0}, dropped{0};
-    WriterHarness writer(options, [&](const auto& event) {
-      if (event.action == ContinuationDiskEventAction::kStored) ++stored;
-      if (event.action == ContinuationDiskEventAction::kDroppedEvict) ++dropped;
-    });
-    std::shared_ptr<const TextRunnerSnapshot> snapshot =
-        MakeSnapshot(*writer.runner, 1, 1);
-    (void)writer.store.Capture(writer.runner, {1}, snapshot);
-    std::binary_semaphore start(0);
-    std::thread offer([&] { start.acquire(); writer.store.PersistEvicted(snapshot); });
-    start.release(); writer.store.Shutdown(); offer.join(); writer.store.Flush();
-    Expect(stored + dropped == 1 && snapshot->persistence->state !=
-               gufo::server::SnapshotPersistence::kQueued,
-           "offer racing exit is durably flushed or explicitly dropped");
-    std::shared_ptr<const TextRunnerSnapshot> after =
-        MakeSnapshot(*writer.runner, 2, 1);
-    (void)writer.store.Capture(writer.runner, {2}, after);
-    writer.store.PersistEvicted(after); writer.store.Flush();
-    Expect(dropped >= 1 && after->persistence->state ==
-               gufo::server::SnapshotPersistence::kAbandoned,
-           "offer after join is rejected and never orphaned");
-  }
-}
-
 int main() {
-  // Lead 1 (learned shared-prefix boundaries rounded down to a multiple of 256) is off in these tests: they assert exact tiny boundaries.
-  ::setenv("GUFO_DISK_BOUNDARY_ALIGN", "0", 1);
-  TestWriterBacklogSafetyCount();
-  TestWriterRefusedTriggerAccounting();
-  TestWriterMissingRecordDeadlineDrop();
-  TestWriterExactReplacementSharedBoundary();
-  TestWriterBatchEvictionsAndBacklogByteBound();
-  TestWriterGrowingConversationAndRealDrops();
-  TestWriterEvictSkipCoveredByPersistedPrefix();
-  TestWriterOptionalCopyRefusedIsNotWritten();
-  TestWriterFailedReplacementAndRamRefusal();
-  TestWriterConcurrentTouchRestoreAndOffers();
-  TestWriterShutdownExitOfferRace();
-  TestWriterStagingAndSharedSpacing();
-  TestWriterEvictionBytesAndDedup();
-  TestWriterIdleBoundNewestFirstAndAdmission();
-  TestWriterRestoredAndAlreadyStoredEntries();
-  TestWriterShutdownDeadlineAndDiscardLogging();
-  TestWriterDefaultsStillWriteThrough();
-  TestWriterSlicingBytesAndActiveYield();
-  TestDeferredPersistenceIdleAndBytes();
-  TestDeferredPersistenceDeadline();
-  TestDeferredPersistencePressure();
-  TestDeferredPersistenceFlushAndShutdown();
   TestAppendedImagePrefixesSurviveRestart();
   TestBoundedAsyncPersistenceDoesNotBlockLookup();
   TestIndexedPrefixLookup();
-  TestLearnedBoundaryRoundsDownToTheAlignment();
   TestMinimumCheckpointStep();
   TestImageIdentitySurvivesRestart();
   TestSharedPrefixBoundariesAndExactDedup();

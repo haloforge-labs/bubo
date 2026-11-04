@@ -1,5 +1,6 @@
 import type { View } from '@/lib/bindings'
 import { bytes, number, percent } from '@/lib/format'
+import { figureGrid } from '@/components/page-grid'
 
 export function CurrentGPU({ gpu }: { gpu: View['gpu'] }) {
   const view = { gpu }
@@ -14,10 +15,7 @@ export function CurrentGPU({ gpu }: { gpu: View['gpu'] }) {
       {' '}
       {view.gpu && (
         <div className="space-y-2">
-          <section
-            aria-label="GPU"
-            className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"
-          >
+          <section aria-label="GPU" className={figureGrid}>
             {gpuMetrics.map((metric) => {
               const value = view.gpu?.[metric.key]
               if (value == null) return null

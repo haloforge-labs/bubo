@@ -46,7 +46,7 @@ class KernelResourcesTest(unittest.TestCase):
              mock.patch.object(RESOURCES.subprocess, "run", return_value=
                                subprocess.CompletedProcess([], 0, "/hip/bin\n")):
             self.assertEqual(RESOURCES.find_bundler(None),
-                             os.path.join("/hip/bin", "clang-offload-bundler"))
+                             os.path.join("/hip/bin", "clang-offload-bundler").replace(os.sep, "/"))
 
     def test_missing_explicit_bundler_fails(self):
         with mock.patch.object(RESOURCES.os.path, "isfile", return_value=False):

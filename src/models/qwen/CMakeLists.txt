@@ -1,4 +1,6 @@
 target_sources(gufo_core PRIVATE
+  ${PROJECT_SOURCE_DIR}/src/models/qwen/continuation_layout.cpp
+  ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/image_cache.cpp
   ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/prompt.cpp
   ${PROJECT_SOURCE_DIR}/src/models/qwen/tokenizer.cpp
   ${PROJECT_SOURCE_DIR}/src/models/qwen/chat_template.cpp
@@ -25,7 +27,9 @@ target_sources(gufo_core PRIVATE
 if (ENGINE_ENABLE_HIP)
   find_package(OpenSSL REQUIRED COMPONENTS Crypto)
   target_link_libraries(gufo_core PRIVATE OpenSSL::Crypto)
+  target_link_libraries(gufo_core PRIVATE gufo_cache_hip)
   target_sources(gufo_core PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/models/qwen/continuation_adapter.cpp
     ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/encoder.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/vision/device_input.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/attention.hip
@@ -64,6 +68,7 @@ if (ENGINE_ENABLE_HIP)
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/sample_27b.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_27b.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_decode.hip
+    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_decode_verify_wave64.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_decode_graph.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_tile.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_wmma.hip
@@ -78,6 +83,7 @@ if (ENGINE_ENABLE_HIP)
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/model_loader.cpp
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/prefill.cpp
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/prefill_chunk.cpp
+    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/prompt_hidden_buffer.cpp
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/ssm_replay.cpp
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/mtp/model.cpp
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/mtp/executor.cpp
@@ -92,6 +98,7 @@ if (ENGINE_ENABLE_HIP)
   set_source_files_properties(
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/small_batch_wave64.hip
     ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_quant_wave64.hip
+    ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/attention_decode_verify_wave64.hip
     TARGET_DIRECTORY gufo_core
     PROPERTIES COMPILE_OPTIONS -mwavefrontsize64)
   # Iterative ILP improves Q4/Q5 groups of sixteen without changing arithmetic.
@@ -111,4 +118,10 @@ if (ENGINE_ENABLE_HIP)
       ${PROJECT_SOURCE_DIR}/src/models/qwen/hip/kernels/prefill_quant_wave64.hip
     TARGET_DIRECTORY gufo_core
     APPEND PROPERTY COMPILE_OPTIONS -fno-slp-vectorize)
+endif()
+
+if (ENGINE_ENABLE_HIP AND GUFO_BUILD_TOOLS)
+  add_executable(qwen27b_continuation_probe EXCLUDE_FROM_ALL
+    ${PROJECT_SOURCE_DIR}/tests/models/qwen27b/continuation_probe.cpp)
+  target_link_libraries(qwen27b_continuation_probe PRIVATE gufo_core)
 endif()

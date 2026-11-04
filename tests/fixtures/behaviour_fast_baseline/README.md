@@ -11,6 +11,7 @@ the baseline executable prints its configured source fingerprint.
 |---|---|---|
 | a40d37f | 2026-10-09 | First frozen sampler for the behaviour fast path. |
 | c847e6df | 2026-10-11 | Release build: loop breaker periods (think 128, answer 16), final second detection, think EOG guard escalation (43bcbcf3), and the exact max-logit bound for EOG threshold tests (c847e6df). |
+| c847e6df + one line | 2026-11-02 | 0.1.2 repeat guard: `LoopBreaker::config::answer_max_period` 16 -> `kMaxPeriod` (128) in `behaviour.hpp` only (`sampling.cpp` and `sampling.hpp` stay c847e6df). The live `src/core/behaviour.hpp` makes the same one-line change (0610ff680); a replay of 1,654 real answers flags none at 16 or 128. |
 
 The c847e6df freeze followed three checks:
 

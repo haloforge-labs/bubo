@@ -7,6 +7,10 @@ export namespace main {
 	    added: boolean;
 	    message: string;
 	    error?: supervisor.CLIError;
+	    checked: boolean;
+	    fits: boolean;
+	    reason: string;
+	    note: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new BrowseResult(source);
@@ -20,6 +24,10 @@ export namespace main {
 	        this.added = source["added"];
 	        this.message = source["message"];
 	        this.error = this.convertValues(source["error"], supervisor.CLIError);
+	        this.checked = source["checked"];
+	        this.fits = source["fits"];
+	        this.reason = source["reason"];
+	        this.note = source["note"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -442,6 +450,84 @@ export namespace supervisor {
 	        this.available = source["available"];
 	    }
 	}
+	export class KVCacheQ8 {
+	    available: boolean;
+	    reason: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new KVCacheQ8(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.available = source["available"];
+	        this.reason = source["reason"];
+	    }
+	}
+	export class RefusalDirection {
+	    available: boolean;
+	    reason: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new RefusalDirection(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.available = source["available"];
+	        this.reason = source["reason"];
+	    }
+	}
+	export class PrefillModeFast {
+	    available: boolean;
+	    reason: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new PrefillModeFast(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.available = source["available"];
+	        this.reason = source["reason"];
+	    }
+	}
+	export class EstimateCapabilities {
+	    routed_experts?: number;
+	    prefill_mode_fast?: PrefillModeFast;
+	    refusal_direction?: RefusalDirection;
+	    kv_cache_q8?: KVCacheQ8;
+	
+	    static createFrom(source: any = {}) {
+	        return new EstimateCapabilities(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.routed_experts = source["routed_experts"];
+	        this.prefill_mode_fast = this.convertValues(source["prefill_mode_fast"], PrefillModeFast);
+	        this.refusal_direction = this.convertValues(source["refusal_direction"], RefusalDirection);
+	        this.kv_cache_q8 = this.convertValues(source["kv_cache_q8"], KVCacheQ8);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class FilePosition {
 	    index: number;
 	    total: number;
@@ -588,6 +674,7 @@ export namespace supervisor {
 	        this.bytes_total = source["bytes_total"];
 	    }
 	}
+	
 	export class NetworkAddress {
 	    adapter: string;
 	    ipv4: string;
@@ -997,6 +1084,7 @@ export namespace supervisor {
 		}
 	}
 	export class ViewMemoryEstimate {
+	    capabilities?: EstimateCapabilities;
 	    recommendation_failures?: string[];
 	    cache_at_clamp_bytes?: number;
 	    host_spill_bytes?: number;
@@ -1041,6 +1129,7 @@ export namespace supervisor {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.capabilities = this.convertValues(source["capabilities"], EstimateCapabilities);
 	        this.recommendation_failures = source["recommendation_failures"];
 	        this.cache_at_clamp_bytes = source["cache_at_clamp_bytes"];
 	        this.host_spill_bytes = source["host_spill_bytes"];
@@ -1137,6 +1226,7 @@ export namespace supervisor {
 		}
 	}
 	export class ViewModelEstimate {
+	    capabilities?: EstimateCapabilities;
 	    estimate_state: string;
 	    reason?: string;
 	    evidence_label?: string;
@@ -1153,6 +1243,7 @@ export namespace supervisor {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.capabilities = this.convertValues(source["capabilities"], EstimateCapabilities);
 	        this.estimate_state = source["estimate_state"];
 	        this.reason = source["reason"];
 	        this.evidence_label = source["evidence_label"];
@@ -1666,6 +1757,8 @@ export namespace supervisor {
 	    lan_access?: boolean;
 	    stall_seconds?: number;
 	    check_for_updates?: boolean;
+	    last_seen_version?: string;
+	    font?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new PreferenceValues(source);
@@ -1691,6 +1784,8 @@ export namespace supervisor {
 	        this.lan_access = source["lan_access"];
 	        this.stall_seconds = source["stall_seconds"];
 	        this.check_for_updates = source["check_for_updates"];
+	        this.last_seen_version = source["last_seen_version"];
+	        this.font = source["font"];
 	    }
 	}
 	export class SwitchOverride {
@@ -1741,6 +1836,7 @@ export namespace supervisor {
 		    return a;
 		}
 	}
+	
 	export class PreparedCapabilities {
 	    context_max?: number;
 	    mtp: boolean;
@@ -1906,6 +2002,7 @@ export namespace supervisor {
 	}
 	
 	
+	
 	export class RequestRefusal {
 	    code: string;
 	    needed_bytes?: number;
@@ -2016,6 +2113,7 @@ export namespace supervisor {
 	}
 	export class SavedSetupEstimate {
 	    memory_estimate?: ViewMemoryEstimate;
+	    capabilities?: EstimateCapabilities;
 	    reason?: string;
 	    error?: CLIError;
 	
@@ -2026,6 +2124,7 @@ export namespace supervisor {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.memory_estimate = this.convertValues(source["memory_estimate"], ViewMemoryEstimate);
+	        this.capabilities = this.convertValues(source["capabilities"], EstimateCapabilities);
 	        this.reason = source["reason"];
 	        this.error = this.convertValues(source["error"], CLIError);
 	    }
@@ -2337,6 +2436,8 @@ export namespace supervisor {
 	    lan_access: boolean;
 	    stall_seconds?: number;
 	    check_for_updates?: boolean;
+	    last_seen_version?: string;
+	    font?: string;
 	    switch_overrides?: Record<string, string>;
 	
 	    static createFrom(source: any = {}) {
@@ -2364,6 +2465,8 @@ export namespace supervisor {
 	        this.lan_access = source["lan_access"];
 	        this.stall_seconds = source["stall_seconds"];
 	        this.check_for_updates = source["check_for_updates"];
+	        this.last_seen_version = source["last_seen_version"];
+	        this.font = source["font"];
 	        this.switch_overrides = source["switch_overrides"];
 	    }
 	}
@@ -2529,6 +2632,7 @@ export namespace supervisor {
 		}
 	}
 	export class ViewModelEstimateInfo {
+	    capabilities?: EstimateCapabilities;
 	    estimate_state: string;
 	    reason?: string;
 	    evidence_label?: string;
@@ -2543,6 +2647,7 @@ export namespace supervisor {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.capabilities = this.convertValues(source["capabilities"], EstimateCapabilities);
 	        this.estimate_state = source["estimate_state"];
 	        this.reason = source["reason"];
 	        this.evidence_label = source["evidence_label"];

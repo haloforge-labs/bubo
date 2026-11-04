@@ -46,6 +46,170 @@ public:
     return timeline;
   }
   [[nodiscard]] bool Enabled() const noexcept { return enabled_; }
+  [[nodiscard]] bool StagesEnabled() const noexcept {
+    return enabled_ && stage_stamps_ != nullptr;
+  }
+  static constexpr std::uint32_t kStageLayers = 64;
+  enum StagePoint : std::uint32_t {
+    kHcAttn,
+    kMixer,
+    kCombineHcFfn,
+    kRouter,
+    kShared,
+    kRouted,
+    kCombineEpilogue,
+    kPoints
+  };
+  // Fixed addresses are retained by graph nodes and overwritten on replay.
+  // Neither these methods nor StageMark touch the phase ring or calibrate.
+  void StageMark(hipStream_t stream, std::uint32_t layer, std::uint32_t point) {
+    if (StagesEnabled() && layer < kStageLayers && point < kPoints)
+      GpuStamp(stage_stamps_ + layer * kPoints + point, stream);
+  }
+  void StageBegin(hipStream_t stream, bool prefix) {
+    if (StagesEnabled())
+      GpuStamp(stage_stamps_ + kStageExtra + (prefix ? 0 : 1), stream);
+  }
+  void StageEmbedding(hipStream_t stream) {
+    if (StagesEnabled())
+      GpuStamp(stage_stamps_ + kStageExtra + 2, stream);
+  }
+  void StageHead(hipStream_t stream) {
+    if (StagesEnabled())
+      GpuStamp(stage_stamps_ + kStageExtra + 3, stream);
+  }
+  // Prefill-only stamps: eager prefill passes also record these three points
+  // per layer in a region after the decode stamps. Graphs never run with the
+  // prefill phase set, so no captured graph gains a node, and the decode
+  // report, its point list and its slots are unchanged.
+  enum PrefillPoint : std::uint32_t { kPfMixIn, kPfIndexer, kPfMixCore, kPfPoints };
+  void PrefillMark(hipStream_t stream, std::uint32_t layer, std::uint32_t point) {
+    if (StagesEnabled() && layer < kStageLayers && point < kPfPoints)
+      GpuStamp(stage_stamps_ + kStageSlots + layer * kPfPoints + point, stream);
+  }
+  // Called after an eager prefill pass has synchronised. Sorts every stamp
+  // of the pass by tick and attributes each gap to the later stamp's name, so
+  // a missing mark merges two stages instead of dropping time. One stderr
+  // line per pass; stamp_ms is the first-to-last stamp span and host_ms the
+  // host clock for the same pass (they must agree within a few percent).
+  void CollectPrefill(std::uint32_t tokens, std::uint32_t start, double host_ms,
+                      int ple_layer, std::uint32_t layers) {
+    if (!StagesEnabled())
+      return;
+    enum Name : unsigned { kEmbed, kHcAttn, kHcAttnPle, kMixIn, kIndexer, kMixCore,
+                           kMixOut, kCombineFfn, kRouter, kShared, kRouted,
+                           kCombineEpi, kHead, kNames };
+    static constexpr const char* kLabel[kNames] = {
+        "embed", "hc_attn", "hc_attn_ple", "mix_in", "indexer", "mix_core",
+        "mix_out", "combine_ffn", "router", "shared", "routed", "combine_epi",
+        "head"};
+    // Decode point -> prefill name; the old "mixer" stamp ends the mixer.
+    static constexpr Name kDecodeName[kPoints] = {kHcAttn, kMixOut, kCombineFfn,
+                                                  kRouter, kShared, kRouted,
+                                                  kCombineEpi};
+    static constexpr Name kPfName[kPfPoints] = {kMixIn, kIndexer, kMixCore};
+    const auto* slots = static_cast<volatile std::uint64_t*>(stage_stamps_);
+    const std::uint64_t begin = slots[kStageExtra + 1];
+    struct Stamp {
+      std::uint64_t tick;
+      Name name;
+    };
+    std::vector<Stamp> stamps;
+    const auto add = [&](std::uint64_t tick, Name name) {
+      if (tick >= begin && begin != 0)
+        stamps.push_back({tick, name});
+    };
+    add(slots[kStageExtra + 2], kEmbed);
+    for (std::uint32_t layer = 0; layer < layers && layer < kStageLayers; ++layer) {
+      for (unsigned p = 0; p < kPoints; ++p) {
+        Name name = kDecodeName[p];
+        if (name == kHcAttn && static_cast<int>(layer) == ple_layer)
+          name = kHcAttnPle;
+        add(slots[layer * kPoints + p], name);
+      }
+      for (unsigned p = 0; p < kPfPoints; ++p)
+        add(slots[kStageSlots + layer * kPfPoints + p], kPfName[p]);
+    }
+    add(slots[kStageExtra + 3], kHead);
+    std::sort(stamps.begin(), stamps.end(),
+              [](const Stamp& a, const Stamp& b) { return a.tick < b.tick; });
+    std::array<double, kNames> ms{};
+    std::array<unsigned, kNames> count{};
+    std::uint64_t previous = begin;
+    for (const auto& s : stamps) {
+      ms[s.name] += double(s.tick - previous) * ns_per_tick_ * 1e-6;
+      ++count[s.name];
+      previous = s.tick;
+    }
+    const double stamp_ms =
+        stamps.empty() ? 0.0 : double(previous - begin) * ns_per_tick_ * 1e-6;
+    std::string line;
+    char buf[96];
+    std::snprintf(buf, sizeof buf, "[prefill-stages] tokens=%u start=%u host_ms=%.3f stamp_ms=%.3f",
+                  tokens, start, host_ms, stamp_ms);
+    line = buf;
+    for (unsigned i = 0; i < kNames; ++i) {
+      std::snprintf(buf, sizeof buf, " %s=%.3f", kLabel[i], ms[i]);
+      line += buf;
+    }
+    line += " cnt=";
+    for (unsigned i = 0; i < kNames; ++i) {
+      std::snprintf(buf, sizeof buf, "%s%u", i ? "," : "", count[i]);
+      line += buf;
+    }
+    std::fprintf(stderr, "%s\n", line.c_str());
+    std::fill_n(stage_stamps_, kStageSlots + kPfSlots, std::uint64_t{0});
+  }
+  // Host metadata is set for every pass, including graph replay. It does not
+  // choose stamp addresses or add captured operations.
+  void PrepareStages(std::uint32_t first_body_layer, std::uint32_t layers) {
+    first_body_layer_ = first_body_layer;
+    stage_layers_ = layers;
+  }
+  // Called after the pass's done-flag wait (or stream synchronization).
+  // Coherent pages make the graph's preceding writes visible at this point.
+  void CollectStages(std::uint32_t width) {
+    if (!StagesEnabled())
+      return;
+    const auto* slots = static_cast<volatile std::uint64_t*>(stage_stamps_);
+    const std::uint64_t prefix = slots[kStageExtra];
+    const std::uint64_t body = slots[kStageExtra + 1];
+    for (unsigned phase = 0; phase < 2; ++phase) {
+      if (phase == 0 && first_body_layer_ == 0)
+        continue;
+      const auto begin = phase == 0 ? prefix : body;
+      if (!begin)
+        continue;
+      auto& a = stages_[{phase, std::min(width, 16u)}];
+      ++a.n;
+      auto previous = begin;
+      const auto belongs = [&](std::uint64_t tick) {
+        return tick >= begin && (phase != 0 || !body || tick < body);
+      };
+      const auto add = [&](std::uint64_t tick, unsigned stage) {
+        if (!belongs(tick)) {
+          previous = 0;
+          return;
+        }
+        if (previous && tick >= previous)
+          a.ms[stage] += double(tick - previous) * ns_per_tick_ * 1e-6;
+        previous = tick;
+      };
+      const auto embedding = slots[kStageExtra + 2];
+      if (belongs(embedding))
+        add(embedding, kPoints);
+      const auto first_layer = phase == 0 ? 0u : first_body_layer_;
+      const auto end_layer = phase == 0 ? first_body_layer_ : stage_layers_;
+      for (unsigned layer = first_layer; layer < end_layer; ++layer) {
+        for (unsigned point = 0; point < kPoints; ++point)
+          add(slots[layer * kPoints + point], point);
+      }
+      const auto head = slots[kStageExtra + 3];
+      if (belongs(head))
+        add(head, kPoints + 1);
+    }
+    std::fill_n(stage_stamps_, kStageSlots, std::uint64_t{0});
+  }
   void Gpu(hipStream_t stream, Label label, std::uint32_t arg = 0) {
     if (!enabled_ || next_slot_ >= kSlots) {
       return;
@@ -72,12 +236,20 @@ public:
     Report();
     cal_start_ = cal_end_;
     events_.clear();
+    stages_.clear();
     next_slot_ = 0;
     window_start_ = Now();
   }
 
 private:
   static constexpr std::size_t kSlots = 1 << 18;
+  static constexpr std::size_t kStageExtra = kStageLayers * kPoints;
+  static constexpr std::size_t kStageSlots = kStageExtra + 4;
+  static constexpr std::size_t kPfSlots = kStageLayers * kPfPoints;
+  struct StageAcc {
+    std::array<double, kPoints + 2> ms{};
+    std::uint64_t n{0};
+  };
   struct Event {
     Label label;
     std::uint32_t arg;
@@ -149,6 +321,16 @@ private:
     *cal_flag_ = 0;
     ns_per_tick_ = 1e6 / khz;
     events_.reserve(kSlots);
+    const char* stages = std::getenv("GUFO_TRACE_STAGES");
+    if (v[0] == '1' && v[1] == '\0' && stages && stages[0] == '1' &&
+        stages[1] == '\0') {
+      void* region = nullptr;
+      if (hipHostMalloc(&region, (kStageSlots + kPfSlots) * sizeof(std::uint64_t),
+                        hipHostMallocCoherent) == hipSuccess) {
+        stage_stamps_ = static_cast<std::uint64_t*>(region);
+        std::fill_n(stage_stamps_, kStageSlots + kPfSlots, std::uint64_t{0});
+      }
+    }
     window_start_ = Now();
   }
   static std::int64_t Now() {
@@ -315,9 +497,39 @@ private:
                  "qwen38_flash_next: trace latency ms (start = GPU start after "
                  "the host queued it; seen = host sync after the GPU end):%s\n",
                  line.c_str());
+    static constexpr const char* names[] = {
+        "hc_attn",          "mixer",     "combine_hc_ffn",
+        "router",           "shared",    "routed",
+        "combine_epilogue", "embedding", "head"};
+    for (const auto& [key, a] : stages_) {
+      const auto [phase, width] = key;
+      const std::string name =
+          std::string(phase == 0 ? "verify-prefix w" : "verify-body w") +
+          std::to_string(width);
+      const auto found = busy.find(name);
+      if (!a.n || found == busy.end() || !found->second.n)
+        continue;
+      line.clear();
+      double sum = 0;
+      for (unsigned i = 0; i < a.ms.size(); ++i) {
+        const double ms = a.ms[i] / a.n;
+        sum += ms;
+        std::snprintf(item, sizeof(item), " %s %.3f", names[i], ms);
+        line += item;
+      }
+      const double body_ms = found->second.ms / found->second.n;
+      std::fprintf(stderr,
+                   "qwen38_flash_next: stages %s %llux:%s sum %.3f body %.3f "
+                   "launch+tail %.3f\n",
+                   name.c_str(), static_cast<unsigned long long>(a.n),
+                   line.c_str(), sum, body_ms, body_ms - sum);
+    }
   }
 
   bool enabled_{false};
+  std::uint64_t* stage_stamps_{nullptr};
+  std::uint32_t first_body_layer_{0}, stage_layers_{0};
+  std::map<std::pair<unsigned, std::uint32_t>, StageAcc> stages_;
   std::uint64_t* stamps_{nullptr};
   std::size_t next_slot_{0};
   double ns_per_tick_{10.0};

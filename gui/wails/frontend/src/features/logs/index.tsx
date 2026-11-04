@@ -16,6 +16,7 @@ import { actions, useView } from '@/lib/bindings'
 import { copyLabel, logText, shownLines } from './lines'
 import { GUIError } from '@/components/gui-error'
 import { GPUHistory } from './gpu-history'
+import { StatusLine } from '@/components/status-line'
 
 export default function LogsPage() {
   const query = useView()
@@ -169,12 +170,12 @@ export default function LogsPage() {
                 save.run(() => actions.SaveBundle(path)),
               )}
             >
-              <Label htmlFor="bundle-path">Local ZIP path</Label>
+              <Label htmlFor="bundle-path">ZIP file path</Label>
               <Input
                 id="bundle-path"
-                placeholder="Absolute local path"
+                placeholder="C:\Users\…\bubo-support.zip"
                 {...bundle.register('path', {
-                  required: 'Enter a local ZIP path.',
+                  required: 'Enter a ZIP file path.',
                 })}
               />
               {bundle.formState.errors.path && (
@@ -187,12 +188,10 @@ export default function LogsPage() {
                 variant="outline"
                 disabled={save.pending || !view.actions.support_bundle.allowed}
               >
-                Save support bundle locally
+                Save support bundle
               </Button>
               <ActionError error={save.error} />
-              {save.completed && (
-                <p role="status">Support bundle saved locally.</p>
-              )}
+              {save.completed && <StatusLine>Support bundle saved.</StatusLine>}
             </form>
           </section>
         )}

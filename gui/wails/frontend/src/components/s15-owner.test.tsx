@@ -101,13 +101,11 @@ test('short first-run disk space offers the shared picker before downloading and
     .mockResolvedValue(bridgeReply({}))
   const { replaceView } = mountCorePage('/onboarding', view)
   await expect.element(page.getByText(spaceSentence(view))).toBeVisible()
+  // One route to the folder picker: the local button. No Settings detour.
   await expect
-    .element(
-      page.getByRole('link', {
-        name: 'Change the download folder in Settings.',
-      }),
-    )
-    .toHaveAttribute('href', '/settings#download-folder')
+    .element(page.getByRole('link', { name: /download folder in Settings/ }))
+    .not.toBeInTheDocument()
+  await page.getByRole('button', { name: 'About download folder' }).click()
   await expect
     .element(page.getByLabelText('Setup steps'))
     .toHaveTextContent('This choice applies to the model files.')
@@ -167,11 +165,7 @@ test.each(['enough', 'unknown'] as const)(
       .element(page.getByRole('button', { name: 'Choose download folder…' }))
       .not.toBeInTheDocument()
     await expect
-      .element(
-        page.getByRole('link', {
-          name: 'Change the download folder in Settings.',
-        }),
-      )
+      .element(page.getByRole('button', { name: 'About download folder' }))
       .not.toBeInTheDocument()
   },
 )
@@ -180,16 +174,6 @@ test('first-run space includes the reported engine download size', async () => {
   const view = shortDiskView()
   mountCorePage('/onboarding', view)
   await expect.element(page.getByText(spaceSentence(view))).toBeVisible()
-})
-
-test('Settings link opens the model download folder section', async () => {
-  mountCorePage('/onboarding', shortDiskView())
-  await page
-    .getByRole('link', { name: 'Change the download folder in Settings.' })
-    .click()
-  await expect
-    .element(page.getByRole('region', { name: 'Model download folder' }))
-    .toBeVisible()
 })
 
 function runtimeView(sameFolder = false) {

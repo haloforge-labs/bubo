@@ -1,6 +1,5 @@
-// CPU test of TwinWeights::Bind (decode twin): a synthetic two-layer trunk (one linear layer, one attention layer, Q8_0 dense tensors, one non-Q8_0 tensor)
-// against tiny twin GGUF files written by this test. Accept case + every rejection case of the contract in weights.hpp (missing tensor, Q8_0 in the twin, wrong shape,
-// half a qkv pair / half of q-k-v, twin tensor for a non-Q8_0 trunk tensor, empty twin). No model file, no GPU.
+// CPU binding checks for quantized/native trunks, identity twins and output HC.
+// Tiny synthetic GGUFs cover shape/completeness errors without a model or GPU.
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -38,7 +37,18 @@ std::size_t BytesOf(GgmlType type, std::uint64_t cols, std::uint64_t rows) {
     case GgmlType::kQ5_1: block = 32; bytes = 24; break;
     case GgmlType::kQ4_K: block = 256; bytes = 144; break;
     case GgmlType::kQ5_K: block = 256; bytes = 176; break;
+    case GgmlType::kQ6_K:
+      block = 256;
+      bytes = 210;
+      break;
+    case GgmlType::kIQ3_S:
+      block = 256;
+      bytes = 110;
+      break;
     case GgmlType::kF32: break;
+    case GgmlType::kBF16:
+      bytes = 2;
+      break;
     default: throw std::runtime_error("test type");
   }
   Require(cols % block == 0, "test shape");
@@ -228,7 +238,7 @@ int main(int argc, char** argv) {
     {
       auto t = GoodTwin(true);
       Find(t, "blk.0.attn_gate.weight").type = GgmlType::kQ8_0;
-      ExpectReject("q8-in-twin", Bind(dir, "q8", t, trunk), "unsupported format");
+      Require(Bind(dir, "q8", t, trunk).empty(), "Q8 identity tensor rejected");
     }
     {
       auto t = GoodTwin(true);
@@ -246,11 +256,47 @@ int main(int argc, char** argv) {
       ExpectReject("half-qkv-triple", Bind(dir, "triple", t, trunk), "attn_v");
     }
     {
-      // a trunk tensor that is not Q8_0 (attn_k F32) must be left alone: absent from the twin = accepted, present = rejected
+      // Native dense tensors can be retained or replaced explicitly.
       const auto f32_trunk = SyntheticTrunk(false);
       const auto accepted = Bind(dir, "k-absent", GoodTwin(false), f32_trunk);
       Require(accepted.empty(), "twin without the non-Q8_0 trunk tensor rejected: " + accepted);
-      ExpectReject("twin-for-non-q8", Bind(dir, "k-present", GoodTwin(true), f32_trunk), "not Q8_0");
+      Require(Bind(dir, "k-present", GoodTwin(true), f32_trunk).empty(),
+              "replacement over a floating dense tensor rejected");
+      auto absent = f32_trunk;
+      absent.layers[1].attn_k = {};
+      ExpectReject("twin-for-absent",
+                   Bind(dir, "k-no-base", GoodTwin(true), absent),
+                   "no supported dense trunk tensor");
+      auto native = SyntheticTrunk(true);
+      for (auto& layer : native.layers) {
+        layer.shexp_gate.type = GgmlType::kQ5_K;
+        layer.shexp_up.type = GgmlType::kIQ3_S;
+      }
+      auto candidate = GoodTwin(true);
+      Find(candidate, "blk.0.attn_qkv.weight").type = GgmlType::kQ6_K;
+      Find(candidate, "blk.0.attn_gate.weight").type = GgmlType::kIQ3_S;
+      native.hc_head.down = Trunk(GgmlType::kQ8_0, 256, 4);
+      native.hc_head.up = Trunk(GgmlType::kQ5_1, 64, 8);
+      candidate.push_back({"output_hc_down.weight", GgmlType::kQ5_K, 256, 4});
+      candidate.push_back({"output_hc_up.weight", GgmlType::kQ5_1, 64, 8});
+      qfn::TwinWeights bound;
+      Require(Bind(dir, "native", candidate, native, &bound).empty(),
+              "native trunk / Q6 / IQ3 / output HC rejected");
+      Require(!bound.hc_head.down.empty() && !bound.hc_head.up.empty(),
+              "output HC not bound");
+      Find(candidate, "output_hc_up.weight").type = GgmlType::kBF16;
+      Require(Bind(dir, "native-hc-bf16", candidate, native).empty(),
+              "published BF16 HC replacement rejected");
+      const auto head_path = dir / "draft-head.gguf";
+      WriteGguf(head_path, {{"output.weight", GgmlType::kQ4_K, 256, 8}});
+      std::string head_error;
+      auto head_reader =
+          gufo::core::GgufReader::OpenFile(head_path, &head_error);
+      Require(head_reader != nullptr &&
+                  qfn::BindDraftOutput(
+                      *head_reader, Trunk(GgmlType::kQ6_K, 256, 8), &head_error)
+                      .has_value(),
+              "existing draft head rejected over native target: " + head_error);
     }
     {
       // keep_q8: a listed Q8_0 tensor is absent from the twin, counted, and accepted; every misuse is rejected
@@ -266,9 +312,21 @@ int main(int argc, char** argv) {
       Drop(missing_unlisted, "blk.0.hc_attn_up.weight");
       ExpectReject("keep-unlisted-missing", Bind(dir, "keep-unlisted", missing_unlisted, trunk, nullptr, "blk.1.ffn_down_shexp.weight"), "missing blk.0.hc_attn_up");
       ExpectReject("keep-and-present", Bind(dir, "keep-present", GoodTwin(true), trunk, nullptr, "blk.0.hc_attn_up.weight"), "both in the twin file and in its keep_q8");
-      ExpectReject("keep-unknown", Bind(dir, "keep-unknown", GoodTwin(true), trunk, nullptr, "blk.0.no_such.weight"), "not a Q8_0 tensor of the twin set");
+      ExpectReject("keep-unknown",
+                   Bind(dir, "keep-unknown", GoodTwin(true), trunk, nullptr,
+                        "blk.0.no_such.weight"),
+                   "not a supported tensor of the twin set");
       const auto f32_trunk = SyntheticTrunk(false);
-      ExpectReject("keep-non-q8", Bind(dir, "keep-nonq8", GoodTwin(false), f32_trunk, nullptr, "blk.1.attn_k.weight"), "not Q8_0");
+      Require(Bind(dir, "keep-nonq8", GoodTwin(false), f32_trunk, nullptr,
+                   "blk.1.attn_k.weight")
+                  .empty(),
+              "keep native float rejected");
+      auto native = trunk;
+      native.layers[0].hc_attn.up.type = GgmlType::kQ5_1;
+      Require(Bind(dir, "keep-native", t, native, nullptr,
+                   "blk.0.hc_attn_up.weight,blk.1.ffn_down_shexp.weight")
+                  .empty(),
+              "legacy keep list rejected a native trunk tensor");
     }
     {
       std::vector<Spec> none;

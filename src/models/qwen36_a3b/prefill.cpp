@@ -483,7 +483,7 @@ bool Engine::WideAttention(const Layer& l, __half* k_cache, __half* v_cache,
 }
 
 bool Engine::WideMoe(const Layer& l, float* res, std::uint32_t n,
-                     std::string* error) {
+                     std::string* error, PrefillLayer prefill) {
   const std::uint32_t H = c_.hidden;
   const bool kquant_experts = IsKQuant(l.gate_exps.type) ||
                               IsKQuant(l.up_exps.type) ||
@@ -511,7 +511,7 @@ bool Engine::WideMoe(const Layer& l, float* res, std::uint32_t n,
       const std::size_t offset = static_cast<std::size_t>(t) * H;
       fn::CopyDevice(wide_.xn + offset, xn_, static_cast<std::size_t>(rows) * H,
                      stream_);
-      Moe(l, rows);
+      Moe(l, rows, prefill);
       AddInPlace(res + offset, blk_, static_cast<std::size_t>(rows) * H,
                  stream_);
     }
@@ -533,7 +533,13 @@ bool Engine::WideMoe(const Layer& l, float* res, std::uint32_t n,
   if (!WideDense(router, s.xn, s.router, n, error))
     return false;
   WideMark(kWTopK);
-  fn::RouterTopK(s.router, E + 1, s.ids, s.weights, n, E, U, stream_);
+  if (prefill) {
+    const auto& policy = *prefill.settings;
+    fn::RouterTopK(s.router, E + 1, s.ids, s.weights, n, E, U, stream_,
+                   policy.keep, policy.mode, policy.mass, prefill.Fold());
+  } else {
+    fn::RouterTopK(s.router, E + 1, s.ids, s.weights, n, E, U, stream_);
+  }
   fn::ExpertCounts(s.ids, s.counts, n, E, U, stream_);
   if (!Ok(hipMemcpyAsync(s.counts_host, s.counts, E * sizeof(std::uint32_t),
                          hipMemcpyDeviceToHost, stream_),
@@ -553,7 +559,20 @@ bool Engine::WideMoe(const Layer& l, float* res, std::uint32_t n,
   WideMark(kWRouteHost);
   if (!Ok(hipEventSynchronize(s.counts_ready), "expert counts", error))
     return false;
+  if (prefill)
+    RecordPrefillCounts({s.counts_host, E}, n);
+  const auto prepare = [&](void* down, bool f16) {
+    if (prefill)
+      fn::PrepareRoutedExpertRows(down, f16, s.ids, slots, H, stream_,
+                                  prefill.settings->audit);
+  };
+  const auto complete = [&](void* down, bool f16) {
+    if (prefill && prefill.settings->audit == qfn::PrefillExpertsAudit::kFull)
+      fn::CountRoutedExpertRows(down, f16, s.ids, slots, H, prefill_audit_,
+                                stream_);
+  };
   if (mmq_experts) {
+    prepare(s.dc, false);
     // The MMQ grid is cut to the largest expert bucket and the tile width
     // fitted to the whole distribution (Flash-Next's RoutedHints). The ids
     // map is built inside the call; down reads the slot rows with one
@@ -586,6 +605,7 @@ bool Engine::WideMoe(const Layer& l, float* res, std::uint32_t n,
       Fail(error, "routed MMQ expert GEMM failed");
       return false;
     }
+    complete(s.dc, false);
     WideMark(kWEpilogue);
     fn::MoeEpilogueVec4(s.dc, s.weights, s.sh_out, s.router + E, E + 1, s.blk,
                         n, U, H, stream_);
@@ -713,6 +733,7 @@ bool Engine::WideMoe(const Layer& l, float* res, std::uint32_t n,
                stream_);
   }
   WideMark(kWDown);
+  prepare(s.down_half, true);
   if (q8_down && q8_gate_up) {
     if (down_tiles > 0 &&
         !fn::RoutedF16Gemm(l.down_exps.data, fn::WeightType::kQ8_0, s.up_half,
@@ -736,6 +757,7 @@ bool Engine::WideMoe(const Layer& l, float* res, std::uint32_t n,
     Fail(error, "BF16 gate/up with Q8_0 down experts is not handled");
     return false;
   }
+  complete(s.down_half, true);
   WideMark(kWEpilogue);
   fn::MoeEpilogueVec4F16(s.down_half, s.weights, s.sh_out, s.router + E, E + 1,
                          s.blk, n, U, H, stream_);
@@ -743,7 +765,8 @@ bool Engine::WideMoe(const Layer& l, float* res, std::uint32_t n,
   return true;
 }
 
-bool Engine::WideTrunk(std::uint32_t n, std::string* error) {
+bool Engine::WideTrunk(std::uint32_t n, std::string* error,
+                       const qfn::PrefillExpertsSettings* experts) {
   const std::uint32_t H = c_.hidden;
   Wide& s = wide_;
   // Diagnostic (A3B_WIDE_DEBUG bits): run a part with the decode kernels in
@@ -808,14 +831,16 @@ bool Engine::WideTrunk(std::uint32_t n, std::string* error) {
         return false;
     }
     if (debug & 1u) {
-      grouped(l.post_norm, [&](float* rows, std::uint32_t r,
-                               const std::uint32_t*) { FusedMoe(l, rows, r); });
+      grouped(l.post_norm,
+              [&](float* rows, std::uint32_t r, const std::uint32_t*) {
+                FusedMoe(l, rows, r, {experts, i});
+              });
       continue;
     }
     WideMark(kWOther);
     fn::RmsNormRows(s.res, l.post_norm.f32(), s.xn, n, H, 1, c_.eps, stream_);
     Unstage();
-    if (!WideMoe(l, s.res, n, error))
+    if (!WideMoe(l, s.res, n, error, {experts, i}))
       return false;
     if (df_)
       DFlashTap(i, s.res, n, true);
@@ -847,18 +872,22 @@ bool Engine::WideLogits(std::span<const std::int32_t> tokens, float* logits,
     return false;
   std::copy_n(tokens.data(), n, s.tokens_host);
   *pos_host_ = pos_;
+  const auto* experts = BeginPrefillExperts(n);
+  const auto began =
+      experts ? qfn::DiagClock::now() : qfn::DiagClock::time_point{};
   if (!Ok(hipMemcpyAsync(s.tokens, s.tokens_host, n * sizeof(std::int32_t),
                          hipMemcpyHostToDevice, stream_),
           "token upload", error) ||
       !Ok(hipMemcpyAsync(pos_dev_, pos_host_, sizeof(std::uint32_t),
                          hipMemcpyHostToDevice, stream_),
           "position upload", error) ||
-      !WideTrunk(n, error))
+      !WideTrunk(n, error, experts))
     return false;
   fn::RmsNormRows(s.res, output_norm_.f32(), s.h, n, H, 1, c_.eps, stream_);
   Unstage();
   if (!WideDense(output_, s.h, s.logits, n, error))
     return false;
+  FinishPrefillExperts(experts, pos_, n, began);
   pos_ += n;
   return Ok(hipMemcpyAsync(logits, s.logits, bytes, hipMemcpyDeviceToHost,
                            stream_),
@@ -888,6 +917,9 @@ bool Engine::SpecPrefillWide(std::span<const std::int32_t> tokens,
       return false;
     std::copy_n(tokens.data() + off, n, s.tokens_host);
     *pos_host_ = pos_;
+    const auto* experts = BeginPrefillExperts(n);
+    const auto began =
+        experts ? qfn::DiagClock::now() : qfn::DiagClock::time_point{};
     if (!Ok(hipMemcpyAsync(s.tokens, s.tokens_host, n * sizeof(std::int32_t),
                            hipMemcpyHostToDevice, stream_),
             "prefill token upload", error) ||
@@ -895,7 +927,7 @@ bool Engine::SpecPrefillWide(std::span<const std::int32_t> tokens,
                            hipMemcpyHostToDevice, stream_),
             "position upload", error))
       return false;
-    if (!WideTrunk(n, error))
+    if (!WideTrunk(n, error, experts))
       return false;
     if (df_ && !DFlashInject(n, pos_, end, true, nullptr, error))
       return false;
@@ -915,6 +947,7 @@ bool Engine::SpecPrefillWide(std::span<const std::int32_t> tokens,
       }
       TopCandidates(1);
     }
+    FinishPrefillExperts(experts, pos_, n, began);
     WideMark(kWMtp);
     if (mtp) {
       // MTP rows pair token i with the trunk's normed hidden i - 1: the

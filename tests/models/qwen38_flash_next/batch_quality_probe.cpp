@@ -1,10 +1,12 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <numeric>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -44,9 +46,57 @@ const std::string Env(const char* key) {
   const char* v = std::getenv(key);
   return v ? v : "";
 }
+void ValidateOutputArgs(
+    const std::unordered_map<std::string, std::string>& args) {
+  const std::set<std::string> allowed = {"--model",
+                                         "--mtp-model",
+                                         "--manifest",
+                                         "--manifest-sha256",
+                                         "--c",
+                                         "--arm",
+                                         "--out",
+                                         "--score-prefill",
+                                         "--validate-only",
+                                         "--tokenize",
+                                         "--per-token-nll",
+                                         "--dump-logits",
+                                         "--telemetry-map"};
+  for (const auto& [key, value] : args) {
+    Require(allowed.contains(key), "unknown argument: " + key);
+    Require(!value.empty(), "empty value for " + key);
+  }
+  const auto dump =
+      args.contains("--dump-logits") ? args.at("--dump-logits") : "1";
+  Require(dump == "0" || dump == "1", "--dump-logits must be 0 or 1");
+  Require(dump != "0" || args.contains("--per-token-nll"),
+          "--dump-logits 0 requires --per-token-nll");
+  Require(!args.contains("--telemetry-map") ||
+              !Env("GUFO_PREFILL_TELEMETRY").empty(),
+          "--telemetry-map requires GUFO_PREFILL_TELEMETRY");
+  if (args.contains("--score-prefill"))
+    Require(
+        args.at("--score-prefill") == "0" || args.at("--score-prefill") == "1",
+        "--score-prefill must be 0 or 1");
+  if (args.contains("--validate-only"))
+    Require(args.at("--validate-only") == "1", "--validate-only must be 1");
+}
 #ifdef GUFO_BATCH_QUALITY_HIP
-void Dump(std::ofstream& compact, std::ofstream& full, std::size_t& offset,
-          const Value& meta, std::span<const float> row, std::int32_t target) {
+std::set<std::string> TelemetryIndexes(const std::string& dir) {
+  namespace fs = std::filesystem;
+  if (!fs::exists(dir))
+    return {};
+  Require(fs::is_directory(dir), "telemetry path is not a directory: " + dir);
+  std::set<std::string> paths;
+  for (const auto& entry : fs::recursive_directory_iterator(dir)) {
+    if (entry.is_regular_file() &&
+        entry.path().filename().string().ends_with(".index.json"))
+      paths.insert(fs::absolute(entry.path()).lexically_normal().string());
+  }
+  return paths;
+}
+void Dump(std::ofstream* compact, std::ofstream* full, std::ofstream* nll,
+          std::size_t& offset, const Value& meta, std::size_t prompt_tokens,
+          std::span<const float> row, std::int32_t target) {
   Require(target >= 0 && static_cast<std::size_t>(target) < row.size(),
           "target outside vocabulary");
   for (auto v : row)
@@ -56,37 +106,60 @@ void Dump(std::ofstream& compact, std::ofstream& full, std::size_t& offset,
   for (auto v : row)
     sum += std::exp(static_cast<double>(v) - peak);
   const double lse = peak + std::log(sum);
-  std::vector<std::size_t> ids(row.size());
-  std::iota(ids.begin(), ids.end(), 0);
-  const auto top = std::min<std::size_t>(512, row.size());
-  std::partial_sort(ids.begin(), ids.begin() + top, ids.end(),
-                    [&row](auto a, auto b) {
-                      return row[a] > row[b] || (row[a] == row[b] && a < b);
-                    });
-  auto record = meta;
-  record["lse"] = lse;
-  record["target"] = target;
-  record["target_logit"] = row[target];
-  record["vocab"] = row.size();
-  record["offset"] = offset;
-  record["top"] = Value::array();
-  for (std::size_t i = 0; i < top; ++i) {
-    auto pair = Value::array();
-    pair.push_back(ids[i]);
-    pair.push_back(row[ids[i]]);
-    record["top"].push_back(std::move(pair));
+  if (nll) {
+    auto score = Value::object();
+    score["session"] = At(meta, "session");
+    score["manifest_sha256"] = At(meta, "manifest_sha256");
+    score["position"] = At(meta, "position");
+    score["target_position"] = At(meta, "position").as_size() + 1;
+    score["target"] = target;
+    score["prompt_tokens"] = prompt_tokens;
+    score["start"] = prompt_tokens;
+    score["nll"] = lse - row[target];
+    *nll << score.dump() << '\n';
+    Require(nll->good(), "per-token NLL write failed");
   }
-  compact << record.dump() << '\n';
-  full.write(reinterpret_cast<const char*>(row.data()), row.size_bytes());
-  Require(compact.good() && full.good(), "quality dump write failed");
-  offset += row.size_bytes();
+  if (compact && full) {
+    std::vector<std::size_t> ids(row.size());
+    std::iota(ids.begin(), ids.end(), 0);
+    const auto top = std::min<std::size_t>(512, row.size());
+    std::partial_sort(ids.begin(), ids.begin() + top, ids.end(),
+                      [&row](auto a, auto b) {
+                        return row[a] > row[b] || (row[a] == row[b] && a < b);
+                      });
+    auto record = meta;
+    record["lse"] = lse;
+    record["target"] = target;
+    record["target_logit"] = row[target];
+    record["vocab"] = row.size();
+    record["offset"] = offset;
+    record["top"] = Value::array();
+    for (std::size_t i = 0; i < top; ++i) {
+      auto pair = Value::array();
+      pair.push_back(ids[i]);
+      pair.push_back(row[ids[i]]);
+      record["top"].push_back(std::move(pair));
+    }
+    *compact << record.dump() << '\n';
+    full->write(reinterpret_cast<const char*>(row.data()), row.size_bytes());
+    Require(compact->good() && full->good(), "quality dump write failed");
+    offset += row.size_bytes();
+  }
 }
 
 int Run(const std::unordered_map<std::string, std::string>& args) {
   namespace qfn = gufo::models::qwen38_flash_next;
   const auto manifest = gufo::json::parse(Read(args.at("--manifest")));
+  Require(
+      args.at("--c") == "1" || args.at("--c") == "2" || args.at("--c") == "4",
+      "quality c must be 1, 2 or 4");
   const auto c = std::stoul(args.at("--c"));
   const auto arm = args.at("--arm");
+  // Default: prune Sync(prompt) only; scored rows retain serving verification.
+  // Opt-in: score through the existing TeacherForce prefill seam, serially,
+  // on AR sessions. Keep the resident MTP sidecar for its eight-logit capacity.
+  const bool score_prefill =
+      args.contains("--score-prefill") && args.at("--score-prefill") == "1";
   Require(c == 1 || c == 2 || c == 4, "quality c must be 1, 2 or 4");
   Require(arm == "wmma" || arm == "narrow" || arm == "self" || arm == "q8",
           "unknown quality arm");
@@ -100,9 +173,10 @@ int Run(const std::unordered_map<std::string, std::string>& args) {
   } else {
     Require(!Env("GUFO_DENSE_TWIN_MODEL").empty(),
             "twin arm needs a twin model");
-    // GUFO_QUALITY_V0_CONTROL=1 (diagnostic, 2026-10-09): the same multi-session
-    // batch path with the dp4a variant 0 (row-identical to narrow), to separate
-    // the multi-session path from the WMMA kernel. Not a gate arm.
+    // GUFO_QUALITY_V0_CONTROL=1 (diagnostic, 2026-10-09): the same
+    // multi-session batch path with the dp4a variant 0 (row-identical to
+    // narrow), to separate the multi-session path from the WMMA kernel. Not a
+    // gate arm.
     const bool v0_control = Env("GUFO_QUALITY_V0_CONTROL") == "1";
     if (!narrow && c > 1)
       Require(Env("GUFO_DENSE_TWIN_BATCH") == "1" &&
@@ -115,10 +189,10 @@ int Run(const std::unordered_map<std::string, std::string>& args) {
               "c1 narrow must disable batch");
   }
   if (args.contains("--validate-only")) {
-    std::cout << "VALIDATE OK arm=" << arm << " c=" << c << " batch="
-              << Env("GUFO_DENSE_TWIN_BATCH") << " variant="
-              << Env("GUFO_IQ4_WIDE_VARIANT") << " v0_control="
-              << Env("GUFO_QUALITY_V0_CONTROL") << "\n";
+    std::cout << "VALIDATE OK arm=" << arm << " c=" << c
+              << " batch=" << Env("GUFO_DENSE_TWIN_BATCH")
+              << " variant=" << Env("GUFO_IQ4_WIDE_VARIANT")
+              << " v0_control=" << Env("GUFO_QUALITY_V0_CONTROL") << "\n";
     return 0;
   }
   qfn::ModelOptions options;
@@ -134,9 +208,22 @@ int Run(const std::unordered_map<std::string, std::string>& args) {
   std::vector<std::vector<std::int32_t>> tokens;
   for (const auto& s : sessions)
     tokens.push_back(Tokens(At(s, "tokens")));
-  std::ofstream compact(args.at("--out") + ".jsonl", std::ios::binary);
-  std::ofstream full(args.at("--out") + ".f32", std::ios::binary);
-  Require(compact.good() && full.good(), "cannot open quality dumps");
+  const bool dump_logits =
+      !args.contains("--dump-logits") || args.at("--dump-logits") == "1";
+  std::ofstream compact, full, nll, telemetry_map;
+  if (dump_logits) {
+    compact.open(args.at("--out") + ".jsonl", std::ios::binary);
+    full.open(args.at("--out") + ".f32", std::ios::binary);
+    Require(compact.good() && full.good(), "cannot open quality dumps");
+  }
+  if (args.contains("--per-token-nll")) {
+    nll.open(args.at("--per-token-nll"), std::ios::binary);
+    Require(nll.good(), "cannot open per-token NLL dump");
+  }
+  if (args.contains("--telemetry-map")) {
+    telemetry_map.open(args.at("--telemetry-map"), std::ios::binary);
+    Require(telemetry_map.good(), "cannot open telemetry map");
+  }
   std::size_t offset = 0;
   const auto& groups = At(At(manifest, "schedules"), std::to_string(c)).items();
   for (const auto& group : groups) {
@@ -146,12 +233,33 @@ int Run(const std::unordered_map<std::string, std::string>& args) {
       const auto i = index.as_size();
       Require(i < sessions.size(), "session outside manifest");
       indices.push_back(i);
-      auto session = model->CreateSession(gufo::core::SessionMode::kSpeculative,
-                                          options.max_context, &error);
+      auto session = model->CreateSession(
+          score_prefill ? gufo::core::SessionMode::kAutoregressive
+                        : gufo::core::SessionMode::kSpeculative,
+          options.max_context, &error);
       Require(session != nullptr, error);
       const auto start = At(sessions[i], "start").as_size();
       Require(start > 0 && start < tokens[i].size(), "bad prefill boundary");
+      const auto before = telemetry_map.is_open()
+                              ? TelemetryIndexes(Env("GUFO_PREFILL_TELEMETRY"))
+                              : std::set<std::string>{};
       Require(session->Sync(std::span(tokens[i]).first(start), &error), error);
+      if (telemetry_map.is_open()) {
+        const auto after = TelemetryIndexes(Env("GUFO_PREFILL_TELEMETRY"));
+        auto record = Value::object();
+        record["session"] = At(sessions[i], "name");
+        record["manifest_sha256"] = args.at("--manifest-sha256");
+        record["prompt_tokens"] = start;
+        record["start"] = 0;
+        record["indexes"] = Value::array();
+        for (const auto& path : after)
+          if (!before.contains(path))
+            record["indexes"].push_back(path);
+        Require(record["indexes"].size() > 0,
+                "Sync produced no telemetry indexes for session");
+        telemetry_map << record.dump() << '\n';
+        Require(telemetry_map.good(), "telemetry map write failed");
+      }
       active.push_back(std::move(session));
     }
     for (const auto& pass : At(group, "passes").items()) {
@@ -170,7 +278,11 @@ int Run(const std::unordered_map<std::string, std::string>& args) {
             {active[j].get(), std::span(tokens[i]).subspan(p, k), &rows[j]});
         total += k;
       }
-      if (narrow) {
+      if (score_prefill) {
+        for (const auto& r : requests)
+          Require(r.session->TeacherForce(r.tokens, r.rows, &error, true),
+                  error);
+      } else if (narrow) {
         for (const auto& r : requests)
           Require(r.session->TeacherForce(r.tokens, r.rows, &error), error);
       } else {
@@ -182,6 +294,8 @@ int Run(const std::unordered_map<std::string, std::string>& args) {
         const auto k = At(pass.items()[j], "width").as_size();
         auto meta = Value::object();
         meta["arm"] = arm;
+        if (score_prefill)
+          meta["score_phase"] = "prefill";
         meta["c"] = c;
         meta["session"] = At(sessions[i], "name");
         meta["manifest_sha256"] = args.at("--manifest-sha256");
@@ -189,7 +303,9 @@ int Run(const std::unordered_map<std::string, std::string>& args) {
         meta["N"] = total;
         for (std::size_t t = 0; t < k; ++t) {
           meta["position"] = p + t;
-          Dump(compact, full, offset, meta,
+          Dump(dump_logits ? &compact : nullptr, dump_logits ? &full : nullptr,
+               nll.is_open() ? &nll : nullptr, offset, meta,
+               At(sessions[i], "start").as_size(),
                std::span(rows[j]).subspan(t * model->VocabSize(),
                                           model->VocabSize()),
                tokens[i][p + t + 1]);
@@ -209,6 +325,7 @@ int main(int argc, char** argv) {
       Require(i + 1 < argc, "every argument needs a value");
       Require(args.emplace(argv[i], argv[i + 1]).second, "duplicate argument");
     }
+    ValidateOutputArgs(args);
     if (args.contains("--tokenize")) {
       std::string error;
       auto reader =

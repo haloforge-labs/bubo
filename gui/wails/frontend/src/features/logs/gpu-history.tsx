@@ -1,5 +1,6 @@
 import { ChartTimeWindow, MetricLineChart } from '@/components/line-chart'
 import type { View } from '@/lib/bindings'
+import { pageGrid } from '@/components/page-grid'
 import { useGPUHistory } from '@/lib/gpu-history'
 
 const metrics = [
@@ -28,11 +29,11 @@ export function GPUHistory({
         : [{ secondsAgo, value: memory ? value / 1024 ** 3 : value }]
     })
     const values = samples.map((sample) => sample.value)
-    // Preserve the Server page's five observations and 5% change threshold.
-    if (
-      values.length < 5 ||
-      Math.max(...values) - Math.min(...values) < Math.max(...values) * 0.05
-    )
+    // Preserve the Server page's five observations and 5% change threshold. A
+    // series that never changes (all zeros included) says nothing: omit it first.
+    const top = Math.max(...values)
+    const bottom = Math.min(...values)
+    if (values.length < 5 || top === bottom || top - bottom < top * 0.05)
       return []
     return [{ metric, samples, memory }]
   })
@@ -45,14 +46,13 @@ export function GPUHistory({
           <ChartTimeWindow />
         </p>
       </div>
-      <div className="grid gap-3 sm:grid-cols-2">
-        {charts.map(({ metric, samples, memory }, index) => (
+      <div className={pageGrid}>
+        {charts.map(({ metric, samples, memory }) => (
           <MetricLineChart
             key={metric.key}
             label={`${metric.label} history`}
             unit={metric.unit}
             showWindow={false}
-            showTimeAxis={index >= charts.length - 2}
             compact
             maximum={
               metric.key === 'use_pct'

@@ -144,7 +144,9 @@ struct LoopBreaker {
         int answer_repeats = 32;
         int answer_tokens = 512;
         int think_max_period = kMaxPeriod;
-        int answer_max_period = 16;
+        // An answer needs answer_repeats (32) exact repeats of a unit of up to this many
+        // tokens; the replay of 1,654 real answers (619k tokens) flags none at 16 or 128.
+        int answer_max_period = kMaxPeriod;
         int tool_repeats = 16;
         int tool_tokens = 128;
         int tool_max_period = kMaxPeriod;
@@ -334,6 +336,10 @@ struct BehaviourConfig {
   float native_repeat_penalty{1}, native_frequency_penalty{0}, native_presence_penalty{0};
   std::size_t native_min_keep{0}, native_repeat_last_n{64};
   bool think_eog_guard{false}, eog_boundary{false}, eog_min_prob_exact{false};
+  bool think_nudge{false};
+  int think_nudge_max{2};
+  std::string think_nudge_text{"Do I have enough"};
+  std::vector<std::uint32_t> think_nudge_prefix;
   bool loop_breaker{false}, loop_eog_close{false}, loop_exempt{false};
   bool loop_tool_args{true};
   bool reasoning_budget_enabled{false}, logit_bias_enabled{false};
@@ -351,7 +357,7 @@ struct BehaviourConfig {
   std::shared_ptr<const std::vector<std::string>> token_pieces;
   [[nodiscard]] bool enabled() const noexcept {
     return production_sampling || model_suppress_tokens || think_eog_guard ||
-           eog_boundary || eog_min_prob > 0 || eog_defer_p > 0 ||
+           think_nudge || eog_boundary || eog_min_prob > 0 || eog_defer_p > 0 ||
            loop_breaker || loop_eog_close || reasoning_budget_enabled ||
            logit_bias_enabled || marker_bias != 0 ||
            !marker_bias_by_effort.empty() || request_marker_bias.has_value() ||
@@ -395,14 +401,23 @@ struct ThinkMarkerCounts {
     return *this;
   }
 };
+struct ThinkNudgeInsertion {
+  std::uint64_t prefix_end{0}, close_distance{0};
+  bool span_closed{false}, natural_close{false};
+};
 struct BehaviourState {
   bool thinking{false}, prefix_used{false}, waiting_utf8{false};
   bool close_decision{false}, guard_escalated{false}, guard_escalation_taken{false};
   std::uint64_t guard_blocked_attempts{0};
   std::uint64_t accepted_count{0};
   std::vector<std::uint64_t> deferred_at, close_at, guard_blocked_at;
+  std::vector<std::uint64_t> think_nudge_at;
+  std::vector<ThinkNudgeInsertion> think_nudges;
+  std::uint64_t think_nudge_insertions{0}, closed_after_nudge{0};
+  static constexpr std::uint64_t kNudgeCloseWindow = 256;
   std::int64_t remaining{-1};
   std::vector<std::uint32_t> match_tail, forced, matched_end;
+  std::vector<bool> forced_tail;
   std::size_t force_pos{0};
   std::string force_reason;
   EogBoundaryState boundary;
@@ -435,7 +450,8 @@ struct BehaviourState {
       std::equal(seq.rbegin(),seq.rend(),match_tail.rbegin());
   }
   void Accept(const BehaviourConfig& cfg, std::uint32_t token,
-              bool grammar_active, bool tool_grammar_active = false) {
+              bool grammar_active, bool tool_grammar_active = false,
+              bool externally_forced = false) {
     ++accepted_count;
     if(std::ranges::find(deferred_at,accepted_count)!=deferred_at.end()) boundary.deferred_stop=true;
     if(std::ranges::find(close_at,accepted_count)!=close_at.end()) close_decision=true;
@@ -451,8 +467,23 @@ struct BehaviourState {
         guard_escalation_taken=true;
       }
     }
+    if (externally_forced && forcing() && force_reason == "think_nudge") {
+      forced.clear();
+      force_pos = 0;
+    }
+    if (thinking && !forcing() && !cfg.think_nudge_prefix.empty() &&
+        token == cfg.think_nudge_prefix.front() &&
+        std::ranges::find(think_nudge_at, accepted_count) !=
+            think_nudge_at.end()) {
+      Force(cfg.think_nudge_prefix, "think_nudge");
+      ++think_nudge_insertions;
+      think_nudges.emplace_back();
+    }
     const bool was_thinking=thinking, was_forcing=forcing();
-    const bool prefix_forcing=was_forcing&&force_reason=="loop_transition"&&cfg.loop_transition==2;
+    const bool prefix_forcing =
+        was_forcing &&
+        (force_reason == "think_nudge" ||
+         (force_reason == "loop_transition" && cfg.loop_transition == 2));
     if(prefix_forcing && remaining>0)--remaining;
     // The redirect already selected the first close token. Continue only its
     // remaining tokens; this is not an arbitrary forced think close.
@@ -463,16 +494,39 @@ struct BehaviourState {
     }
     const auto piece=Piece(cfg,token);
     match_tail.push_back(token);
+    if (cfg.think_nudge)
+      forced_tail.push_back(was_forcing || redirected_close ||
+                            externally_forced);
     auto max_match=std::max(cfg.think_start.size(),cfg.think_end.size());
     for(const auto& seq:cfg.think_starts)max_match=std::max(max_match,seq.size());
     for(const auto& seq:cfg.think_ends)max_match=std::max(max_match,seq.size());
-    if (max_match==0) match_tail.clear();
-    else if (match_tail.size()>max_match)
-      match_tail.erase(match_tail.begin(),match_tail.end()-max_match);
+    if (max_match == 0) {
+      match_tail.clear();
+      forced_tail.clear();
+    } else {
+      if (match_tail.size() > max_match)
+        match_tail.erase(match_tail.begin(), match_tail.end() - max_match);
+      if (forced_tail.size() > max_match)
+        forced_tail.erase(forced_tail.begin(), forced_tail.end() - max_match);
+    }
     std::vector<std::uint32_t> end_match;
     if(Ends(cfg.think_end))end_match=cfg.think_end;
     for(const auto& seq:cfg.think_ends)if(seq.size()>end_match.size()&&Ends(seq))end_match=seq;
     if (!end_match.empty() && thinking) {
+      const bool natural_close =
+          forced_tail.size() >= end_match.size() &&
+          std::none_of(forced_tail.end() - end_match.size(), forced_tail.end(),
+                       [](bool forced_token) { return forced_token; });
+      for (auto& nudge : think_nudges) {
+        if (nudge.span_closed)
+          continue;
+        nudge.span_closed = true;
+        nudge.natural_close = natural_close && nudge.prefix_end != 0;
+        if (nudge.prefix_end != 0)
+          nudge.close_distance = accepted_count - nudge.prefix_end;
+        if (nudge.natural_close && nudge.close_distance <= kNudgeCloseWindow)
+          ++closed_after_nudge;
+      }
       matched_end=std::move(end_match);
       thinking=false; prefix_used=false; waiting_utf8=false;
       guard_blocked_attempts=0;guard_escalated=false;
@@ -492,6 +546,12 @@ struct BehaviourState {
       ++force_pos;
       if (!forcing()) {
         forced.clear();force_pos=0;
+        if (force_reason == "think_nudge") {
+          if (!think_nudges.empty())
+            think_nudges.back().prefix_end = accepted_count;
+          if (cfg.reasoning_budget_enabled && remaining == 0)
+            Force(cfg.budget_forced, "reasoning_budget");
+        }
         if(force_reason=="loop_transition" && cfg.loop_transition==2) {
           prefix_used=true;loop.boundary(LoopBreaker::THINK);
           if(cfg.reasoning_budget_enabled && remaining==0)
@@ -559,6 +619,14 @@ struct BehaviourState {
 [[nodiscard]] inline bool eog_closes_think(const BehaviourConfig& cfg,
                                          const BehaviourState& state) {
   return cfg.loop_eog_close && (state.prefix_used || state.guard_escalated);
+}
+[[nodiscard]] inline bool can_nudge_think(const BehaviourConfig& cfg,
+                                          const BehaviourState& state) {
+  return cfg.think_nudge && state.thinking && !state.forcing() &&
+         !eog_closes_think(cfg, state) && cfg.think_nudge_max > 0 &&
+         !cfg.think_nudge_prefix.empty() &&
+         state.think_nudge_insertions <
+             static_cast<std::uint64_t>(cfg.think_nudge_max);
 }
 } // namespace gufo::sampling
 #endif

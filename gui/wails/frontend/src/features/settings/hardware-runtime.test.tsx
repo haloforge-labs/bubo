@@ -4,7 +4,7 @@ import { coreView, mountCorePage } from '@/components/core-page-test-support'
 
 const pausedSentence = 'The NPU is paused, so the GPU handles prompts for now.'
 for (const [state, reason, wording] of [
-  ['on', null, 'NPU prefill: on'],
+  ['on', null, 'NPU prefill: On'],
   ['tripped', 'power', pausedSentence],
   ['faulted', 'fault', pausedSentence],
 ] as const) {
@@ -31,9 +31,13 @@ for (const [state, reason, wording] of [
       .element(hardware)
       .toHaveTextContent(`${runtime.chip_power.w_mean!.toLocaleString()} W`)
     await expect.element(hardware).toHaveTextContent(runtime.scheme!.name)
-    await expect.element(hardware).toHaveTextContent(runtime.scheme!.guid)
+    // The scheme's id is diagnostic text (a tooltip), never shown as words.
+    expect(hardware.element().textContent).not.toContain(runtime.scheme!.guid)
+    expect(
+      hardware.getByText(runtime.scheme!.name).element().getAttribute('title'),
+    ).toBe(runtime.scheme!.guid)
     for (const [label, value] of [
-      ['Gate holds', runtime.trips],
+      ['Guard trips', runtime.trips],
       ['HAL faults', runtime.hal_faults],
       ['WHEA events', runtime.whea_events],
       ['Invalid chunks', runtime.invalid_chunks],

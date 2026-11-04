@@ -26,8 +26,9 @@ if(WIN32)
     "${CMAKE_SOURCE_DIR}/tests/cli/contract/status_watch_process_test.py"
     --cli "$<TARGET_FILE:gufo>" --bridge "$<TARGET_FILE:status_watch_replay>"
     --artifacts "${CMAKE_BINARY_DIR}/contract-status-watch")
+  # Timing-sensitive: passes by hand on a quiet box, fails beside other load.
   set_tests_properties(status_watch_process_test PROPERTIES
-    LABELS "cpu;cli;contract;control" TIMEOUT 180)
+    LABELS "cpu;cli;contract;control;env-sensitive" RUN_SERIAL TRUE TIMEOUT 180)
 
   add_executable(npu_status_publisher_test
     "${CMAKE_SOURCE_DIR}/tests/cli/contract/npu_status_publisher_test.cpp"
@@ -51,6 +52,7 @@ if(WIN32)
     "${CMAKE_SOURCE_DIR}/src/cli/serve/openai_chat.cpp"
     "${CMAKE_SOURCE_DIR}/src/cli/serve/websocket.cpp"
     "${CMAKE_SOURCE_DIR}/src/models/gemma4/tool_syntax.cpp"
+    "${CMAKE_SOURCE_DIR}/src/models/deepseek_v4_flash/tool_calls.cpp"
     "${CMAKE_SOURCE_DIR}/src/core/sampling.cpp"
     "${CMAKE_SOURCE_DIR}/src/core/json_constraint.cpp"
     "${CMAKE_SOURCE_DIR}/src/core/json_schema_lexeme.cpp"
@@ -66,8 +68,10 @@ if(WIN32)
     "${CMAKE_SOURCE_DIR}/tests/cli/contract/serve_control_process_test.py"
     "$<TARGET_FILE:serve_control_driver>"
     "${CMAKE_BINARY_DIR}/contract-serve-control")
+  # Asserts watch gaps of at most 1 s: passes alone, misses under parallel load.
   set_tests_properties(serve_control_process_test PROPERTIES
-    LABELS "cpu;cli;contract;server;control;fake" TIMEOUT 180)
+    LABELS "cpu;cli;contract;server;control;fake;env-sensitive" RUN_SERIAL TRUE
+    TIMEOUT 180)
 endif()
 
 if(contract_pwsh)

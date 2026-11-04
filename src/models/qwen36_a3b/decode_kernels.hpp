@@ -7,13 +7,15 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "src/models/qwen38_flash_next/router_policy.hpp"
+
 /// A3B fused decode kernels for 1-8 token rows. They replace chains of small
 /// launches (norm, add, quantize, gate, GEMV, epilogue) with one launch each:
 /// at hidden 2048 a decode step is ~1000 dependent kernels, and each small
 /// one costs ~3.5 us whatever it does.
 ///
 /// Activations for Q8_0 weights use GGML's Q8_1 block layout (d = amax / 127,
-/// q = round(x / d), ds = {d, sum}) at a stride of K / 32 blocks per row;
+/// q = round(x / d), ds = {d, d*sum(q)}) at a stride of K / 32 blocks per row;
 /// weights stay in their GGUF layout. Q8_0 dot products are the MMVQ
 /// arithmetic: an exact integer sum per 8 codes, scaled by both block
 /// scales. BF16 and F32 weights take the F32 activations.
@@ -79,7 +81,8 @@ void MultiGemv(const GemvSeg* segs, int count, const Q8_1Block* xq,
 void ExpertsGated(const void* gate, const void* up, WeightKind type,
                   const Q8_1Block* xq, const float* xf, const std::int32_t* ids,
                   float* act, std::uint32_t rows, std::uint32_t used,
-                  std::uint32_t m, std::uint32_t k, hipStream_t stream);
+                  std::uint32_t m, std::uint32_t k, hipStream_t stream,
+                  bool prefill_cut = false);
 
 /// Routed and shared down projections with the MoE epilogue and the residual
 /// add fused:
@@ -95,7 +98,9 @@ void ExpertsDown(const void* down, WeightKind down_type, const void* sh_down,
                  const float* weights, const float* router,
                  std::uint32_t router_stride, std::uint32_t shared_gate,
                  float* res, std::uint32_t rows, std::uint32_t used,
-                 std::uint32_t h, std::uint32_t f, hipStream_t stream);
+                 std::uint32_t h, std::uint32_t f, hipStream_t stream,
+                 bool prefill_cut = false,
+                 qwen38_flash_next::RoutedExpertAudit* audit = nullptr);
 
 }  // namespace gufo::models::qwen36_a3b
 

@@ -26,15 +26,16 @@ struct Expected {
 };
 
 // Zero-based indices from the external reference, THINK cap 128 / ANSWER
-// cap 16.
+// cap 128 (the answer cap was 16 before 0.1.2; an answer needs 32 exact
+// repeats, so the nudge falls at 32 * period - 1 once that exceeds 511).
 constexpr std::array<Expected, 7> kExpected{{
     {1, 127, 143, 511, 527},
     {8, 127, 143, 511, 527},
     {16, 255, 271, 511, 527},
-    {19, 303, 319, -1, -1},
-    {44, 703, 719, -1, -1},
-    {64, 1023, 1039, -1, -1},
-    {128, 2047, 2063, -1, -1},
+    {19, 303, 319, 607, 623},
+    {44, 703, 719, 1407, 1423},
+    {64, 1023, 1039, 2047, 2063},
+    {128, 2047, 2063, 4095, 4111},
 }};
 
 void CheckPattern(Breaker& breaker, int period, Breaker::channel channel,
@@ -89,12 +90,12 @@ void ExactPeriods() {
       CHECK(breaker.matching.size() == 128);
       CHECK(breaker.pending.size() == 16);
       CHECK(breaker.cfg.think_max_period == 128);
-      CHECK(breaker.cfg.answer_max_period == 16);
+      CHECK(breaker.cfg.answer_max_period == 128);
       CheckPattern(
           breaker, row.period, channel,
           channel == Breaker::THINK ? row.think_nudge : row.answer_nudge,
           channel == Breaker::THINK ? row.think_force : row.answer_stop);
-      const bool detected = channel == Breaker::THINK || row.period <= 16;
+      const bool detected = true;  // both caps are 128
       CHECK(breaker.detections == (detected ? 2u : 0u));
       CHECK(breaker.nudges == (detected ? 1u : 0u));
       CHECK(breaker.forced_thinks == (channel == Breaker::THINK ? 1u : 0u));

@@ -20,6 +20,7 @@ export function ModelInfo({ entry }: { entry: CatalogueInfo }) {
         <Button
           variant="ghost"
           size="icon"
+          className="size-6 align-middle"
           aria-label={`About ${entry.display_name}`}
         >
           <InfoIcon />

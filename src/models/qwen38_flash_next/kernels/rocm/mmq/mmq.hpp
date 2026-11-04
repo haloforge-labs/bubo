@@ -1,3 +1,6 @@
+// Copyright (c) 2023-2026 The ggml authors
+// Copyright (c) 2026 Niko1221 and the Strata contributors
+// SPDX-License-Identifier: MIT
 #pragma once
 
 #include "common.hpp"
@@ -92,6 +95,7 @@ static mmq_q8_1_ds_layout mmq_get_q8_1_ds_layout(const ggml_type type_x) {
         case GGML_TYPE_Q6_K:
         case GGML_TYPE_IQ2_XXS:
         case GGML_TYPE_IQ2_XS:
+        case GGML_TYPE_IQ1_M:
         case GGML_TYPE_IQ2_S:
         case GGML_TYPE_IQ3_XXS:
         case GGML_TYPE_IQ3_S:
@@ -196,6 +200,7 @@ static constexpr __host__ __device__ tile_x_sizes mmq_get_dp4a_tile_x_sizes(ggml
         case GGML_TYPE_Q6_K:    return MMQ_DP4A_TXS_Q6_K;
         case GGML_TYPE_IQ2_XXS: return MMQ_DP4A_TXS_Q8_0;
         case GGML_TYPE_IQ2_XS:  return MMQ_DP4A_TXS_Q8_0_16;
+        case GGML_TYPE_IQ1_M:   return MMQ_DP4A_TXS_Q8_0_16;
         case GGML_TYPE_IQ2_S:   return MMQ_DP4A_TXS_Q8_0_16;
         case GGML_TYPE_IQ3_XXS: return MMQ_DP4A_TXS_Q8_0;
         case GGML_TYPE_IQ3_S:   return MMQ_DP4A_TXS_Q8_0;
@@ -243,6 +248,7 @@ static constexpr __host__ __device__ int mmq_get_mma_tile_x_k(ggml_type type) {
         case GGML_TYPE_Q6_K:    return MMQ_MMA_TILE_X_K_Q6_K;
         case GGML_TYPE_IQ2_XXS: return MMQ_MMA_TILE_X_K_Q8_0;
         case GGML_TYPE_IQ2_XS:  return MMQ_MMA_TILE_X_K_Q3_K;
+        case GGML_TYPE_IQ1_M:   return MMQ_MMA_TILE_X_K_Q3_K;
         case GGML_TYPE_IQ2_S:   return MMQ_MMA_TILE_X_K_Q3_K;
         case GGML_TYPE_IQ3_XXS: return MMQ_MMA_TILE_X_K_Q8_0;
         case GGML_TYPE_IQ3_S:   return MMQ_MMA_TILE_X_K_Q8_0;
@@ -2860,6 +2866,57 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
     }
 }
 
+template <int mmq_y, bool need_check> static __device__ __forceinline__ void load_tiles_iq1_m(
+    const char * __restrict__ x, int * __restrict__ x_tile, const int kbx0, const int i_max, const int stride) {
+    constexpr int nwarps = mmq_get_nwarps_device();
+    constexpr int warp_size = ggml_hip_get_physical_warp_size();
+#if defined(AMD_MFMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+    int * x_qs = x_tile;
+    float * x_df = (float *)(x_qs + MMQ_TILE_NE_K*2);
+#else
+    constexpr tile_x_sizes txs = MMQ_DP4A_TXS_Q8_0_16;
+    int * x_qs = x_tile;
+    float * x_df = (float *)(x_qs + txs.qs);
+#endif
+    constexpr int threads_per_row = MMQ_ITER_K / 32;
+    constexpr int nrows = warp_size / threads_per_row;
+    const int kqsx = threadIdx.x % threads_per_row;
+#pragma unroll
+    for (int i0 = 0; i0 < mmq_y; i0 += nwarps*nrows) {
+        int i = i0 + threadIdx.y*nrows + threadIdx.x/threads_per_row;
+        if (need_check) i = min(i, i_max);
+        const block_iq1_m * bxi = (const block_iq1_m *)x + kbx0 + i*stride;
+        const uint32_t packed = get_int_b4(bxi->qs, kqsx);
+#pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            const int high = bxi->qh[2*kqsx + l/2] >> (4*(l%2));
+            const int index = ((packed >> (8*l)) & 255) | ((high & 7) << 8);
+            const uint32_t grid = iq1s_grid_gpu[index];
+            const int g0 = gufo::models::qwen38_flash_next::iq_decode::ExpandIq1(grid, high & 8);
+            const int g1 = gufo::models::qwen38_flash_next::iq_decode::ExpandIq1(grid >> 4, high & 8);
+#if defined(AMD_MFMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+            x_qs[i*MMQ_MMA_TILE_X_K_Q3_K + 8*kqsx + 2*l] = g0;
+            x_qs[i*MMQ_MMA_TILE_X_K_Q3_K + 8*kqsx + 2*l+1] = g1;
+#else
+            x_qs[i*(2*MMQ_TILE_NE_K+1) + 8*kqsx + 2*l] = g0;
+            x_qs[i*(2*MMQ_TILE_NE_K+1) + 8*kqsx + 2*l+1] = g1;
+#endif
+        }
+        iq1m_scale_t scale;
+        scale.u16 = gufo::models::qwen38_flash_next::iq_decode::Iq1Half(bxi->scales);
+        const float d = __half2float(scale.f16);
+        const float d0 = d*gufo::models::qwen38_flash_next::iq_decode::Iq1Scale(bxi->scales, kqsx, 0)/8;
+        const float d1 = d*gufo::models::qwen38_flash_next::iq_decode::Iq1Scale(bxi->scales, kqsx, 1)/8;
+#if defined(AMD_MFMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+        x_df[i*MMQ_MMA_TILE_X_K_Q3_K + 2*kqsx] = d0;
+        x_df[i*MMQ_MMA_TILE_X_K_Q3_K + 2*kqsx+1] = d1;
+#else
+        x_df[i*(2*MMQ_TILE_NE_K*2/QI8_0) + i/(QI8_0/4) + 2*kqsx] = d0;
+        x_df[i*(2*MMQ_TILE_NE_K*2/QI8_0) + i/(QI8_0/4) + 2*kqsx+1] = d1;
+#endif
+    }
+}
+
 template <int mmq_y, bool need_check> static __device__ __forceinline__ void load_tiles_iq2_s(
     const char * __restrict__ x, int * __restrict__ x_tile, const int kbx0, const int i_max, const int stride) {
     constexpr int nwarps = mmq_get_nwarps_device();
@@ -3443,6 +3500,14 @@ struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_IQ2_XS> {
     static constexpr load_tiles_mmq_t load_tiles   = load_tiles_iq2_xs<mmq_y, need_check>;
     static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q8_0_16_q8_1_mma<mmq_x, mmq_y>;
     static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q8_0_16_q8_1_dp4a<mmq_x, mmq_y>;
+};
+
+template <int mmq_x, int mmq_y, bool need_check>
+struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_IQ1_M> {
+    static constexpr int vdr = VDR_IQ1_M_Q8_1_MMQ;
+    static constexpr load_tiles_mmq_t load_tiles = load_tiles_iq1_m<mmq_y, need_check>;
+    static constexpr vec_dot_mmq_t vec_dot_mma = vec_dot_q8_0_16_q8_1_mma<mmq_x, mmq_y>;
+    static constexpr vec_dot_mmq_t vec_dot_dp4a = vec_dot_q8_0_16_q8_1_dp4a<mmq_x, mmq_y>;
 };
 
 template <int mmq_x, int mmq_y, bool need_check>
@@ -4040,6 +4105,8 @@ static __global__ void mul_mat_q_stream_k_fixup(
     }
 }
 
+#include "dispatch_trace.h"
+
 struct mmq_args {
     const char * x; ggml_type type_x; const int * y; const int32_t * ids_dst; const int32_t * expert_bounds; float * dst;
     int64_t ncols_x; int64_t nrows_x; int64_t ncols_dst; int64_t stride_row_x; int64_t ncols_y; int64_t nrows_dst;
@@ -4074,6 +4141,7 @@ struct mmq_args {
     // rows and an 80-column tile spends most of its matrix-core issue on
     // padding. Zero keeps the default rule. See qfn_mmq_set_routed_tile_cols.
     int mmq_x_request;
+    qfn_mmq_dispatch_trace * telemetry = nullptr;
 };
 
 template<ggml_type type>
@@ -4128,6 +4196,17 @@ static void launch_mul_mat_q(ggml_backend_hip_context & ctx, const mmq_args & ar
     const int ntx  = (ncols_grid + mmq_x - 1) / mmq_x;
     const int ntzw = args.nchannels_y * args.nsamples_y;
     const dim3 block_nums_xy_tiling(nty, ntx, ntzw);
+
+    if (args.telemetry != nullptr) {
+        auto & trace = *args.telemetry;
+        if (args.use_stream_k || trace.count >= 4) {
+            trace.invalid = 1;
+        } else {
+            trace.dispatches[trace.count++] = {
+                static_cast<uint32_t>(mmq_x), static_cast<uint32_t>(mmq_y), block_nums_xy_tiling.x,
+                block_nums_xy_tiling.y, block_nums_xy_tiling.z, type};
+        }
+    }
 
     GGML_ASSERT(args.nchannels_y % args.nchannels_x == 0);
     GGML_ASSERT(args.nsamples_y  % args.nsamples_x  == 0);
@@ -4230,7 +4309,7 @@ static void launch_mul_mat_q(ggml_backend_hip_context & ctx, const mmq_args & ar
 
     const bool fixup_needed = ntiles_dst % block_nums_stream_k.x != 0;
 
-    ggml_hip_pool & pool = ctx.pool(id);
+    ggml_hip_pool & pool = qfn_pool_for_stream(id, stream);
     ggml_hip_pool_alloc<float> tmp_fixup(pool);
     if (fixup_needed) {
         tmp_fixup.alloc(block_nums_stream_k.x * mmq_x*mmq_y);
@@ -4408,6 +4487,7 @@ extern DECL_MMQ_CASE(GGML_TYPE_Q5_K);
 extern DECL_MMQ_CASE(GGML_TYPE_Q6_K);
 extern DECL_MMQ_CASE(GGML_TYPE_IQ2_XXS);
 extern DECL_MMQ_CASE(GGML_TYPE_IQ2_XS);
+extern DECL_MMQ_CASE(GGML_TYPE_IQ1_M);
 extern DECL_MMQ_CASE(GGML_TYPE_IQ2_S);
 extern DECL_MMQ_CASE(GGML_TYPE_IQ3_XXS);
 extern DECL_MMQ_CASE(GGML_TYPE_IQ3_S);

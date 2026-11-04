@@ -32,7 +32,14 @@ bool IsPrefix(std::span<const ContinuationToken> prefix,
 
 bool IsContinuation(SnapshotPurpose purpose) {
   return purpose == SnapshotPurpose::kContinuation ||
-         purpose == SnapshotPurpose::kBranchPoint;
+         purpose == SnapshotPurpose::kBranchPoint ||
+         purpose == SnapshotPurpose::kTailBoundary;
+}
+
+bool IsPolicySkip(SnapshotEventReason reason) {
+  return reason == SnapshotEventReason::kTailFinalNotPublished ||
+         reason == SnapshotEventReason::kBOverThirdOfBudget ||
+         reason == SnapshotEventReason::kBDepthCap;
 }
 
 // GUFO_DISK_EVICT_DOMINATED=1 (read once): a snapshot the RAM tier evicts under pressure while a longer retained, tagged entry of the same conversation
@@ -48,12 +55,15 @@ bool EvictDominatedEnabled() {
 
 int MaxRemovalPriority(SnapshotPurpose purpose) {
   switch (purpose) {
+    case SnapshotPurpose::kTailFinal:
+      return -1;
     case SnapshotPurpose::kRetry:
       return 0;
     case SnapshotPurpose::kHistory:
       return 1;
     case SnapshotPurpose::kContinuation:
     case SnapshotPurpose::kBranchPoint:
+    case SnapshotPurpose::kTailBoundary:
       return 3;
   }
   return 0;
@@ -102,6 +112,18 @@ const char* SkippedReason(SnapshotEventReason reason) {
 }
 }  // namespace
 
+struct ContinuationCache::SnapshotHistory {
+  std::vector<ContinuationToken> prompt;
+  std::vector<std::uint8_t> input_identity;
+  std::vector<ContinuationInputPrefix> input_prefixes;
+  [[nodiscard]] std::span<const std::uint8_t> InputIdentity(
+      std::size_t count) const {
+    return PrefixInputIdentity(input_identity, input_prefixes, count);
+  }
+  // Written and read only under the cache mutex after successful publication.
+  mutable std::size_t tail_boundary{0};
+};
+
 struct ContinuationCache::Entry {
   explicit Entry(std::unique_ptr<ContinuationState> model_state)
       : state(std::move(model_state)) {}
@@ -115,6 +137,9 @@ struct ContinuationCache::Entry {
   std::size_t snapshot_bytes{0};
   std::size_t stable_prefix_tokens{0};
   SnapshotPurpose purpose{SnapshotPurpose::kContinuation};
+  std::shared_ptr<const SnapshotHistory> history;
+  enum class EvictionClass { kRegular, kSuperseded };
+  EvictionClass eviction_class{EvictionClass::kRegular};
   std::uint64_t state_last_used{0};
   std::uint64_t snapshot_last_used{0};
   bool available{true};
@@ -132,6 +157,7 @@ struct ContinuationCache::Impl {
   std::size_t snapshot_capacity_bytes{0};
   std::size_t retained_snapshot_bytes{0};
   std::size_t reserved_snapshot_bytes{0};
+  std::uint64_t reserved_snapshot_host_bytes{0};
 
   /// The newest checkpoints the cache dropped or refused, with the reason. A lookup that misses over one of these prefixes reports that reason
   /// instead of prefix_changed / no_checkpoint. Touched only under `mutex`, on eviction, skip and miss paths.
@@ -155,6 +181,53 @@ struct ContinuationCache::Impl {
 
   [[nodiscard]] bool snapshot_mode() const noexcept {
     return static_cast<bool>(snapshot_support.restore);
+  }
+
+  [[nodiscard]] static bool TailContinues(const SnapshotHistory& older,
+                                          const SnapshotHistory& current,
+                                          std::size_t restore_tokens) {
+    return IsPrefix(older.prompt, current.prompt) ||
+           (older.tail_boundary != 0 && restore_tokens >= older.tail_boundary &&
+            IsPrefix(std::span<const ContinuationToken>(older.prompt)
+                         .first(older.tail_boundary),
+                     current.prompt));
+  }
+
+  // Full prompt ancestry establishes ownership across histories. Rewritten
+  // tails require the history actually restored. The policy identity at the
+  // older B excludes identical text in another namespace. A short family hash
+  // or shared earlier grid never establishes ownership.
+  [[nodiscard]] bool OwnTailEntry(
+      std::size_t candidate,
+      const std::shared_ptr<const SnapshotHistory>& history,
+      const std::shared_ptr<const SnapshotHistory>& restore_history,
+      std::size_t restore_tokens, std::size_t incoming_tokens) const {
+    const auto& entry = *entries[candidate];
+    if (!entry.valid || !entry.snapshot || !entry.history || !history ||
+        entry.purpose == SnapshotPurpose::kBranchPoint ||
+        IsBranchPoint(candidate))
+      return false;
+    if (entry.history == history)
+      return entry.purpose == SnapshotPurpose::kHistory &&
+             entry.tokens.size() < incoming_tokens;
+    const auto& older = *entry.history;
+    if (!IsPrefix(older.prompt, history->prompt) &&
+        (entry.history != restore_history ||
+         !TailContinues(older, *history, restore_tokens)))
+      return false;
+    if (older.tail_boundary != 0) {
+      if (!std::ranges::equal(older.InputIdentity(older.tail_boundary),
+                              history->InputIdentity(older.tail_boundary)))
+        return false;
+    } else if (entry.history != restore_history) {
+      return false;
+    }
+    return entry.tokens.size() == older.prompt.size() ||
+           (entry.purpose == SnapshotPurpose::kHistory &&
+            entry.tokens.size() <= restore_tokens &&
+            entry.tokens.size() < incoming_tokens) ||
+           (entry.purpose == SnapshotPurpose::kTailBoundary &&
+            entry.tokens.size() < incoming_tokens);
   }
 
   // Rank extra copies before the last useful checkpoint of a prefix family.
@@ -200,7 +273,8 @@ struct ContinuationCache::Impl {
       std::size_t source, std::span<const ContinuationToken> prompt) const {
     const auto& entry = *entries[source];
     if (entry.purpose != SnapshotPurpose::kHistory &&
-        entry.purpose != SnapshotPurpose::kContinuation)
+        entry.purpose != SnapshotPurpose::kContinuation &&
+        entry.purpose != SnapshotPurpose::kTailBoundary)
       return false;
     const auto diverges = [&](const auto& tokens, const auto& identity) {
       if (identity != entry.input_identity ||
@@ -224,6 +298,10 @@ struct ContinuationCache::Impl {
     const auto& entry = *entries[candidate];
     if (IsBranchPoint(candidate))
       return 3;
+    if (entry.eviction_class == Entry::EvictionClass::kSuperseded)
+      return -1;
+    if (entry.purpose == SnapshotPurpose::kTailFinal)
+      return 0;
     // A new continuation also makes its own earlier copies redundant. During
     // cold prefill those may all be history snapshots, so no retained
     // continuation yet exists to protect another conversation's last copy.
@@ -285,8 +363,15 @@ ContinuationCache::Lease::Lease(Lease&& other) noexcept
       restored_from_disk_(std::exchange(other.restored_from_disk_, false)),
       reserved_snapshot_bytes_(
           std::exchange(other.reserved_snapshot_bytes_, 0)),
+      reserved_snapshot_host_bytes_(
+          std::exchange(other.reserved_snapshot_host_bytes_, 0)),
+      snapshot_preserve_source_(other.snapshot_preserve_source_),
+      snapshot_own_session_only_(other.snapshot_own_session_only_),
       superseded_(std::move(other.superseded_)),
       snapshot_purpose_(other.snapshot_purpose_),
+      snapshot_history_(std::move(other.snapshot_history_)),
+      restore_history_(std::move(other.restore_history_)),
+      published_snapshots_(other.published_snapshots_),
       prompt_tokens_(std::exchange(other.prompt_tokens_, 0)),
       stable_prefix_tokens_(std::exchange(other.stable_prefix_tokens_, 0)),
       input_identity_(std::move(other.input_identity_)),
@@ -307,13 +392,21 @@ ContinuationCache::Lease& ContinuationCache::Lease::operator=(
     restore_ms_ = std::exchange(other.restore_ms_, 0.0);
     restored_from_disk_ = std::exchange(other.restored_from_disk_, false);
     reserved_snapshot_bytes_ = std::exchange(other.reserved_snapshot_bytes_, 0);
+    reserved_snapshot_host_bytes_ =
+        std::exchange(other.reserved_snapshot_host_bytes_, 0);
+    snapshot_preserve_source_ = other.snapshot_preserve_source_;
+    snapshot_own_session_only_ = other.snapshot_own_session_only_;
     superseded_ = std::move(other.superseded_);
     snapshot_purpose_ = other.snapshot_purpose_;
+    snapshot_history_ = std::move(other.snapshot_history_);
+    restore_history_ = std::move(other.restore_history_);
+    published_snapshots_ = other.published_snapshots_;
     prompt_tokens_ = std::exchange(other.prompt_tokens_, 0);
     stable_prefix_tokens_ = std::exchange(other.stable_prefix_tokens_, 0);
     input_identity_ = std::move(other.input_identity_);
     input_prefixes_ = std::move(other.input_prefixes_);
     lookup_ = std::exchange(other.lookup_, {});
+    skips_ = std::exchange(other.skips_, {});
   }
   return *this;
 }
@@ -347,7 +440,8 @@ void ContinuationCache::Lease::AdoptRestoredPrefix(std::size_t cached_tokens,
 bool ContinuationCache::Lease::TryReserveSnapshot(
     std::size_t snapshot_bytes, std::size_t token_count, bool preserve_source,
     SnapshotPurpose purpose,
-    std::span<const ContinuationToken> replacement_prefix) {
+    std::span<const ContinuationToken> replacement_prefix, bool reserve_host,
+    bool tail_boundary) {
   if (cache_ == nullptr) {
     throw std::logic_error("continuation cache lease is empty");
   }
@@ -356,16 +450,28 @@ bool ContinuationCache::Lease::TryReserveSnapshot(
         "continuation cache lease already has a snapshot reservation");
   }
   SnapshotEventReason why = SnapshotEventReason::kByteCapacity;
-  if (!cache_->ReserveSnapshot(source_index_, snapshot_bytes, token_count,
-                               preserve_source, purpose, replacement_prefix,
-                               InputIdentity(token_count), superseded_, &why)) {
+  const bool own_session_only =
+      (tail_boundary || purpose == SnapshotPurpose::kTailBoundary) &&
+      snapshot_bytes > cache_->snapshot_capacity_bytes() / 3;
+  if (!cache_->ReserveSnapshot(
+          source_index_, snapshot_bytes, token_count, preserve_source, purpose,
+          replacement_prefix, InputIdentity(token_count), superseded_, &why,
+          snapshot_history_ || reserve_host ? &reserved_snapshot_host_bytes_
+                                            : nullptr,
+          own_session_only, snapshot_history_, restore_history_,
+          cached_tokens_)) {
     ++skips_.count;
     skips_.reason = why;
+    skips_.policy_count += IsPolicySkip(why);
     cache_->ResolveRemoved(superseded_);
     return false;
   }
   reserved_snapshot_bytes_ = snapshot_bytes;
   snapshot_purpose_ = purpose;
+  snapshot_own_session_only_ = own_session_only;
+  snapshot_preserve_source_ =
+      preserve_source &&
+      (snapshot_history_ || purpose == SnapshotPurpose::kTailBoundary);
   return true;
 }
 
@@ -377,10 +483,20 @@ void ContinuationCache::Lease::SkipSnapshot(SnapshotEventReason reason,
   }
   ++skips_.count;
   skips_.reason = reason;
+  skips_.policy_count += IsPolicySkip(reason);
+  CompleteSnapshotCapture();
   cache_->SkipSnapshot(reserved_snapshot_bytes_, reason, snapshot_bytes,
                        token_count);
   reserved_snapshot_bytes_ = 0;
   cache_->ResolveRemoved(superseded_);
+}
+
+void ContinuationCache::Lease::CompleteSnapshotCapture() noexcept {
+  if (cache_ == nullptr || reserved_snapshot_host_bytes_ == 0)
+    return;
+  const std::lock_guard lock(cache_->impl_->mutex);
+  cache_->impl_->reserved_snapshot_host_bytes -= reserved_snapshot_host_bytes_;
+  reserved_snapshot_host_bytes_ = 0;
 }
 
 std::size_t ContinuationCache::Lease::Commit(
@@ -395,11 +511,23 @@ std::size_t ContinuationCache::Lease::Commit(
   const auto identity = InputIdentity(tokens.size());
   const auto live_identity = InputIdentity(live_tokens.size());
   const auto survivor = superseded_.empty() ? nullptr : snapshot;
+  auto publication_reason = SnapshotEventReason::kCaptureFailure;
+  CompleteSnapshotCapture();
   const std::size_t retained = cache_->Commit(
       index_, source_index_, reserved_snapshot_bytes_, std::move(tokens),
       std::move(snapshot), {identity.begin(), identity.end()},
       std::move(live_tokens), {live_identity.begin(), live_identity.end()},
-      true, nullptr, stable_prefix, snapshot_purpose_);
+      true, nullptr, stable_prefix, snapshot_purpose_, snapshot_history_,
+      restore_history_, cached_tokens_, &publication_reason,
+      snapshot_preserve_source_, snapshot_own_session_only_);
+  published_snapshots_ += retained != 0;
+  if (!retained && reserved_snapshot_bytes_ &&
+      (snapshot_history_ || snapshot_purpose_ == SnapshotPurpose::kTailFinal ||
+       snapshot_purpose_ == SnapshotPurpose::kTailBoundary)) {
+    ++skips_.count;
+    skips_.policy_count += IsPolicySkip(publication_reason);
+    skips_.reason = publication_reason;
+  }
   cache_->ResolveRemoved(superseded_, retained ? survivor : nullptr);
   cache_ = nullptr;
   reserved_snapshot_bytes_ = 0;
@@ -408,16 +536,32 @@ std::size_t ContinuationCache::Lease::Commit(
 
 std::size_t ContinuationCache::Lease::PublishSnapshot(
     std::vector<ContinuationToken> tokens,
-    std::shared_ptr<const ContinuationSnapshot> snapshot,
-    bool preserve_source) {
+    std::shared_ptr<const ContinuationSnapshot> snapshot, bool preserve_source,
+    const std::function<void()>& on_publish) {
   if (cache_ == nullptr)
     throw std::logic_error("continuation cache lease is empty");
   const auto identity = InputIdentity(tokens.size());
   const auto survivor = superseded_.empty() ? nullptr : snapshot;
+  auto publication_reason = SnapshotEventReason::kCaptureFailure;
+  CompleteSnapshotCapture();
   const auto retained = cache_->Commit(
       index_, source_index_, reserved_snapshot_bytes_, std::move(tokens),
       std::move(snapshot), {identity.begin(), identity.end()}, {}, {}, false,
-      preserve_source ? nullptr : &source_index_, 0, snapshot_purpose_);
+      preserve_source ? nullptr : &source_index_, 0, snapshot_purpose_,
+      snapshot_history_, restore_history_, cached_tokens_, &publication_reason,
+      snapshot_preserve_source_ ||
+          (preserve_source &&
+           (snapshot_history_ ||
+            snapshot_purpose_ == SnapshotPurpose::kTailBoundary)),
+      snapshot_own_session_only_, on_publish);
+  published_snapshots_ += retained != 0;
+  if (!retained && reserved_snapshot_bytes_ &&
+      (snapshot_history_ || snapshot_purpose_ == SnapshotPurpose::kTailFinal ||
+       snapshot_purpose_ == SnapshotPurpose::kTailBoundary)) {
+    ++skips_.count;
+    skips_.policy_count += IsPolicySkip(publication_reason);
+    skips_.reason = publication_reason;
+  }
   reserved_snapshot_bytes_ = 0;
   cache_->ResolveRemoved(superseded_, retained ? survivor : nullptr);
   return retained;
@@ -425,11 +569,25 @@ std::size_t ContinuationCache::Lease::PublishSnapshot(
 
 void ContinuationCache::Lease::Invalidate() noexcept {
   if (cache_ != nullptr) {
+    CompleteSnapshotCapture();
     cache_->Invalidate(index_, reserved_snapshot_bytes_);
     cache_->ResolveRemoved(superseded_);
     cache_ = nullptr;
     reserved_snapshot_bytes_ = 0;
   }
+}
+
+std::size_t ContinuationCache::Lease::snapshot_capacity_bytes() const noexcept {
+  return cache_ ? cache_->snapshot_capacity_bytes() : 0;
+}
+
+void ContinuationCache::Lease::BeginTailSnapshotHistory(
+    std::span<const ContinuationToken> prompt) {
+  auto history = std::make_shared<SnapshotHistory>();
+  history->prompt.assign(prompt.begin(), prompt.end());
+  history->input_identity = input_identity_;
+  history->input_prefixes = input_prefixes_;
+  snapshot_history_ = std::move(history);
 }
 
 ContinuationCache::ContinuationCache(std::size_t capacity,
@@ -694,7 +852,10 @@ ContinuationCache::Lease ContinuationCache::Acquire(
       entry.live_identity.clear();
 
       std::shared_ptr<const ContinuationSnapshot> snapshot;
+      std::shared_ptr<const SnapshotHistory> restore_history;
       if (impl_->snapshot_mode()) {
+        if (source < impl_->entries.size())
+          restore_history = impl_->entries[source]->history;
         if (cache_hit && !live_hit) {
           auto& source_entry = *impl_->entries[source];
           snapshot = source_entry.snapshot;
@@ -766,6 +927,7 @@ ContinuationCache::Lease ContinuationCache::Acquire(
                                    input_prefixes.end());
       lease.prompt_tokens_ = prompt.size();
       lease.stable_prefix_tokens_ = stable_prefix_tokens;
+      lease.restore_history_ = std::move(restore_history);
       lease.lookup_ = lookup;
       return lease;
     }
@@ -907,7 +1069,11 @@ bool ContinuationCache::ReserveSnapshot(
     std::span<const ContinuationToken> replacement_prefix,
     std::span<const std::uint8_t> input_identity,
     std::vector<std::shared_ptr<const ContinuationSnapshot>>& superseded,
-    SnapshotEventReason* skip_reason) {
+    SnapshotEventReason* skip_reason, std::uint64_t* reserved_host_bytes,
+    bool own_session_only,
+    const std::shared_ptr<const SnapshotHistory>& history,
+    const std::shared_ptr<const SnapshotHistory>& restore_history,
+    std::size_t restore_tokens) {
   std::vector<std::shared_ptr<const ContinuationSnapshot>> removed_snapshots;
   // (evicted snapshot, retained longer entry that extends it): see EvictDominatedEnabled.
   std::vector<std::pair<std::shared_ptr<const ContinuationSnapshot>,
@@ -941,6 +1107,12 @@ bool ContinuationCache::ReserveSnapshot(
   };
   {
     const std::lock_guard<std::mutex> lock(impl_->mutex);
+    const auto eligible = [&](std::size_t candidate) {
+      return !own_session_only ||
+             (candidate != source_index &&
+              impl_->OwnTailEntry(candidate, history, restore_history,
+                                  restore_tokens, token_count));
+    };
     const auto make_event = [&](SnapshotEventAction action,
                                 SnapshotEventReason reason, std::size_t bytes,
                                 std::size_t tokens) {
@@ -982,20 +1154,47 @@ bool ContinuationCache::ReserveSnapshot(
     const std::uint64_t floor_shortfall = [&]() -> std::uint64_t {
       const auto& support = impl_->snapshot_support;
       if (support.host_floor_bytes == 0 || !support.host_available_bytes) return 0;
+      // Only active-tail captures opt into changed admission. Pending copies
+      // have not reduced the actual reading yet; allocated copies have.
+      const auto pending_host =
+          reserved_host_bytes ? impl_->reserved_snapshot_host_bytes : 0;
       // Only a checkpoint the runner reports as device-resident (host part below its payload) can be exempt; a host-resident payload of any
       // size keeps the floor it was made for.
       if (host_bytes < snapshot_bytes && host_bytes <= kFloorExemptHostBytes) {
         std::uint64_t retained_host = 0;
         for (std::size_t i = impl_->state_count; i < impl_->entries.size(); ++i)
           if (impl_->entries[i]->valid) retained_host += entry_host_bytes(*impl_->entries[i]);
-        if (retained_host + host_bytes <= kFloorExemptRetainedHostBytes) return 0;
+        if (retained_host + host_bytes + pending_host <=
+            kFloorExemptRetainedHostBytes)
+          return 0;
       }
-      const std::uint64_t available = support.host_available_bytes();
+      const auto actual_available = support.host_available_bytes();
+      const std::uint64_t available =
+          actual_available > pending_host ? actual_available - pending_host : 0;
       const std::uint64_t needed = support.host_floor_bytes + host_bytes;
       return available < needed ? needed - available : 0;
     }();
     std::uint64_t floor_evicted = 0;
-    if (!IsContinuation(purpose) &&
+    if (purpose == SnapshotPurpose::kTailFinal) {
+      // This low-value retry must fit both budgets without reclaiming even a
+      // superseded record. Recheck record capacity again at publication.
+      const bool free_record = std::ranges::any_of(
+          impl_->entries.begin() + impl_->state_count, impl_->entries.end(),
+          [](const auto& entry) { return !entry->valid; });
+      if (fits() && free_record && floor_shortfall == 0) {
+        impl_->reserved_snapshot_bytes += snapshot_bytes;
+        admitted = true;
+      } else {
+        events.push_back(
+            make_event(SnapshotEventAction::kSkipped,
+                       !fits() || !free_record
+                           ? SnapshotEventReason::kTailFinalNotPublished
+                           : SnapshotEventReason::kHostMemoryFloor,
+                       snapshot_bytes, token_count));
+      }
+    }
+    const bool evicting_admission = purpose != SnapshotPurpose::kTailFinal;
+    if (evicting_admission && !IsContinuation(purpose) &&
         std::ranges::none_of(impl_->entries.begin() + impl_->state_count,
                              impl_->entries.end(),
                              [](const auto& entry) { return !entry->valid; }) &&
@@ -1010,7 +1209,7 @@ bool ContinuationCache::ReserveSnapshot(
                                   SnapshotEventReason::kEntryCapacity,
                                   snapshot_bytes, token_count));
       impl_->AddTombstone(replacement_prefix, input_identity, SkippedReason(SnapshotEventReason::kEntryCapacity));
-    } else {
+    } else if (evicting_admission) {
       // host_only: only the floor is short, so only an entry that holds its payload in host memory is worth evicting.
       const auto oldest_snapshot = [&](bool allow_source, bool host_only = false) {
         std::size_t selected = impl_->entries.size();
@@ -1021,7 +1220,7 @@ bool ContinuationCache::ReserveSnapshot(
           const auto& entry = *impl_->entries[candidate];
           if (!entry.valid || entry.snapshot == nullptr ||
               (!allow_source && candidate == source_index) ||
-              (host_only && device_resident(entry))) {
+              (host_only && device_resident(entry)) || !eligible(candidate)) {
             continue;
           }
           const int rank = priority_for(candidate);
@@ -1038,7 +1237,7 @@ bool ContinuationCache::ReserveSnapshot(
       };
 
       const auto can_replace_source = [&] {
-        if (preserve_source || !IsContinuation(purpose) ||
+        if (own_session_only || preserve_source || !IsContinuation(purpose) ||
             source_index >= impl_->entries.size() || replacement_prefix.empty())
           return false;
         const auto& source = *impl_->entries[source_index];
@@ -1056,7 +1255,8 @@ bool ContinuationCache::ReserveSnapshot(
         for (std::size_t candidate = impl_->state_count;
              candidate < impl_->entries.size(); ++candidate) {
           const auto& entry = *impl_->entries[candidate];
-          if (candidate != source_index && entry.valid && entry.snapshot &&
+          if (candidate != source_index && eligible(candidate) && entry.valid &&
+              entry.snapshot &&
               std::ranges::equal(entry.tokens, replacement_prefix) &&
               std::ranges::equal(entry.input_identity, input_identity)) {
             exact = candidate;
@@ -1110,7 +1310,7 @@ bool ContinuationCache::ReserveSnapshot(
                     SnapshotPersistence::kFailed ||
                 peer.snapshot->persistence->state.load() ==
                     SnapshotPersistence::kAbandoned ||
-                // Continuation compatibility: agent clients re-render the previous assistant turn, so a
+                // Pre-data amendment (operator 16:1x, multi-slot's L1 finding): agent clients re-render the previous assistant turn, so a
                 // whole-prompt (live-frontier) entry ends past the next prompt's divergence and cannot stand in for the shorter stable-prefix record.
                 // Whole-prompt entries carry stable_prefix_tokens != 0 (continuation_cache.cpp: only tokens.size() == prompt_tokens_ gets it); the
                 // covering peer must be a boundary entry (stable_prefix_tokens == 0).
@@ -1140,6 +1340,7 @@ bool ContinuationCache::ReserveSnapshot(
         entry.tokens.clear();
         entry.snapshot_bytes = 0;
         entry.valid = false;
+        entry.history.reset();
         impl_->retained_snapshot_bytes -= removed_bytes;
         events.push_back(removal_event);
       };
@@ -1151,11 +1352,28 @@ bool ContinuationCache::ReserveSnapshot(
           const auto& entry = *impl_->entries[i];
           // A preserved source is never evicted below, so it cannot cover the shortfall.
           if (preserve_source && i == source_index) continue;
-          if (entry.valid && entry.snapshot != nullptr && priority_for(i) <= max_priority && !device_resident(entry))
+          if (entry.valid && entry.snapshot != nullptr && eligible(i) &&
+              priority_for(i) <= max_priority && !device_resident(entry))
             evictable_host += entry_host_bytes(entry);
         }
       const bool floor_reachable = evictable_host >= floor_shortfall;
-      while (floor_reachable && can_fit_after_eviction && (!fits() || floor_evicted < floor_shortfall)) {
+      // A large B must not partially clear its own history and then discover
+      // that another session or the protected source would also have to go.
+      const bool bytes_reachable = [&] {
+        if (!own_session_only)
+          return true;
+        if (!can_fit_after_eviction)
+          return false;
+        auto protected_bytes = impl_->retained_snapshot_bytes;
+        for (std::size_t i = impl_->state_count; i < impl_->entries.size(); ++i)
+          if (eligible(i))
+            protected_bytes -= impl_->entries[i]->snapshot_bytes;
+        return protected_bytes <= impl_->snapshot_capacity_bytes -
+                                      impl_->reserved_snapshot_bytes -
+                                      snapshot_bytes;
+      }();
+      while (floor_reachable && bytes_reachable && can_fit_after_eviction &&
+             (!fits() || floor_evicted < floor_shortfall)) {
         if (exact < impl_->entries.size() && impl_->entries[exact]->valid) {
           if (impl_->entries[exact]->purpose == SnapshotPurpose::kBranchPoint)
             purpose = SnapshotPurpose::kBranchPoint;
@@ -1198,11 +1416,18 @@ bool ContinuationCache::ReserveSnapshot(
         skipped_event.rank = max_priority;
         std::size_t evictable = 0;
         for (std::size_t i = impl_->state_count; i < impl_->entries.size(); ++i)
-          if (impl_->entries[i]->valid && impl_->entries[i]->snapshot != nullptr && priority_for(i) <= max_priority) ++evictable;
+          if (impl_->entries[i]->valid &&
+              impl_->entries[i]->snapshot != nullptr && eligible(i) &&
+              priority_for(i) <= max_priority)
+            ++evictable;
         skipped_event.stable_prefix_tokens = evictable;
         events.push_back(skipped_event);
         impl_->AddTombstone(replacement_prefix, input_identity, SkippedReason(skipped_event.reason));
       }
+    }
+    if (admitted && reserved_host_bytes) {
+      *reserved_host_bytes = host_bytes;
+      impl_->reserved_snapshot_host_bytes += host_bytes;
     }
   }
   for (auto& [old, survivor] : dominated_snapshots) {
@@ -1253,7 +1478,12 @@ std::size_t ContinuationCache::Commit(
     std::vector<ContinuationToken> live_tokens,
     std::vector<std::uint8_t> live_identity, bool release_state,
     std::size_t* published_index, std::size_t stable_prefix_tokens,
-    SnapshotPurpose purpose) {
+    SnapshotPurpose purpose,
+    const std::shared_ptr<const SnapshotHistory>& history,
+    const std::shared_ptr<const SnapshotHistory>& restore_history,
+    std::size_t restore_tokens, SnapshotEventReason* publication_skip_reason,
+    bool preserve_source, bool own_session_only,
+    const std::function<void()>& on_publish) {
   const std::size_t token_count = tokens.size();
   const int max_priority = MaxRemovalPriority(purpose);
   const auto incoming = IsContinuation(purpose)
@@ -1264,6 +1494,9 @@ std::size_t ContinuationCache::Commit(
   };
   const std::size_t snapshot_bytes =
       snapshot != nullptr ? snapshot->PayloadBytes() : 0;
+  const auto prepared_persistence =
+      purpose == SnapshotPurpose::kTailFinal && snapshot ? snapshot->persistence
+                                                         : nullptr;
   SnapshotEventReason skip_reason = SnapshotEventReason::kCaptureFailure;
   bool retain_snapshot = impl_->snapshot_mode() && snapshot != nullptr &&
                          !tokens.empty() && reservation_bytes != 0 &&
@@ -1286,6 +1519,12 @@ std::size_t ContinuationCache::Commit(
   std::size_t retained_bytes = 0;
   {
     const std::lock_guard<std::mutex> lock(impl_->mutex);
+    const auto eligible = [&](std::size_t candidate) {
+      return !own_session_only ||
+             (candidate != source_index &&
+              impl_->OwnTailEntry(candidate, history, restore_history,
+                                  restore_tokens, token_count));
+    };
     if (reservation_bytes <= impl_->reserved_snapshot_bytes) {
       impl_->reserved_snapshot_bytes -= reservation_bytes;
     } else {
@@ -1322,7 +1561,9 @@ std::size_t ContinuationCache::Commit(
         for (std::size_t candidate = impl_->state_count;
              candidate < impl_->entries.size(); ++candidate) {
           const auto& entry = *impl_->entries[candidate];
-          if (entry.valid && entry.tokens == tokens &&
+          if (purpose != SnapshotPurpose::kTailFinal && eligible(candidate) &&
+              entry.valid && (!preserve_source || candidate != source_index) &&
+              entry.tokens == tokens &&
               entry.input_identity == input_identity) {
             target = candidate;
             exact_replacement = true;
@@ -1338,7 +1579,7 @@ std::size_t ContinuationCache::Commit(
             }
           }
         }
-        if (target == no_entry) {
+        if (target == no_entry && purpose != SnapshotPurpose::kTailFinal) {
           // An edited branch can replace its old, incompatible tail before
           // evicting checkpoints of the shared prefix. This keeps a new stable
           // boundary and complete prompt within the same bounded entry pool.
@@ -1350,7 +1591,7 @@ std::size_t ContinuationCache::Commit(
               const auto& entry = *impl_->entries[candidate];
               if (!source.valid || source.tokens.empty() ||
                   !IsPrefix(source.tokens, tokens) || !entry.valid ||
-                  candidate == source_index ||
+                  candidate == source_index || !eligible(candidate) ||
                   entry.input_identity != input_identity ||
                   entry.tokens.size() <= source.tokens.size() ||
                   IsPrefix(entry.tokens, tokens) ||
@@ -1364,17 +1605,20 @@ std::size_t ContinuationCache::Commit(
             }
           }
         }
-        if (target == no_entry) {
+        if (target == no_entry && purpose != SnapshotPurpose::kTailFinal) {
           std::uint64_t oldest = std::numeric_limits<std::uint64_t>::max();
           int priority = 4;
           for (std::size_t candidate = impl_->state_count;
                candidate < impl_->entries.size(); ++candidate) {
             if (candidate == source_index &&
-                (impl_->entries.size() - impl_->state_count > 1 ||
+                (preserve_source ||
+                 impl_->entries.size() - impl_->state_count > 1 ||
                  !IsContinuation(purpose))) {
               continue;
             }
             const auto& entry = *impl_->entries[candidate];
+            if (!eligible(candidate))
+              continue;
             const int rank = priority_for(candidate);
             if (rank > max_priority)
               continue;
@@ -1387,8 +1631,8 @@ std::size_t ContinuationCache::Commit(
           }
           last_copy_eviction = priority == 3;
         }
-        if (last_copy_eviction && IsContinuation(purpose) &&
-            source_index < impl_->entries.size()) {
+        if (!own_session_only && !preserve_source && last_copy_eviction &&
+            IsContinuation(purpose) && source_index < impl_->entries.size()) {
           const auto& source = *impl_->entries[source_index];
           if (source.valid && priority_for(source_index) < 3 &&
               source.input_identity == input_identity &&
@@ -1398,7 +1642,9 @@ std::size_t ContinuationCache::Commit(
         }
         if (target == no_entry) {
           retain_snapshot = false;
-          skip_reason = SnapshotEventReason::kEntryCapacity;
+          skip_reason = purpose == SnapshotPurpose::kTailFinal
+                            ? SnapshotEventReason::kTailFinalNotPublished
+                            : SnapshotEventReason::kEntryCapacity;
           // Optional copies cannot displace a last useful checkpoint, even
           // when another publication consumed a free record after reservation.
         }
@@ -1419,6 +1665,7 @@ std::size_t ContinuationCache::Commit(
             snapshot_entry.tokens.clear();
             snapshot_entry.snapshot_bytes = 0;
             snapshot_entry.valid = false;
+            snapshot_entry.history.reset();
             events.push_back(make_event(
                 SnapshotEventAction::kRemoved,
                 exact_replacement ? SnapshotEventReason::kExactReplacement
@@ -1432,6 +1679,16 @@ std::size_t ContinuationCache::Commit(
             retain_snapshot = false;
             skip_reason = SnapshotEventReason::kReservationMismatch;
           } else {
+            // Prepared final persistence is attached but unoffered. Offer it
+            // only after every publication check succeeds, while peer removal
+            // and idle sourcing are excluded by this same metadata mutex.
+            if (on_publish) {
+              try {
+                on_publish();
+              } catch (...) {
+                // Optional persistence cannot fail an admitted RAM copy.
+              }
+            }
             snapshot_entry.tokens = std::move(tokens);
             snapshot_entry.input_identity = std::move(input_identity);
             snapshot_entry.snapshot = std::move(retained_snapshot);
@@ -1439,12 +1696,40 @@ std::size_t ContinuationCache::Commit(
             snapshot_entry.stable_prefix_tokens = stable_prefix_tokens;
             snapshot_entry.purpose =
                 learned ? SnapshotPurpose::kBranchPoint : purpose;
+            snapshot_entry.history = history;
+            snapshot_entry.eviction_class = Entry::EvictionClass::kRegular;
             snapshot_entry.valid = !snapshot_entry.tokens.empty();
             snapshot_entry.snapshot_last_used = ++impl_->clock;
             impl_->retained_snapshot_bytes += snapshot_bytes;
             retained_bytes = snapshot_bytes;
             if (published_index)
               *published_index = target;
+            if (purpose == SnapshotPurpose::kTailBoundary && history)
+              history->tail_boundary = token_count;
+            if (purpose == SnapshotPurpose::kTailBoundary && history &&
+                restore_history && history != restore_history &&
+                Impl::TailContinues(*restore_history, *history,
+                                    restore_tokens)) {
+              // Full ancestry or a restore at the previous B identifies this
+              // continuation, including rewritten framing inside the old tail.
+              // A shared earlier grid alone cannot demote its owner's session.
+              for (std::size_t candidate = impl_->state_count;
+                   candidate < impl_->entries.size(); ++candidate) {
+                auto& older = *impl_->entries[candidate];
+                if (!older.valid || older.history != restore_history ||
+                    impl_->IsBranchPoint(candidate))
+                  continue;
+                const bool old_final =
+                    older.tokens.size() == restore_history->prompt.size();
+                const bool old_grid =
+                    older.purpose == SnapshotPurpose::kHistory &&
+                    older.tokens.size() <= restore_tokens &&
+                    older.tokens.size() < token_count;
+                if (old_final || old_grid ||
+                    older.purpose == SnapshotPurpose::kTailBoundary)
+                  older.eviction_class = Entry::EvictionClass::kSuperseded;
+              }
+            }
           }
         }
         if (!retain_snapshot) {
@@ -1467,6 +1752,11 @@ std::size_t ContinuationCache::Commit(
       state_entry.state_last_used = ++impl_->clock;
     }
   }
+  if (!retained_bytes && prepared_persistence) {
+    unsigned unoffered = SnapshotPersistence::kUnoffered;
+    prepared_persistence->state.compare_exchange_strong(
+        unoffered, SnapshotPersistence::kAbandoned);
+  }
   ResolveRemoved(removed_snapshots, retained_bytes ? snapshot : nullptr);
   // Tagged before publication, but refused by byte/entry admission.
   if (!retained_bytes && snapshot && impl_->snapshot_support.on_evict) {
@@ -1475,6 +1765,8 @@ std::size_t ContinuationCache::Commit(
   }
   EmitSnapshotEvents(impl_->snapshot_support.on_event, events);
   impl_->condition.notify_all();
+  if (publication_skip_reason && retained_bytes == 0)
+    *publication_skip_reason = skip_reason;
   return retained_bytes;
 }
 

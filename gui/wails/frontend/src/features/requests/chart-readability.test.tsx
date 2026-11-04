@@ -38,13 +38,14 @@ test('TTFT uses seconds and whole milliseconds with one copy of each fact', asyn
   expect(small).toBeTruthy()
 })
 
-test('request order separates every recorded completion and is labeled', async () => {
+test('request order separates every recorded completion and is labeled once for all charts', async () => {
   await render(<RequestCharts view={walkView()} />)
   const chart = page.getByRole('figure', {
     name: 'Time to first token per completed request',
   })
   await expect.element(chart.getByRole('button').first()).toBeVisible()
-  expect(chart.element().textContent).toContain('Request order')
+  await expect.element(page.getByText(/Oldest → newest/)).toBeVisible()
+  expect(chart.element().textContent).not.toContain('Request order')
   const dots = [...chart.element().querySelectorAll('circle[data-request-id]')]
   const positions = dots.map((p) => Number(p.getAttribute('cx')))
   expect(new Set(positions).size).toBe(dots.length)

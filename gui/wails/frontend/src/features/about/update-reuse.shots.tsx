@@ -26,7 +26,7 @@ test('Update reuse published 0.1.0 to reviewed 0.1.1 update', () => {
     view,
     prepare: async () => {
       await commands.captureFeature('about', 'update-reuse-offer')
-      await page.getByText('Update to 0.1.1', { exact: true }).click()
+      await page.getByText('Release notes for 0.1.1', { exact: true }).click()
       await expect
         .element(page.getByText(release.notes.summary, { exact: true }))
         .toBeVisible()

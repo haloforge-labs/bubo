@@ -1656,10 +1656,302 @@ void CheckIqRaggedDefault(const IqFormat& format, bool pair) {
     CheckHip(hipFree(du), "ragged IQ up free");
 }
 
+// pf-iq-pair: the register-fed IQ gate/up pair kernel (RoutedIqPairGatedF16Gemm, the
+// gate/up route of GUFO_ROUTED_WMMA_IQ=2) at the model shape: hidden 2560, ff 640,
+// 512 experts, top-10, 128-row pair tiles. Acceptance, per type and case:
+//   1. equal to the current route (RoutedGatedF16Gemm, value 1) in every routed output,
+//      value for value (either sign of zero): same decoded weights, same K order of the
+//      WMMA chain, same epilogue (iq_pair_decode.hpp); kPairMaxDiffering = 0;
+//   2. on the sampled outputs, max |pair - F64| <= kPairErrorRatio (1.5) x the current
+//      route's max |route1 - F64| (+ 1e-7) and < 2e-3 x the sample's max |F64| (the Q4_K
+//      reference bound of CheckIqError);
+//   3. every routed row written (no poison left), the guard after the buffer untouched;
+//   4. row independence: 4096 tokens as one chunk and as two (1536 + 2560 tokens, each
+//      compacted on its own) give every token the same F16 bits.
+// Cases: 1023, 1024, 1025 and 4096 tokens x 10 slots, uniform and skewed (u^2, hot
+// experts get several tiles) routing; experts 64..127 are never routed (empty).
+constexpr std::size_t kPairExperts = 512, kPairUsed = 10, kPairHidden = 2560,
+                      kPairFf = 640;
+constexpr double kPairErrorRatio = 1.5;
+constexpr std::size_t kPairMaxDiffering = 0;
+
+std::vector<std::uint8_t> MakeIqPacked(const IqFormat& format, std::size_t rows,
+                                       std::size_t k, std::uint32_t seed) {
+  const std::size_t row_bytes = k / format.block_elements * format.block_bytes;
+  std::vector<std::uint8_t> packed(rows * row_bytes);
+  for (std::size_t i = 0; i + 4 <= packed.size(); i += 4) {
+    const std::uint32_t word = NextRandom(&seed);
+    std::memcpy(packed.data() + i, &word, 4);
+  }
+  for (std::size_t b = 0; b < packed.size() / format.block_bytes; ++b) {
+    const __half scale = __float2half(
+        format.block_scale * (0.75F + (NextRandom(&seed) & 255U) / 512.0F));
+    std::memcpy(packed.data() + b * format.block_bytes, &scale, sizeof(scale));
+  }
+  return packed;
+}
+
+std::vector<std::int32_t> MakePairIds(std::size_t tokens, bool skewed,
+                                      std::uint32_t seed) {
+  std::vector<std::int32_t> ids(tokens * kPairUsed);
+  for (std::size_t t = 0; t < tokens; ++t) {
+    for (std::size_t s = 0; s < kPairUsed; ++s) {
+      for (;;) {
+        const double u = static_cast<double>(NextRandom(&seed) >> 8) / 16777216.0;
+        const auto e = static_cast<std::int32_t>(std::min<double>(
+            kPairExperts - 1, kPairExperts * (skewed ? u * u : u)));
+        bool taken = e >= 64 && e < 128;
+        for (std::size_t p = 0; p < s; ++p)
+          taken = taken || ids[t * kPairUsed + p] == e;
+        if (!taken) {
+          ids[t * kPairUsed + s] = e;
+          break;
+        }
+      }
+    }
+  }
+  return ids;
+}
+
+/// Gate/up over `tokens` rows of dx (device F16 [tokens][hidden]) with routing `ids`:
+/// the pair kernel or the current route (RoutedGatedF16Gemm with `probe`, -1 = its
+/// default dispatch); output [slots][ff] as F16.
+std::vector<__half> RunPairGateUp(bool pair2, const IqFormat& format,
+                                  const std::uint8_t* dg, const std::uint8_t* du,
+                                  const __half* dx, const std::vector<std::int32_t>& ids,
+                                  std::size_t tokens, int probe = -1) {
+  constexpr std::size_t guard = 64;
+  const std::size_t slots = tokens * kPairUsed;
+  std::vector<std::uint32_t> counts(kPairExperts, 0);
+  for (const auto e : ids)
+    ++counts[e];
+  std::vector<std::int32_t> tiles;
+  for (std::size_t e = 0; e < kPairExperts; ++e)
+    for (std::uint32_t j = 0; j < (counts[e] + 127) / 128; ++j)
+      tiles.push_back(static_cast<std::int32_t>(e | (j << 16)));
+  auto* di = Upload(ids);
+  auto* dc = Upload(counts);
+  const auto compact = q::RoutedCompactRows(slots, kPairExperts);
+  auto* db = Upload(std::vector<std::int32_t>(kPairExperts + 1));
+  auto* cursors = Upload(std::vector<std::int32_t>(kPairExperts));
+  auto* rt = Upload(std::vector<std::int32_t>(compact));
+  auto* rs = Upload(std::vector<std::int32_t>(compact));
+  q::RoutedCompact(di, dc, db, cursors, rt, rs, static_cast<std::uint32_t>(tokens),
+                   kPairUsed, kPairExperts, nullptr);
+  auto* dt = Upload(tiles);
+  const __half poison = __float2half(-77.0F);
+  auto* dout = Upload(std::vector<__half>(slots * kPairFf + guard, poison));
+  q::RoutedIqSetProbe(pair2 ? -1 : probe, pair2 || probe < 0 ? -1 : 0);
+  const bool ok =
+      pair2 ? q::RoutedIqPairGatedF16Gemm(dg, du, format.type, dx, dt, tiles.size(),
+                                          128, db, rt, rs, dout, kPairFf,
+                                          kPairHidden, nullptr)
+            : q::RoutedGatedF16Gemm(dg, du, format.type, dx, dt, tiles.size(), 128,
+                                    db, rt, rs, dout, kPairFf, kPairHidden, nullptr);
+  q::RoutedIqSetProbe(-1, -1);
+  if (!ok)
+    throw std::runtime_error(std::string(format.name) +
+                             (pair2 ? " pair kernel" : " current route") +
+                             " rejected the model shape");
+  CheckHip(hipGetLastError(), "IQ pair launch");
+  CheckHip(hipDeviceSynchronize(), "IQ pair sync");
+  const auto out = Download(dout, slots * kPairFf + guard);
+  for (std::size_t i = 0; i < guard; ++i)
+    if (__half2float(out[slots * kPairFf + i]) != __half2float(poison))
+      throw std::runtime_error(std::string(format.name) + " pair output guard overwritten");
+  for (std::size_t i = 0; i < slots * kPairFf; ++i)
+    if (__half2float(out[i]) == __half2float(poison) || !std::isfinite(__half2float(out[i])))
+      throw std::runtime_error(std::string(format.name) +
+                               " pair output row not written or nonfinite");
+  for (void* p : {static_cast<void*>(di), static_cast<void*>(dc),
+                  static_cast<void*>(db), static_cast<void*>(cursors),
+                  static_cast<void*>(rt), static_cast<void*>(rs),
+                  static_cast<void*>(dt), static_cast<void*>(dout)})
+    CheckHip(hipFree(p), "IQ pair free");
+  return std::vector<__half>(out.begin(), out.begin() + slots * kPairFf);
+}
+
+std::size_t ValueDiffers(const __half* a, const __half* b, std::size_t n) {
+  std::size_t differing = 0;
+  for (std::size_t i = 0; i < n; ++i)
+    differing += __half2float(a[i]) != __half2float(b[i]);
+  return differing;
+}
+
+void CheckIqPair2(const IqFormat& format) {
+  const std::size_t row_bytes =
+      kPairHidden / format.block_elements * format.block_bytes;
+  std::uint32_t seed = 0x1A9A1200U + static_cast<std::uint32_t>(format.type);
+  const auto gate = MakeIqPacked(format, kPairExperts * kPairFf, kPairHidden, seed);
+  const auto up =
+      MakeIqPacked(format, kPairExperts * kPairFf, kPairHidden, seed ^ 0x5EED5EEDU);
+  constexpr std::size_t kMaxTokens = 4096;
+  std::vector<__half> x(kMaxTokens * kPairHidden);
+  for (auto& v : x)
+    v = __float2half(Uniform(&seed, 0.04F));
+  auto* dg = Upload(gate);
+  auto* du = Upload(up);
+  auto* dx = Upload(x);
+  std::vector<float> gate_row(kPairHidden), up_row(kPairHidden);
+  for (const bool skewed : {false, true}) {
+    for (const std::size_t tokens : {std::size_t(1023), std::size_t(1024),
+                                     std::size_t(1025), kMaxTokens}) {
+      const auto ids = MakePairIds(tokens, skewed, seed ^ static_cast<std::uint32_t>(tokens));
+      const std::size_t slots = tokens * kPairUsed;
+      const auto route1 = RunPairGateUp(false, format, dg, du, dx, ids, tokens);
+      const auto pair = RunPairGateUp(true, format, dg, du, dx, ids, tokens);
+      const std::size_t differing = ValueDiffers(pair.data(), route1.data(), pair.size());
+      // F64 reference on 1024 sampled (slot, row) outputs, rows dequantized on demand.
+      double max_ref = 0, pair_error = 0, route1_error = 0;
+      std::uint32_t pick = seed ^ 0x51A7E5U ^ static_cast<std::uint32_t>(tokens);
+      for (int sample = 0; sample < 1024; ++sample) {
+        const std::size_t slot = NextRandom(&pick) % slots;
+        const std::size_t row = NextRandom(&pick) % kPairFf;
+        const std::size_t token = slot / kPairUsed;
+        const auto offset = (static_cast<std::size_t>(ids[slot]) * kPairFf + row) * row_bytes;
+        format.dequantize(gate.data() + offset, gate_row.data(), kPairHidden);
+        format.dequantize(up.data() + offset, up_row.data(), kPairHidden);
+        double g = 0, u = 0;
+        for (std::size_t c = 0; c < kPairHidden; ++c) {
+          const double xv = __half2float(x[token * kPairHidden + c]);
+          g += static_cast<double>(gate_row[c]) * xv;
+          u += static_cast<double>(up_row[c]) * xv;
+        }
+        const double ref = u * g / (1.0 + std::exp(-g));
+        const std::size_t index = slot * kPairFf + row;
+        max_ref = std::max(max_ref, std::abs(ref));
+        pair_error = std::max(pair_error, std::abs(__half2float(pair[index]) - ref));
+        route1_error = std::max(route1_error, std::abs(__half2float(route1[index]) - ref));
+      }
+      std::cout << "IQ PAIR2 " << format.name << " tokens=" << tokens
+                << (skewed ? " skewed" : " uniform") << " differing_vs_route1="
+                << differing << "/" << pair.size()
+                << " pair/F64=" << pair_error / max_ref
+                << " route1/F64=" << route1_error / max_ref << '\n';
+      if (differing > kPairMaxDiffering)
+        throw std::runtime_error(std::string(format.name) +
+                                 " pair kernel differs from the current route");
+      if (pair_error > kPairErrorRatio * route1_error + 1e-7 ||
+          pair_error >= 2e-3 * max_ref)
+        throw std::runtime_error(std::string(format.name) +
+                                 " pair kernel exceeds the F64 reference bound");
+      if (tokens == kMaxTokens) {
+        // The bench's register-sign-mask variant (probe 65) is held to the same equality.
+        const auto masks = RunPairGateUp(false, format, dg, du, dx, ids, tokens, 65);
+        if (ValueDiffers(masks.data(), route1.data(), masks.size()) > kPairMaxDiffering)
+          throw std::runtime_error(std::string(format.name) +
+                                   " pair kernel probe 65 differs from the current route");
+        // Row independence: the same tokens as two chunks, each compacted alone.
+        constexpr std::size_t kSplit = 1536;
+        const std::vector<std::int32_t> ids_a(ids.begin(), ids.begin() + kSplit * kPairUsed);
+        const std::vector<std::int32_t> ids_b(ids.begin() + kSplit * kPairUsed, ids.end());
+        const auto part_a = RunPairGateUp(true, format, dg, du, dx, ids_a, kSplit);
+        const auto part_b = RunPairGateUp(true, format, dg, du, dx + kSplit * kPairHidden,
+                                          ids_b, tokens - kSplit);
+        if (std::memcmp(part_a.data(), pair.data(), part_a.size() * sizeof(__half)) != 0 ||
+            std::memcmp(part_b.data(), pair.data() + part_a.size(),
+                        part_b.size() * sizeof(__half)) != 0)
+          throw std::runtime_error(std::string(format.name) +
+                                   " pair kernel depends on the chunk split");
+        std::cout << "IQ PAIR2 " << format.name << (skewed ? " skewed" : " uniform")
+                  << " two-chunk split (1536 + 2560 tokens) bit-identical per token\n";
+      }
+    }
+  }
+  // Shapes the route does not take: 64-row tiles, k off the 256 grid, other types.
+  const std::vector<std::int32_t> one_tile{0};
+  auto* dt = Upload(one_tile);
+  auto* db = Upload(std::vector<std::int32_t>{0, 16});
+  auto* dmap = Upload(std::vector<std::int32_t>(16, 0));
+  auto* dout = Upload(std::vector<__half>(16 * kPairFf));
+  if (q::RoutedIqPairGatedF16Gemm(dg, du, format.type, dx, dt, 1, 64, db, dmap,
+                                  dmap, dout, kPairFf, kPairHidden, nullptr) ||
+      q::RoutedIqPairGatedF16Gemm(dg, du, format.type, dx, dt, 1, 128, db, dmap,
+                                  dmap, dout, kPairFf, kPairHidden - 64, nullptr) ||
+      q::RoutedIqPairGatedF16Gemm(dg, du, q::WeightType::kIQ4_XS, dx, dt, 1, 128,
+                                  db, dmap, dmap, dout, kPairFf, kPairHidden, nullptr))
+    throw std::runtime_error("pair kernel admitted a shape or type it does not cover");
+  for (void* p : {static_cast<void*>(dg), static_cast<void*>(du),
+                  static_cast<void*>(dx), static_cast<void*>(dt),
+                  static_cast<void*>(db), static_cast<void*>(dmap),
+                  static_cast<void*>(dout)})
+    CheckHip(hipFree(p), "IQ pair2 free");
+}
+
+/// Ragged output width (m % 64 != 0: tail rows of the last block) against the
+/// current route, which takes its ragged-safe variant there.
+void CheckIqPair2Ragged(const IqFormat& format) {
+  constexpr std::size_t m = 65, k = 512, tokens = 40, used = 1;
+  const auto gate = MakeIqPacked(format, m, k, 0x9A66EDU);
+  const auto up = MakeIqPacked(format, m, k, 0x9A66EEU);
+  std::uint32_t seed = 0x9A66EFU;
+  std::vector<__half> x(tokens * k);
+  for (auto& v : x)
+    v = __float2half(Uniform(&seed, 0.04F));
+  auto* dg = Upload(gate);
+  auto* du = Upload(up);
+  auto* dx = Upload(x);
+  std::vector<std::int32_t> map(48, -1);
+  for (std::size_t i = 0; i < tokens; ++i)
+    map[i] = static_cast<std::int32_t>(i);
+  auto* db = Upload(std::vector<std::int32_t>{0, 48});
+  auto* dmap = Upload(map);
+  auto* dt = Upload(std::vector<std::int32_t>{0});
+  constexpr std::size_t guard = 32;
+  const __half poison = __float2half(-77.0F);
+  const std::vector<__half> initial(tokens * used * m + guard, poison);
+  std::vector<__half> outs[2];
+  for (int route = 0; route < 2; ++route) {
+    auto* dout = Upload(initial);
+    const bool ok =
+        route == 1 ? q::RoutedIqPairGatedF16Gemm(dg, du, format.type, dx, dt, 1, 128, db,
+                                                 dmap, dmap, dout, m, k, nullptr)
+                   : q::RoutedGatedF16Gemm(dg, du, format.type, dx, dt, 1, 128, db, dmap,
+                                           dmap, dout, m, k, nullptr);
+    if (!ok)
+      throw std::runtime_error("ragged pair shape rejected");
+    outs[route] = Download(dout, initial.size());
+    CheckHip(hipFree(dout), "ragged pair free");
+  }
+  for (std::size_t i = 0; i < guard; ++i)
+    if (__half2float(outs[1][tokens * m + i]) != __half2float(poison))
+      throw std::runtime_error("ragged pair output guard overwritten");
+  if (ValueDiffers(outs[0].data(), outs[1].data(), tokens * m) != 0)
+    throw std::runtime_error(std::string(format.name) +
+                             " ragged pair kernel differs from the current route");
+  std::cout << "IQ PAIR2 RAGGED " << format.name << " m=" << m
+            << " equal to the current route\n";
+  for (void* p : {static_cast<void*>(dg), static_cast<void*>(du),
+                  static_cast<void*>(dx), static_cast<void*>(db),
+                  static_cast<void*>(dmap), static_cast<void*>(dt)})
+    CheckHip(hipFree(p), "ragged pair free");
+}
+
+void CheckIqPair2All() {
+  // IQ2_S, IQ3_XXS, IQ3_S, IQ2_XS, IQ2_XXS (kIqFormats order: 2, 0, 1, 4, 3).
+  for (const std::size_t i : {2, 0, 1, 4, 3}) {
+    CheckIqPair2(kIqFormats[i]);
+    CheckIqPair2Ragged(kIqFormats[i]);
+  }
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
   try {
+    if (argc == 2 && std::string(argv[1]) == "--iq2-prefill") {
+      CheckIqExperts(kIqFormats[3], kIqFormats[6]);
+      CheckIqExperts(kIqFormats[4], kIqFormats[7]);
+      return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--iq-pair2") {
+      CheckIqPair2All();
+      std::cout << "IQ PAIR2 PASS\n";
+      return 0;
+    }
+    if (argc != 1)
+      throw std::runtime_error("Usage: routed_wmma_ops_test [--iq2-prefill | --iq-pair2]");
+    CheckIqPair2All();
     for (std::size_t i = 0; i < 6; ++i)
       CheckIqExperts(kIqFormats[i], kIqFormats[6 + i % 2]);
     CheckIqProbeShapes(kIqFormats[2], true);  // IQ2_S gate/up

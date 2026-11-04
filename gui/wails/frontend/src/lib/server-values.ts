@@ -12,9 +12,3 @@ export function markerListUnset(name: string, value: unknown) {
     ['', 'none'].includes(String(value).trim().toLowerCase())
   )
 }
-
-export function unsetSettingText(name: string) {
-  return isMarkerList(name)
-    ? 'Custom marker-list file: not set (built-in list)'
-    : 'Not set'
-}

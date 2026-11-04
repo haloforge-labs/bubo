@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-const tightExplanation = "The server would start, but there is little room for the context cache (the KV cache), which grows as a conversation gets longer. If it runs out, the server stops with an out-of-memory error, or Windows slows down."
+const tightExplanation = "Little room for KV cache growth."
 const doesNotFitExplanation = "These settings need more memory than this computer has, so Bubo can’t start them."
 
 func TestV12ThreeFitVerdictsAndTightAdmission(t *testing.T) {

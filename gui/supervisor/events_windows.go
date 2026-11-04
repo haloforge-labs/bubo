@@ -28,6 +28,15 @@ func (s *Supervisor) SetEventSink(sink func(StreamEvent)) {
 	defer s.eventMu.Unlock()
 	s.eventSink = sink
 }
+// SetSwitchGuard sets the function that filters the saved serve-switch
+// overrides before every start.
+func (s *Supervisor) SetSwitchGuard(guard func(Settings) map[string]string) {
+	if guard == nil {
+		s.switchGuard.Store(nil)
+		return
+	}
+	s.switchGuard.Store(&guard)
+}
 func (s *Supervisor) emitStream(e StreamEvent) {
 	s.eventMu.RLock()
 	sink := s.eventSink

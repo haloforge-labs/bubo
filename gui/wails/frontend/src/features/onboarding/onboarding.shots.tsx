@@ -67,6 +67,9 @@ test('V12 first-run choices show CLI download sizes and default-context GPU need
     .toHaveValue(
       choices.find((entry) => entry.default_status === 'default')!.id,
     )
+  // The all-choice comparison is behind a fold; the selected choice's GPU need
+  // sits beside the selector.
+  await page.getByText('Compare models').click()
   const facts = page.getByRole('list', { name: 'Download choices' })
   expect(facts.getByRole('listitem').elements()).toHaveLength(3)
   for (const entry of choices) {
@@ -94,7 +97,8 @@ test('V12 first-run choices show CLI download sizes and default-context GPU need
           }),
         )
         .toBeDisabled()
-      await expect.element(row).toHaveTextContent(entry.disabled_reason!)
+      // The reason is said once, in the option.
+      await expect.element(row).not.toHaveTextContent(entry.disabled_reason!)
     }
   }
   await document.fonts.ready

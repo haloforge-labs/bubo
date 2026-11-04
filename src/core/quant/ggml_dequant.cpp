@@ -1,3 +1,5 @@
+// Copyright (c) 2023-2026 The ggml authors
+// SPDX-License-Identifier: MIT
 #include "src/core/quant/ggml_dequant.hpp"
 
 #include <array>
@@ -221,6 +223,9 @@ std::size_t QuantizedRowBytes(core::GgmlType type,
       break;
     case core::GgmlType::kIQ2_XS:
       block_bytes = sizeof(block_iq2_xs);
+      break;
+    case core::GgmlType::kIQ1_M:
+      block_bytes = sizeof(block_iq1_m);
       break;
     case core::GgmlType::kIQ2_S:
       block_bytes = sizeof(block_iq2_s);
@@ -786,6 +791,34 @@ void DequantizeIQ2_XS(const void* src, float* dst, std::size_t k) {
   }
 }
 
+void DequantizeIQ1_M(const void* src, float* dst, std::size_t k) {
+  const auto* blocks = static_cast<const block_iq1_m*>(src);
+  for (std::size_t b = 0; b < k / 256; ++b) {
+    std::uint16_t sc[4];
+    std::memcpy(sc, blocks[b].scales, sizeof(sc));
+    const std::uint16_t half = (sc[0] >> 12) | ((sc[1] >> 8) & 0x00F0) |
+                               ((sc[2] >> 4) & 0x0F00) | (sc[3] & 0xF000);
+    const float d = Fp16ToFloat(half);
+    for (int ib = 0; ib < 8; ++ib) {
+      const float dl[2] = {
+          d * (2 * ((sc[ib / 2] >> (6 * (ib % 2))) & 7) + 1),
+          d * (2 * ((sc[ib / 2] >> (6 * (ib % 2) + 3)) & 7) + 1)};
+      for (int l = 0; l < 4; ++l) {
+        const int high = blocks[b].qh[2 * ib + l / 2] >> (4 * (l % 2));
+        const int index = blocks[b].qs[4 * ib + l] | ((high & 7) << 8);
+        const auto grid = Iq1sGrid()[index];
+        const float delta = high & 8 ? -0.125F : 0.125F;
+        for (int j = 0; j < 8; ++j) {
+          int value = int((grid >> (8 * j)) & 255);
+          if (value >= 128)
+            value -= 256;
+          *dst++ = dl[l / 2] * (float(value) + delta);
+        }
+      }
+    }
+  }
+}
+
 void DequantizeIQ2_S(const void* src, float* dst, std::size_t k) {
   const auto* blocks = static_cast<const block_iq2_s*>(src);
   const std::size_t nb = k / 256;
@@ -870,6 +903,9 @@ float DotProductIQ2_XXS(const void* row_data, std::span<const float> vec, std::s
 
 float DotProductIQ2_XS(const void* row_data, std::span<const float> vec, std::size_t k) {
   return DotViaDequantize(DequantizeIQ2_XS, row_data, vec, k);
+}
+float DotProductIQ1_M(const void* row_data, std::span<const float> vec, std::size_t k) {
+  return DotViaDequantize(DequantizeIQ1_M, row_data, vec, k);
 }
 
 float DotProductIQ2_S(const void* row_data, std::span<const float> vec, std::size_t k) {

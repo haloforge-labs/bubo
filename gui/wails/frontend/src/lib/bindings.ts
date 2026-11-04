@@ -120,6 +120,7 @@ export const actions = {
   BrowseDownloadFolder: bindAction(App.BrowseDownloadFolder),
   BrowseModelFile: bindAction(App.BrowseModelFile),
   BrowseModelFolder: bindAction(App.BrowseModelFolder),
+  BrowseSideFile: bindAction(App.BrowseSideFile),
   Cancel: bindAction(App.Cancel),
   CancelDownload: bindAction(App.CancelDownload),
   CancelUpdate: bindAction(App.CancelUpdate),

@@ -24,16 +24,20 @@ public:
   [[nodiscard]] static std::unique_ptr<BlasLt> Create(hipStream_t stream,
                                                       std::string* error_msg);
 
+  /// Prepare descriptors and load the solution library without launching a
+  /// GEMM or reading model data. Gemm uses the same exact-shape plan.
+  [[nodiscard]] bool Prepare(hipDataType type, int m, int n, int k,
+                             std::string* error_msg);
   /// Row-major out[n][m] = input[n][k] * weights[m][k]^T.
   [[nodiscard]] bool Gemm(const void* weights, const void* input, float* out,
                           hipDataType type, int m, int n, int k,
                           std::string* error_msg);
-  /// Gemm through the library kernel even where DenseBf16Gemm reproduces it
-  /// (tests compare the two).
+  /// Gemm through the library kernel even where Gemm runs its own kernel
+  /// (benchmarks compare the two).
   [[nodiscard]] bool LibraryGemm(const void* weights, const void* input,
                                  float* out, hipDataType type, int m, int n,
                                  int k, std::string* error_msg);
-  /// Whether Gemm runs DenseBf16Gemm for this shape (tests).
+  /// Whether Gemm runs its own position-invariant kernel for this shape.
   [[nodiscard]] bool UsesOwnKernel(hipDataType type, int m, int n, int k,
                                    std::string* error_msg);
 

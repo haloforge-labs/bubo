@@ -218,10 +218,10 @@ struct MtpLenientShift {
 /// and residual correction. Only proposal q uses the compact F32 masses.
 /// `target` is sampler.Distribution(logits) for the verified row, however
 /// it was computed (the full row or an exact candidate list).
+template<class Sampler>
 inline MtpVerification VerifyMtpProposal(
     const sampling::SamplingDistribution& target, std::size_t vocab,
-    const MtpProposal& proposal, sampling::SamplerState& sampler,
-    double accept_scale = 1.0) {
+    const MtpProposal& proposal, Sampler& sampler, double accept_scale = 1.0) {
   if (proposal.size == 0 || proposal.size > kMtpCandidates ||
       proposal.token >= vocab || !std::isfinite(proposal.probability) ||
       proposal.probability <= 0 || proposal.probability > 1)
@@ -271,7 +271,12 @@ inline MtpVerification VerifyMtpProposal(
       std::span(proposal.ids).first(proposal.size),
       std::span(proposal.probabilities).first(proposal.size),
       proposal.token,proposal.probability);
-  return {token,accepted};
+  // The target decision precedes the intervention. A redirected EOG
+  // becomes the next target anchor, never a draft token kept in the chain.
+  auto emitted = token;
+  if constexpr (requires { sampler.ForcedToken(); })
+    emitted = sampler.ForcedToken().value_or(token);
+  return {emitted, accepted && emitted == token};
 }
 
 inline MtpVerification VerifyMtpProposal(std::span<const float> logits,
@@ -279,6 +284,15 @@ inline MtpVerification VerifyMtpProposal(std::span<const float> logits,
                                          sampling::SamplerState& sampler,
                                          double accept_scale = 1.0) {
   return VerifyMtpProposal(sampler.Distribution(logits), logits.size(),
+                           proposal, sampler, accept_scale);
+}
+
+template<class Candidate, class Sampler>
+inline MtpVerification VerifyMtpProposal(
+    std::span<const Candidate> candidates, std::size_t vocab,
+    const MtpProposal& proposal, Sampler& sampler,
+    double accept_scale = 1.0) {
+  return VerifyMtpProposal(sampler.DistributionFromCandidates(candidates), vocab,
                            proposal, sampler, accept_scale);
 }
 

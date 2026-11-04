@@ -104,17 +104,22 @@ test('Server renders the CLI model, context and sessions', async () => {
     .element(page.getByLabelText('Model in use'))
     .toHaveTextContent(activeModelName(view) || view.instance!.served_model!)
   await expect
-    .element(page.getByRole('combobox', { name: 'Model for next start' }))
+    .element(page.getByRole('combobox', { name: 'Next model' }))
     .toBeVisible()
   await expect
-    .element(page.getByLabelText('Context per session'))
+    .element(
+      page.getByRole('spinbutton', {
+        name: 'Context per session',
+        exact: true,
+      }),
+    )
     .toHaveValue(
       Number(
         view.settings.find((row) => row.name === '--context')!.effective.text,
       ).toLocaleString(),
     )
   await expect
-    .element(page.getByLabelText('Sessions', { exact: true }).first())
+    .element(page.getByRole('spinbutton', { name: 'Sessions', exact: true }))
     .toHaveValue(
       Number(
         view.settings.find((row) => row.name === '--sessions')!.effective.text,
@@ -421,6 +426,9 @@ test('the active catalogue identity drives estimates even when its served name d
     manifest_path: model.manifest_path,
   }
   view.instance!.served_model = 'Custom fixture alias'
+  // A saved context choice: the reset for model, context and sessions shows only
+  // while one of those four is saved.
+  view.saved.context = 65536
   const estimate = vi.spyOn(actions, 'Estimate').mockResolvedValue(
     bridgeReply({
       estimate: { memory_estimate: { ...view.memory_estimate!, fits: true } },
@@ -439,7 +447,9 @@ test('the active catalogue identity drives estimates even when its served name d
     .toBe(model.manifest_path!.replace(/[\\/][^\\/]*$/, ''))
   await page.getByRole('button', { name: 'Save server setup' }).click()
   expect(save).toHaveBeenLastCalledWith({ set: { sessions: 3 }, clear: [] })
-  await page.getByRole('button', { name: 'Reset to default' }).click()
+  await page
+    .getByRole('button', { name: 'Reset model, context and sessions' })
+    .click()
   expect(save).toHaveBeenLastCalledWith({
     set: {},
     clear: ['context', 'sessions', 'model_path', 'manifest_path'],

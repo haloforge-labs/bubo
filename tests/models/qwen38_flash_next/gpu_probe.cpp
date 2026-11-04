@@ -27,6 +27,7 @@
 #include "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
 #include "src/models/qwen38_flash_next/ngram.hpp"
+#include "src/models/qwen38_flash_next/prefill_tail.hpp"
 #include "src/models/qwen38_flash_next/reference.hpp"
 #include "src/models/qwen38_flash_next/weights.hpp"
 
@@ -39,7 +40,8 @@ void AuditMtp(q::rocm::Executor& executor, const q::rocm::DeviceModel& device,
 void AuditMtpCosts(q::rocm::Executor& executor,
                    const gufo::tokenization::QwenTokenizer& tokenizer,
                    std::span<const std::uint32_t> depths,
-                   std::uint32_t concurrency);
+                   std::span<const std::uint32_t> concurrencies,
+                   bool sampled_head);
 
 namespace {
 
@@ -92,13 +94,20 @@ int main(int argc, char** argv) {
   std::uint32_t cost_concurrency = 0;
   std::optional<std::uint32_t> cost_depth;
   std::uint32_t batch = 512;
+  std::uint32_t retained_rows = 64;
   std::uint32_t context = 4096;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     auto next = [&]() -> std::string {
       return i + 1 < argc ? argv[++i] : std::string();
     };
-    if (arg == "--model") {
+    if (arg == "--help") {
+      std::printf(
+          "--model SHARD --prompt-file FILE [--batch N] [--context N] "
+          "[--dump FILE] [--logit-rows N (default 64)]\n"
+          "GUFO_PREFILL_EXPERTS_TAIL protects the complete prompt suffix.\n");
+      return 0;
+    } else if (arg == "--model") {
       model_path = next();
     } else if (arg == "--mtp-model") {
       mtp_path = next();
@@ -147,9 +156,12 @@ int main(int argc, char** argv) {
       decode_ids_path = next();
     } else if (arg == "--reference") {
       reference = true;
-    } else if (arg == "--batch" || arg == "--context") {
+    } else if (arg == "--batch" || arg == "--context" ||
+               arg == "--logit-rows") {
       const auto value = next();
-      auto& count = arg == "--batch" ? batch : context;
+      auto& count = arg == "--batch"     ? batch
+                    : arg == "--context" ? context
+                                         : retained_rows;
       const auto [end, ec] =
           std::from_chars(value.data(), value.data() + value.size(), count);
       if (ec != std::errc{} || end != value.data() + value.size() ||
@@ -243,7 +255,7 @@ int main(int argc, char** argv) {
   }
   q::rocm::Executor::Options options;
   options.max_batch = batch;
-  options.max_logit_rows = std::min<std::uint32_t>(batch, 64);
+  options.max_logit_rows = std::min(batch, retained_rows);
   if (mtp_audit || cost_audit)
     options.max_speculative = 8;
 
@@ -263,7 +275,10 @@ int main(int argc, char** argv) {
       std::span<const std::uint32_t> selected_depths = depths;
       if (cost_depth)
         selected_depths = std::span(&*cost_depth, 1);
-      AuditMtpCosts(*executor, *tokenizer, selected_depths, cost_concurrency);
+      const auto concurrencies = cost_concurrency
+                                     ? std::span(&cost_concurrency, 1)
+                                     : std::span<std::uint32_t>{};
+      AuditMtpCosts(*executor, *tokenizer, selected_depths, concurrencies, false);
       return 0;
     } catch (const std::exception& e) {
       std::fprintf(stderr, "cost audit failed: %s\n", e.what());
@@ -316,8 +331,13 @@ int main(int argc, char** argv) {
 
   std::vector<float> gpu_logits;
   std::size_t logit_rows = 0;
-  for (std::size_t off = 0; off < tokens.size(); off += batch) {
-    const std::size_t n = std::min<std::size_t>(batch, tokens.size() - off);
+  const auto tail = q::GetPrefillExperts().tail;
+  const auto policy_boundary =
+      q::PrefillExpertTailBoundary(tokens.size(), tail);
+  for (std::size_t off = 0; off < tokens.size();) {
+    const std::size_t n = q::ClipPrefillExpertTail(
+        off, std::min<std::size_t>(batch, tokens.size() - off),
+        policy_boundary);
     const auto rows = static_cast<std::uint32_t>(
         std::min<std::size_t>(n, options.max_logit_rows));
     std::vector<float> out(static_cast<std::size_t>(rows) * c.vocab_size);
@@ -329,7 +349,8 @@ int main(int argc, char** argv) {
             *session, std::span<const std::int32_t>(tokens.data() + off, n),
             rows, out.data(), q::rocm::Executor::ForwardMode::kPrefill, &error,
             nullptr, false,
-            std::span<const std::int32_t>(tokens.data() + off + n, next))) {
+            std::span<const std::int32_t>(tokens.data() + off + n, next),
+            q::ApplyPrefillExpertPolicy(off, policy_boundary, tail))) {
       std::fprintf(stderr, "prefill failed: %s\n", error.c_str());
       return 1;
     }
@@ -338,6 +359,7 @@ int main(int argc, char** argv) {
       gpu_logits = std::move(out);
       logit_rows = rows;
     }
+    off += n;
   }
   if (decode) {
     // Matched-token decode: feed a fixed continuation one token at a time

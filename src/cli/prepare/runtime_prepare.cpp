@@ -311,6 +311,58 @@ bool CheckInstalled(const fs::path& root, const Environment& e,
     complete = false;
   return complete;
 }
+// The licenses folder must come out equal to the embedded notice set. Files Bubo
+// itself wrote for an earlier version (the old readiness entry lists them) that the
+// embedded set no longer has are removed, and folders they leave empty; a file that
+// is a runtime member, a path that leaves the folder, and anything the entry does
+// not list (a file of the user) stay. Runs under the prepare lock before the
+// journalled step; a crash in between leaves a state the next repair finishes.
+void RemoveStaleNotices(const fs::path& root, const Environment& e) {
+  const auto marker = root / Path(".bubo/runtime-ready.json");
+  Local(marker);
+  if (!fs::exists(marker))
+    return;
+  std::set<std::string> keep;
+  for (const auto& n : e.notices)
+    keep.insert(std::string(n.path));
+  for (const auto& m : e.members)
+    if (m.destination.rfind("licenses/", 0) == 0)
+      keep.insert(m.destination.substr(9));
+  std::vector<std::string> stale;
+  try {
+    const auto have = metadata::Parse(metadata::Read(marker));
+    const auto& listed = metadata::Required(have, "notices");
+    if (!listed.is_object())
+      return;
+    for (const auto& [key, item] : listed.members()) {
+      (void)item;
+      if (!keep.count(key))
+        stale.push_back(key);
+    }
+  } catch (const std::exception&) {
+    return;  // an unreadable entry lists nothing to remove
+  }
+  const auto licenses = root / "licenses";
+  for (const auto& name : stale) {
+    const fs::path relative = Path(name);
+    if (relative.empty() || relative.is_absolute() || relative.has_root_name() ||
+        std::any_of(relative.begin(), relative.end(),
+                    [](const fs::path& part) { return part == ".."; }))
+      continue;
+    const auto path = licenses / relative;
+    Local(path);
+    std::error_code ec;
+    if (!fs::is_regular_file(path, ec))
+      continue;
+    Remove(path);
+    for (auto dir = path.parent_path(); dir != licenses && dir.has_parent_path();
+         dir = dir.parent_path()) {
+      if (!fs::is_empty(dir, ec) || ec)
+        break;
+      fs::remove(dir, ec);
+    }
+  }
+}
 // Refresh only Bubo's metadata. The same durable journal and rollback used
 // for installation protect each rename; no member is staged or replaced.
 void RefreshNotices(const fs::path& root, const Environment& e) {
@@ -348,6 +400,7 @@ void RefreshNotices(const fs::path& root, const Environment& e) {
     if (!payload)
       throw Failure(
           7, "runtime changed during notice refresh; run bubo prepare again");
+    RemoveStaleNotices(root, e);
     auto journal = Value::object();
     journal["phase"] = "installing";
     journal["files"] = Value::array();
@@ -781,6 +834,7 @@ int RunImpl(const Options& options, Environment e, std::istream& input,
                             ready.size(), Digest(ready)));
       CheckInstalled(root, e);
       Holders(e);
+      RemoveStaleNotices(root, e);
       auto journal = Value::object();
       journal["phase"] = "installing";
       auto files = Value::array();
@@ -837,6 +891,59 @@ int RunImpl(const Options& options, Environment e, std::istream& input,
     return 9;
   }
 }
+// True when the readiness entry on disk is the current one except for its notice
+// list: same schema, runtime id and member table, other licence texts (a Bubo
+// version changed them). Anything else (damaged, unknown or older-format entry,
+// another member table) is not this case.
+bool OnlyNoticesDiffer(const fs::path& marker, const Environment& e) {
+  try {
+    const auto have = metadata::Parse(metadata::Read(marker));
+    const auto want = metadata::Parse(Ready(e));
+    metadata::Keys(have, {"schema_version", "runtime_id", "members_sha256",
+                          "notices"});
+    return metadata::Integer(metadata::Required(have, "schema_version")) ==
+               metadata::Integer(metadata::Required(want, "schema_version")) &&
+           metadata::String(metadata::Required(have, "runtime_id")) ==
+               metadata::String(metadata::Required(want, "runtime_id")) &&
+           metadata::String(metadata::Required(have, "members_sha256")) ==
+               metadata::String(metadata::Required(want, "members_sha256")) &&
+           metadata::Required(have, "notices").is_object();
+  } catch (const std::exception&) {
+    return false;
+  }
+}
+// Rewrites the licenses folder and the readiness entry from the embedded notice
+// set when the payload is intact. No network, no download: the same transaction
+// as `bubo prepare runtime` takes when it finds the members in place (the members
+// are hashed, so a changed file keeps today's refusal). False = not repaired.
+bool RepairNoticesInPlace(const fs::path& root, const Environment& e) {
+  try {
+    const auto lock_path = root / Path(".bubo/prepare.lock");
+    Local(lock_path);
+    PrepareLock lock;
+    std::string error;
+    if (!lock.Acquire(lock_path, error)) {
+      if (!lock.busy())
+        return false;
+      // Another process (a second start, the GUI) is repairing: wait for its result.
+      const auto marker = root / Path(".bubo/runtime-ready.json");
+      for (int i = 0; i < 300; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        if (metadata::Read(marker) == Ready(e))
+          return true;
+      }
+      return false;
+    }
+    if (fs::exists(root / Path(".bubo/runtime/journal.json")))
+      return false;
+    RefreshNotices(root, e);
+    std::cerr << "runtime: licence texts refreshed in place for this Bubo "
+                 "version (no download)\n";
+    return true;
+  } catch (const std::exception&) {
+    return false;
+  }
+}
 std::string ReadyError(const fs::path& root, const Environment& e) {
   try {
     const auto journal = root / Path(".bubo/runtime/journal.json");
@@ -845,7 +952,8 @@ std::string ReadyError(const fs::path& root, const Environment& e) {
       throw Failure(2, Utf8(journal) + ": unfinished runtime transaction");
     if (!fs::exists(marker))
       return {};  // Explicit legacy manual installation remains supported.
-    if (metadata::Read(marker) != Ready(e))
+    if (metadata::Read(marker) != Ready(e) &&
+        !(OnlyNoticesDiffer(marker, e) && RepairNoticesInPlace(root, e)))
       throw Failure(2, Utf8(marker) + ": runtime readiness entry mismatch");
     for (const auto& member : e.members) {
       const auto path = root / Path(member.destination);

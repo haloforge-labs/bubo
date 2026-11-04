@@ -3,6 +3,7 @@ import { page, userEvent } from 'vitest/browser'
 import { coreView, mountCorePage } from '@/components/core-page-test-support'
 import { bridgeReply } from '@/components/bridge-test-reply'
 import { actions } from '@/lib/bindings'
+import { openDiscover } from './discover-test-support'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -13,6 +14,7 @@ test('Cyber-Tiel card shows its shared licence line once', async () => {
   )!
   expect(entry.licence.note).toBe(entry.licence.prompt_line)
   mountCorePage('/models', view)
+  await openDiscover()
   await page
     .getByRole('button', { name: `About ${entry.display_name}`, exact: true })
     .click()
@@ -23,17 +25,15 @@ test('Cyber-Tiel card shows its shared licence line once', async () => {
 })
 
 for (const kind of ['file', 'folder'] as const) {
-  test(`header Import opens the existing model ${kind} action`, async () => {
+  test(`the Import section browses for a model ${kind}; there is no second Import menu`, async () => {
     const browse = vi
       .spyOn(actions, kind === 'file' ? 'BrowseModelFile' : 'BrowseModelFolder')
       .mockResolvedValue(bridgeReply({ message: 'Imported.' }))
     mountCorePage('/models', coreView())
-    await page.getByRole('button', { name: 'Import', exact: true }).click()
-    await page
-      .getByRole('menuitem', {
-        name: kind === 'file' ? 'Model file…' : 'Model folder…',
-      })
-      .click()
+    await expect
+      .element(page.getByRole('button', { name: 'Import', exact: true }))
+      .not.toBeInTheDocument()
+    await page.getByRole('button', { name: `Browse model ${kind}…` }).click()
     expect(browse).toHaveBeenCalledExactlyOnceWith()
     expect(document.getElementById('import')).not.toBeNull()
     await expect
@@ -46,6 +46,7 @@ test('catalogue info is keyboard reachable, shows CLI facts and omits absent opt
   const view = coreView()
   const entry = view.models!.catalogue[0]!
   mountCorePage('/models', view)
+  await openDiscover()
   const info = page.getByRole('button', {
     name: `About ${entry.display_name}`,
     exact: true,
@@ -93,6 +94,7 @@ test('catalogue cards show the real CLI identity, prose and publication reason',
     row.id.includes('lowmemory'),
   )!
   mountCorePage('/models', view)
+  await openDiscover()
   await page
     .getByRole('button', { name: `About ${entry.display_name}`, exact: true })
     .click()

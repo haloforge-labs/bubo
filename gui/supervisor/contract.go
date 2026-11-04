@@ -150,6 +150,8 @@ func ParseEvent(line []byte) (Event, error) {
 		target = &Models{}
 	case "model_estimate":
 		target = &ModelEstimate{}
+	case "side_file_check":
+		target = &SideFileCheck{}
 	default:
 		return e, nil // Additive events never drive state.
 	}

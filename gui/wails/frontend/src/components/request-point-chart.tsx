@@ -7,6 +7,7 @@ import {
   YAxis,
 } from 'recharts'
 import { number } from '@/lib/format'
+import { cacheWord } from '@/lib/presentation'
 import { yTicks } from './line-chart'
 
 export type ChartPoint = {
@@ -49,7 +50,7 @@ function pointDescription(
     point.ttftMs == null || unit === 'ms'
       ? undefined
       : `${duration(point.ttftMs)} to first token`,
-    point.cacheKind ? `cache ${point.cacheKind}` : undefined,
+    point.cacheKind ? `Cache: ${cacheWord(point.cacheKind)}` : undefined,
   ]
     .filter(Boolean)
     .join(' · ')
@@ -210,15 +211,18 @@ export function RequestPointChart({
   return (
     <figure aria-label={label} className="min-w-0">
       <figcaption className="text-sm text-muted-foreground">
-        {metricLabel} ({unit === 'ms' ? 'ms / s' : unit.trim()})
-        <label className="mt-1 flex w-fit items-center gap-1 text-xs">
-          <input
-            type="checkbox"
-            checked={logScale}
-            onChange={(event) => setLogScale(event.target.checked)}
-          />
-          Log scale
-        </label>
+        {unit === 'ms' ? metricLabel : `${metricLabel} (${unit.trim()})`}
+        <div className="mt-1 flex flex-wrap items-center gap-x-3 text-xs">
+          <label className="flex w-fit items-center gap-1">
+            <input
+              type="checkbox"
+              checked={logScale}
+              onChange={(event) => setLogScale(event.target.checked)}
+            />
+            Log scale
+          </label>
+          {logScale && <span>Expands small values</span>}
+        </div>
       </figcaption>
       <div
         className="relative h-40 w-full font-mono text-xs tabular-nums"
@@ -258,10 +262,6 @@ export function RequestPointChart({
         )}
         {plot}
       </div>
-      <p className="text-xs text-muted-foreground">
-        Request order · oldest to newest
-        {logScale && ' · Log scale expands small values'}
-      </p>
     </figure>
   )
 }

@@ -231,6 +231,9 @@ MachineFingerprint GenerateMachineFingerprint(
   fp.canonical.cxx_compiler = inventory.toolchain.cxx_compiler;
   fp.canonical.cpp_standard = inventory.toolchain.cpp_standard;
 
+  fp.os_name = inventory.toolchain.os_name;
+  fp.target_platform = inventory.toolchain.target_platform;
+
   fp.fingerprint_id = fp.canonical.ComputeFingerprintId();
   return fp;
 }
@@ -250,22 +253,14 @@ std::string MachineFingerprint::ToHuman() const {
   std::ostringstream oss;
   oss << "=== Machine Fingerprint ===\n";
   oss << "Fingerprint ID      : " << fingerprint_id << "\n";
-  oss << "Target Platform     : " << canonical.cpu_architecture
-#ifdef _WIN32
-      << "-windows (Windows " << canonical.kernel_release << ")\n";
-#else
-      << "-linux (Linux " << canonical.kernel_release << ")\n";
-#endif
+  oss << "Target Platform     : " << target_platform << " (" << os_name << " "
+      << canonical.kernel_release << ")\n";
   oss << "CPU Model           : " << canonical.cpu_model << " ("
       << canonical.cpu_logical_cores << " threads)\n";
   oss << "GPU Architecture    : " << canonical.gpu_name << " ["
       << canonical.gpu_architecture << ", " << canonical.gpu_compute_units
       << " CUs]\n";
-#ifdef _WIN32
-  oss << "ROCm Runtime        : " << canonical.rocm_version << "\n";
-#else
   oss << "Pinned Toolchain    : ROCm " << canonical.rocm_version << "\n";
-#endif
   return oss.str();
 }
 

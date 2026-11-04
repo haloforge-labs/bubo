@@ -86,6 +86,9 @@ public:
     ReleaseRows();
   }
   bool IsValid() const noexcept override { return valid; }
+  bool ExecutionComplete() const noexcept override {
+    return execution_complete;
+  }
   void ReleaseRows() noexcept {
     if (!target.empty())
       guard_.BeforeRelease(kTarget, 0, target.size());
@@ -105,8 +108,10 @@ public:
   mutable std::size_t pending_reads{0};
   std::size_t pending_loads{0};
   bool valid{true};
+  bool execution_complete{true};
   bool restoring{false};
   bool private_loaded{false};
+  std::array<bool, 32> private_pieces{};
   bool failed{false};
 };
 
@@ -228,15 +233,18 @@ Completion FakeStream::SubmitTracked(
 }
 
 Capabilities FakeAdapter::GetCapabilities() const {
-  return {.continuation = true};
+  return {.continuation = true, .persistent_encoding = true};
 }
+FakeAdapter::FakeAdapter(Rows rows_per_chunk)
+    : components_{{
+          {kTarget, 1, ComponentKind::kAppendRows, sizeof(Token),
+           rows_per_chunk, 0},
+          {kDraft, 1, ComponentKind::kAppendRows, sizeof(Token), rows_per_chunk,
+           0},
+          {kRecurrent, 1, ComponentKind::kPrivateState, 0, 0, 32},
+      }} {}
 std::span<const ComponentDescriptor> FakeAdapter::Components() const {
-  static constexpr std::array<ComponentDescriptor, 3> components{{
-      {kTarget, 1, ComponentKind::kAppendRows, sizeof(Token), 4, 0},
-      {kDraft, 1, ComponentKind::kAppendRows, sizeof(Token), 4, 0},
-      {kRecurrent, 1, ComponentKind::kPrivateState, 0, 0, 32},
-  }};
-  return components;
+  return components_;
 }
 Identity FakeAdapter::CompatibilityIdentity() const {
   return {'f', 'a', 'k', 'e', 2};
@@ -250,6 +258,9 @@ void FakeAdapter::SetPrefillPassRows(Rows rows) {
   if (!rows)
     throw std::invalid_argument("empty prefill pass");
   prefill_pass_rows_ = rows;
+}
+void FakeAdapter::SetExecutionComplete(Slot& slot, bool complete) {
+  AsSlot(slot).execution_complete = complete;
 }
 std::vector<Rows> FakeAdapter::PlanPrefill(const Slot& slot, Rows first,
                                            Rows end) const {
@@ -269,6 +280,16 @@ std::vector<ComponentPosition> FakeAdapter::Positions(const Slot& slot) const {
           {kDraft, state.restoring ? ContiguousRows(state.draft_loaded)
                                    : state.draft.size()},
           {kRecurrent, state.recurrent[0]}};
+}
+std::vector<ComponentPosition> FakeAdapter::PrefillCheckpointPositions(
+    const Slot& slot, Rows boundary) const {
+  const auto& state = AsSlot(slot);
+  if (!slot.IsValid() || state.Busy() || boundary <= state.target.size())
+    throw std::invalid_argument("invalid fake in-pass boundary");
+  // The serving fixture advances target and draft by the same prefill tail.
+  return {{kTarget, boundary},
+          {kDraft, state.draft.size() + boundary - state.target.size()},
+          {kRecurrent, boundary}};
 }
 void FakeAdapter::BeginRestore(Slot& slot,
                                std::span<const ComponentPosition> positions) {
@@ -308,6 +329,7 @@ void FakeAdapter::BeginRestore(Slot& slot,
       {{kTarget, target_end}, {kDraft, draft_end}, {kRecurrent, target_end}}};
   state.recurrent = {0, 0, kSeed, kSeed};
   state.private_loaded = false;
+  state.private_pieces.fill(false);
   state.restoring = true;
   state.valid = false;
 }
@@ -373,10 +395,21 @@ Completion FakeAdapter::CapturePrivate(const Slot& slot, ComponentId id,
                                        std::span<std::byte> dst,
                                        Stream& stream) {
   CheckPrivate(id, dst.size());
+  return CapturePrivatePiece(slot, id, 0, dst, stream);
+}
+Completion FakeAdapter::CapturePrivatePiece(const Slot& slot, ComponentId id,
+                                            std::size_t offset,
+                                            std::span<std::byte> dst,
+                                            Stream& stream) {
+  if (id != kRecurrent || offset > 32 || dst.size() > 32 - offset)
+    throw std::invalid_argument("invalid private capture piece");
   const auto& state = AsSlot(slot);
   RequireCapture(state);
-  return SubmitRead(slot, stream, [&state, dst] {
-    std::memcpy(dst.data(), state.recurrent.data(), dst.size());
+  return SubmitRead(slot, stream, [&state, offset, dst] {
+    std::memcpy(
+        dst.data(),
+        reinterpret_cast<const std::byte*>(state.recurrent.data()) + offset,
+        dst.size());
     return TransferResult::kSucceeded;
   });
 }
@@ -428,9 +461,27 @@ Completion FakeAdapter::LoadPrivate(Slot& slot, ComponentId id,
   RequireLoad(state);
   try {
     CheckPrivate(id, src.size());
-    return SubmitLoad(slot, stream, [&state, src] {
-      std::memcpy(state.recurrent.data(), src.data(), src.size());
-      state.private_loaded = true;
+  } catch (...) {
+    state.failed = true;
+    throw;
+  }
+  return LoadPrivatePiece(slot, id, 0, src, stream);
+}
+Completion FakeAdapter::LoadPrivatePiece(Slot& slot, ComponentId id,
+                                         std::size_t offset,
+                                         std::span<const std::byte> src,
+                                         Stream& stream) {
+  auto& state = AsSlot(slot);
+  RequireLoad(state);
+  try {
+    if (id != kRecurrent || offset > 32 || src.size() > 32 - offset)
+      throw std::invalid_argument("invalid private load piece");
+    return SubmitLoad(slot, stream, [&state, offset, src] {
+      std::memcpy(reinterpret_cast<std::byte*>(state.recurrent.data()) + offset,
+                  src.data(), src.size());
+      std::fill_n(state.private_pieces.begin() + offset, src.size(), true);
+      state.private_loaded = std::ranges::all_of(
+          state.private_pieces, [](bool loaded) { return loaded; });
       return TransferResult::kSucceeded;
     });
   } catch (...) {
@@ -463,6 +514,7 @@ bool FakeAdapter::Validate(Slot& slot,
   return complete;
 }
 bool FakeAdapter::Invalidate(Slot& slot) noexcept {
+  invalidations_.fetch_add(1, std::memory_order_relaxed);
   auto& state = AsSlot(slot);
   if (state.Busy())
     return false;
@@ -477,9 +529,23 @@ bool FakeAdapter::Invalidate(Slot& slot) noexcept {
   state.restoring = false;
   state.failed = false;
   state.private_loaded = false;
+  state.private_pieces.fill(false);
   state.valid = true;
   state.guard_.AfterReset();
   return true;
+}
+std::span<const std::byte> FakeAdapter::BorrowRowsView(const Slot& slot,
+                                                       ComponentId component,
+                                                       Rows first,
+                                                       Rows end) const {
+  const auto& state = AsSlot(slot);
+  RequireCapture(state);
+  const auto& rows = RowArray(state, component);
+  if (first >= end || end > rows.size())
+    throw std::invalid_argument("invalid borrowed fake range");
+  // Append, restore and release guard the old allocation before replacing
+  // the vector, so views stay fixed even though this fixture moves storage.
+  return std::as_bytes(std::span(rows).subspan(first, end - first));
 }
 void FakeAdapter::Append(Slot& slot, std::span<const Token> target,
                          std::span<const Token> draft) {

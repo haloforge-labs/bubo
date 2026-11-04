@@ -19,6 +19,7 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/models/qwen36_a3b/config.hpp"
 #include "src/models/qwen36_a3b/decode_kernels.hpp"
+#include "src/models/qwen36_a3b/prefill_policy.hpp"
 
 namespace gufo::models::qwen::vision {
 class DeviceInput;
@@ -262,7 +263,16 @@ private:
   const void* Quantize(const float* x, std::uint32_t n, std::uint32_t k);
   void LinearAttention(const Layer& l, std::uint32_t idx, std::uint32_t n);
   void Attention(const Layer& l, std::uint32_t idx, std::uint32_t n);
-  void Moe(const Layer& l, std::uint32_t n);
+  void Moe(const Layer& l, std::uint32_t n, PrefillLayer prefill = {});
+  const qfn::PrefillExpertsSettings* BeginPrefillExperts(std::uint32_t n);
+  void FinishPrefillExperts(const qfn::PrefillExpertsSettings* settings,
+                            std::uint32_t start, std::uint32_t n,
+                            qfn::DiagClock::time_point began);
+  void RecordPrefillCounts(std::span<const std::uint32_t> counts,
+                           std::uint32_t n);
+  void RecordPrefillIds(std::uint32_t n);
+  qfn::PrefillDiagTotals prefill_totals_;
+  qfn::RoutedExpertAudit* prefill_audit_{nullptr};
   /// Embedding, trunk and (for rows > 0) the head over the last `rows`.
   void Body(std::uint32_t n, std::uint32_t rows);
   /// The fused trunk over `n` rows of `tokens` at `pos`; the head runs on the
@@ -271,7 +281,8 @@ private:
   void BodyFused(std::uint32_t n, std::uint32_t rows,
                  const std::int32_t* tokens, const std::uint32_t* pos,
                  bool capture, bool snapshots,
-                 std::uint32_t inject_pos = kNoInject);
+                 std::uint32_t inject_pos = kNoInject,
+                 const qfn::PrefillExpertsSettings* experts = nullptr);
   /// BodyFused without image embeddings (decode and verify passes).
   static constexpr std::uint32_t kNoInject = 0xFFFFFFFFu;
   /// Image embeddings over prefill rows [pos, pos + n) of `res` (eager).
@@ -283,7 +294,8 @@ private:
   void FusedAttention(const Layer& l, __half* k_cache, __half* v_cache,
                       __half* vt_cache, const std::uint32_t* pos, float* res,
                       std::uint32_t n);
-  void FusedMoe(const Layer& l, float* res, std::uint32_t n);
+  void FusedMoe(const Layer& l, float* res, std::uint32_t n,
+                PrefillLayer prefill = {});
   /// The MTP block over `n` rows at positions pos..: tokens and seed hiddens
   /// in device memory. With `draft_out`, the last row's argmax goes there and
   /// its normed hidden to mtp_hn_ (the next chained seed).
@@ -318,7 +330,8 @@ private:
   bool AllocateWide(std::string* error);
   void FreeWide();
   /// The trunk over wide_.tokens (n rows at pos_); leaves wide_.res.
-  bool WideTrunk(std::uint32_t n, std::string* error);
+  bool WideTrunk(std::uint32_t n, std::string* error,
+                 const qfn::PrefillExpertsSettings* experts = nullptr);
   /// out = x W^T over n rows: Q8_0 through the F16 or int8 WMMA GEMM, F32 and
   /// BF16 through hipBLAS. The staged F16 / tiled-Q8 / BF16 copy of x is
   /// reused while wide_.staged == x (Unstage() after rewriting x).
@@ -333,7 +346,8 @@ private:
   bool WideAttention(const Layer& l, __half* k_cache, __half* v_cache,
                      __half* vt_cache, float* res, std::uint32_t n,
                      std::uint32_t start_pos, std::string* error);
-  bool WideMoe(const Layer& l, float* res, std::uint32_t n, std::string* error);
+  bool WideMoe(const Layer& l, float* res, std::uint32_t n, std::string* error,
+               PrefillLayer prefill = {});
   /// out = x W^T for BF16 weights; with x_lo the activations are the BF16
   /// split x + x_lo (a second, accumulating GEMM).
   bool BlasBf16(const void* w, const void* x, const void* x_lo, float* out,

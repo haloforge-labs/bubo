@@ -4,12 +4,8 @@
 // h3_text_encoder.c at 8974cc055ea9c02fcd14cc27dfda3e1027c05153 (MIT).
 // Dense projections and residency/prefetch are independent ROCm/HIP code.
 
-#include <fcntl.h>
 #include <hip/hip_runtime.h>
 #include <hipblaslt/hipblaslt.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #include <algorithm>
 #include <array>
@@ -31,6 +27,7 @@
 #include <vector>
 
 #include "src/core/mapped_prefetch.hpp"
+#include "src/core/platform/mapped_file.hpp"
 #include "src/models/minimax_h3/prompt_encoder.hpp"
 #include "src/models/minimax_h3/prompt_encoder_ops.hip.hpp"
 
@@ -207,6 +204,7 @@ struct FileInterval {
 
 struct HostMapping {
   std::filesystem::path shard;
+  platform::RawMappedFile mapping_file;
   void* host{nullptr};
   std::size_t bytes{0};
   std::uint64_t file_offset{0};
@@ -218,6 +216,7 @@ struct HostMapping {
   HostMapping& operator=(const HostMapping&) = delete;
   HostMapping(HostMapping&& other) noexcept
       : shard(std::move(other.shard)),
+        mapping_file(std::exchange(other.mapping_file, {})),
         host(std::exchange(other.host, nullptr)),
         bytes(std::exchange(other.bytes, 0)),
         file_offset(other.file_offset),
@@ -227,6 +226,7 @@ struct HostMapping {
     if (this != &other) {
       Release();
       shard = std::move(other.shard);
+      mapping_file = std::exchange(other.mapping_file, {});
       host = std::exchange(other.host, nullptr);
       bytes = std::exchange(other.bytes, 0);
       file_offset = other.file_offset;
@@ -243,10 +243,8 @@ struct HostMapping {
       g_registered_host_bytes.fetch_sub(bytes, std::memory_order_acq_rel);
       registered = false;
     }
-    if (host != nullptr && bytes != 0) {
-      (void)munmap(host, bytes);
-      host = nullptr;
-    }
+    mapping_file.Close();
+    host = nullptr;
     device = nullptr;
     bytes = 0;
   }
@@ -254,11 +252,7 @@ struct HostMapping {
 
 std::vector<FileInterval> BuildIntervals(
     std::span<const TensorDescriptor* const> descriptors) {
-  const long page_size_value = sysconf(_SC_PAGESIZE);
-  if (page_size_value <= 0) {
-    throw std::runtime_error("cannot determine host page size");
-  }
-  const auto page_size = static_cast<std::uint64_t>(page_size_value);
+  const auto page_size = static_cast<std::uint64_t>(platform::SystemPageSize());
   std::vector<FileInterval> intervals;
   intervals.reserve(descriptors.size());
   for (const TensorDescriptor* descriptor : descriptors) {
@@ -341,41 +335,34 @@ BatchLoadResult LoadBatch(const ModelInventory& inventory,
         return result;
       }
       const auto path = inventory.model_root() / interval.shard;
-      const int file = open(path.c_str(), O_RDONLY | O_CLOEXEC);
-      if (file < 0) {
-        result.error = "cannot open H3 text shard " + path.string() + ": " +
-                       std::strerror(errno);
-        return result;
-      }
       const std::uint64_t length64 = interval.end - interval.begin;
       if (length64 > std::numeric_limits<std::size_t>::max()) {
-        close(file);
         result.error = "H3 text mapping is too large";
         return result;
       }
       const auto length = static_cast<std::size_t>(length64);
-      void* host = mmap(nullptr, length, PROT_READ, MAP_PRIVATE, file,
-                        static_cast<off_t>(interval.begin));
-      close(file);
-      if (host == MAP_FAILED) {
-        result.error = "cannot map H3 text shard " + path.string() + ": " +
-                       std::strerror(errno);
-        return result;
-      }
       HostMapping mapping;
       mapping.shard = interval.shard;
-      mapping.host = host;
+      std::string map_error;
+      if (!mapping.mapping_file.OpenRange(path, interval.begin, length,
+                                          platform::MapHint::kNone,
+                                          &map_error)) {
+        result.error =
+            "cannot map H3 text shard " + path.string() + ": " + map_error;
+        return result;
+      }
+      mapping.host = mapping.mapping_file.data;
       mapping.bytes = length;
       mapping.file_offset = interval.begin;
-      core::PrefaultMappedRange(host, length);
-      status = hipHostRegister(host, length,
+      core::PrefaultMappedRange(mapping.host, length);
+      status = hipHostRegister(mapping.host, length,
                                hipHostRegisterMapped | hipHostRegisterReadOnly);
       if (status != hipSuccess) {
         result.error = HipError("hipHostRegister(mapped|readonly)", status);
         return result;
       }
       mapping.registered = true;
-      status = hipHostGetDevicePointer(&mapping.device, host, 0);
+      status = hipHostGetDevicePointer(&mapping.device, mapping.host, 0);
       if (status != hipSuccess) {
         result.error =
             HipError("hipHostGetDevicePointer(H3 text weight)", status);

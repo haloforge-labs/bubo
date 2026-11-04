@@ -22,6 +22,30 @@ add_test(NAME ds4.cli COMMAND ds4_cli_test)
 set_tests_properties(ds4.cli PROPERTIES LABELS "cpu;ds4;cli")
 
 if(ENGINE_ENABLE_HIP)
+  add_executable(ds4_markov_test markov_test.cpp)
+  target_link_libraries(ds4_markov_test PRIVATE gufo_deepseek_v4_flash)
+  add_test(NAME ds4.markov COMMAND ds4_markov_test)
+  set_tests_properties(ds4.markov PROPERTIES
+    LABELS "gpu;hip;gfx1151;ds4;quality"
+    RESOURCE_LOCK ds4_model
+    SKIP_RETURN_CODE 77)
+
+  add_executable(ds4_compressor_test compressor_test.cpp)
+  target_link_libraries(ds4_compressor_test PRIVATE gufo_deepseek_v4_flash)
+  add_test(NAME ds4.compressor COMMAND ds4_compressor_test)
+  set_tests_properties(ds4.compressor PROPERTIES
+    LABELS "gpu;hip;gfx1151;ds4;quality"
+    RESOURCE_LOCK ds4_model
+    SKIP_RETURN_CODE 77)
+
+  add_executable(ds4_router_test router_test.cpp)
+  target_link_libraries(ds4_router_test PRIVATE gufo_deepseek_v4_flash)
+  add_test(NAME ds4.router COMMAND ds4_router_test)
+  set_tests_properties(ds4.router PROPERTIES
+    LABELS "gpu;hip;gfx1151;ds4;quality"
+    RESOURCE_LOCK ds4_model
+    SKIP_RETURN_CODE 77)
+
   add_executable(ds4_load_test load_test.cpp)
   target_link_libraries(ds4_load_test PRIVATE gufo_deepseek_v4_flash)
   add_test(NAME ds4.load COMMAND ds4_load_test)
@@ -51,11 +75,13 @@ if(ENGINE_ENABLE_HIP)
     serving_test.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/continuation_cache.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/continuation_disk_store.cpp
+    ${PROJECT_SOURCE_DIR}/src/cli/serve/component_text_cache.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/text_model_runner.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/text_generation_scheduler.cpp
     ${PROJECT_SOURCE_DIR}/src/cli/serve/inference_backend.cpp)
   target_link_libraries(ds4_serving_test PRIVATE gufo_logging
-    gufo_core gufo_deepseek_v4_flash gufo_qwen38_flash_next gufo_gemma4 hip::host)
+    gufo_core gufo_deepseek_v4_flash gufo_qwen38_flash_next gufo_gemma4
+    gufo_qwen36_a3b gufo_cache_hip hip::host)
   add_test(NAME ds4.serving COMMAND ds4_serving_test)
   set_tests_properties(ds4.serving PROPERTIES
     LABELS "gpu;hip;ds4;server;external-model;slow"
@@ -64,6 +90,16 @@ if(ENGINE_ENABLE_HIP)
 endif()
 
 if(ENGINE_ENABLE_HIP)
+  add_executable(ds4_quantize_test quantize_test.hip)
+  target_include_directories(ds4_quantize_test PRIVATE ${PROJECT_SOURCE_DIR})
+  target_compile_definitions(ds4_quantize_test PRIVATE GGML_USE_HIP GGML_HIP_NO_VMM)
+  target_link_libraries(ds4_quantize_test PRIVATE gufo_deepseek_v4_flash_mmq)
+  add_test(NAME ds4.quantization COMMAND ds4_quantize_test)
+  set_tests_properties(ds4.quantization PROPERTIES
+    LABELS "gpu;hip;gfx1151;ds4;quality"
+    RESOURCE_LOCK ds4_model
+    SKIP_RETURN_CODE 77)
+
   add_executable(ds4_projection_test projection_test.hip moe_test.hip)
   target_include_directories(ds4_projection_test SYSTEM PRIVATE ${ROCWMMA_INCLUDE_DIR})
   target_include_directories(ds4_projection_test PRIVATE ${PROJECT_SOURCE_DIR})

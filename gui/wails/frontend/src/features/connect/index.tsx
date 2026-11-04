@@ -1,15 +1,33 @@
 import { ErrorNote } from '@/components/error-note'
 import { Page } from '@/components/page'
-import { CopyText } from '@/components/copy-text'
+import { AddressRow } from '@/components/address-row'
 import { ActionError, useActionTask } from '@/components/action-feedback'
 import { Switch } from '@/components/ui/switch'
-import { actions, useView } from '@/lib/bindings'
+import { actions, useView, type View } from '@/lib/bindings'
 import { KeyControls } from './key-controls'
 import { ClientSnippets } from './snippets'
 import { Button } from '@/components/ui/button'
 import { serverAddresses } from '@/lib/format'
 import { GUIError } from '@/components/gui-error'
 import { Link } from '@tanstack/react-router'
+import { pageGrid } from '@/components/page-grid'
+
+// Saved and active differ until the restart: say what is saved as pending, and
+// describe current access from what is active.
+function lanStatus(key: View['key']) {
+  if (key.lan_access === key.lan_active) return key.lan_access ? 'On' : 'Off'
+  return key.lan_access ? 'On after restart' : 'Off after restart'
+}
+
+function lanSentence(key: View['key']) {
+  if (key.lan_active)
+    return key.lan_access
+      ? 'Every client must send the key, including clients on this computer.'
+      : 'Other devices can connect now.'
+  return key.lan_access
+    ? 'Only this computer can connect now.'
+    : 'Only this computer can connect. Turn on to allow other devices; every client will need a key.'
+}
 
 export default function ConnectPage() {
   const query = useView()
@@ -25,24 +43,17 @@ export default function ConnectPage() {
         </ErrorNote>
       )}
       {view ? (
-        <div className="space-y-6">
-          <section aria-label="Server addresses" className="space-y-3">
+        <div className="space-y-4">
+          <section aria-label="Server addresses" className="space-y-2">
             {!view.serving &&
               view.phase !== 'starting' &&
               !addresses?.openai_base_url &&
               !addresses?.anthropic_base_url && (
-                <div className="space-y-2">
-                  <p>
-                    No server is running, so there is nothing to connect to yet.
-                  </p>
-                  <p>
-                    Start the server on the{' '}
-                    <Link to="/" className="underline">
-                      Server page
-                    </Link>
-                    .
-                  </p>
-                </div>
+                <p>
+                  <Link to="/" className="underline">
+                    Start the server to connect.
+                  </Link>
+                </p>
               )}
             {(view.phase === 'starting' || view.serving) &&
               !addresses?.openai_base_url &&
@@ -64,32 +75,29 @@ export default function ConnectPage() {
                   )}
                 </div>
               )}
-            {view.serving &&
-              (
-                [
-                  ['OpenAI', addresses?.openai_base_url],
-                  ['Anthropic', addresses?.anthropic_base_url],
-                ] as const
-              ).map(([label, url]) =>
-                url ? (
-                  <div
-                    key={label}
-                    className="grid min-w-0 grid-cols-[6rem_minmax(0,1fr)_auto] items-start gap-4 border-b pb-3"
-                  >
-                    <span>{label}</span>
-                    <code className="break-all text-sm">{url}</code>
-                    <CopyText
-                      iconOnly
-                      label={`Copy ${label} address`}
-                      text={url}
+            {view.serving && (
+              <div className={pageGrid}>
+                {(
+                  [
+                    ['OpenAI', addresses?.openai_base_url],
+                    ['Anthropic', addresses?.anthropic_base_url],
+                  ] as const
+                ).map(([label, url]) =>
+                  url ? (
+                    <AddressRow
+                      key={label}
+                      label={label}
+                      url={url}
+                      copyLabel={`Copy ${label} address`}
                     />
-                  </div>
-                ) : null,
-              )}
+                  ) : null,
+                )}
+              </div>
+            )}
           </section>
-          <section aria-label="Local network access" className="space-y-3">
-            <div className="flex items-center gap-4">
-              <h2 id="lan-label" className="text-2xl">
+          <section aria-label="Local network access" className="space-y-2">
+            <div className="flex items-center gap-3">
+              <h2 id="lan-label" className="text-lg">
                 Local network access
               </h2>
               <Switch
@@ -106,12 +114,10 @@ export default function ConnectPage() {
                   )
                 }
               />
-              <span>{view.key.lan_access ? 'On' : 'Off'}</span>
+              <span>{lanStatus(view.key)}</span>
             </div>
             <p className="text-sm text-muted-foreground">
-              {view.key.lan_access
-                ? 'Every client must send the key, including clients on this computer.'
-                : 'Only this computer can connect. Turn on to allow other devices; every client will need a key.'}
+              {lanSentence(view.key)}
             </p>
             <ActionError error={lan.error} />
             {view.key.unavailable && (
@@ -152,22 +158,16 @@ export default function ConnectPage() {
             )}
             {view.key.lan_access && (
               <>
-                {(view.key.addresses ?? []).map((address) => (
-                  <div
-                    key={address.url}
-                    className="flex flex-wrap items-start justify-between gap-3"
-                  >
-                    <div>
-                      <p>{address.adapter}</p>
-                      <code className="break-all text-sm">{address.url}</code>
-                    </div>
-                    <CopyText
-                      iconOnly
-                      label="Copy network address"
-                      text={address.url}
+                <div className={pageGrid}>
+                  {(view.key.addresses ?? []).map((address) => (
+                    <AddressRow
+                      key={address.url}
+                      label={address.adapter}
+                      url={address.url}
+                      copyLabel="Copy network address"
                     />
-                  </div>
-                ))}
+                  ))}
+                </div>
                 {view.key.addresses_unavailable && (
                   <p>{view.key.addresses_unavailable}</p>
                 )}
@@ -181,24 +181,6 @@ export default function ConnectPage() {
             )}
           </section>
           {view.serving && <ClientSnippets view={view} />}
-          {view.serving && (
-            <section aria-label="Client snippet" className="space-y-4">
-              <h2 className="text-2xl">Pi (coding agent)</h2>
-              <p className="text-sm text-muted-foreground">
-                Copy this configuration into your client.
-              </p>
-              {view.pi_snippet ? (
-                <>
-                  <CopyText label="Copy snippet" text={view.pi_snippet} />
-                  <pre className="max-h-80 overflow-auto border bg-secondary p-4 text-xs whitespace-pre-wrap break-all">
-                    {view.pi_snippet}
-                  </pre>
-                </>
-              ) : (
-                <p>Client snippet not reported.</p>
-              )}
-            </section>
-          )}
         </div>
       ) : (
         !query.error && <p>Loading connection details…</p>

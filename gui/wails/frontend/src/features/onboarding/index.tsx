@@ -19,7 +19,23 @@ import {
   driveName,
   FolderLocked,
 } from '@/components/download-folder'
+import { AboutPopup } from '@/components/about-popup'
+import { Disclosure } from '@/components/disclosure'
+import { downloadFolderScope } from '@/lib/presentation'
 import { useState } from 'react'
+
+type MemoryEstimate = NonNullable<
+  NonNullable<
+    NonNullable<View['models']>['catalogue']
+  >[number]['estimate']['memory_estimate']
+>
+
+// What a choice needs of the GPU, said once per place it is shown.
+function needsGpuMemory(memory: MemoryEstimate) {
+  if (!memory.gpu) return ''
+  const need = bytes(memory.gpu.need.bytes, { unit: 'GiB', digits: 0 })
+  return `Needs about ${need} of GPU memory at ${memory.context_tokens.toLocaleString()} tokens`
+}
 
 export default function OnboardingPage() {
   return (
@@ -35,13 +51,17 @@ function OnboardingContent({ view }: { view: View }) {
   const choices = (view.models?.catalogue ?? []).filter((entry) =>
     recommended?.family_group
       ? entry.family_group === recommended.family_group
-      : recommended && entry.architecture === recommended.architecture,
+      : recommended &&
+        entry.architecture === recommended.architecture &&
+        !entry.family_group,
   )
   const [chosenId, setChosenId] = useState<string>()
   const model =
     choices.find(
       (entry) => entry.id === (chosenId ?? view.models?.download?.id),
     ) ?? recommended
+  const selectorShown = !view.runtime.readiness.model && choices.length > 0
+  const chosenMemory = model?.estimate.memory_estimate
   const runtimeReady = view.runtime.readiness.runtime
   const modelReady = view.runtime.readiness.model
   const activeComponent =
@@ -78,9 +98,8 @@ function OnboardingContent({ view }: { view: View }) {
           <div className="max-w-3xl space-y-6">
             {!(runtimeReady && modelReady) && (
               <p>
-                Bubo{view.product?.version && ` ${view.product.version}`} is
-                optimized for Qwen3.8 Flash Next on Strix Halo computers running
-                Windows. Download the model below, or try other models on the{' '}
+                Needs a Strix Halo computer running Windows. Download the model
+                below, or try other models on the{' '}
                 <Link to="/models" className="underline">
                   Models page
                 </Link>
@@ -102,7 +121,7 @@ function OnboardingContent({ view }: { view: View }) {
               }
             />
             <ol aria-label="Setup steps" className="space-y-3 border-y py-4">
-              <li>
+              <li className="space-y-3">
                 <p>
                   <span className="tabular-nums">1</span> Engine files ·{' '}
                   {activeComponent === 'runtime'
@@ -110,25 +129,26 @@ function OnboardingContent({ view }: { view: View }) {
                     : runtimeReady
                       ? 'Done ✓'
                       : 'Next'}
+                  {engineBytes > 0 && (
+                    <>
+                      {' '}
+                      ·{' '}
+                      <span className="tabular-nums">{bytes(engineBytes)}</span>
+                    </>
+                  )}
                 </p>
-                {engineBytes > 0 && (
-                  <p className="text-sm">
-                    <span className="tabular-nums">{bytes(engineBytes)}</span>
-                  </p>
-                )}
-                <div className="pt-3">
-                  <Preparation
-                    view={view}
-                    primary={!runtimeReady}
-                    hideRepair
-                    progressKind="runtime"
-                  />
-                </div>
+                <Preparation
+                  view={view}
+                  primary={!runtimeReady}
+                  hideRepair
+                  progressKind="runtime"
+                />
               </li>
-              <li>
+              <li className="space-y-3">
                 <p>
                   <span className="tabular-nums">2</span>{' '}
-                  {model
+                  {/* The selector below names the choice. */}
+                  {!selectorShown && model
                     ? `${model.display_name}${model.id === recommended?.id ? ' (default model)' : ''}`
                     : 'Model'}{' '}
                   ·{' '}
@@ -139,17 +159,19 @@ function OnboardingContent({ view }: { view: View }) {
                       : runtimeReady
                         ? 'Next'
                         : 'After step 1'}
+                  {model && (
+                    <>
+                      {' '}
+                      ·{' '}
+                      <span className="tabular-nums">
+                        {bytes(model.download_bytes)}
+                      </span>
+                    </>
+                  )}
                 </p>
-                {model && (
-                  <p className="text-sm">
-                    <span className="tabular-nums">
-                      {bytes(model.download_bytes)}
-                    </span>
-                  </p>
-                )}
-                {!modelReady && choices.length > 0 && (
-                  <div className="space-y-2 pt-3">
-                    <label htmlFor="setup-model" className="block text-sm">
+                {selectorShown && (
+                  <div className="space-y-2">
+                    <label htmlFor="setup-model" className="sr-only">
                       Model to download
                     </label>
                     <select
@@ -172,73 +194,70 @@ function OnboardingContent({ view }: { view: View }) {
                         </option>
                       ))}
                     </select>
-                    <ul
-                      aria-label="Download choices"
-                      className="space-y-2 text-sm text-muted-foreground"
-                    >
-                      {choices.map((entry) => {
-                        const memory = entry.estimate.memory_estimate
-                        return (
-                          <li key={entry.id}>
-                            {entry.selection_label || entry.display_name}:
-                            Download {bytes(entry.download_bytes)}
-                            {memory?.gpu && (
-                              <>
-                                {' '}
-                                · Needs about{' '}
-                                {bytes(memory.gpu.need.bytes, {
-                                  unit: 'GiB',
-                                  digits: 0,
-                                })}{' '}
-                                of GPU memory at{' '}
-                                {memory.context_tokens.toLocaleString()} tokens
-                              </>
-                            )}
-                            {!entry.download_enabled &&
-                              entry.disabled_reason && (
-                                <> · {entry.disabled_reason}</>
+                    {chosenMemory?.gpu && (
+                      <p className="text-sm text-muted-foreground">
+                        {needsGpuMemory(chosenMemory)}
+                      </p>
+                    )}
+                    {choices.length > 1 && (
+                      <Disclosure
+                        summary="Compare models"
+                        className="text-sm text-muted-foreground"
+                      >
+                        <ul aria-label="Download choices" className="space-y-2">
+                          {choices.map((entry) => (
+                            <li key={entry.id}>
+                              {entry.selection_label || entry.display_name}:
+                              Download {bytes(entry.download_bytes)}
+                              {entry.estimate.memory_estimate?.gpu && (
+                                <>
+                                  {' '}
+                                  ·{' '}
+                                  {needsGpuMemory(
+                                    entry.estimate.memory_estimate,
+                                  )}
+                                </>
                               )}
-                          </li>
-                        )
-                      })}
-                    </ul>
+                            </li>
+                          ))}
+                        </ul>
+                      </Disclosure>
+                    )}
                   </div>
                 )}
-                <div className="space-y-3 pt-3">
-                  <ModelDownloadProgress view={view} retry={open} />
-                  {!view.models?.download &&
-                    view.phase === 'downloading_model' && (
-                      <Preparation
-                        view={view}
-                        progressKind="model"
-                        progressOnly
-                      />
-                    )}
-                  {runtimeReady &&
-                    !modelReady &&
-                    model?.download_enabled &&
-                    !busy && (
-                      <Button
-                        disabled={
-                          pending || !view.actions.download_default.allowed
-                        }
-                        onClick={() => open(model.id)}
-                      >
-                        Download model…
-                      </Button>
-                    )}
-                  {!modelReady && (
-                    <Link
-                      to="/models"
-                      hash="import"
-                      className="block text-sm underline"
-                    >
-                      I already have a model
-                    </Link>
+                <ModelDownloadProgress view={view} retry={open} />
+                {!view.models?.download &&
+                  view.phase === 'downloading_model' && (
+                    <Preparation
+                      view={view}
+                      progressKind="model"
+                      progressOnly
+                    />
                   )}
-                </div>
+                {runtimeReady &&
+                  !modelReady &&
+                  model?.download_enabled &&
+                  !busy && (
+                    <Button
+                      disabled={
+                        pending || !view.actions.download_default.allowed
+                      }
+                      onClick={() => open(model.id)}
+                    >
+                      Download model…
+                    </Button>
+                  )}
+                {!modelReady && (
+                  <Link
+                    to="/models"
+                    hash="import"
+                    className="block text-sm underline"
+                  >
+                    I already have a model
+                  </Link>
+                )}
                 {runtimeReady && view.models?.status === 'not_reported' && (
-                  <div className="space-y-2 pt-2">
+                  <div className="space-y-2">
                     <GUIError
                       error={{
                         code: view.models.reason_code,
@@ -257,25 +276,20 @@ function OnboardingContent({ view }: { view: View }) {
                   </div>
                 )}
                 {shortOfSpace && (
-                  <div className="space-y-2 pt-2 text-sm">
+                  <div className="space-y-2 text-sm">
                     <p>
-                      <span>
-                        Needs {bytes(neededBytes!)} free;{' '}
-                        {driveName(disk!.drive) || 'This drive'} has{' '}
-                        {bytes(disk!.free_bytes!)}.
-                      </span>{' '}
-                      <Link
-                        to="/settings"
-                        hash="download-folder"
-                        className="underline"
-                      >
-                        Change the download folder in Settings.
-                      </Link>{' '}
-                      This choice applies to the model files.
+                      Needs {bytes(neededBytes!)} free;{' '}
+                      {driveName(disk!.drive) || 'This drive'} has{' '}
+                      {bytes(disk!.free_bytes!)}.
                     </p>
-                    <ChangeDownloadFolder view={view}>
-                      Choose download folder…
-                    </ChangeDownloadFolder>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <ChangeDownloadFolder view={view}>
+                        Choose download folder…
+                      </ChangeDownloadFolder>
+                      <AboutPopup label="download folder">
+                        <p>{downloadFolderScope}</p>
+                      </AboutPopup>
+                    </div>
                     <FolderLocked folder={view.download_folder} />
                   </div>
                 )}
@@ -305,23 +319,16 @@ function OnboardingContent({ view }: { view: View }) {
                 <ActionError error={check.error} />
               </section>
             )}
-            <section aria-label="System requirements" className="space-y-2">
-              <h3 className="text-lg">System requirements</h3>
-              <p className="text-sm">
-                See the{' '}
-                <a
-                  href={links.docs}
-                  className="underline"
-                  onClick={(event) => {
-                    event.preventDefault()
-                    void actions.OpenExternal(links.docs)
-                  }}
-                >
-                  install guide
-                </a>
-                .
-              </p>
-            </section>
+            <a
+              href={links.docs}
+              className="block text-sm underline"
+              onClick={(event) => {
+                event.preventDefault()
+                void actions.OpenExternal(links.docs)
+              }}
+            >
+              Install guide
+            </a>
           </div>
         )
       }}

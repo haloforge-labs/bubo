@@ -201,7 +201,10 @@ test('labels fall back only when missing and debug rows retain CLI descriptions'
     row.name,
   )
   const debug = Object.values(groupRows(view.switches, 'debug')).flat()
-  expect(debug.every((item) => item.name && item.purpose)).toBe(true)
+  // A row whose CLI purpose is empty shows no About text; the GUI invents none.
+  expect(
+    debug.every((item) => item.name && typeof item.purpose === 'string'),
+  ).toBe(true)
 })
 
 // The release exe reports an unset text option's effective value as its

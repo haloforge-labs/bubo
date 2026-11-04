@@ -1,10 +1,5 @@
 #include "src/core/gguf_reader.hpp"
 
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -25,6 +20,7 @@
 #include <variant>
 #include <vector>
 
+#include "src/core/platform/mapped_file.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
 
 namespace gufo::core {
@@ -60,21 +56,13 @@ bool ReadString(const std::uint8_t* data, std::size_t size, std::size_t& offset,
 
 }  // namespace
 
-GgufReader::~GgufReader() {
-  if (owns_mmap_ && mmap_addr_ != nullptr && size_ > 0) {
-    munmap(mmap_addr_, size_);
-  }
-  if (fd_ >= 0) {
-    close(fd_);
-  }
-}
+GgufReader::~GgufReader() = default;
 
 GgufReader::GgufReader(GgufReader&& other) noexcept
     : data_(other.data_),
-      mmap_addr_(other.mmap_addr_),
       size_(other.size_),
-      fd_(other.fd_),
-      owns_mmap_(other.owns_mmap_),
+      source_path_(std::move(other.source_path_)),
+      mapping_(std::move(other.mapping_)),
       version_(other.version_),
       alignment_(other.alignment_),
       metadata_(std::move(other.metadata_)),
@@ -83,26 +71,19 @@ GgufReader::GgufReader(GgufReader&& other) noexcept
       mapped_regions_(std::move(other.mapped_regions_)),
       shards_(std::move(other.shards_)) {
   other.data_ = nullptr;
-  other.mmap_addr_ = nullptr;
   other.size_ = 0;
-  other.fd_ = -1;
-  other.owns_mmap_ = false;
 }
 
 GgufReader& GgufReader::operator=(GgufReader&& other) noexcept {
   if (this != &other) {
-    if (owns_mmap_ && mmap_addr_ != nullptr && size_ > 0) {
-      munmap(mmap_addr_, size_);
-    }
-    if (fd_ >= 0) {
-      close(fd_);
-    }
+    mapping_.Close();
+    shards_.clear();
+    mapped_regions_.clear();
 
     data_ = other.data_;
-    mmap_addr_ = other.mmap_addr_;
     size_ = other.size_;
-    fd_ = other.fd_;
-    owns_mmap_ = other.owns_mmap_;
+    source_path_ = std::move(other.source_path_);
+    mapping_ = std::move(other.mapping_);
     version_ = other.version_;
     alignment_ = other.alignment_;
     metadata_ = std::move(other.metadata_);
@@ -112,10 +93,7 @@ GgufReader& GgufReader::operator=(GgufReader&& other) noexcept {
     shards_ = std::move(other.shards_);
 
     other.data_ = nullptr;
-    other.mmap_addr_ = nullptr;
     other.size_ = 0;
-    other.fd_ = -1;
-    other.owns_mmap_ = false;
   }
   return *this;
 }
@@ -143,40 +121,21 @@ std::unique_ptr<GgufReader> GgufReader::OpenFile(
 
 std::unique_ptr<GgufReader> GgufReader::OpenSingleFile(
     const std::filesystem::path& path, std::string* error_msg) {
-  const int fd = open(path.c_str(), O_RDONLY);
-  if (fd < 0) {
+  std::string open_error;
+  auto mapping = platform::ReadOnlyMappedFile::Open(path, &open_error);
+  if (!mapping.valid()) {
     if (error_msg != nullptr) {
-      *error_msg = "Failed to open file: " + path.string();
+      *error_msg =
+          "Failed to open or map file: " + path.string() + ": " + open_error;
     }
     return nullptr;
   }
-
-  struct stat sb{};
-  if (fstat(fd, &sb) != 0 || sb.st_size <= 0) {
-    close(fd);
-    if (error_msg != nullptr) {
-      *error_msg = "Invalid or empty file: " + path.string();
-    }
-    return nullptr;
-  }
-
-  const auto size = static_cast<std::size_t>(sb.st_size);
-  void* const addr = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
-  if (addr == MAP_FAILED) {
-    close(fd);
-    if (error_msg != nullptr) {
-      *error_msg = "Failed to mmap file: " + path.string();
-    }
-    return nullptr;
-  }
-  (void)madvise(addr, size, MADV_SEQUENTIAL);
 
   auto reader = std::unique_ptr<GgufReader>(new GgufReader());
-  reader->mmap_addr_ = addr;
-  reader->data_ = static_cast<const std::uint8_t*>(addr);
-  reader->size_ = size;
-  reader->fd_ = fd;
-  reader->owns_mmap_ = true;
+  reader->data_ = mapping.data();
+  reader->size_ = mapping.size();
+  reader->source_path_ = path;
+  reader->mapping_ = std::move(mapping);
 
   try {
     if (!reader->ParseHeaders(error_msg)) {
@@ -189,8 +148,9 @@ std::unique_ptr<GgufReader> GgufReader::OpenSingleFile(
       *error_msg = "Insufficient memory for GGUF descriptors";
     return nullptr;
   }
-  reader->mapped_regions_.push_back(
-      {reader->data_, reader->size_, reader->fd_});
+  reader->mapped_regions_.push_back({reader->data_, reader->size_,
+                                     reader->mapping_.PlatformHandle(),
+                                     reader->source_path_});
   return reader;
 }
 
@@ -294,8 +254,9 @@ std::unique_ptr<GgufReader> GgufReader::OpenSplitFileSet(
   combined->mapped_regions_.reserve(split_count);
 
   for (const auto& shard : shards) {
-    combined->mapped_regions_.push_back(
-        {shard->data_, shard->size_, shard->fd_});
+    combined->mapped_regions_.push_back({shard->data_, shard->size_,
+                                         shard->mapping_.PlatformHandle(),
+                                         shard->source_path_});
     for (const auto& tensor : shard->tensors_) {
       if (combined->tensor_index_.contains(tensor.name)) {
         if (error_msg != nullptr) {
@@ -354,7 +315,9 @@ bool GgufReader::OverlayTensors(
   for (const auto& [ours, theirs] : replacements)
     tensors_[ours] = overlay->tensors_[theirs];
   // size_ stays the base mapping's length: a single-file base unmaps exactly that many bytes.
-  mapped_regions_.push_back({overlay->data_, overlay->size_, overlay->fd_});
+  mapped_regions_.push_back({overlay->data_, overlay->size_,
+                             overlay->mapping_.PlatformHandle(),
+                             overlay->source_path_});
   shards_.push_back(std::move(overlay));
   return true;
 }
@@ -370,11 +333,8 @@ std::unique_ptr<GgufReader> GgufReader::OpenMemory(const void* data,
   }
 
   auto reader = std::unique_ptr<GgufReader>(new GgufReader());
-  reader->mmap_addr_ = nullptr;
   reader->data_ = static_cast<const std::uint8_t*>(data);
   reader->size_ = size;
-  reader->fd_ = -1;
-  reader->owns_mmap_ = false;
 
   try {
     if (!reader->ParseHeaders(error_msg)) {
@@ -388,7 +348,7 @@ std::unique_ptr<GgufReader> GgufReader::OpenMemory(const void* data,
     return nullptr;
   }
   reader->mapped_regions_.push_back(
-      {reader->data_, reader->size_, reader->fd_});
+      {reader->data_, reader->size_, platform::kInvalidFile, {}});
   return reader;
 }
 

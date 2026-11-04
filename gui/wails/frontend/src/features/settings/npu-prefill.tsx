@@ -1,6 +1,15 @@
 import { bytes, number, percent, rate } from '@/lib/format'
 import type { View } from '@/lib/bindings'
 import { guiError } from '@/lib/gui-errors'
+import { Disclosure } from '@/components/disclosure'
+import { valueWord } from '@/lib/presentation'
+
+// A power window under a second is told in milliseconds, never rounded to zero.
+function windowText(seconds: number) {
+  return seconds < 1
+    ? `${Math.round(seconds * 1000)} ms`
+    : `${number(seconds, Number.isInteger(seconds) ? 0 : 2)} s`
+}
 
 export function NPUPrefill({
   runtime,
@@ -16,7 +25,9 @@ export function NPUPrefill({
       aria-label="NPU prefill status"
       className="space-y-1 text-sm text-muted-foreground"
     >
-      {!paused && <p>NPU prefill: {runtime.state}</p>}
+      {!paused && (
+        <p>NPU prefill: {valueWord('--npu-prefill', runtime.state)}</p>
+      )}
       {paused && (
         <p>
           {
@@ -26,15 +37,16 @@ export function NPUPrefill({
         </p>
       )}
       {runtime && (
-        <details className="text-xs">
-          <summary className="cursor-pointer font-normal">Details</summary>
+        <Disclosure summary="Details" className="text-xs">
           {runtime.reason && <p>{runtime.reason}</p>}
           <dl className="grid grid-cols-[auto_1fr] gap-x-5 gap-y-2 pt-3 text-sm">
-            <dt>Gate holds</dt>
+            <dt>Guard trips</dt>
             <dd className="tabular-nums">{number(runtime.trips, 0)}</dd>
-            <dt>HAL faults</dt>
+            <dt title="Faults of the NPU's hardware abstraction layer">
+              HAL faults
+            </dt>
             <dd className="tabular-nums">{number(runtime.hal_faults, 0)}</dd>
-            <dt>WHEA events</dt>
+            <dt title="Windows hardware error reports">WHEA events</dt>
             <dd className="tabular-nums">{number(runtime.whea_events, 0)}</dd>
             <dt>Invalid chunks</dt>
             <dd className="tabular-nums">
@@ -48,20 +60,17 @@ export function NPUPrefill({
                 <>
                   <span className="tabular-nums">
                     {rate(runtime.chip_power.w_mean)} W
-                  </span>{' '}
-                  · {runtime.chip_power.state}
+                  </span>
                 </>
               )}
             </dd>
             <dt>Power window</dt>
             <dd className="tabular-nums">
-              {number(runtime.chip_power.window_s, 0)} s
+              {windowText(runtime.chip_power.window_s)}
             </dd>
             <dt>Power scheme</dt>
-            <dd>
-              {runtime.scheme
-                ? `${runtime.scheme.name} · ${runtime.scheme.guid}`
-                : 'Unavailable'}
+            <dd title={runtime.scheme?.guid}>
+              {runtime.scheme ? runtime.scheme.name : 'Unavailable'}
             </dd>
             <dt>Minimum available memory</dt>
             <dd>
@@ -84,7 +93,7 @@ export function NPUPrefill({
               )}
             </dd>
           </dl>
-        </details>
+        </Disclosure>
       )}
     </section>
   )

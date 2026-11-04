@@ -186,8 +186,11 @@ type Update struct {
 // Draft form estimates use the independent Estimate action.
 type SavedSetupEstimate struct {
 	MemoryEstimate *ViewMemoryEstimate `json:"memory_estimate"`
-	Reason         *string             `json:"reason"`
-	Error          *CLIError           `json:"error"`
+	// Capabilities are the CLI's facts about the saved model. They come with the
+	// estimate, or from a separate ask when serve switches stop the estimate.
+	Capabilities *EstimateCapabilities `json:"capabilities,omitempty"`
+	Reason       *string               `json:"reason"`
+	Error        *CLIError             `json:"error"`
 }
 
 type ViewSlot struct {
@@ -240,6 +243,8 @@ type UserOverrides struct {
 	LANAccess          bool              `json:"lan_access"`
 	StallSeconds       int               `json:"stall_seconds,omitempty"`
 	CheckForUpdates    *bool             `json:"check_for_updates,omitempty"`
+	LastSeenVersion    string            `json:"last_seen_version,omitempty"`
+	Font               string            `json:"font,omitempty"`
 	SwitchOverrides    map[string]string `json:"switch_overrides,omitempty"`
 }
 
@@ -339,6 +344,7 @@ type ViewInput struct {
 	RunningSetupUnchanged     bool
 	SavedEstimate             *MemoryEstimate
 	SavedEstimateError        *CLIError
+	SavedCapabilities         *EstimateCapabilities
 	Snapshot                  Snapshot
 	Registry                  *Switches
 	Models                    *ModelsState
@@ -402,6 +408,11 @@ func (b *ViewBuilder) Build(in ViewInput) View {
 	if in.SavedEstimateError != nil {
 		reason := in.SavedEstimateError.Remedy
 		v.SavedEstimate.Reason, v.SavedEstimate.Error = &reason, in.SavedEstimateError
+	}
+	if in.SavedCapabilities != nil {
+		v.SavedEstimate.Capabilities = in.SavedCapabilities
+	} else if v.SavedEstimate.MemoryEstimate != nil {
+		v.SavedEstimate.Capabilities = v.SavedEstimate.MemoryEstimate.Capabilities
 	}
 	if v.Update.State == "" {
 		v.Update.State = UpdateNone
@@ -527,6 +538,8 @@ func (b *ViewBuilder) Build(in ViewInput) View {
 	v.Saved = UserOverrides{RuntimePath: x.RuntimePath, ModelPath: x.ModelPath, DataFolder: x.DataFolder, ManifestPath: x.ManifestPath, NPUPrefill: x.NPUPrefill, Effort: x.Effort, ModelFolders: x.ModelFolders, StartGUIAtLogin: x.StartGUIAtLogin, StartServerWithGUI: x.StartServerWithGUI, CloseToTray: x.CloseToTray, AllowTightSetup: x.AllowTightSetup, LANAccess: x.LanAccess, StallSeconds: x.StallSeconds}
 	v.Saved.CheckForUpdates = x.CheckForUpdates
 	v.Saved.InferenceExpanded = x.InferenceExpanded
+	v.Saved.LastSeenVersion = x.LastSeenVersion
+	v.Saved.Font = x.Font
 	v.SwitchOverrides = switchOverrideViews(in)
 	for _, row := range v.SwitchOverrides {
 		if row.Saved != nil && row.WriteVia == "override" {
@@ -549,7 +562,8 @@ func (b *ViewBuilder) Build(in ViewInput) View {
 		v.Saved.Sessions = &x.Sessions
 	}
 	if st := s.Status; st != nil {
-		if s.LastError == nil && st.LastError != nil {
+		// The default package's missing model is no reason for a saved model file.
+		if s.LastError == nil && st.LastError != nil && !ignoreStatusModelMissing(in.Saved, st.LastError.Code) {
 			v.Reason = st.LastError.Code
 			v.Remedy = st.LastError.Remedy
 		}

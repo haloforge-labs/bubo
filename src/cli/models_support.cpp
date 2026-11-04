@@ -26,7 +26,9 @@
 #include "src/cli/prepare/prepare.hpp"
 #include "src/cli/serve/memory_estimate.hpp"
 #include "src/cli/serve/memory_policy.hpp"
+#include "src/cli/serve/release_profile.hpp"
 #include "src/cli/settings_support.hpp"
+#include "src/cli/side_file_check.hpp"
 #include "src/core/prepare/metadata_json.hpp"
 #include "src/core/session_state_bytes.hpp"
 #include "src/models/gemma4/config.hpp"
@@ -385,6 +387,79 @@ ScanResult ScanModelFolders(const ScanOptions& options) {
 // ---- estimate --------------------------------------------------------------
 
 namespace {
+constexpr const char* kPrefillFastUnavailable =
+    "Fast mode is for Qwen3.8 Flash Next with 512 experts only.";
+}  // namespace
+
+Value ModelCapabilities(std::string_view architecture,
+                        std::uint32_t routed_experts, bool already_abliterated) {
+  auto value = Value::object();
+  if (routed_experts > 0)
+    value["routed_experts"] = static_cast<std::uint64_t>(routed_experts);
+  // Serve's own rule decides, except that an unknown expert count is not
+  // enough for a hint (serve only refuses what it can see): fast mode is for
+  // models known to have 512 experts. An unknown architecture is not capable.
+  const bool available =
+      !architecture.empty() && routed_experts == 512 &&
+      gufo::server::PrefillFastRefusalFor(
+          prepare::ModelFamilyForArchitecture(architecture), routed_experts) ==
+          gufo::server::PrefillFastRefusal::kNone;
+  auto fast = Value::object();
+  fast["available"] = available;
+  fast["reason"] = std::string(available ? "" : kPrefillFastUnavailable);
+  value["prefill_mode_fast"] = std::move(fast);
+  // Same shape; serve's own rule (KvCacheQ8RefusalFor). An unknown architecture
+  // is not capable.
+  const auto q8_refusal =
+      architecture.empty()
+          ? gufo::server::KvCacheQ8Refusal::kFamily
+          : gufo::server::KvCacheQ8RefusalFor(
+                prepare::ModelFamilyForArchitecture(architecture));
+  auto q8 = Value::object();
+  q8["available"] = q8_refusal == gufo::server::KvCacheQ8Refusal::kNone;
+  q8["reason"] = std::string(gufo::server::KvCacheQ8RefusalText(q8_refusal));
+  value["kv_cache_q8"] = std::move(q8);
+  // Same shape and the same "known 512 experts" rule; the refusal and its
+  // sentence are serve's (RefusalDirectionRefusalFor).
+  auto refusal = gufo::server::RefusalDirectionRefusal::kFamily;
+  if (!architecture.empty())
+    refusal = gufo::server::RefusalDirectionRefusalFor(
+        prepare::ModelFamilyForArchitecture(architecture), routed_experts,
+        already_abliterated);
+  if (refusal == gufo::server::RefusalDirectionRefusal::kNone &&
+      routed_experts != 512)
+    refusal = gufo::server::RefusalDirectionRefusal::kExperts;
+  auto direction = Value::object();
+  direction["available"] =
+      refusal == gufo::server::RefusalDirectionRefusal::kNone;
+  direction["reason"] = gufo::server::RefusalDirectionRefusalText(refusal);
+  value["refusal_direction"] = std::move(direction);
+  return value;
+}
+
+Value CatalogueCapabilities(const CatalogueEntry& entry) {
+  return ModelCapabilities(
+      entry.architecture, entry.routed_experts,
+      gufo::server::ModelIsAbliterated(entry.id, entry.technical_name));
+}
+
+namespace {
+// The capabilities of a model whose header is open: the architecture and the
+// expert count come from the header, as serve reads them. `package_id` is the
+// prepared package's id when the file belongs to one.
+Value HeaderCapabilities(const core::GgufReader& reader,
+                         std::string_view package_id = {}) {
+  const auto architecture = reader.GetMetadataString("general.architecture");
+  if (!architecture)
+    return Value();
+  return ModelCapabilities(
+      *architecture,
+      reader.GetMetadataUint32(std::string(*architecture) + ".expert_count")
+          .value_or(0),
+      gufo::server::ModelIsAbliterated(
+          package_id, reader.GetMetadataString("general.name").value_or("")));
+}
+
 EstimateResult NoneYet(std::string reason, EstimateResult base = {}) {
   base.state = "none_yet";
   base.reason = std::move(reason);
@@ -452,7 +527,7 @@ void FinishHeaderEstimate(
 void FillFitInputs(EstimateResult& result, std::uint64_t weights,
                    std::optional<std::uint64_t> native_context,
                    std::uint64_t context, std::uint64_t sessions,
-                   std::optional<std::uint64_t> available) {
+                   std::optional<std::uint64_t> available, bool kv_q8) {
   auto& inputs = result.fit_inputs;
   inputs["weights_bytes"] = weights;
   inputs["native_context_tokens"] =
@@ -460,6 +535,9 @@ void FillFitInputs(EstimateResult& result, std::uint64_t weights,
   inputs["context_tokens"] = context;
   inputs["sessions"] = sessions;
   inputs["available_bytes"] = available ? Value(*available) : Value();
+  // The ordinary K/V storage the numbers assume. A request for q8_0 on a model
+  // that cannot use it resolves to f16, as in serve.
+  inputs["kv_cache_type"] = kv_q8 ? "q8_0" : "f16";
 }
 
 EstimateResult RunTable(ReleaseMemoryEstimate planning, EstimateResult result) {
@@ -500,6 +578,61 @@ constexpr const char* kRamCacheNote =
     "its cache from the totals. This runner sizes it from free memory when the "
     "server starts, so the cache is not in this estimate.";
 
+// Sets a serve environment setting for this one-shot process; the estimate
+// reads it where serve would.
+void SetProcessEnvironment(const std::string& name, const std::string& value) {
+#ifdef _WIN32
+  _putenv_s(name.c_str(), value.c_str());
+#else
+  ::setenv(name.c_str(), value.c_str(), 1);
+#endif
+}
+
+// Takes `--switch NAME=VALUE` for `models estimate`: the name of any serve
+// switch in the registry and the value as the user saved it. The estimate
+// then resolves it like serve. A bare flag takes an empty value or "true".
+bool AddServeSwitch(std::string_view text, ModelsCommandOptions& options,
+                    std::string* err) {
+  const auto equals = text.find('=');
+  const std::string name(text.substr(0, equals));
+  const std::string value =
+      equals == std::string_view::npos ? "" : std::string(text.substr(equals + 1));
+  // These have their own options on this command.
+  if (name == "--model" || name == "--manifest" || name == "--context" ||
+      name == "--sessions" || name == "--profile") {
+    *err = "--switch " + name + ": use the " + name + " option";
+    return false;
+  }
+  for (const auto& row : gufo::server::ReleaseSwitchTable()) {
+    bool named = row.member_str("name") == name;
+    for (const auto& alias : row.find("aliases")->items())
+      named |= alias.str() == name;
+    if (!named)
+      continue;
+    if (row.member_str("kind") == "env") {
+      options.serve_env.emplace_back(row.member_str("name"), value);
+      return true;
+    }
+    if (row.member_str("kind") != "flag")
+      break;
+    if (row.find("takes_value")->as_bool()) {
+      if (value.empty()) {
+        *err = "--switch " + name + " needs a value: " + name + "=VALUE";
+        return false;
+      }
+      options.serve_args.push_back(row.member_str("name") + "=" + value);
+    } else if (value.empty() || value == "true") {
+      options.serve_args.push_back(row.member_str("name"));
+    } else {
+      *err = "--switch " + name + " does not take a value";
+      return false;
+    }
+    return true;
+  }
+  *err = "--switch " + name + " is not a serve switch";
+  return false;
+}
+
 gufo::server::ReleaseResolution EstimateReleaseSettings(
     const fs::path& path, const EstimateRequest& request, bool manifest = false,
     std::string* package_id = nullptr) {
@@ -513,6 +646,11 @@ gufo::server::ReleaseResolution EstimateReleaseSettings(
     args.push_back("--context");
     args.push_back(std::to_string(request.context));
   }
+  if (!request.kv_cache_type.empty()) {
+    args.push_back("--kv-cache-type");
+    args.push_back(request.kv_cache_type);
+  }
+  args.insert(args.end(), request.serve_args.begin(), request.serve_args.end());
   std::vector<const char*> raw;
   for (const auto& arg : args)
     raw.push_back(arg.c_str());
@@ -532,6 +670,8 @@ EstimateResult EstimateForGguf(const Inspection& inspection,
                                const EstimateRequest& request) {
   EstimateResult base;
   const auto& facts = inspection.facts;
+  if (facts.header_ok && !inspection.support.sidecar && inspection.reader)
+    base.capabilities = HeaderCapabilities(*inspection.reader);
   if (!facts.header_ok)
     return NoneYet("The header cannot be read: " + facts.error, base);
   if (inspection.support.sidecar)
@@ -551,8 +691,21 @@ EstimateResult EstimateForGguf(const Inspection& inspection,
         " shards are present. The weights term is smaller than "
         "the full model.");
   std::string package_id;
-  auto resolved = EstimateReleaseSettings(fs::u8path(facts.path), request,
-                                          false, &package_id);
+  gufo::server::ReleaseResolution resolved;
+  if (request.resolved) {
+    // serve's own resolved settings (artefacts, KV type, sessions): resolving a
+    // partial argv again would run against the environment serve has already
+    // changed and drop the side files.
+    resolved = *request.resolved;
+    package_id = request.resolved_package_id;
+  } else {
+    resolved = EstimateReleaseSettings(fs::u8path(facts.path), request, false,
+                                       &package_id);
+  }
+  // The package id (a Huihui package says nothing in its GGUF name) is known
+  // only now.
+  if (!package_id.empty())
+    base.capabilities = HeaderCapabilities(reader, package_id);
 
   if (route == "qwen38_flash_next") {
     const auto* lowmemory =
@@ -564,8 +717,10 @@ EstimateResult EstimateForGguf(const Inspection& inspection,
                   ShippedCatalogue().entries,
                   prepare::PackageId(prepare::ModelSet::LowMemory))
             : nullptr;
-    const auto estimate_id =
-        lowmemory ? lowmemory->id : std::string(prepare::kPackageId);
+    const auto estimate_id = lowmemory ? lowmemory->id
+                             : package_id == kCoderPackageId
+                                 ? std::string(kCoderPackageId)
+                                 : std::string(prepare::kPackageId);
     const auto* shipped = MemoryTableFor(estimate_id);
     if (shipped == nullptr)
       return NoneYet("No coefficient table for Flash Next.", base);
@@ -598,7 +753,7 @@ EstimateResult EstimateForGguf(const Inspection& inspection,
     if (!planning.value.is_null())
       FillFitInputs(base, planning.value.find("weights")->member_size("bytes"),
                     facts.native_context, inputs.context, inputs.sessions,
-                    inputs.available_bytes);
+                    inputs.available_bytes, inputs.kv_q8);
     return RunTable(std::move(planning), std::move(base));
   }
 
@@ -680,7 +835,7 @@ EstimateResult EstimateForGguf(const Inspection& inspection,
   base.evidence_label = "estimated from the file header";
   base.notes.push_back(kRamCacheNote);
   FillFitInputs(base, weights, facts.native_context, inputs.context,
-                inputs.sessions, inputs.available_bytes);
+                inputs.sessions, inputs.available_bytes, inputs.kv_q8);
   auto result = RunTable(std::move(planning), std::move(base));
   if (result.state == "estimated")
     FinishHeaderEstimate(result.memory_estimate, *owned, state_bytes);
@@ -709,6 +864,7 @@ EstimateResult EstimateForCatalogueFolder(const CatalogueEntry& entry,
                                           const fs::path& folder,
                                           const EstimateRequest& request) {
   EstimateResult base;
+  base.capabilities = CatalogueCapabilities(entry);
   if (entry.flash_next_set) {
     const auto* reference = MemoryTableFor(entry.id);
     if (!reference)
@@ -743,6 +899,11 @@ EstimateResult EstimateForCatalogueFolder(const CatalogueEntry& entry,
       release.explicit_flags["--sessions"] = std::to_string(request.sessions);
       if (request.context)
         release.explicit_flags["--context"] = std::to_string(request.context);
+      if (!request.kv_cache_type.empty())
+        release.explicit_flags["--kv-cache-type"] = request.kv_cache_type;
+      for (const auto& [name, value] :
+           gufo::server::ExplicitFlagsFromServeArgs(request.serve_args))
+        release.explicit_flags[name] = value;
       for (const auto& file : prepare::ModelCatalogue(*entry.flash_next_set))
         if (file.kind != prepare::Kind::MainShard)
           release.manifest_defaults[std::string(
@@ -771,11 +932,78 @@ EstimateResult EstimateForCatalogueFolder(const CatalogueEntry& entry,
     if (!planning.value.is_null())
       FillFitInputs(base, planning.value.find("weights")->member_size("bytes"),
                     table->context_max, inputs.context, inputs.sessions,
-                    inputs.available_bytes);
+                    inputs.available_bytes, inputs.kv_q8);
+    return RunTable(std::move(planning), std::move(base));
+  }
+  // The 256-expert Flash Next Coder: the Flash Next coefficients (per token and
+  // per session measured on the Coder itself, 27,647 B per token against the
+  // table's 27.7 KB; mem-measure 2026-11-02) with the Coder's own resident
+  // weights. The two shards (58.4 GB of files) are not what is resident: the
+  // engine uploads 29.01 GB (native-upload resident_bytes, MTP off), and the
+  // measured difference to the production process puts the weights at 29.2 GB.
+  // No twin, draft head or projector: the Coder entry has none.
+  // The table is the common one (MemoryTableFor), the same serve reads.
+  if (const auto* coder_table = MemoryTableFor(entry.id);
+      !entry.flash_next_set && coder_table && entry.routed_experts == 256) {
+    const auto& coder = *coder_table;
+    gufo::server::ReleaseInputs release;
+    release.profile = request.profile;
+    release.architecture = entry.architecture;
+    release.model_family =
+        std::string(prepare::ModelFamilyForArchitecture(entry.architecture));
+    release.native_context = coder.context_max;
+    release.manifest_present = true;
+    release.environment = gufo::server::SnapshotReleaseEnvironment();
+    release.real_environment = [](const char* name) {
+      return std::getenv(name);
+    };
+    release.explicit_flags["--sessions"] = std::to_string(request.sessions);
+    if (request.context)
+      release.explicit_flags["--context"] = std::to_string(request.context);
+    if (!request.kv_cache_type.empty())
+      release.explicit_flags["--kv-cache-type"] = request.kv_cache_type;
+    for (const auto& [name, value] :
+         gufo::server::ExplicitFlagsFromServeArgs(request.serve_args))
+      release.explicit_flags[name] = value;
+    for (const auto& file : entry.files)
+      if (file.role == "mtp")
+        release.manifest_defaults[std::string(gufo::server::ModelArtefactSetting(
+            prepare::Kind::Mtp))] = Utf8(folder / fs::u8path(file.name));
+    auto resolved = gufo::server::ResolveReleaseSettings(release);
+    auto planning = BuildPlanningReleaseMemoryEstimate(
+        resolved, entry.id, request.available_bytes,
+        request.host_available_bytes, &coder, request.capacity_budgets,
+        request.context != 0);
+    const auto& inputs = planning.inputs;
+    base.evidence_label = "estimated from the measured Flash Next Coder";
+    {
+      // Same GiB unit as the estimate lines; both numbers come from the term.
+      const auto gib = [](std::uint64_t bytes) {
+        char text[32];
+        std::snprintf(text, sizeof(text), "%.1f GiB", BytesToGiB(bytes));
+        return std::string(text);
+      };
+      base.notes.push_back(
+          "The weights term is what the engine keeps on the GPU (" +
+          gib(coder.main_weights_bytes) +
+          (coder.mtp_bytes
+               ? ", plus " + gib(coder.mtp_bytes) + " for the draft file"
+               : std::string()) +
+          "), not the size of the two model files.");
+    }
+    base.notes.push_back(
+        "Cache mode and allowance follow serve's resolved release settings. "
+        "Cache ceilings do not allocate storage at startup; on-demand snapshot "
+        "growth is excluded from both startup estimates.");
+    if (!planning.value.is_null())
+      FillFitInputs(base, planning.value.find("weights")->member_size("bytes"),
+                    coder.context_max, inputs.context, inputs.sessions,
+                    inputs.available_bytes, inputs.kv_q8);
     return RunTable(std::move(planning), std::move(base));
   }
   if (!entry.estimate_pointers.empty()) {
     EstimateResult none;
+    none.capabilities = base.capabilities;
     for (const auto& pointer : entry.estimate_pointers)
       none.notes.push_back("Source for a later merge: " + pointer);
     return NoneYet(entry.estimate_note.empty()
@@ -784,8 +1012,11 @@ EstimateResult EstimateForCatalogueFolder(const CatalogueEntry& entry,
                        : entry.estimate_note,
                    std::move(none));
   }
-  if (entry.packaging == "safetensors_folder")
-    return EstimateForFolder(folder, request);
+  if (entry.packaging == "safetensors_folder") {
+    auto result = EstimateForFolder(folder, request);
+    result.capabilities = base.capabilities;  // the entry names the model
+    return result;
+  }
   const CatalogueFile* main_file = nullptr;
   for (const auto& file : entry.files)
     if (file.role == "main" && file.downloadable) {
@@ -811,6 +1042,8 @@ EstimateResult EstimateForCatalogueFolder(const CatalogueEntry& entry,
       weights += file.bytes;
   adjusted.weights_bytes = weights;
   auto result = EstimateForGguf(inspection, adjusted);
+  if (result.capabilities.is_null())
+    result.capabilities = base.capabilities;
   if (!entry.estimate_note.empty())
     result.notes.push_back(entry.estimate_note);
   return result;
@@ -864,6 +1097,7 @@ EstimateResult EstimateForFolder(const fs::path& folder,
     return NoneYet("The folder has no readable config.json and no GGUF header.",
                    base);
   }
+  base.capabilities = ModelCapabilities(model_type, 0);
   if (model_type == "diffusion_gemma")
     return NoneYet(
         "DiffusionGemma keeps a canvas and a probability buffer per session. "
@@ -887,6 +1121,8 @@ Value EstimateJson(const EstimateResult& result) {
     notes.push_back(note);
   value["notes"] = std::move(notes);
   value["memory_estimate"] = result.memory_estimate;
+  if (!result.capabilities.is_null())
+    value["capabilities"] = result.capabilities;
   return value;
 }
 
@@ -1037,7 +1273,9 @@ ServeMemoryPolicy ResolveServeMemoryPolicy(
                                .sessions = sessions,
                                .available_bytes = budgets.gpu_available,
                                .host_available_bytes = budgets.host_available,
-                               .capacity_budgets = budgets});
+                               .capacity_budgets = budgets,
+                               .resolved = &resolved,
+                               .resolved_package_id = package_id});
       result.value = fallback.memory_estimate;
       result.reason = fallback.reason;
     }
@@ -1144,7 +1382,7 @@ Value BuildModelsList(const ModelsListOptions& options,
   listing["estimate_defaults"]["sessions"] = request.sessions;
   listing["estimate_defaults"]["context_tokens"] =
       "serve release-profile context (native when unset)";
-  listing["catalogue_version"] = "2026-10-14";
+  listing["catalogue_version"] = ShippedCatalogue().version;
 
   auto prepared = Value::array();
   auto catalogue_rows = Value::array();
@@ -1298,7 +1536,7 @@ bool ParseUnsigned(std::string_view text, std::uint64_t& out) {
 bool ParseModelsCommand(std::span<const char* const> args,
                         ModelsCommandOptions& options, std::string& error) {
   if (args.empty()) {
-    error = "missing models verb (list or estimate)";
+    error = "missing models verb (list, estimate or check-side-file)";
     return false;
   }
   options.verb = args[0];
@@ -1306,7 +1544,8 @@ bool ParseModelsCommand(std::span<const char* const> args,
     options.help = true;
     return true;
   }
-  if (options.verb != "list" && options.verb != "estimate") {
+  if (options.verb != "list" && options.verb != "estimate" &&
+      options.verb != "check-side-file") {
     error = "unknown models verb '" + options.verb + "'";
     return false;
   }
@@ -1315,6 +1554,10 @@ bool ParseModelsCommand(std::span<const char* const> args,
   const auto missing = [](std::string_view flag) {
     if (flag == "--model")
       return std::string("--model requires a path or a catalogue id");
+    if (flag == "--file")
+      return std::string("--file requires a path");
+    if (flag == "--role")
+      return std::string("--role requires mtp, mmproj or draft_head");
     if (flag == "--context" || flag == "--sessions")
       return std::string(flag) + " requires a positive number";
     return std::string(flag) + " requires a folder";
@@ -1346,26 +1589,70 @@ bool ParseModelsCommand(std::span<const char* const> args,
     });
   else {
     path("--model", [&](auto value) { options.model = value; });
-    parser.AddOption("", "--profile", "PROFILE", "Serve release profile",
-                     "Estimate", &options.profile);
-    for (const auto* flag : {"--context", "--sessions"})
+    if (options.verb == "estimate") {
+      parser.AddOption("", "--profile", "PROFILE", "Serve release profile",
+                       "Estimate", &options.profile);
       parser.AddCustomOption(
-          "", flag, "N", "Positive number", "Estimate",
-          [&](auto name, auto value, std::string* err) {
-            std::uint64_t number = 0;
-            if (!ParseUnsigned(value, number) || number == 0) {
-              *err = missing(name);
+          "", "--kv-cache-type", "TYPE", "f16 (default) or q8_0", "Estimate",
+          [&](auto, auto value, std::string* err) {
+            if (value != "f16" && value != "q8_0") {
+              *err = "--kv-cache-type must be f16 or q8_0";
               return false;
             }
-            (name == "--context" ? options.context : options.sessions) = number;
+            options.kv_cache_type = value;
             return true;
           });
+      parser.AddCustomOption(
+          "", "--switch", "NAME=VALUE", "A serve switch, as saved", "Estimate",
+          [&](auto, auto value, std::string* err) {
+            return AddServeSwitch(value, options, err);
+          });
+      for (const auto* flag : {"--context", "--sessions"})
+        parser.AddCustomOption(
+            "", flag, "N", "Positive number", "Estimate",
+            [&](auto name, auto value, std::string* err) {
+              std::uint64_t number = 0;
+              if (!ParseUnsigned(value, number) || number == 0) {
+                *err = missing(name);
+                return false;
+              }
+              (name == "--context" ? options.context : options.sessions) =
+                  number;
+              return true;
+            });
+    } else {
+      path("--file", [&](auto value) { options.side_file = value; });
+      parser.AddCustomOption("", "--role", "ROLE", "mtp, mmproj or draft_head",
+                             "Side file",
+                             [&](auto name, auto value, std::string* err) {
+                               if (!ParseSideRole(value)) {
+                                 *err = missing(name);
+                                 return false;
+                               }
+                               options.role = value;
+                               return true;
+                             });
+    }
   }
   if (!parser.Parse(args.subspan(1), &error))
     return false;
   if (options.verb == "estimate" && options.model.empty() && !options.help) {
     error = "estimate requires --model PATH or --model CATALOGUE_ID";
     return false;
+  }
+  if (options.verb == "check-side-file" && !options.help) {
+    if (options.model.empty()) {
+      error = "check-side-file requires --model PATH or --model CATALOGUE_ID";
+      return false;
+    }
+    if (options.role.empty()) {
+      error = "check-side-file requires --role mtp, mmproj or draft_head";
+      return false;
+    }
+    if (options.side_file.empty()) {
+      error = "check-side-file requires --file PATH";
+      return false;
+    }
   }
   return true;
 }
@@ -1376,7 +1663,10 @@ void PrintHelp(std::ostream& out) {
          "[--models-root PATH]\n"
          "       bubo models estimate --model PATH|CATALOGUE_ID "
          "[--json|--jsonl] "
-         "[--profile PROFILE] [--context N] [--sessions N]\n\n"
+         "[--profile PROFILE] [--context N] [--sessions N] "
+         "[--kv-cache-type f16|q8_0] [--switch NAME=VALUE]...\n"
+         "       bubo models check-side-file --model PATH|CATALOGUE_ID "
+         "--role mtp|mmproj|draft_head --file PATH [--json|--jsonl]\n\n"
          "list: prepared packages, catalogue entries and GGUF files in the\n"
          "model folder and in each --scan-folder (depth limit "
       << kScanMaxDepth
@@ -1386,12 +1676,75 @@ void PrintHelp(std::ostream& out) {
          "package; its files are not listed one by one. Only file headers are\n"
          "read.\n"
          "estimate: memory estimate and recommended context. No server "
-         "starts.\n";
+         "starts.\n"
+         "--switch NAME=VALUE gives a serve switch as saved; the estimate "
+         "reads it\n"
+         "as serve does.\n"
+         "check-side-file: whether a helper file (a draft file, an image\n"
+         "projector or a draft head) fits the model. Only file headers are\n"
+         "read. Exit code 0 for both answers.\n";
 }
 std::string Gib(std::uint64_t bytes, int digits = 1) {
   char text[32];
   std::snprintf(text, sizeof(text), "%.*f GiB", digits, BytesToGiB(bytes));
   return text;
+}
+
+// The GGUF file that holds a model's header: --model as a catalogue id, as a
+// package folder (its marker names the files), as a folder of GGUF files (the
+// first shard of a split model, or the only file) or as a file. Empty when
+// there is none; `problem` says why.
+fs::path ResolveModelFile(const std::string& argument,
+                          const fs::path& models_root,
+                          const std::vector<CatalogueEntry>& catalogue,
+                          std::string& problem) {
+  std::error_code ec;
+  if (const auto* entry = FindCatalogueEntry(catalogue, argument)) {
+    const auto folder = CatalogueEntryFolder(*entry, models_root);
+    for (const auto& file : entry->files) {
+      if (file.role != "main" || !file.downloadable)
+        continue;
+      const auto path = CatalogueFilePath(*entry, file, folder);  // shard 1
+      if (fs::is_regular_file(path, ec))
+        return path;
+      break;
+    }
+    problem = "The model file is not on this computer.";
+    return {};
+  }
+  const auto path = fs::u8path(argument);
+  if (fs::is_regular_file(path, ec))
+    return path;
+  if (!fs::is_directory(path, ec)) {
+    problem = "'" + argument + "' is not a file, a folder or a catalogue id";
+    return {};
+  }
+  if (fs::exists(path / "bubo-package.json", ec)) {
+    const auto package = gufo::server::LoadModelPackage(
+        path, std::string(gufo::cli::kDefaultProfile));
+    if (!package.files.empty())
+      return package.files.front().path;
+    problem = "The package folder names no model file.";
+    return {};
+  }
+  std::vector<fs::path> files;
+  std::error_code type_ec;
+  for (fs::directory_iterator
+           item(path, fs::directory_options::skip_permission_denied, ec),
+       end;
+       !ec && item != end; item.increment(ec))
+    if (item->is_regular_file(type_ec) &&
+        Lower(Utf8(item->path().extension())) == ".gguf")
+      files.push_back(item->path());
+  std::sort(files.begin(), files.end());
+  for (const auto& file : files)
+    if (Lower(Utf8(file.filename())).find("-00001-of-") != std::string::npos)
+      return file;
+  if (files.size() == 1)
+    return files.front();
+  problem = files.empty() ? "The folder has no GGUF file."
+                          : "The folder has several GGUF files; choose one.";
+  return {};
 }
 }  // namespace
 
@@ -1421,7 +1774,9 @@ int RunModels(std::span<const char* const> args,
     err << "models: " << parse_error << "; run bubo models --help\n";
     return 2;
   }
-  if (options.models_root.empty()) {
+  // check-side-file needs the folder only to find a catalogue id's files.
+  if (options.models_root.empty() &&
+      !(local_app_data.empty() && options.verb == "check-side-file")) {
     if (local_app_data.empty()) {
       if (writer)
         writer->Write("error", Error("invalid_arguments", "models", "arguments",
@@ -1482,11 +1837,67 @@ int RunModels(std::span<const char* const> args,
             << row.member_str("reason") << '\n';
       return 0;
     }
+    if (options.verb == "check-side-file") {
+      std::string problem;
+      const auto model = ResolveModelFile(options.model, options.models_root,
+                                          shipped.entries, problem);
+      if (model.empty()) {
+        if (writer)
+          writer->Write("error",
+                        Error("model_missing", "models", "model", false,
+                              "Use a file, a folder or a catalogue "
+                              "id from bubo models list.",
+                              problem));
+        else
+          err << "models: " << problem << '\n';
+        return 12;
+      }
+      const auto side_file = fs::u8path(options.side_file);
+      std::error_code ec;
+      if (!fs::is_regular_file(side_file, ec)) {
+        if (writer)
+          writer->Write("error",
+                        Error("model_missing", "models", "side_file", false,
+                              "Choose a file that exists.",
+                              "'" + options.side_file + "' is not a file"));
+        else
+          err << "models: '" << options.side_file << "' is not a file\n";
+        return 12;
+      }
+      std::string failure;
+      const auto check = CheckSideFile(model, *ParseSideRole(options.role),
+                                       side_file, &failure);
+      if (!check) {
+        if (writer)
+          writer->Write("error",
+                        Error("invalid_arguments", "models", "model", false,
+                              "Choose a GGUF model file.", failure));
+        else
+          err << "models: " << failure << '\n';
+        return 2;
+      }
+      if (writer) {
+        if (MachineMode::JsonLines == ParseMachineMode(args))
+          writer->Write("capabilities", Capabilities());
+        return writer->Write("side_file_check", SideFileCheckJson(*check)) ? 0
+                                                                           : 1;
+      }
+      out << (check->fits ? "The file fits this model.\n"
+                          : "The file does not fit this model: " +
+                                check->reason + '\n');
+      if (!check->note.empty())
+        out << "Note: " << check->note << '\n';
+      return 0;
+    }
     // estimate
     EstimateRequest request;
     request.profile = options.profile;
     request.context = options.context;
     request.sessions = options.sessions;
+    request.kv_cache_type = options.kv_cache_type;
+    request.serve_args = options.serve_args;
+    for (const auto& [name, value] : options.serve_env)
+      SetProcessEnvironment(name, value);
     const auto budgets = ReadPlanningMemoryBudgets();
     request.capacity_budgets = budgets;
     request.available_bytes = budgets.gpu_available;

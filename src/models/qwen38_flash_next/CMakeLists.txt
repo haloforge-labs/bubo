@@ -2,8 +2,16 @@
 # only by explicit validation targets, not by production or routine checks.
 add_library(gufo_qwen38_flash_next STATIC
   config.cpp
+  continuation_layout.cpp
+  kv_cache.cpp
   ngram.cpp
+  rope_scaling.cpp
   weights.cpp)
+
+target_sources(gufo_qwen38_flash_next PRIVATE kv_rotation.cpp)
+# The CPU oracle has explicit F32 operation boundaries and strict zero signs.
+set_source_files_properties(kv_rotation.cpp PROPERTIES
+  COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-frounding-math;-Werror=switch")
 
 target_include_directories(gufo_qwen38_flash_next PUBLIC ${PROJECT_SOURCE_DIR})
 target_link_libraries(gufo_qwen38_flash_next PUBLIC gufo_core Threads::Threads)
@@ -44,23 +52,61 @@ if (ENGINE_ENABLE_HIP)
     HIP_STANDARD_REQUIRED ON
     POSITION_INDEPENDENT_CODE ON)
   target_compile_definitions(gufo_qwen38_flash_next_mmq PRIVATE
-    GGML_HIP_NO_VMM)
+    ENGINE_ENABLE_HIP=1 GGML_HIP_NO_VMM)
   target_compile_options(gufo_qwen38_flash_next_mmq PRIVATE
     $<$<COMPILE_LANGUAGE:HIP>:-O3;-ffast-math;-fno-finite-math-only;-Wno-unused-value;-Wno-unused-command-line-argument>)
   target_include_directories(gufo_qwen38_flash_next_mmq SYSTEM PUBLIC ${QFN_MMQ_DIR})
   target_link_libraries(gufo_qwen38_flash_next_mmq PUBLIC hip::host roc::hipblas)
 
+  # Few-row dense dot4 projection: one width per translation unit (built in
+  # parallel). C++20 because it decodes with the shared DecodeQuantSub16
+  # (src/models/qwen/hip/quant_ops.hpp), which the C++17 adapter cannot include.
+  set(QFN_DENSE_DOT4_SOURCES ${QFN_MMQ_DIR}/dense_dot4_dispatch.hip.cpp)
+  foreach(width RANGE 1 8)
+    list(APPEND QFN_DENSE_DOT4_SOURCES ${QFN_MMQ_DIR}/dense_dot4_w${width}.hip.cpp)
+  endforeach()
+  add_library(gufo_qwen38_flash_next_dense_dot4 STATIC ${QFN_DENSE_DOT4_SOURCES})
+  set_source_files_properties(${QFN_DENSE_DOT4_SOURCES} PROPERTIES LANGUAGE HIP)
+  set_target_properties(gufo_qwen38_flash_next_dense_dot4 PROPERTIES
+    HIP_STANDARD 20
+    HIP_STANDARD_REQUIRED ON
+    POSITION_INDEPENDENT_CODE ON)
+  target_compile_definitions(gufo_qwen38_flash_next_dense_dot4 PRIVATE ENGINE_ENABLE_HIP=1)
+  target_compile_options(gufo_qwen38_flash_next_dense_dot4 PRIVATE
+    $<$<COMPILE_LANGUAGE:HIP>:-O3;-Wno-unused-command-line-argument>)
+  target_include_directories(gufo_qwen38_flash_next_dense_dot4 PRIVATE
+    ${PROJECT_SOURCE_DIR} ${QFN_MMQ_DIR})
+  target_link_libraries(gufo_qwen38_flash_next_dense_dot4 PUBLIC hip::host
+    PRIVATE gufo_core)
+  target_link_libraries(gufo_qwen38_flash_next_mmq PUBLIC
+    gufo_qwen38_flash_next_dense_dot4)
+
   set(QFN_HIP_SOURCES
+    ${QFN_ROCM_DIR}/head_two.hip.cpp
+    ${QFN_ROCM_DIR}/head_two_runtime.cpp
+    ${QFN_ROCM_DIR}/ple_rows.hip.cpp
+    ${QFN_ROCM_DIR}/stageb.hip.cpp
     ${QFN_ROCM_DIR}/kernels.hip.cpp
     ${QFN_ROCM_DIR}/select_score.hip.cpp
+    ${QFN_ROCM_DIR}/dense_half_kquant.hip.cpp
+    ${QFN_ROCM_DIR}/kv_q8_dequant.hip
     ${QFN_ROCM_DIR}/w8a8_wave64.hip
     ${QFN_ROCM_DIR}/blaslt.cpp
     ${QFN_ROCM_DIR}/device_model.cpp
     ${QFN_ROCM_DIR}/executor.cpp
     ${QFN_ROCM_DIR}/batch.cpp
+    continuation_adapter.cpp
     engine.cpp)
   target_sources(gufo_qwen38_flash_next PRIVATE ${QFN_HIP_SOURCES})
+  set_source_files_properties(${QFN_ROCM_DIR}/head_two.hip.cpp PROPERTIES
+    LANGUAGE HIP COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off")
   set_source_files_properties(${QFN_ROCM_DIR}/kernels.hip.cpp PROPERTIES LANGUAGE HIP)
+  # The Gemma 4 lane's dense binary16 K-quant GEMM, instantiated here; target flags only.
+  set_source_files_properties(${QFN_ROCM_DIR}/dense_half_kquant.hip.cpp PROPERTIES LANGUAGE HIP)
+  set_source_files_properties(${QFN_ROCM_DIR}/ple_rows.hip.cpp PROPERTIES
+    LANGUAGE HIP COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off")
+  set_source_files_properties(${QFN_ROCM_DIR}/stageb.hip.cpp PROPERTIES
+    LANGUAGE HIP COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off")
   # The indexer scorer spills 304 scalar registers when clang 24's SLP vectorizer merges its query loads;
   # -fno-slp-vectorize on this one file removes the spills (bit-identical output, SelectBlocks 1.6-1.8x faster).
   # The flag must stay on this file only: it is why the kernel has its own translation unit.
@@ -80,5 +126,5 @@ if (ENGINE_ENABLE_HIP)
     ${ROCPRIM_INCLUDE_DIR}
     ${ROCWMMA_INCLUDE_DIR})
   target_link_libraries(gufo_qwen38_flash_next PUBLIC
-    gufo_qwen38_flash_next_mmq hip::host roc::hipblas roc::hipblaslt)
+    gufo_cache_hip gufo_qwen38_flash_next_mmq hip::host roc::hipblas roc::hipblaslt)
 endif()

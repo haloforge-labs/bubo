@@ -54,6 +54,21 @@ inline int ThinkGuardEscalate() {
   return result;
 }
 
+inline int ThinkNudgeMax() {
+  const char* value = std::getenv("GUFO_THINK_NUDGE_MAX");
+  if (value == nullptr || *value == '\0')
+    return 2;
+  const std::string_view text(value);
+  int result = 0;
+  const auto [end, error] =
+      std::from_chars(text.data(), text.data() + text.size(), result);
+  if (text.front() < '0' || text.front() > '9' || error != std::errc{} ||
+      end != text.data() + text.size() || result < 0)
+    throw std::invalid_argument(
+        "GUFO_THINK_NUDGE_MAX must be an integer in [0,2147483647]");
+  return result;
+}
+
 inline std::shared_ptr<sampling::BehaviourConfig> ParseBehaviourOptions(
     const json::Value& body,
     std::shared_ptr<const sampling::BehaviourConfig> previous = {}) {
@@ -61,6 +76,17 @@ inline std::shared_ptr<sampling::BehaviourConfig> ParseBehaviourOptions(
                       : std::make_shared<sampling::BehaviourConfig>();
   cfg->think_eog_guard = BehaviourSwitch("GUFO_THINK_EOG_GUARD");
   cfg->think_guard_escalate = ThinkGuardEscalate();
+  cfg->think_nudge = BehaviourSwitch("GUFO_THINK_NUDGE");
+  cfg->think_nudge_max = ThinkNudgeMax();
+  cfg->think_nudge_text = "Do I have enough";
+  if (const char* text = std::getenv("GUFO_THINK_NUDGE_TEXT"); text && *text) {
+    cfg->think_nudge_text = text;
+    if (std::string_view(" \t\r\n.?!;:").find(cfg->think_nudge_text.back()) !=
+        std::string_view::npos)
+      throw std::invalid_argument(
+          "GUFO_THINK_NUDGE_TEXT must be an unfinished prefix without trailing "
+          "whitespace or sentence punctuation");
+  }
   cfg->eog_boundary = BehaviourSwitch("GUFO_EOG_BOUNDARY");
   cfg->eog_min_prob_exact = BehaviourSwitch("GUFO_EOG_MIN_PROB_EXACT");
   cfg->eog_min_prob = BehaviourNumber("GUFO_EOG_MIN_PROB", -1.0);
@@ -170,11 +196,12 @@ inline std::shared_ptr<sampling::BehaviourConfig> ParseBehaviourOptions(
       }
     } else throw std::invalid_argument("logit_bias must be an object or array");
   }
-  if (!(cfg->think_eog_guard || cfg->eog_boundary || cfg->eog_min_prob >= 0 ||
-        cfg->eog_defer_p > 0 || cfg->spec_eog_stop || cfg->loop_breaker ||
-        cfg->reasoning_budget_enabled || cfg->logit_bias_enabled ||
-        cfg->model_suppress_tokens || cfg->marker_bias != 0 ||
-        !cfg->marker_bias_by_effort.empty() || cfg->production_sampling))
+  if (!(cfg->think_eog_guard || cfg->think_nudge || cfg->eog_boundary ||
+        cfg->eog_min_prob >= 0 || cfg->eog_defer_p > 0 || cfg->spec_eog_stop ||
+        cfg->loop_breaker || cfg->reasoning_budget_enabled ||
+        cfg->logit_bias_enabled || cfg->model_suppress_tokens ||
+        cfg->marker_bias != 0 || !cfg->marker_bias_by_effort.empty() ||
+        cfg->production_sampling))
     return nullptr;
   return cfg;
 }

@@ -71,7 +71,7 @@ test('F4 onboarding shows the transferring component in progress', async () => {
   )
   await expect
     .element(page.getByLabelText('Setup steps'))
-    .toHaveTextContent('(default model) · In progress')
+    .toHaveTextContent('Model · In progress')
   await expect
     .element(
       page.getByText(

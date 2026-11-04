@@ -1,14 +1,14 @@
 {
-  "captured_at": "2026-10-26T15:25:50.6124103-04:00",
-  "candidate_commit": "1a0cd4305a87a527c6bac453910349d754e5944b",
-  "gui_commit": "1a0cd4305a87a527c6bac453910349d754e5944b",
-  "executable": "C:\\bubo\\build\\v12final\\bubo.exe",
-  "executable_sha256": "36393435c2db5ca9ae54c1434f74a8f62c0ea0de2718de46b5a7f399ed647ad2",
-  "engine_sha256": "1811a4ec36f71d882e291bb44ea34b20be8e4ece8f11705b57d36f5bc223011d",
+  "captured_at": "2026-11-03T20:30:12.9641418-05:00",
+  "candidate_commit": "d358f5b00cae49c0024878af0eb3196d9f17bc35",
+  "gui_commit": "d358f5b00cae49c0024878af0eb3196d9f17bc35",
+  "executable": "bubo.exe",
+  "executable_sha256": "c916231229dfe15f87e832b33faf8dfb5e33f28e5d2b4b7dfc9c955831946b9a",
+  "engine_sha256": "0a8c8bb63308d247aa5c0d95603af77609632303eda25ee7ccd4e6d73c3b0a7f",
   "environment": {
-    "PATH": "C:\\bubo\\build\\v12final;C:\\bubo\\src\\gufo-win-060\\build\\deps\\vcpkg\\installed\\x64-windows\\bin;C:\\Windows\\System32;C:\\Windows",
+    "BUBO_RUNTIME_DIR": "%LOCALAPPDATA%/Bubo/runtime/rocm-10.0.0-gfx1151",
     "BUBO_*/GUFO_*": "removed except the recorded runtime discovery path",
-    "BUBO_RUNTIME_DIR": "C:\\bubo\\runtimes\\c4pkg-344f41ac\\bin"
+    "PATH": "<bubo folder>;C:\\Windows\\System32;C:\\Windows"
   },
   "commands": [
     {
@@ -18,11 +18,11 @@
         "status",
         "--json"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:13.3486159-04:00",
-      "finished": "2026-10-26T15:25:13.5281940-04:00",
+      "finished": "2026-10-26T15:25:13.528194-04:00",
       "stdout_bytes": 10014,
       "stdout_sha256": "b5460e96cb564afa63d800486242c4bdce2854138cd22fbb730d4b9e90c1753c"
     },
@@ -33,29 +33,13 @@
         "status",
         "--json"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:13.8109498-04:00",
-      "finished": "2026-10-26T15:25:13.9372270-04:00",
+      "finished": "2026-10-26T15:25:13.937227-04:00",
       "stdout_bytes": 10280,
       "stdout_sha256": "ba4158f811ec4ae141fde136cf6da86c8e956475d89fe96626efbbbf828a5b7f"
-    },
-    {
-      "file": "switches.json",
-      "command": [
-        "bubo.exe",
-        "serve",
-        "--list-switches",
-        "--json"
-      ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
-      "exit_code": 0,
-      "stderr": "",
-      "started": "2026-10-26T15:25:14.2160433-04:00",
-      "finished": "2026-10-26T15:25:14.2845129-04:00",
-      "stdout_bytes": 151331,
-      "stdout_sha256": "4b8d744a1f13569e76415af8b2f62cf2aa088663ab5a09404611f6767d1ea51f"
     },
     {
       "file": "models-list-empty.json",
@@ -65,7 +49,7 @@
         "list",
         "--json"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:14.5884722-04:00",
@@ -87,7 +71,7 @@
         "--scan-folder",
         "S:\\bubo-walk\\E21\\rootB"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:15.0172313-04:00",
@@ -109,7 +93,7 @@
         "--scan-folder",
         "S:\\bubo-walk\\E21\\Import"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:15.5292161-04:00",
@@ -131,7 +115,7 @@
         "--scan-folder",
         "S:\\bubo-walk\\E21\\Import"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:16.0649408-04:00",
@@ -147,7 +131,7 @@
         "list",
         "--json"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:16.5695958-04:00",
@@ -165,11 +149,11 @@
         "C:\\bubo\\run\\app\\v8\\E21\\rootA\\models\\huihui-qwen38-flash-next-ud-q4-k-xl-v1",
         "--json"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:16.9908739-04:00",
-      "finished": "2026-10-26T15:25:17.2157720-04:00",
+      "finished": "2026-10-26T15:25:17.215772-04:00",
       "stdout_bytes": 37878,
       "stdout_sha256": "ae2a9aa13075a39d66c360dcbd9023924dc2d5ca15cf1c1a34ee37831cf7a848"
     },
@@ -187,7 +171,7 @@
         "--sessions",
         "1"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:17.5541937-04:00",
@@ -209,11 +193,11 @@
         "--sessions",
         "4"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
-      "started": "2026-10-26T15:25:18.0669010-04:00",
-      "finished": "2026-10-26T15:25:18.2729790-04:00",
+      "started": "2026-10-26T15:25:18.066901-04:00",
+      "finished": "2026-10-26T15:25:18.272979-04:00",
       "stdout_bytes": 38260,
       "stdout_sha256": "2dad0b39ba272e22bd8058d2c762ec178d0e56103cdf13e72cd4079a225d84d5"
     },
@@ -231,7 +215,7 @@
         "--sessions",
         "1"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:18.5618716-04:00",
@@ -253,7 +237,7 @@
         "--sessions",
         "2"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:19.0442262-04:00",
@@ -275,7 +259,7 @@
         "--sessions",
         "8"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:19.5361437-04:00",
@@ -297,7 +281,7 @@
         "--sessions",
         "8"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:20.0030035-04:00",
@@ -319,7 +303,7 @@
         "--sessions",
         "12"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:20.4741682-04:00",
@@ -337,7 +321,7 @@
         "S:\\bubo-walk\\E21\\rootB\\models\\qwen38-27b-ud-q4-k-xl",
         "--json"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:20.9583144-04:00",
@@ -359,7 +343,7 @@
         "--sessions",
         "1"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:21.3669524-04:00",
@@ -381,7 +365,7 @@
         "--sessions",
         "4"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:21.7711902-04:00",
@@ -403,7 +387,7 @@
         "--sessions",
         "1"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:22.1607645-04:00",
@@ -421,7 +405,7 @@
         "S:\\bubo-walk\\E21\\rootB\\models\\gemma4-26b-a4b-uncensored-hauhaucs-qat-q4-k-m\\Gemma4-26B-A4B-QAT-Uncensored-HauhauCS-Balanced-Q4_K_M.gguf",
         "--json"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:22.5488591-04:00",
@@ -443,7 +427,7 @@
         "--sessions",
         "1"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:22.9316319-04:00",
@@ -465,11 +449,11 @@
         "--sessions",
         "4"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:23.2983549-04:00",
-      "finished": "2026-10-26T15:25:23.3992720-04:00",
+      "finished": "2026-10-26T15:25:23.399272-04:00",
       "stdout_bytes": 593,
       "stdout_sha256": "d1f29f94461fb4dec1fcc1eef3486e74dce05b7cee97f00f8579338846950e12"
     },
@@ -487,11 +471,11 @@
         "--sessions",
         "1"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:23.6814964-04:00",
-      "finished": "2026-10-26T15:25:23.8125140-04:00",
+      "finished": "2026-10-26T15:25:23.812514-04:00",
       "stdout_bytes": 593,
       "stdout_sha256": "323c666079f70059d7115cc02cecdc0ac6b89409b432d583d2d3788f0ad3d276"
     },
@@ -505,7 +489,7 @@
         "S:\\bubo-walk\\E21\\Import\\gemma4-26b-a4b-stock-unsloth-ud-q4-k-m\\gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
         "--json"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:24.0807048-04:00",
@@ -527,11 +511,11 @@
         "--sessions",
         "1"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:24.4554205-04:00",
-      "finished": "2026-10-26T15:25:24.5609440-04:00",
+      "finished": "2026-10-26T15:25:24.560944-04:00",
       "stdout_bytes": 553,
       "stdout_sha256": "ab0a3cc46711d083bdb60759b20cb6170e14faddf6eb7446703f12519ee3f038"
     },
@@ -545,7 +529,7 @@
         "S:\\bubo-walk\\E21\\rootB\\models\\qwen36-27b-ud-q4-k-xl",
         "--json"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:24.8356038-04:00",
@@ -563,7 +547,7 @@
         "S:\\bubo-walk\\E21\\Import\\Qwen3.8-27B-UD-Q8_K_XL.gguf",
         "--json"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:25.2244642-04:00",
@@ -585,7 +569,7 @@
         "--sessions",
         "1"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:25.6127084-04:00",
@@ -603,7 +587,7 @@
         "huihui-qwen38-flash-next-ud-q4-k-xl-v1",
         "--json"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:26.0713377-04:00",
@@ -621,10 +605,10 @@
         "C:\\bubo\\run\\app\\v8\\E21\\rootA\\models\\no-such-package",
         "--json"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 12,
       "stderr": "",
-      "started": "2026-10-26T15:25:26.4902800-04:00",
+      "started": "2026-10-26T15:25:26.49028-04:00",
       "finished": "2026-10-26T15:25:26.5774695-04:00",
       "stdout_bytes": 379,
       "stdout_sha256": "b437d42ae3017165f2acb6973060239d64172d7ef6723950fb67e01cf192eabd"
@@ -642,7 +626,7 @@
         "--plan",
         "--jsonl"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:26.8535111-04:00",
@@ -661,7 +645,7 @@
         "--plan",
         "--jsonl"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:27.1997781-04:00",
@@ -680,7 +664,7 @@
         "--plan",
         "--jsonl"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:27.6127551-04:00",
@@ -699,7 +683,7 @@
         "--plan",
         "--jsonl"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:27.9668637-04:00",
@@ -718,7 +702,7 @@
         "--plan",
         "--jsonl"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:28.3170139-04:00",
@@ -739,7 +723,7 @@
         "--output",
         "C:\\bubo\\run\\app\\v8\\E21\\rootA"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:28.6514613-04:00",
@@ -760,7 +744,7 @@
         "--output",
         "S:\\bubo-walk\\E21\\rootB"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:31.2611359-04:00",
@@ -780,7 +764,7 @@
         "--output",
         "C:\\bubo\\run\\app\\v8\\E21\\rootA"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:32.0070977-04:00",
@@ -800,7 +784,7 @@
         "--output",
         "S:\\bubo-walk\\E21\\rootB"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:34.6384319-04:00",
@@ -821,7 +805,7 @@
         "--output",
         "S:\\bubo-walk\\E21\\rootB"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:35.4087765-04:00",
@@ -842,7 +826,7 @@
         "--output",
         "S:\\bubo-walk\\E21\\rootB"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:35.7678996-04:00",
@@ -863,7 +847,7 @@
         "--output",
         "C:\\bubo\\run\\app\\v8\\E21\\rootC-unused"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:36.1048741-04:00",
@@ -882,7 +866,7 @@
         "--plan",
         "--jsonl"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "localappdata": "<scratch>\\local",
       "exit_code": 2,
       "stderr": "prepare: E2 unknown catalogue id 'no-such-id'. Catalogue ids: huihui-qwen38-flash-next-ud-q4-k-xl-v1, qwen38-flash-next-base-ud-q4-k-xl-v1, huihui-qwen38-flash-next-lowmemory-v1, qwen38-27b-ud-q4-k-xl, qwen36-27b-ud-q4-k-xl, cyber-tiel-coder-35b-a3b-mtp-q4-k-m, gemma4-26b-a4b-unsloth-qat-ud-q4-k-xl, gemma4-31b-unsloth-qat-ud-q4-k-xl, gemma4-26b-a4b-huihui-abliterated-qat-q4-k, gemma4-31b-huihui-abliterated-qat-q4-k, diffusiongemma-26b-e38-abliterated-nvfp4; run bubo prepare --help\n",
       "started": "2026-10-26T15:25:36.4606377-04:00",
@@ -900,7 +884,7 @@
         "huihui-qwen38-flash-next-lowmemory-v1",
         "--json"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:36.7823962-04:00",
@@ -921,7 +905,7 @@
         "--plan",
         "--jsonl"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:37.1677202-04:00",
@@ -940,7 +924,7 @@
         "--plan",
         "--jsonl"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:37.5029752-04:00",
@@ -958,7 +942,7 @@
         "gemma4-26b-a4b-unsloth-qat-ud-q4-k-xl",
         "--json"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:37.8532343-04:00",
@@ -977,7 +961,7 @@
         "--plan",
         "--jsonl"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:38.2668599-04:00",
@@ -995,7 +979,7 @@
         "gemma4-31b-unsloth-qat-ud-q4-k-xl",
         "--json"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:38.6103425-04:00",
@@ -1014,7 +998,7 @@
         "--plan",
         "--jsonl"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:38.9689738-04:00",
@@ -1032,10 +1016,10 @@
         "gemma4-26b-a4b-huihui-abliterated-qat-q4-k",
         "--json"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
-      "started": "2026-10-26T15:25:39.3000160-04:00",
+      "started": "2026-10-26T15:25:39.300016-04:00",
       "finished": "2026-10-26T15:25:39.3864941-04:00",
       "stdout_bytes": 521,
       "stdout_sha256": "6256e945cb22e2d3c250a8e67bd9ce8cf0016ed6810bed11306e1bfe0c5ea054"
@@ -1051,7 +1035,7 @@
         "--plan",
         "--jsonl"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:39.6597212-04:00",
@@ -1069,7 +1053,7 @@
         "gemma4-31b-huihui-abliterated-qat-q4-k",
         "--json"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:40.0389508-04:00",
@@ -1088,11 +1072,11 @@
         "--plan",
         "--jsonl"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
-      "started": "2026-10-26T15:25:40.3908500-04:00",
-      "finished": "2026-10-26T15:25:40.4841950-04:00",
+      "started": "2026-10-26T15:25:40.39085-04:00",
+      "finished": "2026-10-26T15:25:40.484195-04:00",
       "stdout_bytes": 17383,
       "stdout_sha256": "024457530dff6edd55380e1dd94aff729055818189ab252b7cad7f011fb5f10f"
     },
@@ -1106,7 +1090,7 @@
         "diffusiongemma-26b-e38-abliterated-nvfp4",
         "--json"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:40.7564552-04:00",
@@ -1130,11 +1114,11 @@
         "--scan-folder",
         "C:\\"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
-      "started": "2026-10-26T15:25:41.1092810-04:00",
-      "finished": "2026-10-26T15:25:41.2793410-04:00",
+      "started": "2026-10-26T15:25:41.109281-04:00",
+      "finished": "2026-10-26T15:25:41.279341-04:00",
       "stdout_bytes": 158721,
       "stdout_sha256": "f4c6d58de40db1b312df17dee04bf3b7383650dc6c3e2db032b39693c13220b7"
     },
@@ -1148,10 +1132,10 @@
         "C:\\bubo\\evidence\\capture-09\\frozen-capture\\runtime-fresh",
         "--jsonl"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "localappdata": "<scratch>\\local",
       "exit_code": 3,
       "stderr": "",
-      "started": "2026-10-26T15:25:41.5472630-04:00",
+      "started": "2026-10-26T15:25:41.547263-04:00",
       "finished": "2026-10-26T15:25:41.7194355-04:00",
       "stdout_bytes": 420446,
       "stdout_sha256": "703d8d591eedbf9435d45e7a90baf051a14338053600a2207479a614014fb97e"
@@ -1169,10 +1153,10 @@
         "--plan",
         "--jsonl"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
-      "started": "2026-10-26T15:25:41.9834440-04:00",
+      "started": "2026-10-26T15:25:41.983444-04:00",
       "finished": "2026-10-26T15:25:42.0805453-04:00",
       "stdout_bytes": 21525,
       "stdout_sha256": "29691cdb0b85dcbe7dc2e92a1f45f4b4898503f515cfa639c35fc7dcc52d36be"
@@ -1191,7 +1175,7 @@
         "--sessions",
         "1"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:42.3587199-04:00",
@@ -1213,7 +1197,7 @@
         "--sessions",
         "4"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:42.8360809-04:00",
@@ -1235,7 +1219,7 @@
         "--sessions",
         "2"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:43.3281994-04:00",
@@ -1257,7 +1241,7 @@
         "--sessions",
         "8"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:43.8099436-04:00",
@@ -1279,7 +1263,7 @@
         "--sessions",
         "12"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:44.2792619-04:00",
@@ -1301,10 +1285,10 @@
         "--sessions",
         "1"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
-      "started": "2026-10-26T15:25:44.7653320-04:00",
+      "started": "2026-10-26T15:25:44.765332-04:00",
       "finished": "2026-10-26T15:25:44.8892166-04:00",
       "stdout_bytes": 8303,
       "stdout_sha256": "e9694f1a23b700cb70aebb609a3fd6de87570884f172585ddd742e5a4664e08a"
@@ -1323,7 +1307,7 @@
         "--sessions",
         "4"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:45.1553483-04:00",
@@ -1345,7 +1329,7 @@
         "--sessions",
         "1"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:45.5547221-04:00",
@@ -1367,7 +1351,7 @@
         "--sessions",
         "4"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:45.9177495-04:00",
@@ -1389,7 +1373,7 @@
         "--sessions",
         "1"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:46.2854447-04:00",
@@ -1411,7 +1395,7 @@
         "--sessions",
         "1"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:46.6858281-04:00",
@@ -1429,7 +1413,7 @@
         "C:\\bubo\\runtimes\\c4pkg-344f41ac\\bin",
         "--jsonl"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "localappdata": "<scratch>\\local",
       "exit_code": 0,
       "stderr": "",
       "started": "2026-10-26T15:25:47.0703992-04:00",
@@ -1447,15 +1431,50 @@
         "C:\\bubo\\evidence\\capture-09\\frozen-capture\\runtime-payload-without-metadata",
         "--jsonl"
       ],
-      "localappdata": "C:\\bubo\\evidence\\capture-09\\frozen-capture\\local-empty",
+      "localappdata": "<scratch>\\local",
       "exit_code": 3,
       "stderr": "",
       "started": "2026-10-26T15:25:49.6788429-04:00",
       "finished": "2026-10-26T15:25:50.6003739-04:00",
       "stdout_bytes": 422847,
       "stdout_sha256": "e8249067f6ebec658cd982e62e36e224e9be80c1be443897c4b6a91fe7a74dd4"
+    },
+    {
+      "file": "switches.json",
+      "command": [
+        "bubo.exe",
+        "serve",
+        "--list-switches",
+        "--json"
+      ],
+      "localappdata": "<scratch>\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-11-03T20:30:12.3475586-05:00",
+      "finished": "2026-11-03T20:30:12.4831243-05:00",
+      "stdout_bytes": 186034,
+      "stdout_sha256": "ffd7164e61c394c55051762756db4cb3f12935bcb132a171a409bc2b7d39120b"
+    },
+    {
+      "file": "estimate-flash-catalogue-id-q8.json",
+      "command": [
+        "bubo.exe",
+        "models",
+        "estimate",
+        "--model",
+        "huihui-qwen38-flash-next-ud-q4-k-xl-v1",
+        "--kv-cache-type",
+        "q8_0",
+        "--json"
+      ],
+      "localappdata": "<scratch>\\local",
+      "exit_code": 0,
+      "stderr": "",
+      "started": "2026-11-03T20:30:12.6958194-05:00",
+      "finished": "2026-11-03T20:30:12.9524672-05:00",
+      "stdout_bytes": 37277,
+      "stdout_sha256": "62c107e0e9e821f438f38b4d0b94c200bccae9fb42e98ccb40142d13e9209d34"
     }
   ],
-  "note": "CPU-only final integrated CLI. E21/E23 inventory and isolated saved pointer. Existing model roots read only; retired Gemma packages estimated by their main file paths. No server, GUI, GPU or acquisition. Historical running captures remain historical.",
-  "publication_note": "Machine paths and provenance labels are neutral publication fixtures. Output sizes and hashes describe the scrubbed bytes; executable and source revision identities remain historical."
+  "note": "CPU-only final integrated CLI. E21/E23 inventory and isolated saved pointer. Existing model roots read only; retired Gemma packages estimated by their main file paths. No server, GUI, GPU or acquisition. Historical running captures remain historical."
 }

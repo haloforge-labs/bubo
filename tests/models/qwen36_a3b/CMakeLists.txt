@@ -4,3 +4,18 @@ target_link_libraries(qwen36_a3b_config_state_bytes_test PRIVATE gufo_core)
 add_test(NAME qwen36_a3b.config_state_bytes COMMAND qwen36_a3b_config_state_bytes_test)
 set_tests_properties(qwen36_a3b.config_state_bytes PROPERTIES
   LABELS "cpu;models;qwen36_a3b;memory;reference")
+
+add_executable(qwen36_a3b_prefill_policy_test prefill_policy_test.cpp)
+target_link_libraries(qwen36_a3b_prefill_policy_test PRIVATE gufo_core)
+add_test(NAME qwen36_a3b.prefill_policy COMMAND qwen36_a3b_prefill_policy_test)
+set_tests_properties(qwen36_a3b.prefill_policy PROPERTIES LABELS "cpu;models;qwen36_a3b")
+
+add_executable(qwen36_a3b_prefill_audit_test prefill_audit_test.cpp)
+target_link_libraries(qwen36_a3b_prefill_audit_test PRIVATE gufo_core)
+add_test(NAME qwen36_a3b.prefill_audit COMMAND qwen36_a3b_prefill_audit_test)
+set_tests_properties(qwen36_a3b.prefill_audit PROPERTIES LABELS "cpu;models;qwen36_a3b")
+
+add_executable(qwen36_a3b_prefill_capture_options_test prefill_capture_options_test.cpp)
+target_link_libraries(qwen36_a3b_prefill_capture_options_test PRIVATE gufo_core)
+add_test(NAME qwen36_a3b.prefill_capture_options COMMAND qwen36_a3b_prefill_capture_options_test)
+set_tests_properties(qwen36_a3b.prefill_capture_options PROPERTIES LABELS "cpu;models;qwen36_a3b")

@@ -3,7 +3,9 @@ import { actions, useView, type View } from '@/lib/bindings'
 import { ActionError, useActionTask } from '@/components/action-feedback'
 import { Button } from '@/components/ui/button'
 import { ErrorNote } from '@/components/error-note'
+import { settingLabel } from '@/lib/presentation'
 import { serverRowSection } from '@/lib/server-settings'
+import { settingHash } from '@/lib/reveal'
 
 export function RejectedOverride({ failure }: { failure: View['failure'] }) {
   const command = useActionTask()
@@ -11,8 +13,8 @@ export function RejectedOverride({ failure }: { failure: View['failure'] }) {
   const name = failure?.switch
   const row = view?.switches.find((row) => row.name === name)
   const serverSetting = row && serverRowSection(row)
-  const label =
-    view?.switches.find((row) => row.name === name)?.label || 'server setting'
+  // The label the page shows for the setting.
+  const label = (row && settingLabel(row)) || 'server setting'
   if (!name) return null
   return (
     <section aria-label="Rejected override" className="space-y-2">
@@ -34,7 +36,7 @@ export function RejectedOverride({ failure }: { failure: View['failure'] }) {
           <Button variant="outline" asChild>
             <Link
               to={serverSetting ? '/' : '/settings'}
-              hash={serverSetting ? 'server-setup' : ''}
+              hash={settingHash(name)}
             >
               Open setting
             </Link>

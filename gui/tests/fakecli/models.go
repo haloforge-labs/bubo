@@ -128,6 +128,15 @@ func modelsCommand() {
 			return
 		}
 		printRecording(recordedEstimateFile(subject, flag("--context"), flag("--sessions")))
+	case "check-side-file":
+		// A side file whose name says "wrong" does not fit; anything else does.
+		file := filepath.Base(flag("--file"))
+		fits := !strings.Contains(strings.ToLower(file), "wrong")
+		payload := map[string]any{"role": flag("--role"), "fits": fits, "kind_ok": true, "family_ok": fits, "dims_ok": fits, "reason": ""}
+		if !fits {
+			payload["reason"] = "This file is for a different model."
+		}
+		event("side_file_check", payload)
 	default:
 		cliError("invalid_arguments", "models", "arguments", false, "Use models list or models estimate.", 2)
 	}

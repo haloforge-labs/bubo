@@ -42,6 +42,10 @@ type Config struct {
 	// identity handshake. Only bootstrap gets the larger budget and retries.
 	ColdStartTimeout      time.Duration
 	ColdStartRetryBackoff time.Duration
+	// ColdStartHedge is how long the first status call may run before another
+	// one starts beside it (default 4 s). The first call of a start sometimes
+	// stalls for a minute while the next one answers in a second.
+	ColdStartHedge time.Duration
 	// FirstCallNotice is how long the first CLI call may wait before the View
 	// says "Starting for the first time…" (default 3 s). Windows can scan a
 	// freshly unpacked unsigned program on its first run for 15 s or more.
@@ -139,6 +143,9 @@ type Supervisor struct {
 	selection atomic.Pointer[[]string]
 	stallNano atomic.Int64
 	registry  atomic.Pointer[Switches]
+	// switchGuard drops saved serve-switch overrides that the CLI says the
+	// selected model cannot use, so a saved value never reaches serve.
+	switchGuard atomic.Pointer[func(Settings) map[string]string]
 	regOnce   sync.Once
 	// cliAnswered is set after the first successful CLI call.
 	cliAnswered atomic.Bool
@@ -258,9 +265,9 @@ func New(c Config) (*Supervisor, error) {
 	}
 	if c.SettingsPath != "" {
 		settings, warning := LoadSettings(c.SettingsPath)
-		if settings.LastError != nil && (c.ProductVersion == "" || settings.lastErrorVersion != c.ProductVersion) {
+		if settings.LastError != nil && (c.ProductVersion == "" || settings.lastErrorVersion != c.ProductVersion || !settings.savedFailureHolds()) {
 			settings.LastError = nil
-			settings.lastErrorVersion = ""
+			settings.lastErrorVersion, settings.lastErrorSetup = "", ""
 			if err := SaveSettings(c.SettingsPath, settings); err != nil {
 				initial.Label = "Settings save failed."
 			}
@@ -652,7 +659,7 @@ func (s *Supervisor) run(v Snapshot) {
 		if s.config.SettingsPath != "" {
 			settings, _ := LoadSettings(s.config.SettingsPath)
 			settings.LastError = v.LastError
-			settings.lastErrorVersion = s.config.ProductVersion
+			settings.lastErrorVersion, settings.lastErrorSetup = s.config.ProductVersion, settings.failureSetup()
 			if err := SaveSettings(s.config.SettingsPath, settings); err != nil {
 				v.Label = "Settings save failed."
 			}
@@ -1506,8 +1513,23 @@ func (s *Supervisor) captureEventsLimit(ctx context.Context, args []string, max 
 		return nil, appError("cli_unavailable", err.Error())
 	}
 	defer s.trackProcess(p)()
+	began := time.Now()
+	// A CLI call that is slow or stopped is logged with its process, so a stall
+	// can be traced to one process. Cancelled hedge calls land here too.
+	note := func(what string, cause error) {
+		took := time.Since(began).Round(time.Millisecond)
+		if cause == nil && took < slowCliCall {
+			return
+		}
+		line := fmt.Sprintf("cli_call: %s pid=%d args=%q after %s", what, p.PID, strings.Join(args, " "), took)
+		if cause != nil {
+			line += ": " + cause.Error()
+		}
+		s.appendLog([]byte(line), true)
+	}
 	select {
 	case result := <-p.Done:
+		note("slow call finished", nil)
 		select {
 		case err := <-bad:
 			return nil, err
@@ -1541,11 +1563,16 @@ func (s *Supervisor) captureEventsLimit(ctx context.Context, args []string, max 
 		}
 		return events, nil
 	case <-ctx.Done():
+		note("stopped before it answered", ctx.Err())
 		p.Force()
 		<-p.Done
 		return nil, ctx.Err()
 	}
 }
+
+// slowCliCall is the time after which a finished one-shot CLI call is logged.
+const slowCliCall = 5 * time.Second
+
 func (s *Supervisor) query(ctx context.Context, i *Instance) (*Status, error) {
 	return s.queryTimeout(ctx, i, s.config.QueryTimeout)
 }
@@ -1574,20 +1601,76 @@ func (s *Supervisor) initialDiscover() (*Status, error) {
 
 // A cold CLI may outlast several deadlines. Keep the checking View available
 // until it answers or the supervisor closes; fail fast on non-timeout errors.
+// A call that has not answered after ColdStartHedge gets another call beside it
+// (at most maxHedgedCalls at a time); the first answer wins and the others stop.
+// The log says when that happened, so a stalled first call is seen, not hidden.
 func (s *Supervisor) initialDiscoverWithSlow(onSlow func()) (*Status, error) {
-	for attempt := 0; ; attempt++ {
-		var st *Status
-		ctx, cancel := context.WithTimeout(s.ctx, s.config.ColdStartTimeout)
-		st, err := s.discoverTimeout(ctx, s.config.ColdStartTimeout)
-		cancel()
-		if err == nil || !errors.Is(err, context.DeadlineExceeded) || s.ctx.Err() != nil {
-			return st, err
-		}
-		if attempt == 0 && onSlow != nil {
-			onSlow()
-		}
-		if !s.retryDelay(attempt) {
+	type answer struct {
+		st  *Status
+		err error
+		n   int
+	}
+	const maxHedgedCalls = 3
+	answers := make(chan answer)
+	ctx, stop := context.WithCancel(s.ctx)
+	defer stop()
+	began := time.Now()
+	started, running, timeouts := 0, 0, 0
+	launch := func() {
+		n := started
+		started++
+		running++
+		go func() {
+			defer ReportPanic()
+			attempt, cancel := context.WithTimeout(ctx, s.config.ColdStartTimeout)
+			defer cancel()
+			st, err := s.discoverTimeout(attempt, s.config.ColdStartTimeout)
+			select {
+			case answers <- answer{st, err, n}:
+			case <-ctx.Done():
+			}
+		}()
+	}
+	note := func(format string, args ...any) {
+		s.appendLog([]byte("startup_hedge: "+fmt.Sprintf(format, args...)), true)
+	}
+	hedgeAfter := s.config.ColdStartHedge
+	if hedgeAfter <= 0 {
+		hedgeAfter = 4 * time.Second
+	}
+	launch()
+	hedge := time.NewTimer(hedgeAfter)
+	defer hedge.Stop()
+	var retry <-chan time.Time
+	for {
+		select {
+		case <-s.ctx.Done():
 			return nil, s.ctx.Err()
+		case <-hedge.C:
+			if running < maxHedgedCalls {
+				note("the first status call has run for %s without an answer; starting call %d beside it", time.Since(began).Round(time.Millisecond), started+1)
+				launch()
+			}
+			hedge.Reset(hedgeAfter)
+		case <-retry:
+			retry = nil
+			launch()
+		case a := <-answers:
+			running--
+			if a.err == nil || !errors.Is(a.err, context.DeadlineExceeded) {
+				if started > 1 {
+					note("call %d of %d answered after %s", a.n+1, started, time.Since(began).Round(time.Millisecond))
+				}
+				return a.st, a.err
+			}
+			if timeouts == 0 && onSlow != nil {
+				onSlow()
+			}
+			if running == 0 && retry == nil {
+				delay := s.config.ColdStartRetryBackoff * time.Duration(1<<min(timeouts, 5))
+				retry = time.After(min(delay, 8*time.Second))
+			}
+			timeouts++
 		}
 	}
 }
@@ -1717,6 +1800,9 @@ func (s *Supervisor) operate(op *operation, action string, args []string) {
 			bindHost, apiKey = "0.0.0.0", key
 		}
 		argv = append([]string{"serve"}, buildServeArguments(Settings{}, bindHost, s.config.Port, true)...)
+		if guard := s.switchGuard.Load(); guard != nil && len(cur.SwitchOverrides) > 0 {
+			cur.SwitchOverrides = (*guard)(cur)
+		}
 		if len(cur.SwitchOverrides) > 0 {
 			if s.Registry() == nil {
 				if err := s.LoadRegistry(); err != nil {

@@ -182,8 +182,13 @@ void AuditCatalog() {
   for (const auto& name : missing)
     std::cerr << "MISSING: " << name << '\n';
   Expect(missing.empty(), "source literal catalog completeness");
-  // Extend the existing env/catalog scan with the public program-name policy.
-  // Python keeps one implementation shared by hosted CI and this CPU test.
+}
+
+// The public program-name policy. Python keeps one implementation shared by
+// hosted CI and this CPU test. Its own ctest entry (--brand-scan): a throw here
+// used to abort release_profile_test and hid every check after it.
+void BrandLiteralScan() {
+  const auto root = std::filesystem::path(GUFO_RELEASE_SOURCE_ROOT);
   std::string command = "\"" GUFO_BRAND_SCAN_PYTHON "\" -B \"" +
                         (root / "tools/release/check_brand.py").string() +
                         "\" --root \"" + root.string() + "\"";
@@ -227,6 +232,9 @@ void ReviewRegression(int finding) {
     Expect(Find(result, "GUFO_THINK_GUARD_ESCALATE").value ==
                std::optional<std::string>("0"),
            "no-behaviour turns guard escalation off");
+    Expect(Find(result, "GUFO_THINK_NUDGE").value ==
+               std::optional<std::string>("0"),
+           "no-behaviour turns thinking nudge off");
     // The full resolver test checks the explicit suppression rows and every
     // unchanged row.
   } else if (finding == 3) {
@@ -331,6 +339,7 @@ void ReviewRegression(int finding) {
   } else if (finding == 16) {
     const std::map<std::string, std::optional<std::string>> off = {
         {"GUFO_THINK_EOG_GUARD", "0"},
+        {"GUFO_THINK_NUDGE", "0"},
         {"GUFO_ROUTED_LANEROW", "0"},
         {"GUFO_ROUTED_WMMA_IQ", "0"},
         {"GUFO_INCREMENTAL_TOKENIZE", "0"},
@@ -557,7 +566,7 @@ void Review2Regression(int finding) {
     for (const auto& [name, value] : std::map<std::string, std::string>{
              {"--request-timeout-ms", "0 (off)"},
              {"--max-pending", "16"},
-             {"--max-pending-per-client", "Same as --max-pending"},
+             {"--max-pending-per-client", "Same as Queue limit"},
              {"--max-output-bytes", "1048576 (1 MiB)"},
              {"--max-buffered-output-bytes", "65536 (64 KiB)"},
              {"--max-buffered-output-total", "262144 (256 KiB)"},
@@ -938,6 +947,18 @@ void TestResolver() {
   Expect(Find(exact, "GUFO_THINK_EOG_GUARD").value ==
              std::optional<std::string>("0"),
          "exact disables behaviour");
+  Expect(Find(baseline, "GUFO_THINK_NUDGE").value ==
+             std::optional<std::string>("1"),
+         "default enables thinking nudge");
+  Expect(
+      Find(exact, "GUFO_THINK_NUDGE").value == std::optional<std::string>("0"),
+      "exact disables thinking nudge");
+  Expect(Find(baseline, "GUFO_THINK_NUDGE_TEXT").value ==
+             std::optional<std::string>("Do I have enough"),
+         "nudge setting preserves the unfinished prefix and its boundary");
+  Expect(Find(baseline, "GUFO_THINK_NUDGE_MAX").value ==
+             std::optional<std::string>("2"),
+         "default nudge request limit");
   Expect(exact.effective_flags.at("--seed") == "1", "exact seed pin");
   Expect(Find(exact, "GUFO_PREFILL_FORWARD_TOKENS").value ==
              std::optional<std::string>("4096"),
@@ -986,6 +1007,7 @@ void TestResolver() {
   const std::map<std::string, std::optional<std::string>> off = {
       {"GUFO_THINK_GUARD_ESCALATE", "0"},
       {"GUFO_THINK_EOG_GUARD", "0"},
+      {"GUFO_THINK_NUDGE", "0"},
       {"GUFO_EOG_BOUNDARY", "0"},
       {"GUFO_EOG_MIN_PROB", "-1"},
       {"GUFO_EOG_DEFER_P", "0"},
@@ -1166,6 +1188,8 @@ void TestResolver() {
   for (const auto& [name, value] : std::map<std::string, std::string>{
            {"GUFO_THINK_GUARD_ESCALATE", "3000000000"},
            {"GUFO_THINK_EOG_GUARD", "01"},
+           {"GUFO_THINK_NUDGE", "01"},
+           {"GUFO_THINK_NUDGE_MAX", "2147483648"},
            {"GUFO_EOG_MIN_PROB", "2"},
            {"GUFO_EOG_DEFER_P", "nan"},
            {"GUFO_LENIENT_LAMBDA", "0"},
@@ -1189,9 +1213,20 @@ void TestResolver() {
     if (std::string_view(field) == "requires") {
       rows[0][field] = gufo::json::Value::array();
       rows[0][field].push_back("unknown");
-    } else
+    } else {
       rows[0][field] = std::string_view(field) == "class" ? "unknown" : "";
+      // Only a debug row may have no purpose.
+      if (std::string_view(field) == "purpose")
+        rows[0]["audience"] = "user";
+    }
     Reject([&] { ValidateSwitchTable(rows); }, "C++ rejects invalid table");
+  }
+  {
+    auto rows = ReleaseSwitchTable();
+    rows[0]["purpose"] = "";
+    rows[0]["audience"] = "debug";
+    ValidateSwitchTable(rows);
+    ++passed;  // a debug row without a purpose is valid
   }
   const auto root = std::filesystem::path(GUFO_RELEASE_SOURCE_ROOT);
   const auto& rows = ReleaseSwitchTable();
@@ -1347,7 +1382,7 @@ void RegistryNormalizationTest() {
                found->member_str("label") == row.member_str("label"),
            "effective switch emitter preserves registry label");
   }
-  Expect(labels == 48, "all reviewed user and advanced labels are present");
+  Expect(labels == 56,"all reviewed user and advanced labels are present");
   const auto runtime =
       std::find_if(ReleaseSwitchTable().begin(), ReleaseSwitchTable().end(),
                    [](const auto& row) {
@@ -1361,6 +1396,50 @@ void RegistryNormalizationTest() {
   std::cout << "PASS: RegistryLabelsAndRuntimeRow " << passed - start
             << " checks\n";
 }
+void RefusalSettingsDisplayTest() {
+  auto inputs = Inputs();
+  inputs.environment["GUFO_REFUSAL_DIRECTION"] = "private-direction.gguf";
+  inputs.environment["GUFO_REFUSAL_DIRECTION_STRENGTH"] = "2";
+  inputs.environment["GUFO_REFUSAL_DIRECTION_MODE"] = "stream";
+  const auto find_row = [](const gufo::json::Value& document,
+                           std::string_view name) -> const gufo::json::Value& {
+    const auto& rows = document.find("effective_switches")->items();
+    const auto found = std::find_if(
+        rows.begin(), rows.end(),
+        [&](const auto& row) { return row.member_str("name") == name; });
+    if (found == rows.end())
+      throw std::runtime_error("missing direction setting");
+    return *found;
+  };
+  auto document = ReleaseSettingsJson(ResolveReleaseSettings(inputs));
+  Expect(find_row(document, "--refusal-direction").member_str("effective") ==
+                 "on" &&
+             find_row(document, "--refusal-direction").member_str("source") ==
+                 "env",
+         "legacy path is displayed as enabled");
+  Expect(find_row(document, "--refusal-direction-strength")
+                     .member_str("effective") == "2" &&
+             find_row(document, "--refusal-direction-mode")
+                     .member_str("effective") == "stream",
+         "environment direction controls are displayed");
+  inputs.explicit_flags["--refusal-direction"] = "off";
+  inputs.explicit_flags["--refusal-direction-strength"] = "1";
+  document = ReleaseSettingsJson(ResolveReleaseSettings(inputs));
+  Expect(find_row(document, "--refusal-direction").member_str("effective") ==
+                 "off" &&
+             find_row(document, "--refusal-direction-strength")
+                     .member_str("effective") == "1",
+         "explicit direction flags override environment display");
+  Expect(document.dump().find("private-direction.gguf") == std::string::npos,
+         "legacy environment path is not exposed");
+  inputs.explicit_flags.erase("--refusal-direction");
+  inputs.explicit_flags["--refusal-direction-file"] = "chosen.gguf";
+  document = ReleaseSettingsJson(ResolveReleaseSettings(inputs));
+  Expect(find_row(document, "--refusal-direction").member_str("effective") ==
+             "off",
+         "a file flag without the enable flag stays off");
+}
+
 void DefaultSessionContextTest() {
   const auto start = passed;
   auto inputs = Inputs();
@@ -1694,6 +1773,190 @@ void FlashNextUnchangedTest() {
 
 
 
+// --prefill-mode fast resolves to the five prefill expert rows; normal leaves
+// them to the environment. The chunk size is not part of the mode.
+void PrefillModeTest() {
+  const auto folder = std::filesystem::temp_directory_path() /
+                      "release_profile_test_prefill_mode";
+  std::filesystem::create_directories(folder);
+  const auto fold = folder / std::string(kPrefillFoldFileName);
+  {
+    std::ofstream out(fold, std::ios::binary);
+    for (int layer = 0; layer < 48; ++layer)
+      out << "1.0\n";
+  }
+  const auto Fast = [&](const std::string& profile = "default") {
+    auto inputs = Inputs(profile);
+    inputs.explicit_flags["--prefill-mode"] = "fast";
+    inputs.prefill_fold_file = fold;
+    return inputs;
+  };
+  const auto Injected = [](const ReleaseResolution& result) {
+    std::map<std::string, std::string> rows;
+    for (const auto& injection : result.injections)
+      if (injection.name.starts_with("GUFO_PREFILL_EXPERTS"))
+        rows[injection.name] = injection.value.value_or("");
+    return rows;
+  };
+  const auto normal = ResolveReleaseSettings(Inputs());
+  Expect(Find(normal, "--prefill-mode").value ==
+                 std::optional<std::string>("normal") &&
+             Find(normal, "--prefill-mode").origin == "built-in",
+         "prefill mode defaults to normal");
+  Expect(Injected(normal).empty(), "normal prefill mode injects no expert rows");
+  {
+    auto inputs = Inputs();
+    inputs.explicit_flags["--prefill-mode"] = "normal";
+    inputs.environment["GUFO_PREFILL_EXPERTS"] = "2";
+    Expect(Injected(ResolveReleaseSettings(inputs)).empty(),
+           "explicit normal leaves the expert environment to the developer");
+  }
+  const auto fast = ResolveReleaseSettings(Fast());
+  const auto rows = Injected(fast);
+  Expect(rows.size() == 5 && rows.at("GUFO_PREFILL_EXPERTS") == "3" &&
+             rows.at("GUFO_PREFILL_EXPERTS_MODE") == "fold" &&
+             rows.at("GUFO_PREFILL_EXPERTS_AUDIT") == "lean" &&
+             rows.at("GUFO_PREFILL_EXPERTS_TAIL") == "256",
+         "fast prefill mode injects the 3-expert fold cut with a 256 tail");
+  const auto fold_text = fold.u8string();
+  Expect(rows.at("GUFO_PREFILL_EXPERTS_FOLD") ==
+             std::string(fold_text.begin(), fold_text.end()),
+         "fast prefill mode points at the installed fold file");
+  Expect(Find(fast, "--prefill-mode").value ==
+                 std::optional<std::string>("fast") &&
+             Find(fast, "--prefill-mode").origin == "flag",
+         "fast prefill mode shows as a flag row");
+  Expect(Find(fast, "GUFO_PREFILL_FORWARD_TOKENS").value ==
+                 Find(normal, "GUFO_PREFILL_FORWARD_TOKENS").value &&
+             Find(fast, "--prefill-chunk").value ==
+                 Find(normal, "--prefill-chunk").value,
+         "fast prefill mode leaves the chunk size alone");
+  {
+    auto inputs = Fast();
+    inputs.prefill_fold_file = folder / "absent-fold.txt";
+    std::string message;
+    try {
+      (void)ResolveReleaseSettings(inputs);
+    } catch (const std::invalid_argument& error) {
+      message = error.what();
+    }
+    Expect(message.find("absent-fold.txt") != std::string::npos,
+           "a missing fold file is an error that names the file");
+  }
+  {
+    auto inputs = Fast();
+    inputs.prefill_fold_file.clear();
+    std::string message;
+    try {
+      (void)ResolveReleaseSettings(inputs);
+    } catch (const std::invalid_argument& error) {
+      message = error.what();
+    }
+    Expect(message.find(std::string(kPrefillFoldFileName)) !=
+               std::string::npos,
+           "an unset fold path still names the fold file");
+  }
+  {
+    auto inputs = Fast();
+    inputs.environment["GUFO_PREFILL_EXPERTS_TAIL"] = "512";
+    Reject([&] { (void)ResolveReleaseSettings(inputs); },
+           "fast prefill mode rejects a different expert environment value");
+  }
+  {
+    // The first startup pass runs before the model header names the family.
+    auto inputs = Fast();
+    inputs.model_family.clear();
+    (void)ResolveReleaseSettings(inputs);
+    ++passed;
+  }
+  {
+    // The fold table is fitted for 512 routed experts: unknown (0) and 512 pass, a pruned model is refused.
+    auto inputs = Fast();
+    inputs.expert_count = 512;
+    Expect(Injected(ResolveReleaseSettings(inputs)).size() == 5,
+           "fast prefill mode accepts the 512-expert models");
+    inputs.expert_count = 0;
+    Expect(Injected(ResolveReleaseSettings(inputs)).size() == 5,
+           "an unknown expert count does not block fast prefill mode");
+    inputs.expert_count = 256;
+    std::string message;
+    try {
+      (void)ResolveReleaseSettings(inputs);
+    } catch (const std::invalid_argument& error) {
+      message = error.what();
+    }
+    Expect(message.find("512 routed experts") != std::string::npos &&
+               message.find("has 256") != std::string::npos,
+           "fast prefill mode refuses a 256-expert model and names the numbers");
+    inputs.explicit_flags["--prefill-mode"] = "normal";
+    (void)ResolveReleaseSettings(inputs);
+    ++passed;
+  }
+  {
+    auto inputs = Fast();
+    inputs.environment["GUFO_PREFILL_EXPERTS"] = "3";
+    Expect(Injected(ResolveReleaseSettings(inputs)).size() == 5,
+           "an environment value equal to the fast value is not a conflict");
+  }
+  Reject([&] { (void)ResolveReleaseSettings(Fast("exact")); },
+         "exact refuses fast prefill mode");
+  Reject([&] { (void)ResolveReleaseSettings(Fast("vanilla")); },
+         "vanilla refuses fast prefill mode");
+  {
+    auto inputs = Fast();
+    inputs.model_family = "gemma4";
+    Reject([&] { (void)ResolveReleaseSettings(inputs); },
+           "fast prefill mode needs Qwen3.8-Flash-Next");
+  }
+  {
+    auto inputs = Inputs();
+    inputs.explicit_flags["--prefill-mode"] = "turbo";
+    Reject([&] { (void)ResolveReleaseSettings(inputs); },
+           "prefill mode accepts only normal and fast");
+  }
+  std::filesystem::remove_all(folder);
+}
+
+// Q8 K/V storage exists on Flash-Next only. On any other known family the
+// request is not an error: the effective setting is f16 and one line says so.
+void KvCacheQ8Test() {
+  const auto WithQ8 = [](const std::string& family, const std::string& value) {
+    auto inputs = Inputs();
+    inputs.model_family = family;
+    inputs.explicit_flags["--kv-cache-type"] = value;
+    return inputs;
+  };
+  const auto Effective = [](const ReleaseResolution& result) {
+    const auto found = result.effective_flags.find("--kv-cache-type");
+    return found == result.effective_flags.end() ? std::string("-")
+                                                 : found->second;
+  };
+  const auto HasLine = [](const ReleaseResolution& result) {
+    return std::find(result.logs.begin(), result.logs.end(),
+                     std::string(kKvCacheQ8FallbackLine)) != result.logs.end();
+  };
+  const auto flash = ResolveReleaseSettings(WithQ8("qwen3.8-flash-next", "q8_0"));
+  Expect(Effective(flash) == "q8_0" && !HasLine(flash),
+         "Flash Next keeps the Q8 cache and logs nothing");
+  const auto unknown = ResolveReleaseSettings(WithQ8("", "q8_0"));
+  Expect(Effective(unknown) == "q8_0" && !HasLine(unknown),
+         "a first startup pass without a family leaves the request alone");
+  const auto f16 = ResolveReleaseSettings(WithQ8("qwen35", "f16"));
+  Expect(Effective(f16) == "f16" && !HasLine(f16),
+         "f16 on any family is f16 without a line");
+  for (const char* family : {"qwen35", "gemma4"}) {
+    const auto fallback = ResolveReleaseSettings(WithQ8(family, "q8_0"));
+    Expect(Effective(fallback) == "f16" && HasLine(fallback),
+           std::string("Q8 cache on ") + family +
+               " falls back to f16 with one log line");
+    const auto& row = Find(fallback, "--kv-cache-type");
+    Expect(row.value == std::optional<std::string>("f16") &&
+               row.requested == std::optional<std::string>("q8_0"),
+           std::string("the settings row on ") + family +
+               " shows f16 and what was asked");
+  }
+}
+
 void CacheRamDefaultTest() {
   const auto Row = [](const ReleaseInputs& inputs) {
     const auto result = ResolveReleaseSettings(inputs);
@@ -1724,6 +1987,18 @@ void CacheRamDefaultTest() {
     const auto [value, origin] = Row(inputs);
     Expect(value && *value == "6442450944" && origin == "flag",
            "an explicit --cache-ram-bytes wins over the profile");
+  }
+  {
+    // The help says N|off and the reader accepts off: the release rule
+    // must too.
+    auto inputs = Inputs("default");
+    inputs.explicit_flags["--cache-ram-bytes"] = "off";
+    const auto [value, origin] = Row(inputs);
+    Expect(value && *value == "off" && origin == "flag",
+           "--cache-ram-bytes off passes the release rule");
+    inputs.explicit_flags["--cache-ram-bytes"] = "often";
+    Reject([&] { (void)ResolveReleaseSettings(inputs); },
+           "--cache-ram-bytes accepts off and numbers only");
   }
   {
     const auto [value, origin] = Row(Inputs("vanilla"));
@@ -1887,6 +2162,23 @@ void ServedModelNameTest() {
          "a plain GGUF serves its file name without the extension");
   Expect(ServedModelName("mine", "folder/model.gguf", package) == "mine",
          "an explicit served name wins over the package id");
+  // A shard file serves the model's name, not the shard's.
+  Expect(ServedModelName("", "d/Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00001-of-00002.gguf") ==
+             "Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS",
+         "a first shard serves the model name without the shard suffix");
+  Expect(ServedModelName("", "d/Model-00004-of-00004.gguf") == "Model",
+         "the last shard serves the same name");
+  Expect(ServedModelName("", "d/model-1-of-2.gguf") == "model-1-of-2",
+         "a suffix without five digits is part of the name");
+  Expect(ServedModelName("", "d/model-00001-of-0002.gguf") == "model-00001-of-0002",
+         "a suffix with a short total is part of the name");
+  Expect(ServedModelName("", "d/-00001-of-00002.gguf") == "-00001-of-00002",
+         "a name that is only the suffix is kept");
+  Expect(ServedModelName("", "d/model-00001-of-00002-extra.gguf") ==
+             "model-00001-of-00002-extra",
+         "the suffix is only dropped at the end of the stem");
+  Expect(ServedModelName("mine", "d/Model-00001-of-00002.gguf") == "mine",
+         "an explicit name is not touched");
   const auto plain = ResolveReleaseSettings(Inputs());
   Expect(!Find(plain, "--served-model-name").value,
          "the registry leaves the served name for model selection");
@@ -1897,7 +2189,8 @@ void ServedModelNameTest() {
          "an explicit --served-model-name wins in the settings");
   for (const auto& row : ReleaseSwitchTable())
     if (row.member_str("name") == "--served-model-name")
-      Expect(row.member_str("default_text") == "Package ID or GGUF file name",
+      Expect(row.member_str("default_text") ==
+                 "Package ID or GGUF file name without a shard suffix",
              "the help names the default: " + row.member_str("default_text"));
 }
 
@@ -1943,16 +2236,16 @@ void V12SettingsTest() {
       "GUFO_LENIENT_LAMBDA",        "GUFO_INCREMENTAL_TOKENIZE",
       "GUFO_PREFILL_FORWARD_TOKENS"};
   const std::map<std::string, std::string> labels = {
-      {"--top-k", "Top K (sampling candidate limit)"},
-      {"--top-p", "Top P (cumulative probability filter)"},
-      {"--min-p", "Min P (relative probability filter)"},
-      {"--repeat-penalty", "Repeat Penalty (repetition penalty)"},
-      {"--repeat-last-n", "Repeat Last N (repetition window)"},
-      {"--presence-penalty", "Presence Penalty (repeated token penalty)"},
-      {"--frequency-penalty", "Frequency Penalty (token frequency penalty)"},
-      {"--max-tokens", "Max Tokens (new tokens per request)"},
-      {"--seed", "Seed (random seed)"},
-      {"--min-keep", "Min Keep (minimum sampling candidates)"}};
+      {"--top-k", "Top-k"},
+      {"--top-p", "Top-p"},
+      {"--min-p", "Min-p"},
+      {"--repeat-penalty", "Repeat penalty"},
+      {"--repeat-last-n", "Repeat last N"},
+      {"--presence-penalty", "Presence penalty"},
+      {"--frequency-penalty", "Frequency penalty"},
+      {"--max-tokens", "Max tokens"},
+      {"--seed", "Seed"},
+      {"--min-keep", "Min keep"}};
   const std::set<std::string> unbounded = {
       "--cache-disk-bytes", "--cache-disk-staging-bytes",
       "--cache-ram-bytes",  "--context",
@@ -1981,6 +2274,46 @@ void V12SettingsTest() {
   }
 }
 
+void ThinkNudgeToolsProfilesTest() {
+  namespace s = gufo::sampling;
+  for (int mode = 0; mode < 3; ++mode) {
+    auto inputs = Inputs(mode == 1 ? "exact" : "default");
+    if (mode == 2)
+      inputs.explicit_flags["--no-behaviour"] = "1";
+    const auto resolved = ResolveReleaseSettings(inputs);
+    const bool enabled = Find(resolved, "GUFO_THINK_NUDGE").value ==
+                         std::optional<std::string>("1");
+    Expect(enabled == (mode == 0), "tools thinking nudge profile policy");
+    auto behaviour = std::make_shared<s::BehaviourConfig>();
+    behaviour->think_nudge = enabled;
+    behaviour->initial_thinking = true;
+    behaviour->loop_exempt = true;
+    behaviour->eog_ids = {0};
+    behaviour->think_nudge_prefix = {2, 3};
+    auto constraint = std::make_shared<s::TokenConstraint>();
+    constraint->grammar = s::JsonConstraint::WithTools(
+        nullptr, {{"bash", s::JsonConstraint::Object()}}, false);
+    const auto pieces = std::make_shared<const std::vector<std::string>>(
+        std::initializer_list<std::string>{"", "ordinary", "Do", " I"});
+    constraint->vocabulary = std::make_shared<s::ConstraintVocabulary>(
+        4, [pieces](std::uint32_t id) {
+          return s::ConstraintVocabulary::Piece{pieces->at(id), id == 0};
+        });
+    s::SamplingConfig config;
+    config.temperature = 0;
+    config.behaviour = behaviour;
+    config.constraint = constraint;
+    s::SamplerState sampler(config);
+    const std::vector<float> row = {10, 9, -10, -10};
+    const auto token = sampler.Sample(row);
+    Expect(token == (enabled ? 2u : 0u),
+           "resolved profile controls the tools thinking intervention");
+    sampler.Accept(token);
+    Expect(sampler.ForcingThinkNudge() == enabled,
+           "exact and no-behaviour cannot start a tools nudge");
+  }
+}
+
 int main(int argc, char** argv) {
   try {
     if (argc == 3 && std::string_view(argv[1]) == "--write-flash-baseline") {
@@ -1991,11 +2324,33 @@ int main(int argc, char** argv) {
       RegistryRecipe(argv[2]);
       return 0;
     }
+    if (argc == 2 && std::string_view(argv[1]) == "--brand-scan") {
+      BrandLiteralScan();
+      std::cout << "PASS: brand_literal_scan " << passed << " checks\n";
+      return 0;
+    }
+    if (argc > 1 && std::string_view(argv[1]) == "--prefill-mode-test") {
+      PrefillModeTest();
+      std::cout << "PASS: prefill_mode_test " << passed << " checks\n";
+      return 0;
+    }
     BuiltinDefaultDisplayTest();
     StatusSummaryAndRejectionTest();
     if (argc > 1 && std::string_view(argv[1]) == "--registry") {
       RegistryNormalizationTest();
+      RefusalSettingsDisplayTest();
       std::cout << "PASS: registry " << passed << " checks\n";
+      return 0;
+    }
+    if (argc > 1 && std::string_view(argv[1]) == "--think-nudge") {
+      ReviewRegression(2);
+      ReviewRegression(16);
+      TestResolver();
+      ThinkNudgeToolsProfilesTest();
+      HeaderTest();
+      RegistryNormalizationTest();
+      FlashNextUnchangedTest();
+      std::cout << "PASS: think_nudge_profile_test " << passed << " checks\n";
       return 0;
     }
     // CPU-only echo harness uses the same startup resolver as RunServe.
@@ -2033,7 +2388,9 @@ int main(int argc, char** argv) {
       Review2Regression(finding);
     NpuPolicyTest();
     RegistryNormalizationTest();
+    RefusalSettingsDisplayTest();
     TestResolver();
+    ThinkNudgeToolsProfilesTest();
     DefaultSessionContextTest();
     HeaderTest();
     InFileMtpWarningTest();
@@ -2045,6 +2402,8 @@ int main(int argc, char** argv) {
     RegistryWordingTest();
     FlashNextUnchangedTest();
     CacheRamDefaultTest();
+    PrefillModeTest();
+    KvCacheQ8Test();
     AuditCatalog();
     if (argc > 2 && std::string_view(argv[1]) == "--production-spec")
       CheckSpec(argv[2]);

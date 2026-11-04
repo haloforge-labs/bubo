@@ -301,6 +301,9 @@ type RecommendedContext struct {
 // MemoryEstimate is the CLI's planning estimate. FitVerified is always false in
 // version 1. The GUI shows the CLI numbers and never computes its own.
 type MemoryEstimate struct {
+	// Capabilities are not part of the CLI's memory_estimate object; the parser
+	// copies them from the model_estimate payload that holds it.
+	Capabilities *EstimateCapabilities `json:"capabilities,omitempty"`
 	RecommendationFailures       []RecommendationFailure `json:"recommendation_failures,omitempty"`
 	CacheAtClampBytes            *Count                  `json:"cache_at_clamp_bytes,omitempty"`
 	HostSpillBytes               *Count                  `json:"host_spill_bytes,omitempty"`

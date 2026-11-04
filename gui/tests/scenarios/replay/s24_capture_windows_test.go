@@ -30,7 +30,7 @@ func TestS24CaptureIntegrity(t *testing.T) {
 	if err := json.Unmarshal(data, &metadata); err != nil {
 		t.Fatal(err)
 	}
-	if metadata.Commit != "1a0cd4305a87a527c6bac453910349d754e5944b" || metadata.Executable != "36393435c2db5ca9ae54c1434f74a8f62c0ea0de2718de46b5a7f399ed647ad2" || len(metadata.Commands) != 72 {
+	if metadata.Commit != "d358f5b00cae49c0024878af0eb3196d9f17bc35" || metadata.Executable != "c916231229dfe15f87e832b33faf8dfb5e33f28e5d2b4b7dfc9c955831946b9a" || len(metadata.Commands) != 73 {
 		t.Fatalf("capture provenance: %+v", metadata)
 	}
 	seen := map[string]bool{}

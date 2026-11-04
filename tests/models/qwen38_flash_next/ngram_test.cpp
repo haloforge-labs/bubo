@@ -1,9 +1,6 @@
 // PLE n-gram hashing and disk row reads, checked without the model.
 #include "src/models/qwen38_flash_next/ngram.hpp"
 
-#include <fcntl.h>
-#include <unistd.h>
-
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -13,6 +10,9 @@
 #include <string>
 #include <vector>
 
+#include "src/core/platform/fs.hpp"
+#include "tests/support/temporary_directory.hpp"
+
 namespace q = gufo::models::qwen38_flash_next;
 
 namespace {
@@ -21,10 +21,9 @@ std::unique_ptr<q::NgramTable> OpenTable(const std::filesystem::path& path,
                                          std::uint64_t rows, std::uint32_t dim,
                                          gufo::core::GgmlType type,
                                          std::string* error) {
-  const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  const auto fd = gufo::platform::OpenReadFile(path);
   auto table = q::NgramTable::Open(fd, offset, rows, dim, type, error);
-  if (fd >= 0)
-    ::close(fd);
+  gufo::platform::CloseFile(fd);
   return table;
 }
 
@@ -335,33 +334,98 @@ void TestDistantRows() {
 }
 
 void TestReplacedPath() {
-  std::string name_storage =
-      (std::filesystem::temp_directory_path() / "qwen-ngram-bound-XXXXXX")
-          .string();
-  char* name = name_storage.data();
-  const int fd = ::mkstemp(name);
-  Check(fd >= 0, "create bound table");
-  if (fd < 0)
-    return;
-  const std::uint16_t value = 0x3f80;  // BF16 1.0
-  Check(::write(fd, &value, sizeof(value)) == sizeof(value), "write bound row");
-  ::unlink(name);
+  TemporaryDirectory temp("qwen-ngram-bound");
+  const auto name = temp.path() / "bound";
+  const auto next = temp.path() / "next";
   {
-    std::ofstream replacement(name, std::ios::binary);
+    std::ofstream initial(name, std::ios::binary);
+    const std::uint16_t value = 0x3f80;
+    initial.write(reinterpret_cast<const char*>(&value), sizeof(value));
+    Check(initial.good(), "write bound row");
+  }
+  const auto fd = gufo::platform::OpenReadFile(name);
+  Check(gufo::platform::FileValid(fd), "create bound table");
+  if (!gufo::platform::FileValid(fd))
+    return;
+  {
+    std::ofstream replacement(next, std::ios::binary);
     const std::uint16_t other = 0x4000;
     replacement.write(reinterpret_cast<const char*>(&other), sizeof(other));
   }
+  std::error_code ec;
+  gufo::platform::Directory dir;
+  Check(dir.Open(temp.path(), ec) &&
+            gufo::platform::Rename(dir, "bound", dir, "retired", ec) &&
+            gufo::platform::Rename(dir, "next", dir, "bound", ec),
+        "replace bound path while descriptor stays open");
   std::string error;
   auto table =
       q::NgramTable::Open(fd, 0, 1, 1, gufo::core::GgmlType::kBF16, &error);
-  ::close(fd);
+  gufo::platform::CloseFile(fd);
   Check(table != nullptr, "open original descriptor after path replacement");
   std::array<std::uint32_t, 1> ids{0};
   std::array<float, 1> output{};
   if (table)
     Check(table->Read(ids, output) && output[0] == 1.0F,
           "PLE reads original weights after replacement and descriptor close");
-  std::filesystem::remove(name);
+}
+
+// Upstream gather accounting remains covered alongside prefill diagnostics.
+void TestCounters() {
+  const std::filesystem::path path =
+      std::filesystem::temp_directory_path() / "qwen38_ngram_counters.bin";
+  const std::uint32_t dim = 4;
+  const std::uint64_t rows = 4096;
+  {
+    std::ofstream out(path, std::ios::binary);
+    const std::vector<char> zeros(rows * dim * 2, 0);
+    out.write(zeros.data(), static_cast<std::streamsize>(zeros.size()));
+  }
+  std::string error;
+  auto table = OpenTable(path, 0, rows, dim, gufo::core::GgmlType::kBF16, &error);
+  Check(table != nullptr, error.c_str());
+  if (table) {
+    const auto balanced = [](const q::NgramTotals& t) {
+      return t.rows == t.dedup_rows + t.cache_hits + t.disk_reads;
+    };
+    q::NgramCounters first, second;
+    const std::vector<std::uint32_t> ids{5, 6, 5, 9, 6, 9, 10};
+    std::vector<float> out(ids.size() * dim);
+    const std::array owners{q::NgramGatherOwner{4, &first},
+                            q::NgramGatherOwner{3, &second}};
+    Check(table->StartRead(ids, out, owners) && table->WaitRead(),
+          "owned gather completes");
+    const auto a = first.Load(), b = second.Load();
+    Check(a.rows == 4 && a.dedup_rows == 1 && a.cache_hits == 0 &&
+              a.disk_reads == 3, "first owner pays its own reads");
+    Check(b.rows == 3 && b.dedup_rows == 2 && b.cache_hits == 0 &&
+              b.disk_reads == 1, "second owner copies rows the first one read");
+    const std::array whole{q::NgramGatherOwner{ids.size(), &first}};
+    Check(table->Read(ids, out) && table->StartRead(ids, out, whole) &&
+              table->WaitRead(), "repeated gather completes");
+    const auto repeated = first.Load();
+    Check(repeated.rows == 11 && repeated.dedup_rows == 4 &&
+              repeated.cache_hits + repeated.disk_reads == 7 &&
+              repeated.disk_reads >= 3, "repeated rows hit the row cache");
+    Check(balanced(repeated) && second.Load().rows == 3,
+          "unowned gathers are not counted");
+    std::vector<std::uint32_t> wide(3000);
+    for (std::size_t i = 0; i < wide.size(); ++i)
+      wide[i] = static_cast<std::uint32_t>((i * 7) % 2048 + 1024);
+    std::vector<float> wide_out(wide.size() * dim);
+    q::NgramCounters pooled;
+    const std::array pooled_owner{q::NgramGatherOwner{wide.size(), &pooled}};
+    Check(table->StartRead(wide, wide_out, pooled_owner) && table->WaitRead(),
+          "pooled gather completes");
+    const auto p = pooled.Load();
+    Check(p.rows == wide.size() && p.dedup_rows == wide.size() - 2048 &&
+              balanced(p), "pooled gather balances");
+    const std::array short_owner{q::NgramGatherOwner{ids.size() - 1, &first}};
+    Check(!table->StartRead(ids, out, short_owner), "owners must cover the gather");
+    Check(first.Load().rows == repeated.rows, "rejected gather is uncounted");
+  }
+  table.reset();
+  std::filesystem::remove(path);
 }
 
 }  // namespace
@@ -372,6 +436,7 @@ int main() {
   TestTable();
   TestQuantizedRows();
   TestDistantRows();
+  TestCounters();
   if (failures != 0) {
     std::fprintf(stderr, "%d failures\n", failures);
     return 1;

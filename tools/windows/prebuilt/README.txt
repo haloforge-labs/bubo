@@ -4,7 +4,9 @@ Bubo for Windows
 You need:
   - Windows 11, an AMD Strix Halo (gfx1151) GPU and a current AMD Adrenalin driver.
   - The Microsoft Visual C++ x64 runtime: https://aka.ms/vs/17/release/vc_redist.x64.exe
-  - For the default model, about 113 GiB of free disk space. It downloads 8 files, about 108.6 GiB in total.
+  - Free disk space for the model. The app and "bubo prepare" show the exact download and the space it needs.
+    The standard model downloads 8 files, about 108.6 GiB, and needs about 113 GiB free.
+    On a 96 GB machine they choose the lower-memory model: about 83.7 GiB to download, about 85.7 GiB free.
 
 Open the app: double-click start.cmd (or bin\Bubo.Control.Web.exe).
 The app downloads the AMD files and a model, and starts the server.

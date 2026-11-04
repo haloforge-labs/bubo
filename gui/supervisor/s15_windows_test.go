@@ -32,6 +32,7 @@ func s15App(t *testing.T, mode, savedVersion string) (*AppService, *NativeBacken
 	}
 	if savedVersion != "" {
 		saved["last_error_version"], _ = json.Marshal(savedVersion)
+		saved["last_error_setup"], _ = json.Marshal(settings.failureSetup())
 	}
 	data, _ = json.Marshal(saved)
 	if err := os.MkdirAll(filepath.Dir(c.SettingsPath), 0700); err != nil {

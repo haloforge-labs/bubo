@@ -1,10 +1,41 @@
 #include "qfn_mmq_prelude.h"
+#include <atomic>
 #include "src/models/qwen38_flash_next/iq4_wide_policy.hpp"
 namespace qfn_mmq {
+// These implementation headers depend on earlier definitions in this namespace.
+// clang-format off
 #include "mmvq.hpp"
 #include "unary.hpp"
 #include "vecdotq.hpp"
 #include "iq4_dense.hpp"
+#include "dense_gemv.hpp"
+#include "kquant_dense.hpp"
+// clang-format on
+
+static constexpr int iq_launch_format(int type) {
+  switch (type) {
+    case GGML_TYPE_IQ2_S: return 0;
+    case GGML_TYPE_Q2_0: return 1;
+    case GGML_TYPE_IQ2_XXS: return 2;
+    case GGML_TYPE_IQ2_XS: return 3;
+    case GGML_TYPE_IQ1_M: return 4;
+    case GGML_TYPE_IQ3_XXS: return 5;
+    case GGML_TYPE_IQ3_S: return 6;
+    case GGML_TYPE_IQ4_XS: return 7;
+    case GGML_TYPE_IQ4_NL: return 8;
+    default: return -1;
+  }
+}
+static std::atomic<unsigned long long> iq_decode_launches[9][5][8]{};
+
+extern "C" unsigned long long qfn_mmq_iq_decode_launch_count(
+    int weight_type, int variant, int width) {
+  const int format = iq_launch_format(weight_type);
+  if (format < 0 || variant < 0 || variant >= 5 || width < 1 || width > 8)
+    return 0;
+  return iq_decode_launches[format][variant][width - 1].load(
+      std::memory_order_relaxed);
+}
 
 // Each wave handles up to eight dense inputs for one weight row on gfx1151.
 // `scatter` reduces the inputs' sums together and stores them from one lane
@@ -242,6 +273,7 @@ static constexpr __device__ vec_dot_q_hip_t get_vec_dot_q_hip(ggml_type type) {
         case GGML_TYPE_IQ2_S:   return vec_dot_iq2_s_q8_1;
         case GGML_TYPE_IQ2_XXS: return vec_dot_iq2_xxs_q8_1;
         case GGML_TYPE_IQ2_XS:  return vec_dot_iq2_xs_q8_1;
+        case GGML_TYPE_IQ1_M:   return vec_dot_iq1_m_q8_1;
         case GGML_TYPE_Q2_0:    return vec_dot_q2_0_q8_1;
         case GGML_TYPE_IQ4_XS:  return vec_dot_iq4_xs_q8_1;
         case GGML_TYPE_IQ4_NL:  return vec_dot_iq4_nl_q8_1;
@@ -263,6 +295,7 @@ static constexpr __host__ __device__ int get_vdr_mmvq(ggml_type type) {
         case GGML_TYPE_IQ2_S:   return VDR_IQ2_S_Q8_1_MMVQ;
         case GGML_TYPE_IQ2_XXS: return VDR_IQ2_XXS_Q8_1_MMVQ;
         case GGML_TYPE_IQ2_XS:  return VDR_IQ2_XS_Q8_1_MMVQ;
+        case GGML_TYPE_IQ1_M:   return VDR_IQ1_M_Q8_1_MMVQ;
         case GGML_TYPE_Q2_0:    return VDR_Q2_0_Q8_1_MMVQ;
         case GGML_TYPE_IQ4_XS:  return VDR_IQ4_XS_Q8_1_MMVQ;
         case GGML_TYPE_IQ4_NL:  return VDR_IQ4_NL_Q8_1_MMVQ;
@@ -270,7 +303,8 @@ static constexpr __host__ __device__ int get_vdr_mmvq(ggml_type type) {
     }
 }
 
-template<ggml_type type, int c_rows_per_block, bool gated = false>
+template<ggml_type type, int c_rows_per_block, bool gated = false,
+         IqDecodeVariant iq_variant = IqDecodeVariant::kBaseline>
 __launch_bounds__(mmvq_moe_max_batch(type) * (gated ? 64 : 32),
                   1) static __global__
     void mul_mat_vec_q_moe(const void* __restrict__ weights,
@@ -302,6 +336,16 @@ __launch_bounds__(mmvq_moe_max_batch(type) * (gated ? 64 : 32),
 
   const uint32_t channel_dst = blockIdx.y;
 
+  constexpr bool stage_grid = type == GGML_TYPE_IQ2_S &&
+                              iq_variant == IqDecodeVariant::kLds4;
+  __shared__ uint64_t local_grid[stage_grid ? 1024 : 1];
+  if constexpr (stage_grid) {
+    const int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    for (int i = tid; i < 1024; i += blockDim.x * blockDim.y)
+      local_grid[i] = iq2s_grid[i];
+    __syncthreads();
+  }
+
   if (token_idx >= ncols_dst) {
     return;
   }
@@ -309,7 +353,8 @@ __launch_bounds__(mmvq_moe_max_batch(type) * (gated ? 64 : 32),
   // Inactive experts still write zero to every output row. The expert ID
   // and its validity are uniform within a wave.
   const int32_t id_raw = ids[channel_dst + token_idx * ids_stride];
-  const bool invalid_id = id_raw < 0;
+  const bool invalid_id =
+      !gufo::models::qwen38_flash_next::iq_decode::ActiveExpert(id_raw);
   // Expert-ordered slot rows store to their source slot; the load is issued
   // with the expert's, not after the dot product.
   const uint32_t dst_token = dst_slots ? dst_slots[token_idx] : token_idx;
@@ -334,7 +379,30 @@ __launch_bounds__(mmvq_moe_max_batch(type) * (gated ? 64 : 32),
 
 #pragma unroll
         for (int i = 0; i < c_rows_per_block; ++i) {
-            tmp[i] += vec_dot_q_hip(vx, &y[kby], row_offsets[i] + kbx, kqs);
+            if constexpr (type == GGML_TYPE_IQ2_S &&
+                          iq_variant != IqDecodeVariant::kBaseline) {
+                tmp[i] += vec_dot_iq2_s_q8_1_packed(
+                    vx, &y[kby], row_offsets[i] + kbx, kqs,
+                    stage_grid ? local_grid : iq2s_grid);
+            } else if constexpr (type == GGML_TYPE_Q2_0 &&
+                                 iq_variant != IqDecodeVariant::kBaseline) {
+                tmp[i] += vec_dot_q2_0_q8_1_packed(
+                    vx, &y[kby], row_offsets[i] + kbx, kqs);
+            } else if constexpr ((type == GGML_TYPE_IQ2_XXS || type == GGML_TYPE_IQ2_XS) &&
+                                 iq_variant != IqDecodeVariant::kBaseline) {
+                tmp[i] += vec_dot_iq2_q8_1_packed<type>(
+                    vx, &y[kby], row_offsets[i] + kbx, kqs);
+            } else if constexpr (type == GGML_TYPE_IQ1_M &&
+                                 iq_variant != IqDecodeVariant::kBaseline) {
+                tmp[i] += vec_dot_iq1_m_q8_1_packed(
+                    vx, &y[kby], row_offsets[i] + kbx, kqs);
+            } else if constexpr ((type == GGML_TYPE_IQ3_XXS || type == GGML_TYPE_IQ3_S) &&
+                                 iq_variant != IqDecodeVariant::kBaseline) {
+                tmp[i] += vec_dot_iq3_q8_1_packed<type>(
+                    vx, &y[kby], row_offsets[i] + kbx, kqs);
+            } else {
+                tmp[i] += vec_dot_q_hip(vx, &y[kby], row_offsets[i] + kbx, kqs);
+            }
         }
     }
 
@@ -360,6 +428,20 @@ __launch_bounds__(mmvq_moe_max_batch(type) * (gated ? 64 : 32),
         const float u = values[1][threadIdx.x];
         dst[channel_dst * stride_channel_dst + row0 + threadIdx.x] =
             (g * (1.0f / (1.0f + __expf(-g)))) * u;
+      }
+      return;
+    }
+
+    // Wider IQ tiles retain the original two-row tile's storing lane.
+    if constexpr (iq_variant != IqDecodeVariant::kBaseline &&
+                  c_rows_per_block > 2) {
+#pragma unroll
+      for (int i = 0; i < c_rows_per_block; ++i) {
+        if (threadIdx.x == (i % 2) && uint32_t(row0 + i) < nrows_x) {
+          const float value = tmp[i];
+          dst[channel_dst * stride_channel_dst + dst_token * stride_col_dst +
+              row0 + i] = isfinite(value) ? value : 0.0f;
+        }
       }
       return;
     }
@@ -677,6 +759,66 @@ static void launch_q8(const void* weights, const void* gate, const block_q8_1* i
     }
 }
 
+static int head_q8_dispatch(const void* weights, const void* input,
+                            float* output, int cols, int rows, int width,
+                            hipStream_t stream) {
+  if (!weights || !input || !output || width < 1 || width > 8 ||
+      cols != 2560 || rows <= 0) return -1;
+  const auto* x = static_cast<const block_q8_1*>(input);
+  const int stride = GGML_PAD(cols, MATRIX_ROW_PADDING) / QK8_1;
+#define HEAD_Q8(N)                                                     \
+  case N:                                                              \
+    launch_q8<N>(weights, nullptr, x, output, cols, rows, stride, stream); \
+    break
+  switch (width) {
+    HEAD_Q8(1); HEAD_Q8(2); HEAD_Q8(3); HEAD_Q8(4);
+    HEAD_Q8(5); HEAD_Q8(6); HEAD_Q8(7); HEAD_Q8(8);
+  }
+#undef HEAD_Q8
+  return hipGetLastError() == hipSuccess ? 0 : -3;
+}
+
+static __global__ void head_gather(const unsigned char* weights,
+                                   const int32_t* ids, unsigned char* packed,
+                                   int row_bytes, int rows) {
+  const int row = blockIdx.x, source = ids[row];
+  for (int i = threadIdx.x; i < row_bytes; i += blockDim.x)
+    packed[size_t(row) * row_bytes + i] = source >= 0 && source < rows
+        ? weights[size_t(source) * row_bytes + i] : 0;
+}
+
+static __global__ void head_diagonal(const float* cross, const int32_t* ids,
+                                     float* output, int shortlist, int width,
+                                     int rows) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= width * shortlist) return;
+  const int token = i / shortlist;
+  output[i] = ids[i] >= 0 && ids[i] < rows
+      ? cross[token * width * shortlist + i] : -INFINITY;
+}
+
+extern "C" int qfn_mmq_head_rescore(const void* weights, const void* input,
+                                    const int32_t* ids, float* output,
+                                    int cols, int shortlist, int weight_rows,
+                                    int width, void* packed, float* cross,
+                                    hipStream_t stream) {
+  if (!weights || !input || !ids || !packed || !cross || !output ||
+      width < 1 || width > 8 || cols != 2560 || shortlist < 20 || shortlist > 512)
+    return -1;
+  const int count = width * shortlist;
+  head_gather<<<count, 256, 0, stream>>>(static_cast<const unsigned char*>(weights),
+                                        ids, static_cast<unsigned char*>(packed),
+                                        cols / 32 * 34, weight_rows);
+  // Keeping the original N-row specialization also keeps its contraction
+  // and scatter tree. Only the diagonal K results per input are retained.
+  const int status =
+      head_q8_dispatch(packed, input, cross, cols, count, width, stream);
+  if (status) return status;
+  head_diagonal<<<(count + 255) / 256, 256, 0, stream>>>(
+      cross, ids, output, shortlist, width, weight_rows);
+  return hipGetLastError() == hipSuccess ? 0 : -3;
+}
+
 template<int waves>
 static void launch_q8_batch(const void* weights, const block_q8_1* input,
                             float* output, int k, int rows, int tokens,
@@ -704,6 +846,16 @@ static void launch_q8_matrix(const void* weights, const block_q8_1* input,
         <<<(rows + 15) / 16, 256, 0, stream>>>(
             static_cast<const block_q8_0*>(weights), input, output, k, rows,
             input_stride, tokens);
+}
+
+int prepare_q8_decode() {
+  hipFuncAttributes attributes{};
+  return hipFuncGetAttributes(
+             &attributes,
+             reinterpret_cast<const void*>(mul_mat_vec_q8<1, false>)) ==
+                 hipSuccess
+             ? 0
+             : -2;
 }
 
 void mul_mat_vec_q8_dispatch(const void* weights, const void* gate,
@@ -780,7 +932,84 @@ void mul_mat_vec_q8_dispatch(const void* weights, const void* gate,
   }
 }
 
-template<ggml_type type, int rows_per_wave = 2>
+// ---- Bench-only ablation controls. They launch existing kernels through
+// their existing launch helpers; each launch is counted so the bench can
+// prove which kernel ran. Production dispatch does not call them. ----
+static std::atomic<unsigned long long> g_q8_control_launches[2][8]{};
+static std::atomic<unsigned long long> g_reuse1_loads_launches[9]{};
+
+extern "C" unsigned long long qfn_mmq_q8_0_control_launch_count(int kind,
+                                                               int width) {
+  if (kind < 0 || kind > 1 || width < 1 || width > 8)
+    return 0;
+  return g_q8_control_launches[kind][width - 1].load(std::memory_order_relaxed);
+}
+
+// kind 0: the production Q8_0 route for 1..8 rows (dp4a mul_mat_vec_q8<N>).
+// kind 1: the Q8_0 matrix-unit kernel (ragged 16-column tile) at 1..8 rows.
+extern "C" int qfn_mmq_q8_0_control_launch(int kind, const void* W,
+                                           const void* X_q8, float* out, int M,
+                                           int N, int K, hipStream_t stream) {
+  if ((kind != 0 && kind != 1) || !W || !X_q8 || !out || M <= 0 || N < 1 ||
+      N > 8 || K <= 0 || K % QK8_0)
+    return -1;
+  const int stride = GGML_PAD(K, MATRIX_ROW_PADDING) / QK8_1;
+  const auto* x = static_cast<const block_q8_1*>(X_q8);
+  if (kind == 0)
+    mul_mat_vec_q8_dispatch(W, nullptr, x, out, K, M, N, stride, stream);
+  else
+    launch_q8_matrix<1>(W, x, out, K, M, N, stride, stream);
+  if (hipGetLastError() != hipSuccess)
+    return -3;
+  g_q8_control_launches[kind][N - 1].fetch_add(1, std::memory_order_relaxed);
+  return 0;
+}
+
+extern "C" unsigned long long qfn_mmq_reuse1_loads_launch_count(int type) {
+  const int format = dense::FormatIndex(type);
+  return format < 0 ? 0
+                    : g_reuse1_loads_launches[format].load(
+                          std::memory_order_relaxed);
+}
+
+// reuse1 at one output row per wave with only the weight loads and the
+// fragment decode (no activations, no dot products). Width is always one.
+extern "C" int qfn_mmq_reuse1_loads_launch(int type, const void* W,
+                                           const void* X_q8, float* out, int M,
+                                           int K, hipStream_t stream) {
+  if (!dense::Covers(type, 1, K) || !W || !X_q8 || !out || M <= 0)
+    return -1;
+  const int stride = GGML_PAD(K, MATRIX_ROW_PADDING) / QK8_1;
+  const auto* w = static_cast<const uint8_t*>(W);
+  const auto* x = static_cast<const block_q8_1*>(X_q8);
+#define REUSE1_LOADS_CASE(T)                                              \
+  case T:                                                                 \
+    mul_mat_vec_dense_reuse<T, 1, 1, false, false, 1, 4, true>            \
+        <<<(M + 3) / 4, 128, 0, stream>>>(w, x, out, K, M, stride);       \
+    break
+  switch (type) {
+    REUSE1_LOADS_CASE(23);
+    REUSE1_LOADS_CASE(20);
+    REUSE1_LOADS_CASE(12);
+    REUSE1_LOADS_CASE(13);
+    REUSE1_LOADS_CASE(7);
+    REUSE1_LOADS_CASE(14);
+    REUSE1_LOADS_CASE(21);
+    REUSE1_LOADS_CASE(18);
+    REUSE1_LOADS_CASE(17);
+    default:
+      return -1;
+  }
+#undef REUSE1_LOADS_CASE
+  if (hipGetLastError() != hipSuccess)
+    return -3;
+  g_reuse1_loads_launches[dense::FormatIndex(type)].fetch_add(
+      1, std::memory_order_relaxed);
+  return 0;
+}
+
+template<ggml_type type, int rows_per_wave = 2,
+         IqDecodeVariant iq_variant = IqDecodeVariant::kBaseline>
 static void launch_moe(const void* weights, const block_q8_1* input,
                        const int32_t* ids, float* output, int k, int rows,
                        int tokens, int experts_used, int input_stride,
@@ -790,7 +1019,14 @@ static void launch_moe(const void* weights, const block_q8_1* input,
   GGML_ASSERT(tokens > 0);
   const int block_tokens = std::min(tokens, mmvq_moe_max_batch(type));
   const int row_stride = k / ggml_blck_size(type);
-  mul_mat_vec_q_moe<type, rows_per_wave>
+  if constexpr (iq_launch_format(type) >= 0) {
+    // Host launches include graph captures, not graph replays. Width is the
+    // launched block's token waves; down projection slot rows also use this.
+    iq_decode_launches[iq_launch_format(type)]
+                      [static_cast<int>(iq_variant)][block_tokens - 1]
+                          .fetch_add(1, std::memory_order_relaxed);
+  }
+  mul_mat_vec_q_moe<type, rows_per_wave, false, iq_variant>
       <<<dim3((rows + rows_per_wave - 1) / rows_per_wave, experts_used,
               (tokens + block_tokens - 1) / block_tokens),
          dim3(32, block_tokens), 0, stream>>>(
@@ -799,11 +1035,51 @@ static void launch_moe(const void* weights, const block_q8_1* input,
           nullptr, dst_slots);
 }
 
+template<ggml_type type>
+static void launch_iq_moe(const void* weights, const block_q8_1* input,
+                           const int32_t* ids, float* output, int k, int rows,
+                           int tokens, int experts_used, int input_stride,
+                           hipStream_t stream, IqDecodeVariant variant) {
+  switch (variant) {
+    case IqDecodeVariant::kBaseline:
+      launch_moe<type>(weights, input, ids, output, k, rows, tokens,
+                       experts_used, input_stride, stream);
+      break;
+    case IqDecodeVariant::kPacked2:
+      launch_moe<type, 2, IqDecodeVariant::kPacked2>(
+          weights, input, ids, output, k, rows, tokens, experts_used,
+          input_stride, stream);
+      break;
+    case IqDecodeVariant::kPacked4:
+      launch_moe<type, 4, IqDecodeVariant::kPacked4>(
+          weights, input, ids, output, k, rows, tokens, experts_used,
+          input_stride, stream);
+      break;
+    case IqDecodeVariant::kPacked8:
+      launch_moe<type, 8, IqDecodeVariant::kPacked8>(
+          weights, input, ids, output, k, rows, tokens, experts_used,
+          input_stride, stream);
+      break;
+    case IqDecodeVariant::kLds4:
+      if constexpr (type == GGML_TYPE_IQ2_S) {
+        launch_moe<type, 4, IqDecodeVariant::kLds4>(
+            weights, input, ids, output, k, rows, tokens, experts_used,
+            input_stride, stream);
+      } else {
+        GGML_ABORT("LDS variant requires IQ2_S");
+      }
+      break;
+    default:
+      GGML_ABORT("invalid IQ decode variant");
+  }
+}
+
 void mul_mat_vec_moe_dispatch(const void* weights, ggml_type type,
                              const block_q8_1* input, const int32_t* ids, float* output,
                              int k, int rows, int tokens, int experts_used,
                              int input_stride, hipStream_t stream,
-                             const int32_t* dst_slots) {
+                             const int32_t* dst_slots,
+                             IqDecodeVariant iq_variant) {
     // dst_slots (expert-ordered slot rows) is only used by the down view.
     GGML_ASSERT(!dst_slots || (k == 640 && experts_used == 1 && tokens > 1 &&
                                (type == GGML_TYPE_Q5_1 ||
@@ -860,28 +1136,32 @@ void mul_mat_vec_moe_dispatch(const void* weights, ggml_type type,
                                           experts_used, input_stride, stream);
             break;
         case GGML_TYPE_IQ3_S:
-            launch_moe<GGML_TYPE_IQ3_S>(weights, input, ids, output, k, rows, tokens,
-                                           experts_used, input_stride, stream);
+            launch_iq_moe<GGML_TYPE_IQ3_S>(weights, input, ids, output, k, rows,
+                tokens, experts_used, input_stride, stream, iq_variant);
             break;
         case GGML_TYPE_IQ3_XXS:
-            launch_moe<GGML_TYPE_IQ3_XXS>(weights, input, ids, output, k, rows, tokens,
-                                           experts_used, input_stride, stream);
+            launch_iq_moe<GGML_TYPE_IQ3_XXS>(weights, input, ids, output, k, rows,
+                tokens, experts_used, input_stride, stream, iq_variant);
             break;
         case GGML_TYPE_IQ2_S:
-            launch_moe<GGML_TYPE_IQ2_S>(weights, input, ids, output, k, rows, tokens,
-                                           experts_used, input_stride, stream);
+            launch_iq_moe<GGML_TYPE_IQ2_S>(weights, input, ids, output, k, rows,
+                tokens, experts_used, input_stride, stream, iq_variant);
             break;
         case GGML_TYPE_IQ2_XXS:
-            launch_moe<GGML_TYPE_IQ2_XXS>(weights, input, ids, output, k, rows, tokens,
-                                           experts_used, input_stride, stream);
+            launch_iq_moe<GGML_TYPE_IQ2_XXS>(weights, input, ids, output, k, rows,
+                tokens, experts_used, input_stride, stream, iq_variant);
             break;
         case GGML_TYPE_IQ2_XS:
-            launch_moe<GGML_TYPE_IQ2_XS>(weights, input, ids, output, k, rows, tokens,
-                                          experts_used, input_stride, stream);
+            launch_iq_moe<GGML_TYPE_IQ2_XS>(weights, input, ids, output, k, rows,
+                tokens, experts_used, input_stride, stream, iq_variant);
             break;
         case GGML_TYPE_Q2_0:
-            launch_moe<GGML_TYPE_Q2_0>(weights, input, ids, output, k, rows, tokens,
-                                           experts_used, input_stride, stream);
+            launch_iq_moe<GGML_TYPE_Q2_0>(weights, input, ids, output, k, rows,
+                tokens, experts_used, input_stride, stream, iq_variant);
+            break;
+        case GGML_TYPE_IQ1_M:
+            launch_iq_moe<GGML_TYPE_IQ1_M>(weights, input, ids, output, k, rows,
+                tokens, experts_used, input_stride, stream, iq_variant);
             break;
         case GGML_TYPE_IQ4_XS:
             launch_moe<GGML_TYPE_IQ4_XS>(weights, input, ids, output, k, rows, tokens,

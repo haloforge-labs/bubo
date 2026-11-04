@@ -22,7 +22,7 @@ try {
     $provenance = (& git -C $root rev-parse $FrontendRef).Trim()
     if ($LASTEXITCODE) { throw 'Unknown frontend revision' }
     $frontendPath = 'gui/wails/frontend'
-    $selected = @('package.json','package-lock.json','src/vendor/shadcn-admin-LICENSE.txt','src/fonts/Go-Mono-LICENSE.txt','src/fonts/et-book-LICENSE.txt') | ForEach-Object { "$frontendPath/$_" }
+    $selected = @('package.json','package-lock.json','src/vendor/shadcn-admin-LICENSE.txt','src/vendor/shadcn-LICENSE.txt','src/fonts/Go-Mono-LICENSE.txt','src/fonts/et-book-LICENSE.txt','src/fonts/ibm-plex-sans-LICENSE.txt') | ForEach-Object { "$frontendPath/$_" }
     $tar = Join-Path $scratch 'inputs.tar'
     & git -C $root archive --format=tar "--output=$tar" $FrontendRef -- @selected
     if ($LASTEXITCODE) { throw 'Cannot extract locked frontend inputs' }

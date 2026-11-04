@@ -320,7 +320,7 @@
       "purpose": "Limit RAM used to stage disk prompt snapshots.",
       "default_text": "0 = auto (\u003c= disk budget, \u003c= 1/8 available RAM)",
       "hardware_scope": "generic",
-      "note": "Keep automatic sizing unless disk persistence needs a different RAM limit.",
+      "note": "Flash Next ignores this value and logs a warning; other models size staging automatically unless set.",
       "built_in": "0",
       "value_rule": "uint",
       "aliases": [],
@@ -386,6 +386,15 @@
       "allowed": {
         "kind": "object",
         "properties": {
+          "also": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "string",
+                "text": "off"
+              }
+            ]
+          },
           "minimum": {
             "kind": "number",
             "text": "0"
@@ -473,10 +482,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control debug hooks.",
+      "purpose": "",
       "default_text": "off",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": "0",
       "value_rule": "text",
       "aliases": [],
@@ -532,10 +541,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control dflash model.",
+      "purpose": "",
       "default_text": "-",
       "hardware_scope": "generic",
-      "note": "Use this switch with its model family.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -628,10 +637,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control draft policy.",
+      "purpose": "",
       "default_text": "-",
       "hardware_scope": "generic",
-      "note": "Use this switch with its model family.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -654,7 +663,7 @@
     },
     {
       "name": "--draft-tokens",
-      "label": "Longest draft",
+      "label": "Max draft tokens",
       "kind": "flag",
       "class": "OPTION",
       "model_family": "qwen3.8-flash-next",
@@ -722,10 +731,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control dspark model.",
+      "purpose": "",
       "default_text": "-",
       "hardware_scope": "generic",
-      "note": "Use this switch with its model family.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -807,7 +816,7 @@
     },
     {
       "name": "--frequency-penalty",
-      "label": "Frequency Penalty (token frequency penalty)",
+      "label": "Frequency penalty",
       "kind": "flag",
       "class": "OPTION",
       "model_family": "any",
@@ -873,10 +882,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control help.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
-      "note": "unclassified",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -954,6 +963,65 @@
           "type": {
             "kind": "string",
             "text": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "--kv-cache-type",
+      "label": "Smaller context cache (Q8)",
+      "kind": "flag",
+      "class": "OPTION",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Use about half the cache memory, so more or longer conversations fit; replies can differ slightly from the default.",
+      "default_text": "f16",
+      "hardware_scope": "generic",
+      "note": "Q8 storage is opt in and lossy; existing caches rebuild when the KV format changes.",
+      "built_in": "f16",
+      "value_rule": "text",
+      "aliases": [],
+      "takes_value": true,
+      "echo": false,
+      "group": "Memory",
+      "audience": "user",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": true,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "enum"
+          },
+          "values": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "string",
+                "text": "f16"
+              },
+              {
+                "kind": "string",
+                "text": "q8_0"
+              }
+            ]
           }
         }
       }
@@ -1147,10 +1215,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control manifest.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
-      "note": "unclassified",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -1428,7 +1496,7 @@
       "inject_with": null,
       "suppressed_by": [],
       "purpose": "Limit queued requests from each client.",
-      "default_text": "Same as --max-pending",
+      "default_text": "Same as Queue limit",
       "hardware_scope": "generic",
       "note": "Keep the queue limit unless one client must have a smaller request allowance.",
       "built_in": "16",
@@ -1525,10 +1593,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control max score tokens.",
+      "purpose": "",
       "default_text": "8192",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": "8192",
       "value_rule": "text",
       "aliases": [],
@@ -1551,7 +1619,7 @@
     },
     {
       "name": "--max-tokens",
-      "label": "Max Tokens (new tokens per request)",
+      "label": "Max tokens",
       "kind": "flag",
       "class": "OPTION",
       "model_family": "any",
@@ -1599,7 +1667,7 @@
     },
     {
       "name": "--min-draft-tokens",
-      "label": "Shortest draft",
+      "label": "Min draft tokens",
       "kind": "flag",
       "class": "OPTION",
       "model_family": "qwen3.8-flash-next",
@@ -1645,7 +1713,7 @@
     },
     {
       "name": "--min-keep",
-      "label": "Min Keep (minimum sampling candidates)",
+      "label": "Min keep",
       "kind": "flag",
       "class": "OPTION",
       "model_family": "any",
@@ -1691,7 +1759,7 @@
     },
     {
       "name": "--min-p",
-      "label": "Min P (relative probability filter)",
+      "label": "Min-p",
       "kind": "flag",
       "class": "DEFAULT",
       "model_family": "any",
@@ -1807,10 +1875,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control model.",
+      "purpose": "Path of the model file to load.",
       "default_text": "required",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [
@@ -2598,7 +2666,7 @@
     },
     {
       "name": "--prefill-chunk",
-      "label": "Prompt tokens between generation rounds",
+      "label": "Prefill chunk",
       "kind": "flag",
       "class": "DEFAULT",
       "model_family": "qwen3.8-flash-next",
@@ -2648,8 +2716,67 @@
       }
     },
     {
+      "name": "--prefill-mode",
+      "label": "Prefill mode",
+      "kind": "flag",
+      "class": "OPTION",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Experimental. Reads prompts of 4,096+ new tokens up to 16 % faster with fewer experts. Decode uses all experts.",
+      "default_text": "normal",
+      "hardware_scope": "generic",
+      "note": "Only available for select models; no visible quality change.",
+      "built_in": "normal",
+      "value_rule": "text",
+      "aliases": [],
+      "takes_value": true,
+      "echo": false,
+      "group": "Speed",
+      "audience": "user",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": true,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "enum"
+          },
+          "values": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "string",
+                "text": "normal"
+              },
+              {
+                "kind": "string",
+                "text": "fast"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
       "name": "--presence-penalty",
-      "label": "Presence Penalty (repeated token penalty)",
+      "label": "Presence penalty",
       "kind": "flag",
       "class": "OPTION",
       "model_family": "any",
@@ -2670,7 +2797,7 @@
       "inject_with": null,
       "suppressed_by": [],
       "purpose": "Penalize tokens already generated in the response.",
-      "default_text": "Qwen3.8: 0.0 thinking; 1.5 non-thinking unless GUFO_PRODUCTION_SAMPLING=1",
+      "default_text": "Model preset (Qwen3.8: 0.0 thinking; 1.5 non-thinking, unless production sampling is on)",
       "hardware_scope": "generic",
       "note": "Keep the model preset unless the task needs a different penalty for previously generated tokens.",
       "built_in": "0.0",
@@ -3016,8 +3143,334 @@
       }
     },
     {
+      "name": "--refusal-direction",
+      "label": "In-engine abliteration (Qwen3.8 Flash Next)",
+      "kind": "flag",
+      "class": "OPTION",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Turn the direction projection on or off.",
+      "default_text": "off",
+      "hardware_scope": "generic",
+      "note": "Uses the packaged direction file; a missing file stops loading.",
+      "built_in": "off",
+      "value_rule": "on_off",
+      "aliases": [],
+      "takes_value": true,
+      "echo": false,
+      "group": "Behaviour",
+      "audience": "user",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": true,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "enum"
+          },
+          "values": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "string",
+                "text": "on"
+              },
+              {
+                "kind": "string",
+                "text": "off"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "--refusal-direction-file",
+      "label": "Direction file",
+      "kind": "flag",
+      "class": "OPTION",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Choose the direction file used when the projection is on.",
+      "default_text": "Packaged refusal/refusal-r-d180ec15-fitted.gguf",
+      "hardware_scope": "generic",
+      "note": "Override the packaged default with a direction made for this model.",
+      "built_in": null,
+      "value_rule": "text",
+      "aliases": [],
+      "takes_value": true,
+      "echo": false,
+      "group": "Behaviour",
+      "audience": "advanced",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "--refusal-direction-layer-end",
+      "label": "Last stream layer",
+      "kind": "flag",
+      "class": "OPTION",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Set the last layer for stream mode, inclusive. Ignored in sites mode.",
+      "default_text": "44",
+      "hardware_scope": "generic",
+      "note": "The last layer must be at least the first layer.",
+      "built_in": "44",
+      "value_rule": "uint",
+      "aliases": [],
+      "takes_value": true,
+      "echo": false,
+      "group": "Behaviour",
+      "audience": "advanced",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "maximum": {
+            "kind": "number",
+            "text": "47"
+          },
+          "minimum": {
+            "kind": "number",
+            "text": "1"
+          },
+          "type": {
+            "kind": "string",
+            "text": "integer"
+          }
+        }
+      }
+    },
+    {
+      "name": "--refusal-direction-layer-start",
+      "label": "First stream layer",
+      "kind": "flag",
+      "class": "OPTION",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Set the first layer for stream mode, inclusive. Ignored in sites mode.",
+      "default_text": "4",
+      "hardware_scope": "generic",
+      "note": "Layer 0 cannot be selected.",
+      "built_in": "4",
+      "value_rule": "uint",
+      "aliases": [],
+      "takes_value": true,
+      "echo": false,
+      "group": "Behaviour",
+      "audience": "advanced",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "maximum": {
+            "kind": "number",
+            "text": "47"
+          },
+          "minimum": {
+            "kind": "number",
+            "text": "1"
+          },
+          "type": {
+            "kind": "string",
+            "text": "integer"
+          }
+        }
+      }
+    },
+    {
+      "name": "--refusal-direction-mode",
+      "label": "Direction mode",
+      "kind": "flag",
+      "class": "OPTION",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Choose whether to project selected outputs or the residual stream.",
+      "default_text": "sites",
+      "hardware_scope": "generic",
+      "note": "Sites acts on selected outputs; stream acts after each selected layer.",
+      "built_in": "sites",
+      "value_rule": "text",
+      "aliases": [],
+      "takes_value": true,
+      "echo": false,
+      "group": "Behaviour",
+      "audience": "advanced",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "enum"
+          },
+          "values": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "string",
+                "text": "sites"
+              },
+              {
+                "kind": "string",
+                "text": "stream"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "--refusal-direction-strength",
+      "label": "Direction strength",
+      "kind": "flag",
+      "class": "OPTION",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Set the projection strength. 1 removes the direction; 0 has no effect.",
+      "default_text": "Fitted value in file (about 1.96)",
+      "hardware_scope": "generic",
+      "note": "Leave unset to use the fitted strength saved in the file.",
+      "built_in": null,
+      "value_rule": "number",
+      "aliases": [],
+      "takes_value": true,
+      "echo": false,
+      "group": "Behaviour",
+      "audience": "advanced",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "maximum": {
+            "kind": "number",
+            "text": "4"
+          },
+          "minimum": {
+            "kind": "number",
+            "text": "0"
+          },
+          "type": {
+            "kind": "string",
+            "text": "number"
+          }
+        }
+      }
+    },
+    {
       "name": "--repeat-last-n",
-      "label": "Repeat Last N (repetition window)",
+      "label": "Repeat last N",
       "kind": "flag",
       "class": "OPTION",
       "model_family": "any",
@@ -3063,7 +3516,7 @@
     },
     {
       "name": "--repeat-penalty",
-      "label": "Repeat Penalty (repetition penalty)",
+      "label": "Repeat penalty",
       "kind": "flag",
       "class": "OPTION",
       "model_family": "any",
@@ -3175,10 +3628,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control root.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
-      "note": "unclassified",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -3201,7 +3654,7 @@
     },
     {
       "name": "--seed",
-      "label": "Seed (random seed)",
+      "label": "Seed",
       "kind": "flag",
       "class": "OPTION",
       "model_family": "any",
@@ -3250,7 +3703,7 @@
     },
     {
       "name": "--served-model-name",
-      "label": "API model name",
+      "label": "Served model name",
       "kind": "flag",
       "class": "OPTION",
       "model_family": "any",
@@ -3271,7 +3724,7 @@
       "inject_with": null,
       "suppressed_by": [],
       "purpose": "Set the model identifier exposed by the API.",
-      "default_text": "Package ID or GGUF file name",
+      "default_text": "Package ID or GGUF file name without a shard suffix",
       "hardware_scope": "generic",
       "note": "Override the package ID or GGUF file name shown to clients; bubo remains an accepted alias.",
       "built_in": null,
@@ -3581,7 +4034,7 @@
     },
     {
       "name": "--think-marker-bias",
-      "label": "Reasoning length",
+      "label": "Rethinking penalty (fixed)",
       "kind": "flag",
       "class": "OPTION",
       "model_family": "qwen3.8-flash-next",
@@ -3602,10 +4055,10 @@
       "exact_off": true,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Set a fixed thinking marker probability bias.",
+      "purpose": "Uses one rethinking penalty at every reasoning effort, replacing the per-effort values. Negative numbers lower the chance of \"wait\" restarts.",
       "default_text": "0",
       "hardware_scope": "strix-halo-tuned",
-      "note": "Keep zero unless the task needs a fixed thinking marker bias.",
+      "note": "Use 0 for vanilla.",
       "built_in": "0",
       "value_rule": "number",
       "aliases": [],
@@ -3645,7 +4098,7 @@
     },
     {
       "name": "--top-k",
-      "label": "Top K (sampling candidate limit)",
+      "label": "Top-k",
       "kind": "flag",
       "class": "DEFAULT",
       "model_family": "any",
@@ -3691,7 +4144,7 @@
     },
     {
       "name": "--top-p",
-      "label": "Top P (cumulative probability filter)",
+      "label": "Top-p",
       "kind": "flag",
       "class": "DEFAULT",
       "model_family": "any",
@@ -3712,7 +4165,7 @@
       "inject_with": null,
       "suppressed_by": [],
       "purpose": "Filter sampling candidates by cumulative probability.",
-      "default_text": "preset (0.95 thinking; 0.8 non-thinking unless GUFO_PRODUCTION_SAMPLING=1)",
+      "default_text": "Model preset (Qwen3.8: 0.95 thinking; 0.8 non-thinking, unless production sampling is on)",
       "hardware_scope": "generic",
       "note": "Keep the model preset unless the task needs a different cumulative probability limit.",
       "built_in": "0.95",
@@ -3803,10 +4256,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control ttl.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
-      "note": "unclassified",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -3829,7 +4282,7 @@
     },
     {
       "name": "--twin-model",
-      "label": "4-bit decode twin",
+      "label": "Decode twin file",
       "kind": "flag",
       "class": "DEFAULT",
       "model_family": "qwen3.8-flash-next",
@@ -3899,10 +4352,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control verbose.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
-      "note": "unclassified",
+      "note": "",
       "built_in": "0",
       "value_rule": "text",
       "aliases": [
@@ -4019,10 +4472,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control voice.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
-      "note": "unclassified",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -4065,10 +4518,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control voice lang.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
-      "note": "unclassified",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -4111,10 +4564,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control voice text.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
-      "note": "unclassified",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -4157,7 +4610,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control the a3b attn check setting.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Other model or test configuration; no release default.",
@@ -4203,7 +4656,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control the a3b attn precise setting.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Other model or test configuration; no release default.",
@@ -4249,7 +4702,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control the a3b decode attn setting.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Other model or test configuration; no release default.",
@@ -4295,7 +4748,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control the a3b dflash profile setting.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Other model or test configuration; no release default.",
@@ -4341,7 +4794,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control the a3b no resume setting.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Other model or test configuration; no release default.",
@@ -4387,7 +4840,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control the a3b probe only setting.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Other model or test configuration; no release default.",
@@ -4433,7 +4886,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control the a3b wide attn check setting.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Other model or test configuration; no release default.",
@@ -4459,7 +4912,7 @@
     },
     {
       "name": "A3B_WIDE_BF16_BLAS",
-      "label": "Wide brain float multiplication",
+      "label": "BF16 wide multiplication",
       "kind": "env",
       "class": "OTHER_MODEL",
       "model_family": "any",
@@ -4479,7 +4932,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control the a3b wide bf16 blas setting.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Other model or test configuration; no release default.",
@@ -4525,7 +4978,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control the a3b wide blas f32 setting.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Other model or test configuration; no release default.",
@@ -4571,7 +5024,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control the a3b wide debug setting.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Other model or test configuration; no release default.",
@@ -4617,7 +5070,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control the a3b wide f16 maxcols setting.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Other model or test configuration; no release default.",
@@ -4663,7 +5116,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control the a3b wide f16 minrows setting.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Other model or test configuration; no release default.",
@@ -4709,7 +5162,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control the a3b wide fn attn setting.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Other model or test configuration; no release default.",
@@ -4755,7 +5208,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control the a3b wide no down64 setting.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Other model or test configuration; no release default.",
@@ -4801,7 +5254,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control the a3b wide no f16 setting.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Other model or test configuration; no release default.",
@@ -4847,7 +5300,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control the a3b wide profile setting.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Other model or test configuration; no release default.",
@@ -5124,7 +5577,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control the ds4 lock file setting.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Other model or test configuration; no release default.",
@@ -5216,10 +5669,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control a3b data.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
-      "note": "unclassified",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -5262,10 +5715,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control a3b model.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
-      "note": "unclassified",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -5308,10 +5761,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control batch draft head.",
+      "purpose": "",
       "default_text": "off",
       "hardware_scope": "generic",
-      "note": "unclassified",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -5400,10 +5853,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control cache removal log.",
+      "purpose": "",
       "default_text": "off",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -5446,10 +5899,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control debug hooks.",
+      "purpose": "",
       "default_text": "off",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -5460,6 +5913,52 @@
       "experimental": false,
       "restart_required": true,
       "gui_control": true,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_DECODE_IQ_ROUTING_PATH",
+      "label": "Expert routing export",
+      "kind": "env",
+      "class": "DEBUG",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Export narrow-pass expert routing for diagnostic replay.",
+      "default_text": "unset (disabled)",
+      "hardware_scope": "generic",
+      "note": "Process-lifetime output path. Forces eager execution and synchronous diagnostic downloads; do not use for timing.",
+      "built_in": null,
+      "value_rule": "text",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Other",
+      "audience": "debug",
+      "experimental": true,
+      "restart_required": true,
+      "gui_control": false,
       "allowed": {
         "kind": "object",
         "properties": {
@@ -5492,7 +5991,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control deepseek dspark timing.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Use this diagnostic with DeepSeek V4 Flash.",
@@ -5538,7 +6037,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control deepseek dspark trace.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Use this diagnostic with DeepSeek V4 Flash.",
@@ -5584,7 +6083,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control deepseek dspark width trace.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Use this diagnostic with DeepSeek V4 Flash.",
@@ -5630,7 +6129,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control deepseek rocm decode stage profile.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Use this diagnostic with DeepSeek V4 Flash.",
@@ -5676,7 +6175,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control deepseek rocm graph prefill profile.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Use this diagnostic with DeepSeek V4 Flash.",
@@ -5722,7 +6221,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control deepseek rocm graph token profile.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Use this diagnostic with DeepSeek V4 Flash.",
@@ -5768,7 +6267,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control deepseek rocm indexer stage profile.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Use this diagnostic with DeepSeek V4 Flash.",
@@ -5814,7 +6313,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control deepseek rocm layer stage profile.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Use this diagnostic with DeepSeek V4 Flash.",
@@ -5860,7 +6359,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control deepseek rocm q stage profile.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Use this diagnostic with DeepSeek V4 Flash.",
@@ -5880,6 +6379,93 @@
           "type": {
             "kind": "string",
             "text": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_DENSE_IQ_VARIANT",
+      "label": "Dense IQ kernel diagnostic",
+      "kind": "env",
+      "class": "DEBUG",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Select a diagnostic dense kernel for the process lifetime.",
+      "default_text": "unset (production selection)",
+      "hardware_scope": "strix-halo-tuned",
+      "note": "Unset keeps production selection; dot4 sends Q4_K, Q5_K and Q6_K projections to the dot4 kernel; unknown names are errors.",
+      "built_in": null,
+      "value_rule": "text",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Speed",
+      "audience": "debug",
+      "experimental": true,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "enum"
+          },
+          "values": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "string",
+                "text": "baseline"
+              },
+              {
+                "kind": "string",
+                "text": "reuse1"
+              },
+              {
+                "kind": "string",
+                "text": "reuse2"
+              },
+              {
+                "kind": "string",
+                "text": "reuse1_cap6"
+              },
+              {
+                "kind": "string",
+                "text": "reuse1_lds"
+              },
+              {
+                "kind": "string",
+                "text": "reuse1_ldsgrid"
+              },
+              {
+                "kind": "string",
+                "text": "reuse1_splitk_lds"
+              },
+              {
+                "kind": "string",
+                "text": "kquant_wmma"
+              },
+              {
+                "kind": "string",
+                "text": "dot4"
+              }
+            ]
           }
         }
       }
@@ -5906,10 +6492,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control dense twin allow q8.",
+      "purpose": "",
       "default_text": "off",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -6114,10 +6700,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control dense twin shadow.",
+      "purpose": "",
       "default_text": "off",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -6160,10 +6746,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control dense twin trace.",
+      "purpose": "",
       "default_text": "off",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -6180,6 +6766,126 @@
           "type": {
             "kind": "string",
             "text": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_DENSE_W1",
+      "label": "Single-row dense vector kernel",
+      "kind": "env",
+      "class": "DEFAULT",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Enable the production dense vector kernel for single-row projections.",
+      "default_text": "1",
+      "hardware_scope": "strix-halo-tuned",
+      "note": "Set literal 0 to compare the baseline kernel for single-row projections.",
+      "built_in": "1",
+      "value_rule": "bool",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Speed",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "boolean"
+          },
+          "values": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "boolean",
+                "boolean": false
+              },
+              {
+                "kind": "boolean",
+                "boolean": true
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_DEVICE_ACCEPT",
+      "label": "Queue greedy rollback early",
+      "kind": "env",
+      "class": "DEBUG",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [
+        "speculative==mtp"
+      ],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Queue greedy speculative rollback before reading acceptance on the host.",
+      "default_text": "0",
+      "hardware_scope": "generic",
+      "note": "Experimental; sampled requests and unsupported selection policies retain the existing path.",
+      "built_in": "0",
+      "value_rule": "bool",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Speed",
+      "audience": "debug",
+      "experimental": true,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "boolean"
+          },
+          "values": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "boolean",
+                "boolean": false
+              },
+              {
+                "kind": "boolean",
+                "boolean": true
+              }
+            ]
           }
         }
       }
@@ -6206,10 +6912,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control disk boundary align.",
-      "default_text": "as shown",
+      "purpose": "",
+      "default_text": "256 tokens",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -6257,7 +6963,7 @@
         "--no-cache-disk"
       ],
       "purpose": "Defer disk writes until idle.",
-      "default_text": "Unset; 1 with --cache-disk",
+      "default_text": "Off; On with the disk cache",
       "hardware_scope": "generic",
       "note": "Keep the disk bundle setting unless disk write deferral tests require another setting.",
       "built_in": null,
@@ -6302,10 +7008,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control disk defer ms.",
-      "default_text": "as shown",
+      "purpose": "",
+      "default_text": "10 seconds",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": null,
       "value_rule": "uint",
       "aliases": [],
@@ -6356,10 +7062,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control disk evict backlog bytes.",
-      "default_text": "as shown",
+      "purpose": "",
+      "default_text": "2 GiB",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -6407,7 +7113,7 @@
         "--no-cache-disk"
       ],
       "purpose": "Skip snapshots covered by a longer retained snapshot.",
-      "default_text": "Unset; 1 with --cache-disk",
+      "default_text": "Off; On with the disk cache",
       "hardware_scope": "generic",
       "note": "Keep the disk bundle setting unless dominated snapshot eviction tests require another setting.",
       "built_in": null,
@@ -6457,7 +7163,7 @@
         "--no-cache-disk"
       ],
       "purpose": "Skip snapshot writes close to an existing persisted prefix.",
-      "default_text": "Unset; 8192 with --cache-disk",
+      "default_text": "Off; 8192 with the disk cache",
       "hardware_scope": "generic",
       "note": "Keep 8192 with disk caching unless eviction tests require a different minimum prompt length.",
       "built_in": null,
@@ -6510,10 +7216,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control disk idle ms.",
+      "purpose": "",
       "default_text": "30000 (0..600000)",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": null,
       "value_rule": "uint",
       "aliases": [],
@@ -6615,7 +7321,7 @@
         "--no-cache-disk"
       ],
       "purpose": "Persist disk snapshots on eviction after idle.",
-      "default_text": "Unset; evict_idle with --cache-disk",
+      "default_text": "Off; Persist when idle with the disk cache",
       "hardware_scope": "generic",
       "note": "Keep the disk bundle policy unless persistence tests require a different write policy.",
       "built_in": null,
@@ -6660,10 +7366,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control disk slice.",
-      "default_text": "as shown",
+      "purpose": "",
+      "default_text": "Off",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -6680,6 +7386,60 @@
           "type": {
             "kind": "string",
             "text": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_DISPATCH_RESERVE_MIB",
+      "label": "Device heap reserve",
+      "kind": "env",
+      "class": "OPTION",
+      "model_family": "any",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Set the device heap reserve in MiB.",
+      "default_text": "4096",
+      "hardware_scope": "generic",
+      "note": "Pinned cache backing and weights leave this many MiB of the device heap free, and 0 leaves none.",
+      "built_in": null,
+      "value_rule": "uint",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Memory",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "maximum": {
+            "kind": "number",
+            "text": "1048576"
+          },
+          "minimum": {
+            "kind": "number",
+            "text": "0"
+          },
+          "type": {
+            "kind": "string",
+            "text": "integer"
           }
         }
       }
@@ -6706,10 +7466,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control dispatch telemetry.",
+      "purpose": "",
       "default_text": "off",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -6726,6 +7486,184 @@
           "type": {
             "kind": "string",
             "text": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_DRAFT_CHAIN",
+      "label": "Capture greedy draft steps together",
+      "kind": "env",
+      "class": "DEBUG",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [
+        "speculative==mtp"
+      ],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Run a fixed greedy draft depth in one captured graph.",
+      "default_text": "1",
+      "hardware_scope": "generic",
+      "note": "Enabled by default; set 0 to run each draft step as its own launch. Publishes each draft for overlapping table reads. Sampled proposals, lookup, batches and draft falsification retain separate steps.",
+      "built_in": "1",
+      "value_rule": "bool",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Speed",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "boolean"
+          },
+          "values": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "boolean",
+                "boolean": false
+              },
+              {
+                "kind": "boolean",
+                "boolean": true
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_DRAFT_FALSIFY",
+      "label": "Draft verifier falsifier",
+      "kind": "env",
+      "class": "DEBUG",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Replace draft proposals with deterministic incorrect tokens for verifier checks.",
+      "default_text": "off",
+      "hardware_scope": "generic",
+      "note": "Requires literal GUFO_DEBUG_HOOKS=1; wrong uses deterministic alternatives, shift changes token IDs, and repeat copies the anchor.",
+      "built_in": null,
+      "value_rule": "text",
+      "aliases": [],
+      "takes_value": true,
+      "echo": false,
+      "group": "Other",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "enum"
+          },
+          "values": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "string",
+                "text": "wrong"
+              },
+              {
+                "kind": "string",
+                "text": "shift"
+              },
+              {
+                "kind": "string",
+                "text": "repeat"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_DRAFT_FALSIFY_CYCLES",
+      "label": "Maximum falsified draft cycles",
+      "kind": "env",
+      "class": "DEBUG",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Limit the number of falsified draft cycles in each request.",
+      "default_text": "32",
+      "hardware_scope": "generic",
+      "note": "Requires GUFO_DRAFT_FALSIFY and its GUFO_DEBUG_HOOKS=1 gate; the request can end before this limit.",
+      "built_in": "32",
+      "value_rule": "uint",
+      "aliases": [],
+      "takes_value": true,
+      "echo": false,
+      "group": "Other",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "maximum": {
+            "kind": "number",
+            "text": "1000000"
+          },
+          "minimum": {
+            "kind": "number",
+            "text": "1"
+          },
+          "type": {
+            "kind": "string",
+            "text": "integer"
           }
         }
       }
@@ -6777,6 +7715,101 @@
           "type": {
             "kind": "string",
             "text": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_DRAFT_POLICY",
+      "label": "MTP draft length policy",
+      "kind": "env",
+      "class": "OPTION",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Select the MTP draft length policy.",
+      "default_text": "current",
+      "hardware_scope": "generic",
+      "note": "Unset selects current; fit uses a fixed cost rule, off proposes nothing, and serial64 adds cooldowns.",
+      "built_in": "current",
+      "value_rule": "text",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Speed",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "enum"
+          },
+          "values": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "string",
+                "text": "fit"
+              },
+              {
+                "kind": "string",
+                "text": "off"
+              },
+              {
+                "kind": "string",
+                "text": "serial64"
+              },
+              {
+                "kind": "string",
+                "text": "current"
+              },
+              {
+                "kind": "string",
+                "text": "fitnoprobe"
+              },
+              {
+                "kind": "string",
+                "text": "fixed2"
+              },
+              {
+                "kind": "string",
+                "text": "fixed3"
+              },
+              {
+                "kind": "string",
+                "text": "fixed4"
+              },
+              {
+                "kind": "string",
+                "text": "fixed5"
+              },
+              {
+                "kind": "string",
+                "text": "fixed6"
+              },
+              {
+                "kind": "string",
+                "text": "fixed7"
+              }
+            ]
           }
         }
       }
@@ -7099,10 +8132,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control eval api key.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
-      "note": "unclassified",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -7146,10 +8179,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control eval artifact id.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
-      "note": "unclassified",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -7192,10 +8225,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control eval model revision.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
-      "note": "unclassified",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -7238,10 +8271,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control eval server commit.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
-      "note": "unclassified",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -7284,10 +8317,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control eval server config.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
-      "note": "unclassified",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -7330,10 +8363,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control eval server label.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
-      "note": "unclassified",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -7528,10 +8561,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control ffmpeg.",
+      "purpose": "",
       "default_text": "-",
       "hardware_scope": "generic",
-      "note": "Use this switch with its model family.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -7574,10 +8607,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control ffprobe.",
+      "purpose": "",
       "default_text": "-",
       "hardware_scope": "generic",
-      "note": "Use this switch with its model family.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -7620,7 +8653,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control grouped down.",
+      "purpose": "",
       "default_text": "Removed",
       "hardware_scope": "generic",
       "note": "This experiment has no source reader.",
@@ -7640,6 +8673,419 @@
           "type": {
             "kind": "string",
             "text": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_HC_BF16_DENSE",
+      "label": "BF16 hyper-connection projections",
+      "kind": "env",
+      "class": "OPTION",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Use the narrow BF16 hyper-connection projection kernel.",
+      "default_text": "1",
+      "hardware_scope": "strix-halo-tuned",
+      "note": "Enabled by default; set 0 for the generic projection, which sums two BF16 hyper-connection shapes in a different order.",
+      "built_in": "1",
+      "value_rule": "bool",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Speed",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "boolean"
+          },
+          "values": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "boolean",
+                "boolean": false
+              },
+              {
+                "kind": "boolean",
+                "boolean": true
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_HC_INJECT_BF16_FUSED",
+      "label": "BF16 hyper-connection inject fusion",
+      "kind": "env",
+      "class": "OPTION",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Fuse BF16 hyper-connection inject weights into the scalar decode epilogue.",
+      "default_text": "1",
+      "hardware_scope": "generic",
+      "note": "Enabled by default; set 0 to retain separate BF16 inject projections during scalar decode.",
+      "built_in": "1",
+      "value_rule": "bool",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Speed",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "boolean"
+          },
+          "values": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "boolean",
+                "boolean": false
+              },
+              {
+                "kind": "boolean",
+                "boolean": true
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_HC_LOAD_Q8",
+      "label": "Q8_0 hyper-connection weights",
+      "kind": "env",
+      "class": "OPTION",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Narrow BF16 hyper-connection weights to Q8_0 in memory while loading.",
+      "default_text": "1",
+      "hardware_scope": "strix-halo-tuned",
+      "note": "Enabled by default; set 0 to keep BF16 hyper-connection weights, which native files then run on the slower route.",
+      "built_in": "1",
+      "value_rule": "bool",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Speed",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "boolean"
+          },
+          "values": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "boolean",
+                "boolean": false
+              },
+              {
+                "kind": "boolean",
+                "boolean": true
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_HC_LOAD_Q8_POISON",
+      "label": "Poison released loader buffers",
+      "kind": "env",
+      "class": "OPTION",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Poison buffers the weight loader releases and keep device ones allocated to expose stale reads.",
+      "default_text": "0",
+      "hardware_scope": "strix-halo-tuned",
+      "note": "Debug, off by default; 1 overwrites loader-released buffers with NaN patterns and keeps device ones allocated, to expose stale reads.",
+      "built_in": "0",
+      "value_rule": "bool",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Speed",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "boolean"
+          },
+          "values": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "boolean",
+                "boolean": false
+              },
+              {
+                "kind": "boolean",
+                "boolean": true
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_HC_LOAD_Q8_VERIFY",
+      "label": "Verify hyper-connection weights",
+      "kind": "env",
+      "class": "OPTION",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Compare converted and draft-block weights on the device with the file after loading.",
+      "default_text": "0",
+      "hardware_scope": "strix-halo-tuned",
+      "note": "Debug, off by default; 1 reads converted and draft-block weights back from the device and prints one line.",
+      "built_in": "0",
+      "value_rule": "bool",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Speed",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "boolean"
+          },
+          "values": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "boolean",
+                "boolean": false
+              },
+              {
+                "kind": "boolean",
+                "boolean": true
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_HEAD_CHECK",
+      "label": "Full head comparison",
+      "kind": "env",
+      "class": "DEBUG",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Compare shortlisted head results against the full output head.",
+      "default_text": "0",
+      "hardware_scope": "strix-halo-tuned",
+      "note": "Diagnostic only; literal 1 runs the full head comparison after shortlist rescoring.",
+      "built_in": "0",
+      "value_rule": "bool",
+      "aliases": [],
+      "takes_value": true,
+      "echo": false,
+      "group": "Other",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "boolean"
+          },
+          "values": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "boolean",
+                "boolean": false
+              },
+              {
+                "kind": "boolean",
+                "boolean": true
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_HEAD_SHORTLIST",
+      "label": "Output head shortlist",
+      "kind": "env",
+      "class": "DEFAULT",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Opt in to experimental shortlist scoring and exact rescoring for eligible output head calls; off by default.",
+      "default_text": "0",
+      "hardware_scope": "strix-halo-tuned",
+      "note": "Off by default; set 1 for this opt-in experiment, requiring supported shapes and a compatible sidecar.",
+      "built_in": "0",
+      "value_rule": "bool",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Speed",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "boolean"
+          },
+          "values": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "boolean",
+                "boolean": false
+              },
+              {
+                "kind": "boolean",
+                "boolean": true
+              }
+            ]
           }
         }
       }
@@ -7666,10 +9112,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control hipblaslt plan cache.",
+      "purpose": "",
       "default_text": "-",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -7820,10 +9266,10 @@
       "exact_off": true,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control iq4 wide variant.",
+      "purpose": "",
       "default_text": "4",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -7866,10 +9312,10 @@
       "exact_off": true,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control iq4 wmma waves.",
+      "purpose": "",
       "default_text": "8",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -8173,6 +9619,69 @@
               {
                 "kind": "string",
                 "text": "1"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_LOGIT_EVAL_DUMP",
+      "label": "Logit evaluation dumps",
+      "kind": "env",
+      "class": "DEBUG",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Write head inputs and full logits during logit-eval.",
+      "default_text": "off",
+      "hardware_scope": "generic",
+      "note": "Requires literal GUFO_DEBUG_HOOKS=1, MTP and decode/verify schedules. Diagnostic copies are not timing measurements.",
+      "built_in": null,
+      "value_rule": "text",
+      "aliases": [],
+      "takes_value": true,
+      "echo": false,
+      "group": "Other",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "enum"
+          },
+          "values": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "string",
+                "text": "0"
+              },
+              {
+                "kind": "string",
+                "text": "1"
+              },
+              {
+                "kind": "string",
+                "text": "heads"
               }
             ]
           }
@@ -8654,10 +10163,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control mem accounting.",
+      "purpose": "",
       "default_text": "off",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -8760,10 +10269,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control moe bench.",
+      "purpose": "",
       "default_text": "off",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -8780,6 +10289,65 @@
           "type": {
             "kind": "string",
             "text": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_MOE_FUSION",
+      "label": "Combine expert output with residual update",
+      "kind": "env",
+      "class": "DEBUG",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Combine narrow expert output and the residual update in one launch.",
+      "default_text": "0",
+      "hardware_scope": "generic",
+      "note": "Greedy only. Each shape checks real residual, norm and packed activation bytes before capture; a mismatch fails the request.",
+      "built_in": "0",
+      "value_rule": "bool",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Speed",
+      "audience": "debug",
+      "experimental": true,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "boolean"
+          },
+          "values": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "boolean",
+                "boolean": false
+              },
+              {
+                "kind": "boolean",
+                "boolean": true
+              }
+            ]
           }
         }
       }
@@ -9522,7 +11090,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control Windows timing and memory placement switches.",
+      "purpose": "",
       "default_text": "All switches on on Windows",
       "hardware_scope": "generic",
       "note": "GUFO_PLATFORM_TUNING=none is a diagnostic that slows Windows decode.",
@@ -9546,6 +11114,65 @@
           "type": {
             "kind": "string",
             "text": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_PLE_READAHEAD",
+      "label": "PLE table read ahead",
+      "kind": "env",
+      "class": "OPTION",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Start PLE table reads when anchor and draft token IDs become available.",
+      "default_text": "1",
+      "hardware_scope": "generic",
+      "note": "Enabled by default; set 0 to disable overlapping raw table reads, retaining existing PLE decode and consumption boundaries.",
+      "built_in": "1",
+      "value_rule": "bool",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Speed",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "boolean"
+          },
+          "values": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "boolean",
+                "boolean": false
+              },
+              {
+                "kind": "boolean",
+                "boolean": true
+              }
+            ]
           }
         }
       }
@@ -9618,10 +11245,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control prefill diag.",
+      "purpose": "",
       "default_text": "off",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -9638,6 +11265,386 @@
           "type": {
             "kind": "string",
             "text": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_PREFILL_EXPERTS",
+      "label": "Prefill experts per token",
+      "kind": "env",
+      "class": "OPTION",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": true,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Set how many routed experts each token keeps during prompt prefill.",
+      "default_text": "off",
+      "hardware_scope": "generic",
+      "note": "Leave it unset except for fast prefill; it changes the output and exact rejects it.",
+      "built_in": null,
+      "value_rule": "uint",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Speed",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "maximum": {
+            "kind": "number",
+            "text": "10"
+          },
+          "minimum": {
+            "kind": "number",
+            "text": "1"
+          },
+          "type": {
+            "kind": "string",
+            "text": "integer"
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_PREFILL_EXPERTS_AUDIT",
+      "label": "Prefill expert cut record",
+      "kind": "env",
+      "class": "OPTION",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Select how much the prefill expert cut records.",
+      "default_text": "lean",
+      "hardware_scope": "generic",
+      "note": "Keep lean for fast prefill runs; full records more per layer and costs time.",
+      "built_in": null,
+      "value_rule": "text",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Speed",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "enum"
+          },
+          "values": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "string",
+                "text": "lean"
+              },
+              {
+                "kind": "string",
+                "text": "full"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_PREFILL_EXPERTS_FOLD",
+      "label": "Prefill fold scalars file",
+      "kind": "env",
+      "class": "OPTION",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Set the file of per-layer scalars for the fold prefill expert mode.",
+      "default_text": "Unset",
+      "hardware_scope": "generic",
+      "note": "Set it with fold mode; the file needs one scalar for each of the 48 layers.",
+      "built_in": null,
+      "value_rule": "text",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Speed",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_PREFILL_EXPERTS_KFILE",
+      "label": "Prefill expert counts file",
+      "kind": "env",
+      "class": "OPTION",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": true,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Set the file of per-layer expert counts for prefill.",
+      "default_text": "Unset",
+      "hardware_scope": "generic",
+      "note": "Use it instead of GUFO_PREFILL_EXPERTS when each layer needs its own count; exact rejects it.",
+      "built_in": null,
+      "value_rule": "text",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Speed",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_PREFILL_EXPERTS_MASS",
+      "label": "Prefill expert mass",
+      "kind": "env",
+      "class": "OPTION",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Set the routing mass that mass mode keeps in each prefill token.",
+      "default_text": "Unset",
+      "hardware_scope": "generic",
+      "note": "Set it only with mass mode, as a fraction above zero and up to one.",
+      "built_in": null,
+      "value_rule": "number",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Speed",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "exclusive_minimum": {
+            "kind": "number",
+            "text": "0"
+          },
+          "maximum": {
+            "kind": "number",
+            "text": "1"
+          },
+          "type": {
+            "kind": "string",
+            "text": "number"
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_PREFILL_EXPERTS_MODE",
+      "label": "Prefill expert cut mode",
+      "kind": "env",
+      "class": "OPTION",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Select how the prefill expert cut rescales the kept experts.",
+      "default_text": "renorm",
+      "hardware_scope": "generic",
+      "note": "Use fold for the measured fast prefill setting; the other modes are for calibration.",
+      "built_in": null,
+      "value_rule": "text",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Speed",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "enum"
+          },
+          "values": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "string",
+                "text": "renorm"
+              },
+              {
+                "kind": "string",
+                "text": "ref10"
+              },
+              {
+                "kind": "string",
+                "text": "fold"
+              },
+              {
+                "kind": "string",
+                "text": "mass"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_PREFILL_EXPERTS_TAIL",
+      "label": "Prefill full-expert tail",
+      "kind": "env",
+      "class": "OPTION",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Set how many final prompt tokens keep all experts in prefill.",
+      "default_text": "0",
+      "hardware_scope": "generic",
+      "note": "Use 256 with the fast prefill setting so the last tokens keep full quality.",
+      "built_in": null,
+      "value_rule": "uint",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Speed",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "maximum": {
+            "kind": "number",
+            "text": "65536"
+          },
+          "minimum": {
+            "kind": "number",
+            "text": "0"
+          },
+          "type": {
+            "kind": "string",
+            "text": "integer"
           }
         }
       }
@@ -9698,6 +11705,262 @@
       }
     },
     {
+      "name": "GUFO_PREFILL_NATIVE_GEMM",
+      "label": "Native GEMM prefill",
+      "kind": "env",
+      "class": "OPTION",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "string",
+          "text": "0"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": true,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Run native GGUF dense layers through a blocked matrix GEMM in prefill: 1 uses int8, 2 (default) adds 16-bit K-quants.",
+      "default_text": "2",
+      "hardware_scope": "strix-halo-tuned",
+      "note": "Changes the output; 1 keeps the int8 route only, 0 uses the MMQ route, and exact turns it off.",
+      "built_in": "2",
+      "value_rule": "text",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Speed",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "enum"
+          },
+          "values": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "string",
+                "text": "0"
+              },
+              {
+                "kind": "string",
+                "text": "1"
+              },
+              {
+                "kind": "string",
+                "text": "2"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_PREFILL_STAGEB",
+      "label": "Prefill expert samples directory",
+      "kind": "env",
+      "class": "DEBUG",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Write prefill expert samples to a directory for calibration.",
+      "default_text": "off",
+      "hardware_scope": "generic",
+      "note": "Calibration only; the directory must be an absolute S: path.",
+      "built_in": null,
+      "value_rule": "text",
+      "aliases": [],
+      "takes_value": true,
+      "echo": false,
+      "group": "Other",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_PREFILL_STAGEB_LAYERS",
+      "label": "Prefill expert sample layers",
+      "kind": "env",
+      "class": "DEBUG",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Select the layers that the prefill expert samples cover.",
+      "default_text": "all",
+      "hardware_scope": "generic",
+      "note": "Calibration only; a comma list of layer numbers from 0 to 47.",
+      "built_in": null,
+      "value_rule": "text",
+      "aliases": [],
+      "takes_value": true,
+      "echo": false,
+      "group": "Other",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_PREFILL_STAGEB_ROWS",
+      "label": "Prefill expert sample interval",
+      "kind": "env",
+      "class": "DEBUG",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Set the token interval between prefill expert samples.",
+      "default_text": "64",
+      "hardware_scope": "generic",
+      "note": "Calibration only; a positive whole number.",
+      "built_in": null,
+      "value_rule": "uint",
+      "aliases": [],
+      "takes_value": true,
+      "echo": false,
+      "group": "Other",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "minimum": {
+            "kind": "number",
+            "text": "1"
+          },
+          "type": {
+            "kind": "string",
+            "text": "integer"
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_PREFILL_STAGEB_STRIDE",
+      "label": "Prefill expert statistics interval",
+      "kind": "env",
+      "class": "DEBUG",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Set the token interval between accumulated prefill expert statistics.",
+      "default_text": "1",
+      "hardware_scope": "generic",
+      "note": "Calibration only; a positive whole number.",
+      "built_in": null,
+      "value_rule": "uint",
+      "aliases": [],
+      "takes_value": true,
+      "echo": false,
+      "group": "Other",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "minimum": {
+            "kind": "number",
+            "text": "1"
+          },
+          "type": {
+            "kind": "string",
+            "text": "integer"
+          }
+        }
+      }
+    },
+    {
       "name": "GUFO_PREFILL_STEP_LOG",
       "label": "Prefill step log",
       "kind": "env",
@@ -9719,7 +11982,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control prefill step log.",
+      "purpose": "",
       "default_text": "off",
       "hardware_scope": "generic",
       "note": "This tree has no reader for this variable.",
@@ -9765,7 +12028,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control prefill target ms.",
+      "purpose": "",
       "default_text": "internal",
       "hardware_scope": "generic",
       "note": "This tree has no reader for this variable.",
@@ -9778,6 +12041,98 @@
       "audience": "debug",
       "experimental": false,
       "restart_required": false,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_PREFILL_TELEMETRY",
+      "label": "Prefill routing telemetry directory",
+      "kind": "env",
+      "class": "DEBUG",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Write prefill routing telemetry to a directory.",
+      "default_text": "off",
+      "hardware_scope": "generic",
+      "note": "Diagnosis only; the directory must exist.",
+      "built_in": null,
+      "value_rule": "text",
+      "aliases": [],
+      "takes_value": true,
+      "echo": false,
+      "group": "Other",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_PREFILL_TELEMETRY_LAYERS",
+      "label": "Prefill telemetry layers",
+      "kind": "env",
+      "class": "DEBUG",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Select the layers that the prefill telemetry covers.",
+      "default_text": "3,15,27,39,47",
+      "hardware_scope": "generic",
+      "note": "Diagnosis only; a comma list of layer numbers from 0 to 47.",
+      "built_in": null,
+      "value_rule": "text",
+      "aliases": [],
+      "takes_value": true,
+      "echo": false,
+      "group": "Other",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
       "gui_control": false,
       "allowed": {
         "kind": "object",
@@ -9871,10 +12226,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control qwen27 profile.",
+      "purpose": "",
       "default_text": "-",
       "hardware_scope": "generic",
-      "note": "Use this switch with its model family.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -9917,10 +12272,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control qwen27 profile.",
+      "purpose": "",
       "default_text": "-",
       "hardware_scope": "generic",
-      "note": "Use this switch with its model family.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -9963,10 +12318,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control qwen27 profile.",
+      "purpose": "",
       "default_text": "-",
       "hardware_scope": "generic",
-      "note": "Use this switch with its model family.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -10009,10 +12364,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control qwen27 profile.",
+      "purpose": "",
       "default_text": "-",
       "hardware_scope": "generic",
-      "note": "Use this switch with its model family.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -10055,10 +12410,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control qwen27 profile.",
+      "purpose": "",
       "default_text": "-",
       "hardware_scope": "generic",
-      "note": "Use this switch with its model family.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -10140,6 +12495,332 @@
       }
     },
     {
+      "name": "GUFO_REFUSAL_DIRECTION",
+      "label": "Refusal direction",
+      "kind": "env",
+      "class": "DEBUG",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Remove a configured refusal direction from selected model outputs.",
+      "default_text": "Unset",
+      "hardware_scope": "generic",
+      "note": "A direction file enables unit projection at the 96 dense writer sites. Invalid files stop model loading. Restart to change the setting.",
+      "built_in": null,
+      "value_rule": "text",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Behaviour",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_REFUSAL_DIRECTION_ENABLED",
+      "label": "Direction enable override",
+      "kind": "env",
+      "class": "DEBUG",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Enable or disable the direction projection.",
+      "default_text": "Unset",
+      "hardware_scope": "generic",
+      "note": "Debug environment override; the matching command-line option takes precedence.",
+      "built_in": null,
+      "value_rule": "on_off",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Behaviour",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "enum"
+          },
+          "values": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "string",
+                "text": "on"
+              },
+              {
+                "kind": "string",
+                "text": "off"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_REFUSAL_DIRECTION_LAYER_END",
+      "label": "Last direction layer override",
+      "kind": "env",
+      "class": "DEBUG",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Choose the last stream layer.",
+      "default_text": "Unset",
+      "hardware_scope": "generic",
+      "note": "Debug environment override; the matching command-line option takes precedence.",
+      "built_in": null,
+      "value_rule": "uint",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Behaviour",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "maximum": {
+            "kind": "number",
+            "text": "47"
+          },
+          "minimum": {
+            "kind": "number",
+            "text": "1"
+          },
+          "type": {
+            "kind": "string",
+            "text": "integer"
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_REFUSAL_DIRECTION_LAYER_START",
+      "label": "First direction layer override",
+      "kind": "env",
+      "class": "DEBUG",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Choose the first stream layer.",
+      "default_text": "Unset",
+      "hardware_scope": "generic",
+      "note": "Debug environment override; the matching command-line option takes precedence.",
+      "built_in": null,
+      "value_rule": "uint",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Behaviour",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "maximum": {
+            "kind": "number",
+            "text": "47"
+          },
+          "minimum": {
+            "kind": "number",
+            "text": "1"
+          },
+          "type": {
+            "kind": "string",
+            "text": "integer"
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_REFUSAL_DIRECTION_MODE",
+      "label": "Direction mode override",
+      "kind": "env",
+      "class": "DEBUG",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Choose the projection mode.",
+      "default_text": "Unset",
+      "hardware_scope": "generic",
+      "note": "Debug environment override; the matching command-line option takes precedence.",
+      "built_in": null,
+      "value_rule": "text",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Behaviour",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "enum"
+          },
+          "values": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "string",
+                "text": "sites"
+              },
+              {
+                "kind": "string",
+                "text": "stream"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_REFUSAL_DIRECTION_STRENGTH",
+      "label": "Direction strength override",
+      "kind": "env",
+      "class": "DEBUG",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Override the fitted direction strength.",
+      "default_text": "Unset",
+      "hardware_scope": "generic",
+      "note": "Debug environment override; the matching command-line option takes precedence.",
+      "built_in": null,
+      "value_rule": "number",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Behaviour",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "maximum": {
+            "kind": "number",
+            "text": "4"
+          },
+          "minimum": {
+            "kind": "number",
+            "text": "0"
+          },
+          "type": {
+            "kind": "string",
+            "text": "number"
+          }
+        }
+      }
+    },
+    {
       "name": "GUFO_REQUIRE_GFX1151",
       "label": "Require target GPU",
       "kind": "env",
@@ -10161,10 +12842,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control require hip.",
+      "purpose": "",
       "default_text": "off",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -10207,10 +12888,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control require hip.",
+      "purpose": "",
       "default_text": "off",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -10253,10 +12934,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control require hip.",
+      "purpose": "",
       "default_text": "off",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -10350,11 +13031,11 @@
       "inject_with": null,
       "suppressed_by": [],
       "purpose": "Enable the F16 WMMA route for supported IQ and Q2 expert weights.",
-      "default_text": "on",
+      "default_text": "2",
       "hardware_scope": "strix-halo-tuned",
-      "note": "Set 0 to compare the MMQ fallback; non-IQ expert models keep their existing routes.",
-      "built_in": "1",
-      "value_rule": "bool",
+      "note": "Set 0 for the MMQ fallback or 1 to turn the IQ gate/up pair kernel off.",
+      "built_in": "2",
+      "value_rule": "text",
       "aliases": [],
       "takes_value": true,
       "echo": true,
@@ -10368,18 +13049,22 @@
         "properties": {
           "type": {
             "kind": "string",
-            "text": "boolean"
+            "text": "enum"
           },
           "values": {
             "kind": "array",
             "items": [
               {
-                "kind": "boolean",
-                "boolean": false
+                "kind": "string",
+                "text": "0"
               },
               {
-                "kind": "boolean",
-                "boolean": true
+                "kind": "string",
+                "text": "1"
+              },
+              {
+                "kind": "string",
+                "text": "2"
               }
             ]
           }
@@ -10472,10 +13157,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control survival floor.",
+      "purpose": "",
       "default_text": "ON",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -10621,7 +13306,7 @@
     },
     {
       "name": "GUFO_THINK_MARKER_BIAS",
-      "label": "Thinking marker bias",
+      "label": "Rethinking penalty (fixed)",
       "kind": "env",
       "class": "OPTION",
       "model_family": "qwen3.8-flash-next",
@@ -10644,10 +13329,10 @@
       "suppressed_by": [
         "--think-marker-bias"
       ],
-      "purpose": "Set a fixed thinking marker probability bias.",
+      "purpose": "Uses one rethinking penalty at every reasoning effort. Negative numbers lower the chance of \"wait\" and \"let me rethink\" restarts.",
       "default_text": "0",
       "hardware_scope": "generic",
-      "note": "Keep zero unless a fixed thinking marker bias is required outside exact.",
+      "note": "Use 0 for vanilla.",
       "built_in": null,
       "value_rule": "number",
       "aliases": [],
@@ -10674,7 +13359,7 @@
     },
     {
       "name": "GUFO_THINK_MARKER_BIAS_BY_EFFORT",
-      "label": "Thinking bias by effort",
+      "label": "Rethinking penalty",
       "kind": "env",
       "class": "DEFAULT",
       "model_family": "qwen3.8-flash-next",
@@ -10698,10 +13383,10 @@
       "suppressed_by": [
         "--no-behaviour"
       ],
-      "purpose": "Map reasoning effort to think marker bias.",
+      "purpose": "Lowers the chance of \"wait\" and \"let me rethink\" restarts while the model thinks. It does not cut thinking off.",
       "default_text": "low:-2,medium:-1,xhigh:0",
       "hardware_scope": "strix-halo-tuned",
-      "note": "Keep the default map unless reasoning effort tests require different thinking marker biases.",
+      "note": "Defaults are recommended: low -2, medium -1, xhigh 0; use 0 for vanilla, or go more negative to think less.",
       "built_in": null,
       "value_rule": "effort_map",
       "aliases": [],
@@ -10811,10 +13496,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control think marker list.",
+      "purpose": "",
       "default_text": "none",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -10825,6 +13510,170 @@
       "experimental": false,
       "restart_required": true,
       "gui_control": true,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_THINK_NUDGE",
+      "label": "Thinking stop nudge",
+      "kind": "env",
+      "class": "DEFAULT",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "string",
+          "text": "1"
+        },
+        "exact": {
+          "kind": "string",
+          "text": "0"
+        },
+        "subagents": {
+          "kind": "string",
+          "text": "1"
+        }
+      },
+      "exact_off": true,
+      "inject_with": null,
+      "suppressed_by": [
+        "--no-behaviour"
+      ],
+      "purpose": "Insert an unfinished reasoning prefix when the model attempts to end an open thinking span.",
+      "default_text": "1",
+      "hardware_scope": "strix-halo-tuned",
+      "note": "The existing stop guard remains the backstop after the request insertion limit.",
+      "built_in": "0",
+      "value_rule": "bool",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Behaviour",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "boolean"
+          },
+          "values": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "string",
+                "text": "0"
+              },
+              {
+                "kind": "string",
+                "text": "1"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_THINK_NUDGE_MAX",
+      "label": "Thinking nudge limit",
+      "kind": "env",
+      "class": "OPTION",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Limit thinking stop nudge insertions per request. Zero disables insertions.",
+      "default_text": "2",
+      "hardware_scope": "generic",
+      "note": "The limit spans all thinking segments in one request.",
+      "built_in": "2",
+      "value_rule": "int31",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Behaviour",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "maximum": {
+            "kind": "number",
+            "text": "2147483647"
+          },
+          "minimum": {
+            "kind": "number",
+            "text": "0"
+          },
+          "type": {
+            "kind": "string",
+            "text": "integer"
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_THINK_NUDGE_TEXT",
+      "label": "Thinking nudge prefix",
+      "kind": "env",
+      "class": "OPTION",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Set the unfinished thinking stop nudge prefix, tokenized without special tokens.",
+      "default_text": "Do I have enough",
+      "hardware_scope": "generic",
+      "note": "Use an unfinished prefix without trailing whitespace or sentence punctuation so the model writes the continuation.",
+      "built_in": "Do I have enough",
+      "value_rule": "text",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Behaviour",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
       "allowed": {
         "kind": "object",
         "properties": {
@@ -10857,10 +13706,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control trace.",
+      "purpose": "",
       "default_text": "off",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -10871,6 +13720,52 @@
       "experimental": false,
       "restart_required": true,
       "gui_control": true,
+      "allowed": {
+        "kind": "object",
+        "properties": {
+          "type": {
+            "kind": "string",
+            "text": "string"
+          }
+        }
+      }
+    },
+    {
+      "name": "GUFO_TRACE_STAGES",
+      "label": "Trace stages",
+      "kind": "env",
+      "class": "DEBUG",
+      "model_family": "qwen3.8-flash-next",
+      "platform": "any",
+      "requires": [],
+      "values": {
+        "default": {
+          "kind": "null"
+        },
+        "exact": {
+          "kind": "null"
+        },
+        "subagents": {
+          "kind": "null"
+        }
+      },
+      "exact_off": false,
+      "inject_with": null,
+      "suppressed_by": [],
+      "purpose": "Trace decode stages inside verification graphs.",
+      "default_text": "off",
+      "hardware_scope": "generic",
+      "note": "Only 1 enables; requires GUFO_TRACE=1. Adds diagnostic stamp nodes. Batched sessions and the draft body are not instrumented.",
+      "built_in": null,
+      "value_rule": "text",
+      "aliases": [],
+      "takes_value": true,
+      "echo": true,
+      "group": "Other",
+      "audience": "debug",
+      "experimental": false,
+      "restart_required": true,
+      "gui_control": false,
       "allowed": {
         "kind": "object",
         "properties": {
@@ -10903,7 +13798,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control weight upload readers.",
+      "purpose": "",
       "default_text": "16",
       "hardware_scope": "generic",
       "note": "This tree has no reader for this variable.",
@@ -10957,10 +13852,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control home.",
+      "purpose": "",
       "default_text": "-",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -11049,10 +13944,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control localappdata.",
+      "purpose": "",
       "default_text": "-",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -11188,7 +14083,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control the qwen3 asr artifacts setting.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Other model or test configuration; no release default.",
@@ -11234,7 +14129,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control the qwen3 asr model root setting.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Other model or test configuration; no release default.",
@@ -11280,7 +14175,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control the qwen3 asr test wav setting.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Other model or test configuration; no release default.",
@@ -11326,7 +14221,7 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control the temp setting.",
+      "purpose": "",
       "default_text": "Unset",
       "hardware_scope": "generic",
       "note": "Other model or test configuration; no release default.",
@@ -11418,10 +14313,10 @@
       "exact_off": false,
       "inject_with": null,
       "suppressed_by": [],
-      "purpose": "Control xdg cache home.",
+      "purpose": "",
       "default_text": "-",
       "hardware_scope": "generic",
-      "note": "Inventory classification.",
+      "note": "",
       "built_in": null,
       "value_rule": "text",
       "aliases": [],
@@ -11617,6 +14512,16 @@
       },
       "write_block": "supervisor_owned",
       "restart_state": "not_running"
+    },
+    {
+      "write_via": "override",
+      "name": "--kv-cache-type",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "",
+      "restart_state": "unchanged"
     },
     {
       "write_via": "override",
@@ -11948,6 +14853,16 @@
     },
     {
       "write_via": "override",
+      "name": "--prefill-mode",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
       "name": "--presence-penalty",
       "saved": null,
       "effective": {
@@ -12008,6 +14923,66 @@
         "kind": "null"
       },
       "write_block": "supervisor_owned",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "--refusal-direction",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "--refusal-direction-file",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "--refusal-direction-layer-end",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "--refusal-direction-layer-start",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "--refusal-direction-mode",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "--refusal-direction-strength",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
       "restart_state": "unchanged"
     },
     {
@@ -12526,6 +15501,16 @@
     },
     {
       "write_via": "override",
+      "name": "GUFO_DECODE_IQ_ROUTING_PATH",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
       "name": "GUFO_DEEPSEEK_DSPARK_TIMING",
       "saved": null,
       "effective": {
@@ -12616,6 +15601,16 @@
     },
     {
       "write_via": "override",
+      "name": "GUFO_DENSE_IQ_VARIANT",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
       "name": "GUFO_DENSE_TWIN_ALLOW_Q8",
       "saved": null,
       "effective": {
@@ -12672,6 +15667,26 @@
         "kind": "null"
       },
       "write_block": "",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_DENSE_W1",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_DEVICE_ACCEPT",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
       "restart_state": "unchanged"
     },
     {
@@ -12776,6 +15791,16 @@
     },
     {
       "write_via": "override",
+      "name": "GUFO_DISPATCH_RESERVE_MIB",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
       "name": "GUFO_DISPATCH_TELEMETRY",
       "saved": null,
       "effective": {
@@ -12786,12 +15811,52 @@
     },
     {
       "write_via": "override",
+      "name": "GUFO_DRAFT_CHAIN",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_DRAFT_FALSIFY",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_DRAFT_FALSIFY_CYCLES",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
       "name": "GUFO_DRAFT_OUT_MODEL",
       "saved": null,
       "effective": {
         "kind": "null"
       },
       "write_block": "",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_DRAFT_POLICY",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
       "restart_state": "unchanged"
     },
     {
@@ -12966,6 +16031,76 @@
     },
     {
       "write_via": "override",
+      "name": "GUFO_HC_BF16_DENSE",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_HC_INJECT_BF16_FUSED",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_HC_LOAD_Q8",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_HC_LOAD_Q8_POISON",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_HC_LOAD_Q8_VERIFY",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_HEAD_CHECK",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_HEAD_SHORTLIST",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
       "name": "GUFO_HIPBLASLT_PLAN_CACHE",
       "saved": null,
       "effective": {
@@ -13062,6 +16197,16 @@
         "kind": "null"
       },
       "write_block": "",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_LOGIT_EVAL_DUMP",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
       "restart_state": "unchanged"
     },
     {
@@ -13172,6 +16317,16 @@
         "kind": "null"
       },
       "write_block": "",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_MOE_FUSION",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
       "restart_state": "unchanged"
     },
     {
@@ -13336,6 +16491,16 @@
     },
     {
       "write_via": "override",
+      "name": "GUFO_PLE_READAHEAD",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
       "name": "GUFO_PORT",
       "saved": null,
       "effective": {
@@ -13356,12 +16521,132 @@
     },
     {
       "write_via": "override",
+      "name": "GUFO_PREFILL_EXPERTS",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_PREFILL_EXPERTS_AUDIT",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_PREFILL_EXPERTS_FOLD",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_PREFILL_EXPERTS_KFILE",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_PREFILL_EXPERTS_MASS",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_PREFILL_EXPERTS_MODE",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_PREFILL_EXPERTS_TAIL",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
       "name": "GUFO_PREFILL_FORWARD_TOKENS",
       "saved": null,
       "effective": {
         "kind": "null"
       },
       "write_block": "",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_PREFILL_NATIVE_GEMM",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_PREFILL_STAGEB",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_PREFILL_STAGEB_LAYERS",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_PREFILL_STAGEB_ROWS",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_PREFILL_STAGEB_STRIDE",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
       "restart_state": "unchanged"
     },
     {
@@ -13382,6 +16667,26 @@
         "kind": "null"
       },
       "write_block": "removed",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_PREFILL_TELEMETRY",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_PREFILL_TELEMETRY_LAYERS",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
       "restart_state": "unchanged"
     },
     {
@@ -13447,6 +16752,66 @@
     {
       "write_via": "override",
       "name": "GUFO_REASONING_BUDGET",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_REFUSAL_DIRECTION",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_REFUSAL_DIRECTION_ENABLED",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_REFUSAL_DIRECTION_LAYER_END",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_REFUSAL_DIRECTION_LAYER_START",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_REFUSAL_DIRECTION_MODE",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_REFUSAL_DIRECTION_STRENGTH",
       "saved": null,
       "effective": {
         "kind": "null"
@@ -13586,12 +16951,52 @@
     },
     {
       "write_via": "override",
+      "name": "GUFO_THINK_NUDGE",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_THINK_NUDGE_MAX",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_THINK_NUDGE_TEXT",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
       "name": "GUFO_TRACE",
       "saved": null,
       "effective": {
         "kind": "null"
       },
       "write_block": "",
+      "restart_state": "unchanged"
+    },
+    {
+      "write_via": "override",
+      "name": "GUFO_TRACE_STAGES",
+      "saved": null,
+      "effective": {
+        "kind": "null"
+      },
+      "write_block": "read_only",
       "restart_state": "unchanged"
     },
     {

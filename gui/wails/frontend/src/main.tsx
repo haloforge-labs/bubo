@@ -5,8 +5,10 @@ import { RouterProvider } from '@tanstack/react-router'
 import { queryClient } from '@/lib/query-client'
 import { createAppRouter } from '@/router'
 import { subscribeViewEvents } from '@/lib/bindings'
+import { restoreFont } from '@/lib/font'
 import '@/styles/app.css'
 
+restoreFont()
 const root = document.getElementById('root')
 if (!root) throw new Error('The application root is missing.')
 const router = createAppRouter()

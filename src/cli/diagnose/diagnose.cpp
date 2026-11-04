@@ -150,19 +150,16 @@ diagnostics::DiagnosticReport CollectDiagnostics(
   if (section == "all" || section == "platform" || section == "inventory") {
     diagnostics::DiagnosticCheck check;
     check.name = "platform";
-    if (inventory.cpu.architecture == "x86_64") {
+    const std::string& target = inventory.toolchain.target_platform;
+    check.details["targetArchitecture"] = target;
+    if (target == "x86_64-linux" || target == "x86_64-windows") {
       check.status = diagnostics::DiagnosticStatus::kPass;
-#ifdef _WIN32
-      check.message = "Supported architecture: Windows x86-64";
-      check.details["targetArchitecture"] = "x86_64-windows";
-#else
-      check.message = "Supported architecture: Linux x86-64";
-      check.details["targetArchitecture"] = "x86_64-linux";
-#endif
+      check.message =
+          "Supported architecture: " + inventory.toolchain.os_name + " x86-64";
     } else {
       check.status = diagnostics::DiagnosticStatus::kFail;
-      check.message =
-          "Unsupported target platform: only Linux x86-64 is supported";
+      check.message = "Unsupported target platform " + target +
+                      ": only Linux and Windows x86-64 are supported";
       report.AddError("Unsupported platform architecture detected");
     }
     report.AddCheck(std::move(check));
@@ -174,6 +171,7 @@ diagnostics::DiagnosticReport CollectDiagnostics(
     sys_check.name = "system";
     sys_check.status = diagnostics::DiagnosticStatus::kPass;
     sys_check.message = "Host operating system and kernel identified";
+    sys_check.details["osName"] = inventory.toolchain.os_name;
     sys_check.details["kernelRelease"] = inventory.toolchain.kernel_release;
     report.AddCheck(std::move(sys_check));
 
@@ -450,8 +448,8 @@ static int RunDiagnoseImpl(std::span<const char* const> args,
       bw_options.warmup = warmup;
       bw_options.repetitions = repetitions;
       bw_options.duration_ms = duration_ms;
-      const auto report =
-          diagnostics::RunBandwidthBenchmark(bw_options, fingerprint);
+      auto report = diagnostics::RunBandwidthBenchmark(bw_options, fingerprint);
+      report.engine_revision = std::string(gufo::cli::kRevision);
       const std::string content =
           json_mode ? report.ToJson() : report.ToHuman();
       OutputContent(content, output_file, writer);
@@ -473,8 +471,9 @@ static int RunDiagnoseImpl(std::span<const char* const> args,
       std::cerr << "Error: " << size_error << "\n";
       return invalid();
     }
-    const auto report = diagnostics::RunHipAllocationBenchmark(
-        allocation_options, inventory, fingerprint);
+    auto report = diagnostics::RunHipAllocationBenchmark(allocation_options,
+                                                         inventory, fingerprint);
+    report.engine_revision = std::string(gufo::cli::kRevision);
     const std::string content = json_mode ? report.ToJson() : report.ToHuman();
     OutputContent(content, output_file, writer, !report.Success());
     return report.Success() ? 0 : 1;
@@ -493,6 +492,7 @@ static int RunDiagnoseImpl(std::span<const char* const> args,
 
   // Handle default diagnostics report
   auto report = CollectDiagnostics(diagnostics::LinuxSysfs(), section);
+  report.SetEngineRevision(gufo::cli::kRevision);
   if (section == "all" || section == "inventory" || section == "gpu") {
     auto probe = bubo::cli::CreateSystemMachineProbe();
     AddMachineSettingChecks(report, bubo::cli::ReadMachineWarningInputs(*probe));

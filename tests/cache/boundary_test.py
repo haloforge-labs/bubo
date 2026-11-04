@@ -69,11 +69,7 @@ def link_violations(metadata: Path) -> list[str]:
         return [f"{metadata}: cache link metadata is missing"]
     # Only this reviewed CPU platform dependency may be linked. Arbitrary relay
     # targets are rejected too, so they cannot hide a transitive model/HIP link.
-    allowed = {"Threads::Threads"}
-    if sys.platform == "win32":
-        # CMake links the shared Win32 POSIX shim into every host target.
-        # Model, HTTP and GPU relay targets remain forbidden below.
-        allowed.add("gufo_posix_compat")
+    allowed = {"Threads::Threads", "gufo_platform"}
     return [f"gufo_cache: unapproved dependency {library}"
             for line in metadata.read_text().splitlines()
             for library in line.split(";") if library and library not in allowed]
@@ -133,7 +129,7 @@ class BoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "links.txt"
             self.assertTrue(link_violations(metadata))
-            metadata.write_text("\nThreads::Threads\n")
+            metadata.write_text("\nThreads::Threads\ngufo_platform\n")
             self.assertEqual(link_violations(metadata), [])
             for dependency in ("gufo_core", "gufo_http", "gufo_model_relay", "hip::host", "/opt/rocm/lib/libamdhip64.so"):
                 with self.subTest(dependency=dependency):

@@ -133,6 +133,44 @@ static void launch_iq4_dense(const void* weights, const block_q8_1* input,
 // Both IQ4 formats pack K0..15 in low nibbles, K16..31 in high nibbles.
 // Decode directly from global memory; chain two full K16 WMMA operations
 // in int32 before one FP32 scale/FMA. No LDS weight or activation tile.
+// Shared matrix-unit transpose and descending wave reduction. Keeping this
+// helper explicit preserves IQ4's existing sum order and nonfinite policy.
+template<int waves, bool clamp_nonfinite>
+__device__ __forceinline__ void store_dense_matrix_tile(
+    const float* acc, float* partial, float* output, int first_row, int rows,
+    int tokens, int first_token = 0) {
+  const int wave = threadIdx.x / 32, lane = threadIdx.x % 32;
+  const int sub = lane % 16, half = lane / 16;
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    const int out = sub * 16 + 2 * i + half;
+    const int swizzle = (out ^ (out >> 4)) & (waves - 1);
+    partial[out * waves + (wave ^ swizzle)] = acc[i];
+  }
+  __syncthreads();
+  for (int out = threadIdx.x; out < 256; out += 32 * waves) {
+    const int swizzle = (out ^ (out >> 4)) & (waves - 1);
+    float sums[waves];
+#pragma unroll
+    for (int i = 0; i < waves; ++i)
+      sums[i] = partial[out * waves + (i ^ swizzle)];
+#pragma unroll
+    for (int delta = waves / 2; delta; delta /= 2) {
+#pragma unroll
+      for (int i = 0; i < delta; ++i)
+        sums[i] = __fadd_rn(sums[i], sums[i + delta]);
+    }
+    const int row = first_row + out % 16;
+    const int token = first_token + out / 16;
+    if (row < rows && token < tokens) {
+      const float value = sums[0];
+      output[token * rows + row] =
+          clamp_nonfinite && !isfinite(value) ? 0.0f : value;
+    }
+  }
+  __syncthreads();
+}
+
 template<ggml_type type, int token_tiles, bool ragged, int waves>
 __launch_bounds__(32 * waves) static __global__ void mul_mat_iq4_decode_batch(
     const void* __restrict__ weights, const block_q8_1* __restrict__ input,
@@ -210,35 +248,8 @@ __launch_bounds__(32 * waves) static __global__ void mul_mat_iq4_decode_batch(
   // (row, token) has the same wave K traversal and descending-delta sum tree.
 #pragma unroll
   for (int tile = 0; tile < token_tiles; ++tile) {
-#pragma unroll
-    for (int i = 0; i < 8; ++i) {
-      const int out = sub * 16 + 2 * i + half;
-      const int swizzle = (out ^ (out >> 4)) & (waves - 1);
-      partial[out * waves + (wave ^ swizzle)] = acc[tile][i];
-    }
-    __syncthreads();
-    // Four waves assign two outputs/thread; sixteen waves leave half idle
-    // during reduction only. All threads still participate in barriers.
-    for (int out = threadIdx.x; out < 256; out += 32 * waves) {
-      const int swizzle = (out ^ (out >> 4)) & (waves - 1);
-      float sums[waves];
-#pragma unroll
-      for (int i = 0; i < waves; ++i)
-        sums[i] = partial[out * waves + (i ^ swizzle)];
-#pragma unroll
-      for (int delta = waves / 2; delta; delta /= 2) {
-#pragma unroll
-        for (int i = 0; i < delta; ++i)
-          sums[i] = __fadd_rn(sums[i], sums[i + delta]);
-      }
-      const int out_row = first_row + out % 16;
-      const int token = tile * 16 + out / 16;
-      if (out_row < rows && (!ragged || token < tokens)) {
-        const float value = sums[0];
-        output[token * rows + out_row] = isfinite(value) ? value : 0.0f;
-      }
-    }
-    __syncthreads();
+    store_dense_matrix_tile<waves, true>(acc[tile], partial, output, first_row,
+                                         rows, tokens, tile * 16);
   }
 }
 

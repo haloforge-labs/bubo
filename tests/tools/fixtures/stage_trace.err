@@ -1,0 +1,5 @@
+qwen38_flash_next: trace 9.0 s, 163 cycles: GPU busy 96.5% (53.53 ms/cycle busy, 1.95 idle) | GPU ms per phase: verify-body w3 102x44.08 (submit 1.836) verify-prefix w3 102x1.17 (submit 0.070)
+qwen38_flash_next: stages verify-body w3 2x: hc_attn 1.000 mixer 2.000 combine_hc_ffn 3.000 router 4.000 shared 5.000 routed 6.000 combine_epilogue 7.000 embedding 0.000 head 8.000 sum 36.000 body 40.000 launch+tail 4.000
+qwen38_flash_next: stages verify-prefix w3 8x: hc_attn 1.000 mixer 2.000 combine_hc_ffn 3.000 router 4.000 shared 5.000 routed 6.000 combine_epilogue 7.000 embedding 0.500 head 0.000 sum 28.500 body 30.000 launch+tail 1.500
+qwen38_flash_next: stages verify-body w3 6x: hc_attn 3.000 mixer 2.000 combine_hc_ffn 3.000 router 4.000 shared 5.000 routed 6.000 combine_epilogue 7.000 embedding 0.000 head 8.000 sum 38.000 body 42.000 launch+tail 4.000
+qwen38_flash_next: stages verify-body w4 1x: hc_attn 3.000 mixer 2.000 combine_hc_ffn 3.000 router 4.000 shared 5.000 routed 6.000 combine_epilogue 7.000 embedding 0.000 head 8.000 sum 38.000 body 42.000 launch+tail 4.000

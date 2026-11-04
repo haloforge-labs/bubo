@@ -55,7 +55,15 @@ public:
 /// Failed entries retry on eviction/shutdown; abandoned entries are logged.
 struct SnapshotPersistence {
   enum State : unsigned {
-    kDirty, kQueued, kPersisted, kFailed, kAbandoned, kSuperseded
+    kDirty,
+    kQueued,
+    kPersisted,
+    kFailed,
+    kAbandoned,
+    kSuperseded,
+    /// Prepared before visibility; neither idle sourcing nor eviction may offer
+    /// it.
+    kUnoffered
   };
   std::vector<ContinuationToken> tokens;
   std::vector<std::uint8_t> input_identity;
@@ -120,6 +128,9 @@ enum class SnapshotEventReason : std::uint8_t {
   kReservationMismatch,
   kHostMemoryFloor,   ///< skipped: host MemAvailable minus this snapshot would fall under the floor (GUFO_CACHE_HOST_FLOOR_MB)
   kMemoryPressure,    ///< skipped or removed by the memory guard (RAM under the floor, Windows low-memory event, GPU budget used up)
+  kTailFinalNotPublished,
+  kBOverThirdOfBudget,
+  kBDepthCap,
 };
 
 /// Continuation boundaries take precedence over optional history/retry copies.
@@ -130,6 +141,9 @@ enum class SnapshotPurpose : std::uint8_t {
   kHistory,
   kRetry,
   kBranchPoint,
+  kTailBoundary,
+  /// Exact retry only: admission and publication must not evict any entry.
+  kTailFinal,
 };
 
 /// Sanitized snapshot-retention event.
@@ -168,6 +182,8 @@ struct ContinuationLookup {
 /// The first deployment uses one entry. Supporting a bounded entry count here
 /// keeps cache policy independent from Qwen, DeepSeek, and future providers.
 class ContinuationCache {
+  struct SnapshotHistory;
+
 public:
   using StateFactory = std::function<std::unique_ptr<ContinuationState>()>;
   using CancellationCheck = std::function<bool()>;
@@ -230,20 +246,39 @@ public:
     /// Byte-pressure evictions happen synchronously before this returns true.
     /// A verified replacement prefix can retire this family's old boundary
     /// before evicting another family's last copy, unless preserve_source.
+    /// reserve_host charges an early tail capture before request ownership
+    /// history is initialized; legacy callers keep their existing admission.
+    /// A tail boundary above one third of the budget may reclaim only its
+    /// own prompt lineage. The flag also covers explicitly shared boundaries.
     [[nodiscard]] bool TryReserveSnapshot(
         std::size_t snapshot_bytes, std::size_t token_count,
         bool preserve_source = false,
         SnapshotPurpose purpose = SnapshotPurpose::kContinuation,
-        std::span<const ContinuationToken> replacement_prefix = {});
+        std::span<const ContinuationToken> replacement_prefix = {},
+        bool reserve_host = false, bool tail_boundary = false);
 
     /// Snapshot copies THIS request wanted and the cache refused or dropped (capacity, floor, memory guard, failed capture), and the reason of
     /// the last one. Reported per request next to the miss reason (GitHub #9).
     [[nodiscard]] std::size_t skipped_snapshots() const noexcept { return skips_.count; }
     [[nodiscard]] SnapshotEventReason skip_reason() const noexcept { return skips_.reason; }
+    [[nodiscard]] std::size_t policy_skipped_snapshots() const noexcept {
+      return skips_.policy_count;
+    }
+    [[nodiscard]] std::size_t published_snapshots() const noexcept {
+      return published_snapshots_;
+    }
+    [[nodiscard]] std::size_t snapshot_capacity_bytes() const noexcept;
+
+    /// Tail-only capture ownership. Exact prompt ancestry, rather than a
+    /// short family hash, identifies a superseded request's checkpoints.
+    void BeginTailSnapshotHistory(std::span<const ContinuationToken> prompt);
 
     /// Releases an admitted reservation and records a sanitized skip reason.
     void SkipSnapshot(SnapshotEventReason reason, std::size_t snapshot_bytes,
                       std::size_t token_count) noexcept;
+
+    /// Allocation finished: actual host availability now accounts for the copy.
+    void CompleteSnapshotCapture() noexcept;
 
     /// Publishes a reserved immutable checkpoint without releasing this state.
     /// Peers can fork it before this lease advances the live continuation.
@@ -252,7 +287,8 @@ public:
     std::size_t PublishSnapshot(
         std::vector<ContinuationToken> tokens,
         std::shared_ptr<const ContinuationSnapshot> snapshot,
-        bool preserve_source = false);
+        bool preserve_source = false,
+        const std::function<void()>& on_publish = {});
 
     /// Atomically publishes the state and the exact tokens it represents.
     ///
@@ -283,8 +319,14 @@ public:
     double restore_ms_{0.0};
     bool restored_from_disk_{false};
     std::size_t reserved_snapshot_bytes_{0};
+    std::uint64_t reserved_snapshot_host_bytes_{0};
+    bool snapshot_preserve_source_{false};
+    bool snapshot_own_session_only_{false};
     std::vector<std::shared_ptr<const ContinuationSnapshot>> superseded_;
     SnapshotPurpose snapshot_purpose_{SnapshotPurpose::kContinuation};
+    std::shared_ptr<const SnapshotHistory> snapshot_history_;
+    std::shared_ptr<const SnapshotHistory> restore_history_;
+    std::size_t published_snapshots_{0};
     std::size_t prompt_tokens_{0};
     std::size_t stable_prefix_tokens_{0};
     std::vector<std::uint8_t> input_identity_;
@@ -296,6 +338,7 @@ public:
     ContinuationLookup lookup_;
     struct Skips {
       std::size_t count{0};
+      std::size_t policy_count{0};
       SnapshotEventReason reason{SnapshotEventReason::kByteCapacity};
     } skips_;
   };
@@ -379,7 +422,12 @@ private:
       std::span<const ContinuationToken> replacement_prefix,
       std::span<const std::uint8_t> input_identity,
       std::vector<std::shared_ptr<const ContinuationSnapshot>>& superseded,
-      SnapshotEventReason* skip_reason = nullptr);
+      SnapshotEventReason* skip_reason = nullptr,
+      std::uint64_t* reserved_host_bytes = nullptr,
+      bool own_session_only = false,
+      const std::shared_ptr<const SnapshotHistory>& history = {},
+      const std::shared_ptr<const SnapshotHistory>& restore_history = {},
+      std::size_t restore_tokens = 0);
   void ResolveRemoved(
       std::vector<std::shared_ptr<const ContinuationSnapshot>>& removed,
       const std::shared_ptr<const ContinuationSnapshot>& survivor = {}) noexcept;
@@ -395,7 +443,13 @@ private:
       std::vector<std::uint8_t> live_identity, bool release_state = true,
       std::size_t* published_index = nullptr,
       std::size_t stable_prefix_tokens = 0,
-      SnapshotPurpose purpose = SnapshotPurpose::kContinuation);
+      SnapshotPurpose purpose = SnapshotPurpose::kContinuation,
+      const std::shared_ptr<const SnapshotHistory>& history = {},
+      const std::shared_ptr<const SnapshotHistory>& restore_history = {},
+      std::size_t restore_tokens = 0,
+      SnapshotEventReason* publication_skip_reason = nullptr,
+      bool preserve_source = false, bool own_session_only = false,
+      const std::function<void()>& on_publish = {});
   void Invalidate(std::size_t index, std::size_t reservation_bytes) noexcept;
 
   struct Impl;

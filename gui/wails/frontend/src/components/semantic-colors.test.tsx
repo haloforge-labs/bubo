@@ -17,6 +17,20 @@ function luminance(color: string) {
   return linear[0]! * 0.2126 + linear[1]! * 0.7152 + linear[2]! * 0.0722
 }
 
+// Whether two CSS colours have the same red, green and blue (alpha ignored).
+function sameColor(a: string, b: string) {
+  const canvas = document.createElement('canvas')
+  canvas.width = canvas.height = 1
+  const context = canvas.getContext('2d')!
+  const rgb = (color: string) => {
+    context.clearRect(0, 0, 1, 1)
+    context.fillStyle = color
+    context.fillRect(0, 0, 1, 1)
+    return [...context.getImageData(0, 0, 1, 1).data].slice(0, 3)
+  }
+  return rgb(a).every((part, index) => Math.abs(part - rgb(b)[index]!) <= 2)
+}
+
 function contrast(a: string, b: string) {
   const values = [luminance(a), luminance(b)]
   return (Math.max(...values) + 0.05) / (Math.min(...values) + 0.05)
@@ -66,7 +80,7 @@ for (const theme of ['dark', 'light']) {
       theme === 'dark' ? 'rgb(139, 198, 204)' : 'rgb(36, 92, 100)',
     )
     const message = error.getByText(
-      'Bubo and its runtime use different versions.',
+      'Bubo and its engine use different versions.',
     )
     expect(getComputedStyle(message.element()).color).toBe(coral)
     const save = page.getByRole('button', { name: 'Save server setup' })
@@ -78,9 +92,13 @@ for (const theme of ['dark', 'light']) {
       exact: true,
     })
     await expect.element(start).toBeEnabled()
+    // The pointer can rest over Start after the layout settles; the hover fill
+    // is the same coral at 95 % alpha, so compare the colour, not its alpha.
     await expect
-      .poll(() => getComputedStyle(start.element()).backgroundColor)
-      .toBe(coral)
+      .poll(() =>
+        sameColor(getComputedStyle(start.element()).backgroundColor, coral),
+      )
+      .toBe(true)
     expect(
       contrast(coral, getComputedStyle(start.element()).color),
     ).toBeGreaterThanOrEqual(4.5)

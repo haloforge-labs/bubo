@@ -30,6 +30,20 @@ func startSettingsForArguments(saved Settings, args []string) Settings {
 	return saved
 }
 
+// recommendedSessionContext is the per-session context of the CLI's recommended
+// row for this session count, or 0 when the CLI recommends none.
+func recommendedSessionContext(estimate *MemoryEstimate, sessions uint32) uint64 {
+	if estimate == nil || estimate.RecommendedContext == nil {
+		return 0
+	}
+	for _, row := range estimate.RecommendedContext.BySessions {
+		if uint64(row.Sessions) == uint64(sessions) && row.Recommended != nil && *row.Recommended {
+			return uint64(row.ContextPerSession)
+		}
+	}
+	return 0
+}
+
 func (s *Supervisor) admitSavedStart(saved Settings, st *Status) error {
 	// Bare supervisors can have callers without app preferences. The desktop
 	// backend always supplies its settings path.
@@ -40,23 +54,32 @@ func (s *Supervisor) admitSavedStart(saved Settings, st *Status) error {
 	if subject == "" {
 		return appError("estimate_unavailable", "Select a model before checking memory.")
 	}
-	query := []string{"models", "estimate", "--model", subject, "--json"}
-	if saved.Context != 0 {
-		query = append(query, "--context", strconv.FormatUint(saved.Context, 10))
-	}
-	if saved.Sessions != 0 {
-		query = append(query, "--sessions", strconv.FormatUint(uint64(saved.Sessions), 10))
-	}
-	if saved.Profile != "" {
-		query = append(query, "--profile", saved.Profile)
-	}
+	// The request is the one behind the fit shown before the start, every saved
+	// override included: a setup that fits with a q8_0 cache must not be judged at
+	// f16, and the side files (MTP, mmproj) count.
+	query := estimateArguments(subject, saved.Context, saved.Sessions, saved.Profile, saved.SwitchOverrides)
+	unavailable := &actionUnavailableError{blockedAction("estimate_unavailable", "Bubo could not check memory for this setup. The server was not started. Try again after resolving the memory check failure.")}
 	events, err := s.captureEvents(s.ctx, query, 1)
 	if err != nil {
-		return &actionUnavailableError{blockedAction("estimate_unavailable", "Bubo could not check memory for this setup. The server was not started. Try again after resolving the memory check failure.")}
+		return unavailable
 	}
 	estimate, ok := events[0].Value.(*ModelEstimate)
 	if !ok {
 		return protocol("memory estimate answered with another event")
+	}
+	// With several sessions and no saved context, serve starts at the context it
+	// recommends for that session count, not at the default the estimate used
+	// above. Judge the setup serve will run.
+	if saved.Context == 0 && saved.Sessions > 1 {
+		if context := recommendedSessionContext(estimate.MemoryEstimate, saved.Sessions); context != 0 {
+			events, err = s.captureEvents(s.ctx, estimateArguments(subject, context, saved.Sessions, saved.Profile, saved.SwitchOverrides), 1)
+			if err != nil {
+				return unavailable
+			}
+			if estimate, ok = events[0].Value.(*ModelEstimate); !ok {
+				return protocol("memory estimate answered with another event")
+			}
+		}
 	}
 	if estimate.MemoryEstimate == nil || estimate.MemoryEstimate.fitVerdict() == nil {
 		// Supported models without a measured table retain the CLI's own

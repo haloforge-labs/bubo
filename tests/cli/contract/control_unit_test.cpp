@@ -3,7 +3,9 @@
 #include <cstdio>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 #include <thread>
 
@@ -262,6 +264,38 @@ void WindowsProof() {
         "tombstone_error_redacted");
   Check(!cli::RecordedStopped(*tombstone),
         "tombstone_never_means_live_process_exited");
+
+  // status reads every record, so a record of a process that is gone is
+  // dropped once it is a day old. A record of a live process, and a recent
+  // record of a gone process, stay.
+  const auto age = [&](int hours) {
+    fs::last_write_time(path, fs::file_time_type::clock::now() -
+                                  std::chrono::hours(hours));
+  };
+  age(48);
+  Check(cli::DiscoverRecords(root_text).size() == 1 && fs::exists(path),
+        "old_record_of_live_process_kept");
+  {
+    // Edit in place: the record keeps its owner-only ACL. Another creation time
+    // on this PID is a reused PID, so the recorded process is gone.
+    std::string text;
+    {
+      std::ifstream in(path, std::ios::binary);
+      text.assign(std::istreambuf_iterator<char>(in),
+                  std::istreambuf_iterator<char>());
+    }
+    const auto at = text.find(identity.process_creation_time);
+    if (at == std::string::npos)
+      throw std::runtime_error("creation time not in the record");
+    text.replace(at, identity.process_creation_time.size(), "1");
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << text;
+  }
+  Check(cli::DiscoverRecords(root_text).size() == 1 && fs::exists(path),
+        "recent_record_of_gone_process_kept");
+  age(48);
+  Check(cli::DiscoverRecords(root_text).empty() && !fs::exists(path),
+        "old_record_of_gone_process_pruned");
 
   // Delete only the exact files and directories created by this test. CTest
   // runs in its new build directory; no recursive removal is used.

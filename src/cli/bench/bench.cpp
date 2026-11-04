@@ -20,6 +20,7 @@
 
 #include "src/cli/arg_parser.hpp"
 #include "src/cli/brand.hpp"
+#include "src/cli/kv_cache_options.hpp"
 #include "src/cli/prompt/gemma4_prompt.hpp"
 #include "src/cli/sampling_options.hpp"
 #include "src/core/crypto/sha256.hpp"
@@ -28,6 +29,7 @@
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
 #include "src/models/gemma4/engine.hpp"
+#include "src/models/qwen38_flash_next/decode_cycle.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 #include "src/testing/compare/logit_comparator.hpp"
 
@@ -85,6 +87,7 @@ void RegisterBenchOptions(ArgParser& parser, BenchOptions& opt,
   parser.AddOption("-m", "--model", "PATH",
                    "Path to GGUF model file (required)", "Model",
                    &opt.model_path);
+  RegisterKvCacheTypeOption(parser, &opt.kv_cache_type);
 
   parser.AddCustomOption(
       "-p", "--n-prompt", "n,n,...",
@@ -182,6 +185,11 @@ void RegisterBenchOptions(ArgParser& parser, BenchOptions& opt,
       "Flash-Next: teacher-force this text file through the decode and "
       "verify arithmetic and dump per-position log-probabilities",
       "Validation", &opt.logit_eval_path);
+  parser.AddOption("", "--twin-model", "FILE",
+                   "Flash-Next dense twin for small passes", "Validation",
+                   &opt.twin_model_path);
+  parser.AddFlag("", "--no-twin", "Disable the Flash-Next dense twin",
+                 "Validation", &opt.no_twin);
   parser.AddOption("", "--logit-out", "PREFIX",
                    "Output prefix for --logit-eval (PREFIX-s<i>.bin)",
                    "Validation", &opt.logit_out);
@@ -270,6 +278,10 @@ void RegisterBenchOptions(ArgParser& parser, BenchOptions& opt,
         return true;
       });
   RegisterSamplingOptions(parser, &opt.sampling, "Sampling", false);
+  parser.AddFlag("", "--enable-yarn",
+                 "Flash-Next: static YaRN, required when depth + prompt or "
+                 "generation exceeds the native 262144",
+                 "Model", &opt.enable_yarn);
   parser.AddFlag("-v", "--verbose",
                  "Print detailed timing, latency breakdown, and tok/s metrics",
                  "General", &opt.verbose);
@@ -906,6 +918,17 @@ bool IsQwen38FlashNext(const core::GgufReader& reader) {
 int RunFlashNextLogitEval(models::qwen38_flash_next::Model& model,
                           const BenchOptions& options, std::uint32_t context) {
   constexpr std::uint32_t kTop = 64;
+  bool diagnostics = false;
+  std::string diagnostic_error;
+  if (!models::qwen38_flash_next::ParseLogitEvalDump(
+          std::getenv("GUFO_LOGIT_EVAL_DUMP"), std::getenv("GUFO_DEBUG_HOOKS"),
+          &diagnostics, &diagnostic_error)) {
+    std::cerr << "Error: " << diagnostic_error << '\n';
+    return 1;
+  }
+  const bool full_diagnostics =
+      diagnostics &&
+      std::string_view(std::getenv("GUFO_LOGIT_EVAL_DUMP")) == "1";
   std::ifstream in(options.logit_eval_path, std::ios::binary);
   if (!in) {
     std::cerr << "Error: cannot read " << options.logit_eval_path << '\n';
@@ -938,6 +961,12 @@ int RunFlashNextLogitEval(models::qwen38_flash_next::Model& model,
     }
     schedules.push_back(std::move(*widths));
     start = end + 1;
+  }
+  if (diagnostics &&
+      (!model.HasMtp() ||
+       std::find(prefill.begin(), prefill.end(), true) != prefill.end())) {
+    std::cerr << "Error: head dumps require MTP and decode/verify schedules\n";
+    return 1;
   }
   const std::string prefix =
       options.logit_out.empty() ? "logit-eval" : options.logit_out;
@@ -974,6 +1003,29 @@ int RunFlashNextLogitEval(models::qwen38_flash_next::Model& model,
     put(std::uint32_t{1});
     put(vocab);
     put(kTop);
+    std::ofstream heads_out, full_out;
+    models::qwen38_flash_next::Session::LogitEvalHeadRows heads;
+    const auto write_value = [](std::ofstream& file, const auto& value) {
+      file.write(reinterpret_cast<const char*>(&value), sizeof(value));
+    };
+    if (diagnostics) {
+      heads_out.open(prefix + "-head-s" + std::to_string(s) + ".bin",
+                     std::ios::binary);
+      heads_out.write("GFHS", 4);
+      write_value(heads_out, std::uint32_t{1});
+    }
+    if (full_diagnostics) {
+      full_out.open(prefix + "-full-s" + std::to_string(s) + ".bin",
+                    std::ios::binary);
+      full_out.write("GFLF", 4);
+      write_value(full_out, std::uint32_t{1});
+      write_value(full_out, vocab);
+    }
+    if (!out || (diagnostics && !heads_out) ||
+        (full_diagnostics && !full_out)) {
+      std::cerr << "Error: cannot open logit-eval output\n";
+      return 1;
+    }
     double nll = 0;
     std::size_t count = 0;
     const auto start = std::chrono::steady_clock::now();
@@ -981,8 +1033,11 @@ int RunFlashNextLogitEval(models::qwen38_flash_next::Model& model,
     for (std::size_t k = 0; p + 1 < tokens.size(); ++k) {
       const std::size_t width = std::min(schedules[s][k % schedules[s].size()],
                                          tokens.size() - 1 - p);
-      if (!session->TeacherForce(std::span(tokens).subspan(p, width), &rows,
-                                 &error, prefill[s])) {
+      if (!session->TeacherForce(
+              std::span(tokens).subspan(p, width), &rows, &error, prefill[s],
+              diagnostics ? &heads : nullptr,
+              diagnostics ? std::span(tokens).subspan(p + 1, width)
+                          : std::span<const std::int32_t>{})) {
         std::cerr << "Error: teacher forcing at " << p << ": " << error << '\n';
         return 1;
       }
@@ -1001,6 +1056,45 @@ int RunFlashNextLogitEval(models::qwen38_flash_next::Model& model,
                           });
         const std::int32_t target = tokens[p + j + 1];
         const float target_lp = static_cast<float>(row[target] - lse);
+        if (diagnostics) {
+          // GFLF: position, width, forced target, chosen token, F64 LSE,
+          // then vocab F32 raw logits. GFLE remains byte-compatible.
+          if (full_diagnostics) {
+            write_value(full_out, static_cast<std::uint32_t>(p + j));
+            write_value(full_out, static_cast<std::uint32_t>(width));
+            write_value(full_out, target);
+            write_value(full_out, order[0]);
+            write_value(full_out, lse);
+            full_out.write(reinterpret_cast<const char*>(row),
+                           vocab * sizeof(float));
+          }
+          const auto hidden =
+              static_cast<std::uint32_t>(heads.target.size() / width);
+          // GFHS: kind (0 decode, 1 verify, 2 draft), pass width, row index,
+          // prediction position, chosen token, forced target, hidden size,
+          // followed by that many F32 values entering the output projection.
+          const auto write_head =
+              [&](std::uint32_t kind, std::uint32_t pass_width,
+                  std::uint32_t position, std::int32_t chosen,
+                  std::int32_t forced, const float* input) {
+                for (auto value :
+                     {kind, pass_width,
+                      kind == 2 ? 0u : static_cast<std::uint32_t>(j), position})
+                  write_value(heads_out, value);
+                write_value(heads_out, chosen);
+                write_value(heads_out, forced);
+                write_value(heads_out, hidden);
+                heads_out.write(reinterpret_cast<const char*>(input),
+                                hidden * sizeof(float));
+              };
+          write_head(width == 1 ? 0 : 1, static_cast<std::uint32_t>(width),
+                     static_cast<std::uint32_t>(p + j), order[0], target,
+                     heads.target.data() + j * hidden);
+          write_head(2, 1, static_cast<std::uint32_t>(p + j + 1),
+                     heads.draft_tokens[j],
+                     p + j + 2 < tokens.size() ? tokens[p + j + 2] : -1,
+                     heads.draft.data() + j * hidden);
+        }
         put(static_cast<std::int32_t>(p + j));
         put(static_cast<std::int32_t>(width));
         put(target);
@@ -1015,6 +1109,16 @@ int RunFlashNextLogitEval(models::qwen38_flash_next::Model& model,
         ++count;
       }
       p += width;
+    }
+    out.flush();
+    if (diagnostics)
+      heads_out.flush();
+    if (full_diagnostics)
+      full_out.flush();
+    if (!out || (diagnostics && !heads_out) ||
+        (full_diagnostics && !full_out)) {
+      std::cerr << "Error: logit-eval output write failed\n";
+      return 1;
     }
     const double seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
@@ -1032,6 +1136,20 @@ int RunQwen38FlashNextBenchmark(
     const std::shared_ptr<const core::GgufReader>& reader,
     std::chrono::steady_clock::time_point model_load_start) {
   namespace qfn = models::qwen38_flash_next;
+  bool dump_heads = false;
+  std::string dump_error;
+  if (!qfn::ParseLogitEvalDump(std::getenv("GUFO_LOGIT_EVAL_DUMP"),
+                               std::getenv("GUFO_DEBUG_HOOKS"), &dump_heads,
+                               &dump_error)) {
+    std::cerr << "Error: " << dump_error << '\n';
+    return 1;
+  }
+  if (dump_heads && (options.logit_eval_path.empty() ||
+                     options.speculative_backend != "mtp")) {
+    std::cerr
+        << "Error: head dumps require --logit-eval and --speculative mtp\n";
+    return 1;
+  }
   int device_count = 0;
   if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
     std::cerr << "Error: no HIP GPU is available for Qwen3.8-Flash-Next\n";
@@ -1042,15 +1160,15 @@ int RunQwen38FlashNextBenchmark(
     return values.empty() ? std::size_t{0}
                           : *std::max_element(values.begin(), values.end());
   };
-  const std::size_t max_depth = max_or_zero(options.n_depths);
-  const std::size_t max_prompt = max_or_zero(options.n_prompts);
-  const std::size_t max_generation = max_or_zero(options.n_gens);
-  if (std::max({max_depth, max_prompt, max_generation,
-                options.validate_prefill_tokens}) >
+  if (std::max({max_or_zero(options.n_depths), max_or_zero(options.n_prompts),
+                max_or_zero(options.n_gens), options.validate_prefill_tokens}) >
       std::numeric_limits<std::uint32_t>::max()) {
     std::cerr << "Error: benchmark workload exceeds the context range\n";
     return 1;
   }
+  const std::size_t max_depth = max_or_zero(options.n_depths);
+  const std::size_t max_prompt = max_or_zero(options.n_prompts);
+  const std::size_t max_generation = max_or_zero(options.n_gens);
   const std::size_t base_context =
       std::max({std::size_t{4096}, max_depth + max_prompt + 1,
                 std::max<std::size_t>(max_depth, 16) + max_generation + 1,
@@ -1058,8 +1176,8 @@ int RunQwen38FlashNextBenchmark(
   // Logit-eval texts are short; 32K covers any sensible corpus.
   const std::size_t required_context =
       options.logit_eval_path.empty()
-          ? base_context
-          : std::max<std::size_t>(base_context, 32768);
+          ? std::max(base_context, FlashNextBenchContext(options))
+          : std::max<std::size_t>({base_context, FlashNextBenchContext(options), 32768});
   const bool mtp = options.speculative_backend == "mtp";
   if (!options.speculative_backend.empty() && !mtp) {
     std::cerr << "Error: Qwen3.8-Flash-Next supports only --speculative mtp "
@@ -1086,11 +1204,23 @@ int RunQwen38FlashNextBenchmark(
     return 1;
   }
 
+  // The same --enable-yarn rule as serve, applied to the context that sizes
+  // the benchmark's own requests.
+  const std::uint32_t qwen4exp_native_context =
+      reader->GetMetadataUint32("qwen4exp.context_length").value_or(0);
+  std::optional<qfn::RopeScaling> rope_scaling;
+  std::string yarn_error;
+  if (!ResolveFlashNextBenchYarn(options, qwen4exp_native_context,
+                                 &rope_scaling, &yarn_error)) {
+    std::cerr << "Error: Flash-Next benchmark: " << yarn_error << '\n';
+    return 1;
+  }
+
   // `serve` runs Flash-Next MTP with prompt lookup and the auto draft
   // vocabulary (release profile defaults that need no package file). The
   // direct bench path takes the same defaults, so `bench --speculative mtp`
   // measures the decoding a user gets from `serve`. The logit evaluation keeps
-  // the plain arithmetic path (teacher-forced, no drafting).
+  // the plain teacher-forced path; optional diagnostics also trace draft rows.
   const bool serve_defaults = mtp && options.logit_eval_path.empty();
   if (serve_defaults) {
     std::cerr << "bench: Flash-Next MTP with prompt lookup on and the auto "
@@ -1103,9 +1233,18 @@ int RunQwen38FlashNextBenchmark(
           .max_context = static_cast<std::uint32_t>(required_context),
           .mtp_model_path = mtp ? options.mtp_model_path : "",
           .max_draft_tokens = std::max<std::uint32_t>(1, options.draft_tokens),
+          .rope_scaling = rope_scaling,
           .prompt_lookup = serve_defaults,
           .draft_vocabulary = serve_defaults ? qfn::DraftVocabulary::kAuto
+                              : dump_heads   ? qfn::DraftVocabulary::kLatinText
                                              : qfn::DraftVocabulary::kFull,
+          .resolved_artefacts =
+              options.no_twin || !options.twin_model_path.empty(),
+          .twin_model_path = options.no_twin ? "" : options.twin_model_path,
+          .draft_head_model_path = std::getenv("GUFO_DRAFT_OUT_MODEL")
+                                       ? std::getenv("GUFO_DRAFT_OUT_MODEL")
+                                       : "",
+          .kv_cache_type = options.kv_cache_type,
       },
       &error);
   if (model == nullptr) {
@@ -1114,6 +1253,11 @@ int RunQwen38FlashNextBenchmark(
     return 1;
   }
   PrintModelLoadTime(model_load_start);
+  if (rope_scaling) {
+    std::cout << "[YaRN]: factor=" << rope_scaling->factor
+              << " original_context=" << qwen4exp_native_context
+              << " context=" << required_context << '\n';
+  }
   if (!options.logit_eval_path.empty()) {
     return RunFlashNextLogitEval(*model, options,
                                  static_cast<std::uint32_t>(required_context));
@@ -1299,7 +1443,10 @@ int RunQwen38FlashNextBenchmark(
           std::cerr << "Qwen3.8-Flash-Next tg depth=" << depth
                     << " cycles=" << stats.cycles
                     << " drafted=" << stats.drafted
-                    << " accepted=" << stats.accepted << " output_sha256="
+                    << " accepted=" << stats.accepted
+                    << " lookup_proposed=" << stats.lookup
+                    << " lookup_accepted=" << stats.lookup_accepted
+                    << " output_sha256="
                     << crypto::Sha256Hex(
                            std::span(reinterpret_cast<const std::uint8_t*>(
                                          generated.data()),
@@ -1495,6 +1642,34 @@ int RunGemma4Benchmark(const BenchOptions& options,
 
 }  // namespace
 
+std::size_t FlashNextBenchContext(const BenchOptions& options) {
+  const auto max_or_zero = [](const std::vector<std::size_t>& values) {
+    return values.empty() ? std::size_t{0}
+                          : *std::max_element(values.begin(), values.end());
+  };
+  const std::size_t max_depth = max_or_zero(options.n_depths);
+  return std::max(
+      {std::size_t{4096}, max_depth + max_or_zero(options.n_prompts) + 1,
+       std::max<std::size_t>(max_depth, 16) + max_or_zero(options.n_gens) + 1,
+       options.validate_prefill_tokens + 1});
+}
+
+bool ResolveFlashNextBenchYarn(
+    const BenchOptions& options, std::uint32_t native,
+    std::optional<models::qwen38_flash_next::RopeScaling>* scaling,
+    std::string* error) {
+  const std::size_t context = FlashNextBenchContext(options);
+  if (context > std::numeric_limits<std::uint32_t>::max()) {
+    *scaling = std::nullopt;
+    if (error != nullptr)
+      *error = "benchmark workload exceeds the context range";
+    return false;
+  }
+  return models::qwen38_flash_next::ResolveRopeScaling(
+      static_cast<std::uint32_t>(context), native, options.enable_yarn, scaling,
+      error);
+}
+
 void PrintBenchHelp(std::string_view program_name) {
   BenchOptions opt;
   bool explicit_p = false;
@@ -1616,8 +1791,19 @@ int RunBench(std::span<const char* const> args) {
   }
   const std::shared_ptr<const gufo::core::GgufReader> reader(
       std::move(reader_owner));
+  if (!ValidateKvCacheTypeForArchitecture(
+          opt.kv_cache_type,
+          reader->GetMetadataString("general.architecture").value_or(""),
+          &err)) {
+    std::cerr << "Error: " << err << '\n';
+    return 1;
+  }
 
 #if defined(ENGINE_ENABLE_HIP)
+  if (opt.enable_yarn && !IsQwen38FlashNext(*reader)) {
+    std::cerr << "Error: --enable-yarn applies only to Qwen3.8-Flash-Next\n";
+    return 1;
+  }
   if (IsDeepSeekV4Flash(*reader)) {
     return RunDeepSeekBenchmark(opt, reader, model_load_start);
   }

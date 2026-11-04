@@ -1,6 +1,7 @@
 import { afterEach, expect, test, vi } from 'vitest'
 import { page } from 'vitest/browser'
 import { actions } from '@/lib/bindings'
+import { settingLabel } from '@/lib/presentation'
 import { coreView, mountCorePage } from '@/components/core-page-test-support'
 
 afterEach(() => vi.restoreAllMocks())
@@ -9,12 +10,13 @@ for (const path of ['/', '/settings'] as const) {
   test(`${path} clears only the CLI-identified rejected override`, async () => {
     const view = coreView('switch-override-rejected')
     const name = view.failure!.switch!
-    const label = view.switches.find((row) => row.name === name)!.label
+    // The GUI's own words for the row, not the registry's "Reasoning length".
+    const label = settingLabel(view.switches.find((row) => row.name === name)!)
     const clear = vi.spyOn(actions, 'SetSwitchOverrides').mockResolvedValue({})
     mountCorePage(path, view)
     await expect
       .element(page.getByRole('region', { name: 'Rejected override' }))
-      .toHaveTextContent(label!)
+      .toHaveTextContent(label)
     await expect
       .element(
         page

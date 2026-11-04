@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "src/core/crypto/sha256.hpp"
+#include "src/models/deepseek_v4_flash/tool_calls.hpp"
 
 namespace gufo::models::deepseek_v4_flash {
 namespace {
@@ -147,26 +148,41 @@ std::string PythonJsonSpacing(std::string_view value) {
   return output;
 }
 
-void AppendToolsPrompt(std::string& output, std::span<const ChatTool> tools,
-                       bool require_tool_call) {
+void AppendToolsPrompt(std::string& output, std::span<const ChatTool> tools) {
   if (tools.empty()) {
     return;
   }
   output.append(
       "## Tools\n\n"
-      "You have access to a set of tools to help answer the user's question. "
-      "You can invoke tools by writing a \"<｜DSML｜tool_calls>\" block like "
-      "the following:\n\n"
-      "<｜DSML｜tool_calls>\n"
-      "<｜DSML｜invoke name=\"$TOOL_NAME\">\n"
-      "<｜DSML｜parameter name=\"$PARAMETER_NAME\" "
-      "string=\"true|false\">$PARAMETER_VALUE</｜DSML｜parameter>\n"
-      "...\n"
-      "</｜DSML｜invoke>\n"
-      "<｜DSML｜invoke name=\"$TOOL_NAME2\">\n"
-      "...\n"
-      "</｜DSML｜invoke>\n"
-      "</｜DSML｜tool_calls>\n\n"
+      "You have access to a set of tools to help answer the user's "
+      "question. You can invoke tools by writing a \"");
+  output.append(DeepSeekToolSyntax::kCallsOpen);
+  output.append("\" block like the following:\n\n");
+  output.append(DeepSeekToolSyntax::kCallsOpen);
+  output.push_back('\n');
+  output.append(DeepSeekToolSyntax::kInvokeOpens[0]);
+  output.push_back(' ');
+  output.append(DeepSeekToolSyntax::kNameAttribute);
+  output.append("$TOOL_NAME\">\n");
+  output.append(DeepSeekToolSyntax::kParameterOpens[0]);
+  output.push_back(' ');
+  output.append(DeepSeekToolSyntax::kNameAttribute);
+  output.append("$PARAMETER_NAME\" ");
+  output.append(DeepSeekToolSyntax::kStringAttribute);
+  output.append("true|false\">$PARAMETER_VALUE");
+  output.append(DeepSeekToolSyntax::kParameterCloses[0]);
+  output.append("\n...\n");
+  output.append(DeepSeekToolSyntax::kInvokeCloses[0]);
+  output.push_back('\n');
+  output.append(DeepSeekToolSyntax::kInvokeOpens[0]);
+  output.push_back(' ');
+  output.append(DeepSeekToolSyntax::kNameAttribute);
+  output.append("$TOOL_NAME2\">\n...\n");
+  output.append(DeepSeekToolSyntax::kInvokeCloses[0]);
+  output.push_back('\n');
+  output.append(DeepSeekToolSyntax::kCallsClose);
+  output.append(
+      "\n\n"
       "String parameters should be specified as is and set `string=\"true\"`. "
       "For all other types (numbers, booleans, arrays, objects), pass the "
       "value in JSON format and set `string=\"false\"`.\n\n"
@@ -200,10 +216,6 @@ void AppendToolsPrompt(std::string& output, std::span<const ChatTool> tools,
   output.append(
       "\n\nYou MUST strictly follow the above defined tool name and parameter "
       "schemas to invoke tool calls.\n");
-  if (require_tool_call) {
-    output.append(
-        "\n\nYou MUST invoke at least one available tool before answering.");
-  }
 }
 
 void AppendToolCalls(std::string& output,
@@ -211,32 +223,41 @@ void AppendToolCalls(std::string& output,
   if (calls.empty()) {
     return;
   }
-  output.append("\n\n<｜DSML｜tool_calls>\n");
+  output.append("\n\n");
+  output.append(DeepSeekToolSyntax::kCallsOpen);
+  output.push_back('\n');
   for (std::size_t call_index = 0; call_index < calls.size(); ++call_index) {
     const auto& call = calls[call_index];
-    output.append("<｜DSML｜invoke name=\"");
+    output.append(DeepSeekToolSyntax::kInvokeOpens[0]);
+    output.push_back(' ');
+    output.append(DeepSeekToolSyntax::kNameAttribute);
     output.append(call.name);
     output.append("\">\n");
     for (std::size_t argument_index = 0; argument_index < call.arguments.size();
          ++argument_index) {
       const auto& argument = call.arguments[argument_index];
-      output.append("<｜DSML｜parameter name=\"");
+      output.append(DeepSeekToolSyntax::kParameterOpens[0]);
+      output.push_back(' ');
+      output.append(DeepSeekToolSyntax::kNameAttribute);
       output.append(argument.name);
-      output.append("\" string=\"");
+      output.append("\" ");
+      output.append(DeepSeekToolSyntax::kStringAttribute);
       output.append(argument.is_string ? "true" : "false");
       output.append("\">");
       output.append(argument.value);
-      output.append("</｜DSML｜parameter>");
+      output.append(DeepSeekToolSyntax::kParameterCloses[0]);
       if (argument_index + 1 < call.arguments.size()) {
         output.push_back('\n');
       }
     }
-    output.append("\n</｜DSML｜invoke>");
+    output.push_back('\n');
+    output.append(DeepSeekToolSyntax::kInvokeCloses[0]);
     if (call_index + 1 < calls.size()) {
       output.push_back('\n');
     }
   }
-  output.append("\n</｜DSML｜tool_calls>");
+  output.push_back('\n');
+  output.append(DeepSeekToolSyntax::kCallsClose);
 }
 
 }  // namespace
@@ -296,7 +317,7 @@ std::string RenderChat(std::span<const ChatMessage> messages,
       }
     }
     if (tool_host_index == messages.size()) {
-      AppendToolsPrompt(output, tools, options.require_tool_call);
+      AppendToolsPrompt(output, tools);
     }
   }
 
@@ -310,7 +331,7 @@ std::string RenderChat(std::span<const ChatMessage> messages,
         if (!message.content.empty()) {
           output.append("\n\n");
         }
-        AppendToolsPrompt(output, tools, options.require_tool_call);
+        AppendToolsPrompt(output, tools);
       }
       continue;
     }
@@ -325,7 +346,7 @@ std::string RenderChat(std::span<const ChatMessage> messages,
         if (!message.content.empty()) {
           output.append("\n\n");
         }
-        AppendToolsPrompt(output, tools, options.require_tool_call);
+        AppendToolsPrompt(output, tools);
       }
       continue;
     }

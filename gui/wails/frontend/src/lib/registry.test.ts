@@ -3,6 +3,7 @@ import { dummyRow } from '../../tests/dummy-registry'
 import {
   fieldFromRow,
   fieldsFromRegistry,
+  parseAllowed,
   schemaFromAllowed,
   schemaFromRegistry,
   UnsupportedRegistryError,
@@ -66,6 +67,18 @@ test('numeric bounds, exclusive minimum, special allowed numbers and finite form
   expect([0, 3, 7].every((value) => schema.safeParse(value).success)).toBe(true)
   expect(
     [1, 2, 8, NaN, Infinity].every((value) => !schema.safeParse(value).success),
+  ).toBe(true)
+})
+
+test('a word the CLI accepts next to a number is part of the allowed contract', () => {
+  const allowed = { type: 'integer' as const, minimum: 1, also: ['off'] }
+  expect(parseAllowed(allowed).also).toEqual(['off'])
+  const schema = schemaFromAllowed(allowed)
+  expect(
+    ['off', 1, 4096].every((value) => schema.safeParse(value).success),
+  ).toBe(true)
+  expect(
+    ['on', 0, 1.5].every((value) => !schema.safeParse(value).success),
   ).toBe(true)
 })
 

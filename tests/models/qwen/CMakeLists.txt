@@ -14,6 +14,9 @@ add_qwen_cpu_test(parallel_for_test
 
 # Qwen tests mirror src/models/qwen so focused module, policy, and runtime
 # changes have an obvious validation target while preserving CTest names.
+add_qwen_cpu_test(qwen_vision_cache_test
+  tests/models/qwen/vision_cache_test.cpp
+  "cpu;vision;qwen;correctness")
 add_qwen_cpu_test(qwen_tokenizer_test
   tests/models/qwen/tokenization/tokenizer_test.cpp
   "cpu;tokenization;qwen")
@@ -107,6 +110,9 @@ if (ENGINE_ENABLE_HIP)
   add_qwen_hip_test(qwen_hip_device_gate_test
     tests/models/qwen/hip/device_gate_test.cpp
     "hip;qwen;test-support;device-gate")
+  add_qwen_hip_test(qwen_prompt_hidden_buffer_test
+    tests/models/qwen/hip/prompt_hidden_buffer_test.cpp
+    "hip;gpu;qwen")
 
   add_qwen_hip_test(qwen_gpu_ops_test
     tests/models/qwen/hip/basic/blas_ops_test.cpp

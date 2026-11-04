@@ -25,10 +25,11 @@ test('request metrics use the recorded rows and sorting preserves one line per r
   await expect
     .poll(() => document.querySelectorAll('tbody tr').length)
     .toBe(view.requests.length)
-  for (const row of view.requests)
-    expect(document.querySelector('tbody')?.textContent).toContain(
-      row.finish_reason || row.outcome,
-    )
+  // Results and cache states are words, never the wire values.
+  expect(document.querySelector('tbody')?.textContent).toContain('Completed')
+  expect(document.querySelector('tbody')?.textContent).not.toMatch(
+    /\bstop\b|\bmemory\b|\bmiss\b/,
+  )
   await page.getByRole('button', { name: /Prompt/ }).click()
   await expect
     .element(page.getByRole('columnheader', { name: /Prompt/ }))
@@ -69,11 +70,55 @@ test('absent values show a dash while reported zeroes remain zero', async () => 
   expect(values[4]).toBe('—')
   expect(values[5]).toBe('—')
 })
-test('empty request history stays empty', async () => {
+test('empty request history is one sentence: no charts, table, definitions or zero count', async () => {
   const view = fixture('ready-idle')
   view.requests = []
   cleanup = renderView(<RequestsPage />, view).cleanup
   await expect.element(page.getByText('No requests yet.')).toBeVisible()
+  expect(document.querySelector('table')).toBeNull()
+  expect(document.body.textContent).not.toContain('0 requests')
+  expect(document.body.textContent).not.toContain('Oldest')
+  expect(document.body.textContent).not.toContain('reported for completed')
+  expect(document.body.textContent).not.toContain('Time is local')
+})
+
+test('cache and finish words replace wire values, and the full terms sit in titles', async () => {
+  const view = fixture('ready-busy')
+  const template = view.requests[0]!
+  view.requests = [
+    { ...template, id: 'a', cache_kind: 'memory', finish_reason: 'stop' },
+    { ...template, id: 'b', cache_kind: 'disk', finish_reason: 'length' },
+    { ...template, id: 'c', cache_kind: 'miss', finish_reason: 'cancelled' },
+    {
+      ...template,
+      id: 'd',
+      cache_kind: 'miss',
+      finish_reason: 'stop_sequence',
+    },
+  ]
+  cleanup = renderView(<RequestsPage />, view).cleanup
+  await expect.poll(() => document.querySelectorAll('tbody tr').length).toBe(4)
+  const cells = (id: string) =>
+    Array.from(document.querySelectorAll('tbody tr'))
+      .find((row) => row.lastElementChild?.textContent === id)!
+      .querySelectorAll('td')
+  expect([cells('a')[7]!.textContent, cells('a')[8]!.textContent]).toEqual([
+    'RAM hit',
+    'Completed',
+  ])
+  expect([cells('b')[7]!.textContent, cells('b')[8]!.textContent]).toEqual([
+    'Disk hit',
+    'Token limit',
+  ])
+  expect(cells('c')[8]!.textContent).toBe('Cancelled')
+  expect(cells('d')[8]!.textContent).toBe('Stop sequence')
+  // The raw finish reason stays in the title.
+  expect(cells('b')[8]!.querySelector('span')!.getAttribute('title')).toContain(
+    'length',
+  )
+  expect(
+    page.getByRole('button', { name: /TTFT/ }).element().getAttribute('title'),
+  ).toBe('Time to first token, in milliseconds')
 })
 
 test('request rates align at one decimal and TTFT at whole milliseconds', async () => {
@@ -241,14 +286,11 @@ test('a request that did not complete shows its outcome and cause, never the fin
   )
   expect(rows['req-busy']).toBe('Failed: the server was busy.')
   expect(rows['req-key']).toBe('Failed: the API key was missing or wrong.')
-  expect(rows['req-bad']).toBe(
-    'Failed: the request was not valid (invalid_tool).',
-  )
-  expect(rows['req-5xx']).toBe(
-    'Failed: the server could not answer (backend_error).',
-  )
+  // Unknown codes never reach the sentence; they stay in the title.
+  expect(rows['req-bad']).toBe('Failed: the request was not valid.')
+  expect(rows['req-5xx']).toBe('Failed: the server could not answer.')
   expect(rows['req-gone']).toBe('Stopped: the client disconnected.')
-  expect(rows['req-done']).toBe('stop')
+  expect(rows['req-done']).toBe('Completed')
   // The raw status and code stay available in the cell's title.
   const refusedCell = Array.from(document.querySelectorAll('tbody tr'))
     .find((row) => row.lastElementChild?.textContent === 'req-refused')!

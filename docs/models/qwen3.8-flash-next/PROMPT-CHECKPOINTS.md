@@ -27,7 +27,9 @@ below; none is averaged away or hidden.
   path. Disk-enabled text prompts now use the same admitted in-pass capture;
   a learned disk boundary coincident with the stable target shares it at the
   unchanged position. Distinct learned boundaries still split: the engine
-  supports one checkpoint with at most eight suffix tokens per chunk. The
+  supports one checkpoint with at most twelve suffix tokens per chunk (eight
+  before the snapshot alignment: a stable boundary rounded down to a multiple of
+  the four-query attention group lies up to three rows further from the end). The
   128-token final-pass allowance does not extend that checkpoint suffix limit.
   `GUFO_DISK_INPASS=0` restores the previous disk copying path (read once;
   unset enables the new path). This disk extension needs operator qualification;
@@ -223,3 +225,26 @@ During a functional run, `ksoftirqd` threads used roughly seven cores, almost
 all in tasklet softirqs. The n-gram table is read with `O_DIRECT` from a
 dm-crypt volume on this machine, a likely source that was not confirmed. It
 applies to every binary and was not investigated further.
+
+## Fast prefill and the length of a request
+
+`--prefill-mode fast` cuts the routed experts of the prompt rows a request
+computes (three experts per token with the fold scalars) and keeps the last 256
+rows in full precision. The cut gains little on a short pass (cold: 2.9K tokens
++3.5 to +7 %, 7.9K +12 to +13 %) and about 16 % on a long one (16K to 100K
+tokens). The full-precision tail has a cost: the next turn restores only up to
+the tail and computes it again.
+
+A request therefore cuts only when the rows it still has to compute reach 4,096
+(`kPrefillExpertMinNewTokens`): the prompt less the rows restored from the
+cache. A shorter request runs exactly as the normal mode does: the same rows,
+the same pass boundaries, the same checkpoints, no tail. A warm agent turn
+reads a few hundred new tokens, so a warm session never cuts.
+
+Rows restored from the cache keep the arithmetic they were computed with, so
+the cache identity of a prompt carries no row policy. One request can restore
+cut rows from a long first prompt and compute its few new rows in full
+precision; a later long paste is cut again from the rows it adds. A restore
+inside the cut region followed by a long new part gives the cold result. A
+restore followed by a short new part gives the normal-mode result for those
+rows, not the result of a cold fast run of the whole prompt.

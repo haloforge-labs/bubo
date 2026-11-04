@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <deque>
 #include <exception>
+#include <fstream>
 #include <iomanip>
 #include <iterator>
 #include <limits>
@@ -29,6 +30,7 @@
 #include "src/cli/serve/stop_sequences.hpp"
 #include "src/cli/serve/trace.hpp"
 #include "src/core/platform/memory_guard.hpp"
+#include "src/core/platform/os_info.hpp"
 
 namespace gufo::server {
 namespace {
@@ -86,6 +88,7 @@ struct ScheduledRequest {
   std::string client_id{"anonymous"};
   std::vector<TextRunnerToken> prompt;
   std::shared_ptr<const TextPromptContext> prompt_context;
+  std::shared_ptr<const TextPromptContext> cache_context;
   bool cache_prompt{true};
   std::size_t cache_prefix_tokens{0};
   bool stop_at_eos{true};
@@ -156,6 +159,13 @@ struct ScheduledRequest {
   std::size_t prefix_position{0};
   bool prefix_considered{false};
   std::optional<TextGenerationScheduler::Clock::time_point> prefix_wait_start;
+  // Admission also waits, once and bounded, for a disk job writing a much
+  // deeper prefix of the prompt (a conversation larger than the RAM budget).
+  std::optional<TextGenerationScheduler::Clock::time_point>
+      publication_wait_start;
+  bool publication_waiting{false};
+  TextPendingPublication publication;
+  detail::PublicationWaitEstimate::Milliseconds publication_wait_limit{};
   // The held `/slots` session while counted_processing is set. Only the
   // scheduler worker changes it.
   std::size_t session{kNoSession};
@@ -179,6 +189,38 @@ struct PendingClient {
   std::string client_id;
   std::deque<std::shared_ptr<ScheduledRequest>> requests;
 };
+
+void LogPublicationWait(const std::shared_ptr<ScheduledRequest>& request,
+                        std::string_view stage, std::string_view release = {}) {
+  if (!Logger::Enabled(LogLevel::kInfo))
+    return;
+  std::ostringstream line;
+  line << "event=publication_wait request=" << request->id << " stage=" << stage
+       << " checkpoint_id=" << request->publication.checkpoint_id
+       << " pending_tokens=" << request->publication.pending_tokens
+       << " available_tokens=" << request->publication.available_tokens
+       << " limit_ms=" << request->publication_wait_limit.count();
+  if (request->publication_wait_start)
+    line << " wait_ms="
+         << std::chrono::duration<double, std::milli>(
+                TextGenerationScheduler::Clock::now() -
+                *request->publication_wait_start)
+                .count();
+  if (!release.empty())
+    line << " release=" << release;
+  Logger::Info("cache", line.str());
+}
+
+void EndPublicationWait(const std::shared_ptr<ScheduledRequest>& request,
+                        std::string_view reason) noexcept {
+  if (!std::exchange(request->publication_waiting, false))
+    return;
+  try {
+    LogPublicationWait(request, "release", reason);
+  } catch (...) {
+    // Observability cannot prevent cancellation or failure completion.
+  }
+}
 
 bool IsTerminal(const std::shared_ptr<ScheduledRequest>& request) noexcept {
   return request->phase.load(std::memory_order_acquire) ==
@@ -428,6 +470,8 @@ void WriteGenerationTrace(GenerationTrace trace,
                           const TextGenerationScheduler::Result& result,
                           const std::exception_ptr& failure) {
   auto& record = trace.record;
+  if (result.component_cache)
+    record["component_cache"] = ComponentCacheJson(*result.component_cache);
   record["prompt_tokens"] = result.prompt_tokens;
   record["cache"] = result.cache_disk_hit ? "disk"
                     : result.cache_hit    ? "memory"
@@ -457,6 +501,29 @@ void WriteGenerationTrace(GenerationTrace trace,
   Trace::Write(record);
 }
 
+std::size_t ResidentKiB() {
+  return static_cast<std::size_t>(platform::ResidentMemoryBytes() / 1024);
+}
+
+// The first constrained request would otherwise build the vocabulary inside
+// its queue time (about 30 ms for Flash-Next's 248,320 tokens).
+void PrepareStructuredOutput(const TextModelRunner& runner) {
+  const auto resident = ResidentKiB();
+  const auto started = std::chrono::steady_clock::now();
+  const auto tokens = runner.PrepareConstraintVocabulary();
+  if (tokens == 0)
+    return;
+  const std::chrono::duration<double, std::milli> elapsed =
+      std::chrono::steady_clock::now() - started;
+  std::ostringstream line;
+  line << "event=structured_output_prepared vocabulary_tokens=" << tokens
+       << " prepare_ms=" << std::fixed << std::setprecision(1)
+       << elapsed.count() << " rss_delta_kib="
+       << static_cast<long long>(ResidentKiB()) -
+              static_cast<long long>(resident)
+       << ' ' << Logger::MemoryStatus();
+  Logger::Info("loader", line.str());
+}
 /// Optional memory ledger (GUFO_MEM_ACCOUNTING, the switch that already prints
 /// the load-time accounting): the device memory this process holds, sampled at
 /// phase boundaries (after a prefill step, after a decode batch, at request
@@ -589,6 +656,7 @@ struct TextGenerationScheduler::Impl {
             .Descriptor()
             .capabilities.batched_multi_token_decode_max_width;
     device_lost_requests.reserve(runner_pool->capacity());
+    PrepareStructuredOutput(runner_pool->runner());
     worker = std::jthread(
         [this](const std::stop_token& stop_token) { Run(stop_token); });
     if (scheduler_policy.stall_timeout.count() > 0) {
@@ -843,6 +911,7 @@ struct TextGenerationScheduler::Impl {
 
   void CompleteCancelled(
       const std::shared_ptr<ScheduledRequest>& request) noexcept {
+    EndPublicationWait(request, "cancelled");
     if (device_lost.load(std::memory_order_acquire)) {
       CompleteFailure(request, device_lost_failure);
       return;
@@ -850,6 +919,7 @@ struct TextGenerationScheduler::Impl {
     try {
       if (request->runner_request) {
         const auto retained = request->runner_request.Cancel();
+        request->result.component_cache = retained.component_cache;
         request->result.cache_snapshot_bytes = retained.snapshot_bytes;
         request->result.cache_snapshot_ms = retained.snapshot_ms;
         request->result.cache_disk_queued_bytes = retained.disk_queued_bytes;
@@ -871,6 +941,7 @@ struct TextGenerationScheduler::Impl {
   void CompleteFailure(const std::shared_ptr<ScheduledRequest>& request,
                        std::exception_ptr failure,
                        bool classified = false) noexcept {
+    EndPublicationWait(request, "failed");
     if (IsTerminal(request))
       return;
     if (!classified)
@@ -979,6 +1050,7 @@ struct TextGenerationScheduler::Impl {
 
   void CompleteDeadline(
       const std::shared_ptr<ScheduledRequest>& request) noexcept {
+    EndPublicationWait(request, "deadline");
     CompleteFailure(request, std::make_exception_ptr(TextGenerationError(
                                  TextGenerationErrorCode::kDeadlineExceeded,
                                  "text generation request deadline exceeded")));
@@ -1031,10 +1103,17 @@ struct TextGenerationScheduler::Impl {
     // A stop may land on a preview, an unadvanced AR token, or inside an
     // accepted speculative block. Retain only correctly labelled executed
     // state, using the same cache reconciliation as an interrupted request.
+    // Read before the commit returns the leased state.
+    const auto ngram = request->runner_request.ngram_rows();
+    request->result.ngram_rows = ngram.rows;
+    request->result.ngram_dedup_rows = ngram.dedup_rows;
+    request->result.ngram_cache_hits = ngram.cache_hits;
+    request->result.ngram_disk_reads = ngram.disk_reads;
     const auto cache_commit =
         finish_reason == TextGenerationBackend::FinishReason::kStopSequence
             ? request->runner_request.Cancel()
             : request->runner_request.Commit();
+    request->result.component_cache = cache_commit.component_cache;
     request->result.cache_snapshot_bytes = cache_commit.snapshot_bytes;
     request->result.cache_snapshot_ms = cache_commit.snapshot_ms;
     request->result.cache_disk_queued_bytes = cache_commit.disk_queued_bytes;
@@ -1212,8 +1291,8 @@ struct TextGenerationScheduler::Impl {
             shared <= resident->runner_request.prefill_position())
           continue;
         const auto identity =
-            request->prompt_context
-                ? request->prompt_context->CacheIdentity(shared)
+            request->cache_context
+                ? request->cache_context->CacheIdentity(shared)
                 : std::span<const std::uint8_t>{};
         if (!std::ranges::equal(
                 identity, resident->runner_request.input_identity(shared)))
@@ -1222,17 +1301,24 @@ struct TextGenerationScheduler::Impl {
         common = shared;
       }
     }
-    if (leader == nullptr ||
-        common < TextRunnerPool::Request::kSharedPrefixMinTokens)
+    if (leader == nullptr)
       return false;
     // A longer retained prefix, such as this conversation's previous turn,
     // already beats waiting for a peer.
     const auto cached =
         runner_pool->CachedPrefixTokens(prompt, request->prompt_context.get());
-    if (common < cached + TextRunnerPool::Request::kSharedPrefixMinTokens)
+    // A leader may have leased a deeper native frontier than a sibling can
+    // restore. Share its next planned checkpoint even for a short suffix:
+    // replaying generated tokens through prefill can change recurrent state.
+    // Ordinary cold-prefix sharing retains its minimum-work threshold.
+    const auto minimum_gain =
+        leader->runner_request.cached_prompt_tokens() > cached
+            ? std::size_t{1}
+            : TextRunnerPool::Request::kSharedPrefixMinTokens;
+    if (common < cached + minimum_gain)
       return false;
     const auto position = leader->runner_request.ShareCheckpoint(common);
-    if (position < cached + TextRunnerPool::Request::kSharedPrefixMinTokens)
+    if (position < cached + minimum_gain)
       return false;
     request->prefix_leader = std::move(leader);
     request->prefix_position = position;
@@ -1287,15 +1373,48 @@ struct TextGenerationScheduler::Impl {
         }
         request->prefix_leader.reset();
       }
+      if (request->publication_waiting) {
+        const auto pending = runner_pool->PendingPublication(
+            request->prompt, request->prompt_context.get(),
+            request->publication.checkpoint_id);
+        if (!pending) {
+          // Published, failed or superseded: the matching job is no longer
+          // pending. Its completion log carries this same checkpoint ID.
+          EndPublicationWait(request, "not_pending");
+        } else {
+          request->publication = *pending;
+          if (pending->Gain() <= TextPendingPublication::kMinimumGainTokens) {
+            EndPublicationWait(request, "available");
+          } else if (const auto limit =
+                         publication_prefill.Limit(pending->Gain())) {
+            // Better usable cache or faster recent prefill may shorten the
+            // original deadline. Neither slower samples nor a new disk job
+            // may extend it or restart this request's one publication wait.
+            request->publication_wait_limit =
+                std::min(request->publication_wait_limit, *limit);
+            if (Clock::now() - *request->publication_wait_start >=
+                request->publication_wait_limit)
+              EndPublicationWait(
+                  request, request->publication_wait_limit ==
+                                   detail::PublicationWaitEstimate::kMaximumWait
+                               ? "cap"
+                               : "cost_bound");
+          } else {
+            EndPublicationWait(request, "no_estimate");
+          }
+        }
+      }
       ++it;
     }
   }
 
   [[nodiscard]] static std::shared_ptr<ScheduledRequest> PopReleased(
       std::deque<std::shared_ptr<ScheduledRequest>>& waiting) {
-    const auto released = std::ranges::find_if(
-        waiting,
-        [](const auto& request) { return request->prefix_leader == nullptr; });
+    const auto released =
+        std::ranges::find_if(waiting, [](const auto& request) {
+          return request->prefix_leader == nullptr &&
+                 !request->publication_waiting;
+        });
     if (released == waiting.end())
       return {};
     auto request = std::move(*released);
@@ -1371,6 +1490,21 @@ struct TextGenerationScheduler::Impl {
           waiting.push_back(std::move(request));
           continue;
         }
+        if (request->cache_prompt && !request->publication_wait_start) {
+          if (const auto pending = runner_pool->PendingPublication(
+                  request->prompt, request->prompt_context.get())) {
+            request->publication = *pending;
+            if (const auto limit = publication_prefill.Limit(pending->Gain())) {
+              request->publication_wait_limit = *limit;
+              request->publication_wait_start = Clock::now();
+              request->publication_waiting = true;
+              LogPublicationWait(request, "start");
+              waiting.push_back(std::move(request));
+              continue;
+            }
+            LogPublicationWait(request, "skip", "no_estimate");
+          }
+        }
 
         if (request->result.debug_timeline)
           request->debug_admit_start = Clock::now();
@@ -1393,6 +1527,8 @@ struct TextGenerationScheduler::Impl {
           continue;
         }
 
+        request->result.component_cache =
+            request->runner_request.component_cache_metrics();
         request->result.cache_hit = request->runner_request.cache_hit();
         const auto lookup = request->runner_request.cache_lookup();
         request->result.cache_miss_reason = lookup.miss_reason;
@@ -1505,6 +1641,8 @@ struct TextGenerationScheduler::Impl {
                                                 step.prefill_diag);
       request->result.prefill_ms += step_ms;
       request->result.prefill_tokens += step.consumed_tokens;
+      if (!decoder_runnable && !peer_waiting)
+        publication_prefill.Observe(step.consumed_tokens, step_ms);
       request->live_prefill_tokens.store(request->result.prefill_tokens,
                                          std::memory_order_relaxed);
       detail::TotalPromptTokens().fetch_add(step.consumed_tokens,
@@ -2344,6 +2482,7 @@ struct TextGenerationScheduler::Impl {
   json::Value cached_debug_settings;
   TextPrefillPolicy prefill_policy;
   TextSchedulerPolicy scheduler_policy;
+  detail::PublicationWaitEstimate publication_prefill;
   std::shared_ptr<OutputBudget> output_budget;
   std::shared_ptr<SessionTable> sessions;
   bool incremental_prefill_supported{false};
@@ -2648,7 +2787,6 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
         "stop sequences require exact incremental token decoding");
 
   auto request = std::make_shared<ScheduledRequest>();
-  request->disk_admission = impl_->runner_pool->TrackPendingAdmission();
   request->stop_filter = StopSequenceFilter(std::move(metadata.stop_sequences));
   request->id = impl_->next_request_id.fetch_add(1, std::memory_order_relaxed);
   request->client_id =
@@ -2666,6 +2804,8 @@ TextGenerationScheduler::Request TextGenerationScheduler::Submit(
       impl_->runner_pool->capacity() == 1 ? "serial-c1" : "serial-fallback";
   request->prompt = std::move(prompt);
   request->prompt_context = std::move(metadata.prompt_context);
+  request->cache_context = impl_->runner_pool->runner().CacheIdentity(
+      request->prompt.size(), request->prompt_context);
   request->cache_prompt = metadata.cache_prompt;
   request->cache_prefix_tokens = metadata.cache_prefix_tokens;
   request->stop_at_eos = metadata.stop_at_eos;

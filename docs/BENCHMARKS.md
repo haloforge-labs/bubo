@@ -60,7 +60,11 @@ active decode time. Preserve a separate fresh AR completion-hash control.
 
 ## Direct and serving measurements
 
-`bubo bench` measures the model path. Keep model artifact, prompt length,
+`bubo bench` measures the model path. For Qwen3.8-Flash-Next with
+`--speculative mtp`, it uses prompt lookup and the auto draft vocabulary, as
+`bubo serve` does; the twin and the Q4_K draft head come only from a prepared
+package. Results from earlier builds did not use prompt lookup in `bench`.
+Keep model artifact, prompt length,
 generation length, context depth, speculative mode, and sampling controls
 fixed when comparing runs. `pp2048` means 2,048 new prompt tokens; context
 depth is separate from the amount of new prefill work.

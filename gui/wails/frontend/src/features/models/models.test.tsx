@@ -9,6 +9,7 @@ import {
   mountCorePage,
   recordedPlan,
 } from '@/components/core-page-test-support'
+import { openDiscover } from './discover-test-support'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -26,6 +27,8 @@ test('folder copy uses the containing folder and active identity uses the catalo
   const installed = page.getByRole('region', { name: 'Installed models' })
   await expect.element(installed).toHaveTextContent('In use')
   expect(installed.element().textContent).not.toContain('In use:')
+  // The folder and its actions sit behind the row's "Model folder" fold.
+  await installed.getByText('Model folder').first().click()
   await installed
     .getByRole('button', { name: 'Copy folder path' })
     .first()
@@ -48,6 +51,11 @@ test('Open folder preserves the native typed rejection', async () => {
     }),
   )
   mountCorePage('/models', coreView())
+  await page
+    .getByRole('region', { name: 'Installed models' })
+    .getByText('Model folder')
+    .first()
+    .click()
   await page.getByRole('button', { name: 'Open folder' }).first().click()
   await expect
     .element(page.getByRole('alert'))
@@ -113,6 +121,7 @@ test('one plan opens before consent; Download confirms once and never reads the 
   view.prepared_models = []
   view.models!.prepared_models = []
   mountCorePage('/models', view)
+  await openDiscover()
   await page
     .getByRole('button', { name: 'Download', exact: true })
     .first()
@@ -159,6 +168,7 @@ test('Not now cancels the waiting plan without confirming', async () => {
   view.prepared_models = []
   view.models!.prepared_models = []
   mountCorePage('/models', view)
+  await openDiscover()
   await page
     .getByRole('button', { name: 'Download', exact: true })
     .first()
@@ -187,6 +197,7 @@ test('insufficient space or absent licence disables acceptance', async () => {
   view.prepared_models = []
   view.models!.prepared_models = []
   mountCorePage('/models', view)
+  await openDiscover()
   await page
     .getByRole('button', { name: 'Download', exact: true })
     .first()
@@ -219,6 +230,7 @@ test('typed confirm failure preserves the dialog, code and remedy', async () => 
   view.prepared_models = []
   view.models!.prepared_models = []
   mountCorePage('/models', view)
+  await openDiscover()
   await page
     .getByRole('button', { name: 'Download', exact: true })
     .first()
@@ -385,7 +397,7 @@ test('active model identity marks the installed catalogue row despite a custom s
   await expect.element(row.getByText('In use', { exact: true })).toBeVisible()
 })
 
-test('in-use rows do not offer selection and the running server holds the memory', async () => {
+test('in-use rows do not offer selection and a running server says selection applies after restart', async () => {
   const view = coreView()
   mountCorePage('/models', view)
   const installed = page.getByRole('region', { name: 'Installed models' })
@@ -407,9 +419,12 @@ test('in-use rows do not offer selection and the running server holds the memory
   )
   await expect
     .element(page.getByRole('region', { name: 'Discover models' }))
-    .toHaveTextContent(
-      "Bubo's server holds the memory now. Stop it to switch models.",
-    )
+    .toHaveTextContent('Selection applies after restart.')
+  // The missing estimates are explained next to the Installed table.
+  await expect
+    .element(installed)
+    .toHaveTextContent('Stop the server to check memory.')
+  expect(document.body.textContent).not.toContain('Stop it to switch models.')
   expect(document.body.textContent).not.toContain(
     'Not loadable in this version',
   )

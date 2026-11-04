@@ -7,6 +7,7 @@ import { bridgeReply } from '@/components/bridge-test-reply'
 import recordedReply from '@/generated/memory96-estimate-reply.json'
 
 import { lowerMemoryPlanFixture as lowerMemoryPlan } from '@/components/core-page-test-support'
+import { openDiscover } from './discover-test-support'
 
 const id = 'huihui-qwen38-flash-next-lowmemory-v1'
 
@@ -92,6 +93,7 @@ test('published lower-memory Download opens the recorded plan and waits for cons
   )
   const confirm = vi.spyOn(actions, 'ConfirmDownload')
   mountCorePage('/models', view)
+  await openDiscover()
   const row = page.getByRole('row').filter({ hasText: entry.display_name })
   expect(entry.disabled_reason).toBeNull()
   await expect

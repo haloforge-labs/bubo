@@ -15,6 +15,7 @@
 
 #include "src/cli/arg_parser.hpp"
 #include "src/cli/brand.hpp"
+#include "src/cli/kv_cache_options.hpp"
 #include "src/cli/prompt/gemma4_prompt.hpp"
 #include "src/cli/sampling_options.hpp"
 #include "src/core/crypto/sha256.hpp"
@@ -91,6 +92,7 @@ static void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
   parser.AddOption("-m", "--model", "PATH", "Path to GGUF model file", "Model",
                    &opt.model_path);
   RegisterImageOptions(parser, opt);
+  RegisterKvCacheTypeOption(parser, &opt.kv_cache_type);
 
   // Prompt & Formatting
   if (command == "prompt") {
@@ -666,7 +668,8 @@ std::shared_ptr<models::qwen38_flash_next::Model> LoadFlashNextModel(
        .mtp_model_path =
            opt.speculative_backend == "mtp" ? opt.mtp_model_path : "",
        .max_draft_tokens = opt.draft_tokens,
-       .vision_model_path = opt.vision_model_path},
+       .vision_model_path = opt.vision_model_path,
+       .kv_cache_type = opt.kv_cache_type},
       &error);
   PrintModelLoadTime(load_start, model != nullptr);
   if (!model)
@@ -693,6 +696,7 @@ int GenerateFlashNextResponse(const PromptOptions& opt,
   }
   sampling::SamplerState sampler(opt.sampling, prompt);
   std::vector<tokenization::TokenId> generated;
+  const auto stats_before = session.Statistics();
   const auto start = std::chrono::steady_clock::now();
   while (generated.size() < opt.max_tokens) {
     models::qwen38_flash_next::Session::DecodeResult decoded;
@@ -718,6 +722,16 @@ int GenerateFlashNextResponse(const PromptOptions& opt,
             .count();
     std::cerr << "Generated " << generated.size() << " tokens ("
               << generated.size() / seconds << " tok/s)\n";
+    const auto& stats = session.Statistics();
+    if (stats.cycles != stats_before.cycles) {
+      std::cerr << "[Speculative]: cycles="
+                << stats.cycles - stats_before.cycles
+                << " drafted=" << stats.drafted - stats_before.drafted
+                << " accepted=" << stats.accepted - stats_before.accepted
+                << " lookup_proposed=" << stats.lookup - stats_before.lookup
+                << " lookup_accepted="
+                << stats.lookup_accepted - stats_before.lookup_accepted << '\n';
+    }
     PrintTokenTrace(generated);
   }
   return 0;
@@ -857,6 +871,15 @@ static std::optional<PromptOptions> ParseTextOptions(
     return std::nullopt;
   }
   if (parser.IsHelpRequested()) {
+    return std::nullopt;
+  }
+  if (opt.force_cpu &&
+      opt.kv_cache_type != models::qwen38_flash_next::KvCacheType::kF16) {
+    if (error_msg)
+      *error_msg = "--kv-cache-type " +
+                   std::string(models::qwen38_flash_next::KvCacheTypeName(
+                       opt.kv_cache_type)) +
+                   " requires the ROCm backend";
     return std::nullopt;
   }
   opt.sampling_supplied = SamplingOptionsSupplied(parser);
@@ -1012,6 +1035,13 @@ int RunPrompt(std::span<const char* const> args) {
   }
   const std::shared_ptr<const gufo::core::GgufReader> reader(
       std::move(reader_owner));
+  if (!ValidateKvCacheTypeForArchitecture(
+          opt.kv_cache_type,
+          reader->GetMetadataString("general.architecture").value_or(""),
+          &err)) {
+    std::cerr << "Error: " << err << '\n';
+    return 1;
+  }
   ResolvePromptSampling(*reader, &opt);
 
 #if defined(ENGINE_ENABLE_HIP)
@@ -1238,6 +1268,13 @@ int RunChat(std::span<const char* const> args) {
   }
   const std::shared_ptr<const gufo::core::GgufReader> reader(
       std::move(reader_owner));
+  if (!ValidateKvCacheTypeForArchitecture(
+          opt.kv_cache_type,
+          reader->GetMetadataString("general.architecture").value_or(""),
+          &err)) {
+    std::cerr << "Error: " << err << '\n';
+    return 1;
+  }
   ResolvePromptSampling(*reader, &opt);
 
 #if defined(ENGINE_ENABLE_HIP)

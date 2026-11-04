@@ -97,6 +97,17 @@ Models, settings, logs, API keys, wheel cache and AMD runtime must live outside
 the package; the updater does not discover, migrate, or write any of them. The
 release must contain K1's external-runtime change before this updater is enabled.
 
+## Proxy
+
+The client connects through the proxy that the environment names (`HTTPS_PROXY`,
+`HTTP_PROXY`, `NO_PROXY`, as net/http reads them) and otherwise through the manual
+proxy of the user's Windows Internet Options (`ProxyServer`, with `ProxyOverride`
+and `<local>`). A proxy only carries the connection: HTTPS goes through a CONNECT
+tunnel, TLS is verified against the release host, and the host allowlist and the
+exact release path are checked on every request and redirect as before. PAC
+scripts and automatic proxy detection are not supported. Versions before 0.1.2
+connect directly.
+
 ## Health and rollback: inherited by U4
 
 The exported constants in `types.go` define the protocol. The helper launches

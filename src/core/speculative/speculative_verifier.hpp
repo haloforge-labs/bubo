@@ -269,6 +269,10 @@ public:
   SpeculativeVerifier(hip::QwenGpuExecutor& target_executor,
                       std::unique_ptr<IDraftBackend> draft_backend,
                       SpeculativeOptions options = {});
+  // Component-cache slots own both executors and outlive the bound runner.
+  SpeculativeVerifier(hip::QwenGpuExecutor& target_executor,
+                      IDraftBackend& draft_backend,
+                      SpeculativeOptions options = {});
   SpeculativeVerifier(ISpeculativeTargetExecutor& target_executor,
                       std::unique_ptr<IDraftBackend> draft_backend,
                       SpeculativeOptions options = {});
@@ -303,6 +307,8 @@ public:
     std::vector<float> next_token_logits;
     bool hit_eos{false};
     std::size_t physical_width{1};
+    std::size_t lookup_tokens{0};
+    std::size_t lookup_accepted_tokens{0};
   };
 
   struct StepRequest {
@@ -384,7 +390,8 @@ private:
 
   std::unique_ptr<ISpeculativeTargetExecutor> owned_target_executor_;
   ISpeculativeTargetExecutor* target_executor_;
-  std::unique_ptr<IDraftBackend> draft_backend_;
+  std::unique_ptr<IDraftBackend> owned_draft_backend_;
+  IDraftBackend* draft_backend_;
   SpeculativeOptions options_;
   SpeculativeStats stats_;
   std::uint32_t current_draft_length_{3};

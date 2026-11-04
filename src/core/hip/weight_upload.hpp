@@ -24,8 +24,17 @@ public:
 
   bool Copy(std::uint32_t shard, std::uint64_t offset, std::size_t size,
             void* device, std::string* error);
+  /// Resolve a pointer within the supplied mappings without reading its pages.
+  bool CopyMapped(const void* source, std::size_t size, void* device,
+                  std::string* error);
   /// Waits for every queued copy, including on failure.
   bool Finish(std::string* error);
+  /// Debug only (GUFO_HC_LOAD_Q8_POISON): after Finish, overwrites each
+  /// pinned staging buffer with `pattern` and keeps the memory allocated and
+  /// pinned for the rest of the process, so a stale reader sees the pattern
+  /// and the pages cannot be reused. The object accepts no Copy afterwards.
+  /// Returns the bytes overwritten and retained (0 if work is still pending).
+  std::size_t PoisonAndRetainStaging(std::uint8_t pattern);
 
 private:
   struct State;

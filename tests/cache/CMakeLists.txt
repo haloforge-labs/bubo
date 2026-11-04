@@ -1,9 +1,11 @@
 add_library(gufo_cache_fake STATIC fake_adapter.cpp)
-if (ENGINE_ENABLE_HIP)
+if (ENGINE_ENABLE_HIP AND NOT WIN32)
+  # Linux seccomp/madvise fault injection requires ELF --wrap interposition.
   add_executable(cache_backing_test backing_test.cpp)
   target_link_libraries(cache_backing_test PRIVATE gufo_cache_hip gufo_cache_fake)
   target_compile_options(cache_backing_test PRIVATE -UNDEBUG)
   target_link_options(cache_backing_test PRIVATE
+    -Wl,--wrap=madvise
     -Wl,--wrap=hipHostMalloc -Wl,--wrap=hipMalloc
     -Wl,--wrap=hipHostRegister -Wl,--wrap=hipMallocManaged
     -Wl,--wrap=hipStreamCreateWithFlags -Wl,--wrap=hipEventCreateWithFlags
@@ -11,15 +13,12 @@ if (ENGINE_ENABLE_HIP)
     -Wl,--wrap=hipEventQuery -Wl,--wrap=hipEventSynchronize
     -Wl,--wrap=hipStreamSynchronize)
   add_test(NAME cache_backing_test COMMAND cache_backing_test)
-  set_tests_properties(cache_backing_test PROPERTIES
+  add_test(NAME cache_backing_restricted_test
+    COMMAND cache_backing_test --deny-long-term-pins)
+  set_tests_properties(cache_backing_test cache_backing_restricted_test PROPERTIES
     LABELS "hip;gpu;gfx1151;cache" TIMEOUT 60)
 endif()
 target_link_libraries(gufo_cache_fake PUBLIC gufo_cache)
-add_executable(cache_adapter_test adapter_test.cpp)
-target_link_libraries(cache_adapter_test PRIVATE gufo_cache_fake)
-add_test(NAME cache_adapter_test COMMAND cache_adapter_test)
-set_tests_properties(cache_adapter_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
-
 add_executable(cache_adapter_lifecycle_test lifecycle_test.cpp)
 target_link_libraries(cache_adapter_lifecycle_test PRIVATE gufo_cache_fake)
 add_test(NAME cache_adapter_lifecycle_test COMMAND cache_adapter_lifecycle_test)
@@ -30,29 +29,21 @@ target_link_libraries(cache_ledger_test PRIVATE gufo_cache Threads::Threads)
 add_test(NAME cache_ledger_test COMMAND cache_ledger_test)
 set_tests_properties(cache_ledger_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
 
-file(GENERATE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/cache-links-$<CONFIG>.txt CONTENT
-  "$<TARGET_GENEX_EVAL:gufo_cache,$<TARGET_PROPERTY:gufo_cache,LINK_LIBRARIES>>\n$<TARGET_GENEX_EVAL:gufo_cache,$<TARGET_PROPERTY:gufo_cache,INTERFACE_LINK_LIBRARIES>>\n")
-
-add_test(NAME cache_boundary_test
-  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/boundary_test.py
-    ${PROJECT_SOURCE_DIR}/src/cache
-    ${CMAKE_CURRENT_BINARY_DIR}/cache-links-$<CONFIG>.txt)
-set_tests_properties(cache_boundary_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
-
 add_executable(cache_checkpoint_test checkpoint_test.cpp)
 target_link_libraries(cache_checkpoint_test PRIVATE gufo_cache_fake)
 add_test(NAME cache_checkpoint_test COMMAND cache_checkpoint_test)
 set_tests_properties(cache_checkpoint_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
 
+add_executable(cache_restore_lifetime_test restore_lifetime_test.cpp)
+target_link_libraries(cache_restore_lifetime_test PRIVATE gufo_cache_fake)
+add_test(NAME cache_restore_lifetime_test COMMAND cache_restore_lifetime_test)
+set_tests_properties(cache_restore_lifetime_test PROPERTIES
+  LABELS "cpu;cache;state;lifecycle" TIMEOUT 60)
+
 add_executable(cache_prefix_index_test prefix_index_test.cpp)
 target_link_libraries(cache_prefix_index_test PRIVATE gufo_cache)
 add_test(NAME cache_prefix_index_test COMMAND cache_prefix_index_test)
 set_tests_properties(cache_prefix_index_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
-
-add_executable(cache_slot_test slot_test.cpp)
-target_link_libraries(cache_slot_test PRIVATE gufo_cache_fake)
-add_test(NAME cache_slot_test COMMAND cache_slot_test)
-set_tests_properties(cache_slot_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
 
 if (GUFO_BUILD_TOOLS)
   add_executable(cache_slot_bench slot_bench.cpp)
@@ -79,14 +70,59 @@ target_link_libraries(cache_idle_spill_test PRIVATE gufo_cache_fake)
 add_test(NAME cache_idle_spill_test COMMAND cache_idle_spill_test)
 set_tests_properties(cache_idle_spill_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
 
-add_executable(cache_disk_test disk_test.cpp)
-target_link_libraries(cache_disk_test PRIVATE gufo_cache)
-target_link_options(cache_disk_test PRIVATE -Wl,--wrap=read -Wl,--wrap=pread)
-add_test(NAME cache_disk_test COMMAND cache_disk_test)
-set_tests_properties(cache_disk_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
-
 if (GUFO_BUILD_TOOLS)
   add_executable(cache_disk_bench disk_bench.cpp)
   target_link_libraries(cache_disk_bench PRIVATE gufo_cache)
   target_compile_options(cache_disk_bench PRIVATE -UNDEBUG)
+endif()
+
+# These tests fork, inject faults with --wrap or create POSIX temporaries;
+# the boundary check needs Python. Windows builds the tests above only.
+if (NOT WIN32)
+  add_executable(cache_adapter_test adapter_test.cpp)
+  target_link_libraries(cache_adapter_test PRIVATE gufo_cache_fake)
+  add_test(NAME cache_adapter_test COMMAND cache_adapter_test)
+  set_tests_properties(cache_adapter_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
+
+  file(GENERATE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/cache-links-$<CONFIG>.txt CONTENT
+    "$<TARGET_GENEX_EVAL:gufo_cache,$<TARGET_PROPERTY:gufo_cache,LINK_LIBRARIES>>\n$<TARGET_GENEX_EVAL:gufo_cache,$<TARGET_PROPERTY:gufo_cache,INTERFACE_LINK_LIBRARIES>>\n")
+
+  add_test(NAME cache_boundary_test
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/boundary_test.py
+      ${PROJECT_SOURCE_DIR}/src/cache
+      ${CMAKE_CURRENT_BINARY_DIR}/cache-links-$<CONFIG>.txt)
+  set_tests_properties(cache_boundary_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
+
+  add_executable(cache_slot_test slot_test.cpp)
+  target_link_libraries(cache_slot_test PRIVATE gufo_cache_fake)
+  add_test(NAME cache_slot_test COMMAND cache_slot_test)
+  set_tests_properties(cache_slot_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
+
+  add_executable(cache_disk_test disk_test.cpp)
+  target_link_libraries(cache_disk_test PRIVATE gufo_cache)
+  target_link_options(cache_disk_test PRIVATE -Wl,--wrap=read -Wl,--wrap=pread)
+  add_test(NAME cache_disk_test COMMAND cache_disk_test)
+  set_tests_properties(cache_disk_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
+
+  add_executable(cache_streaming_test streaming_test.cpp)
+  target_link_libraries(cache_streaming_test PRIVATE gufo_cache_fake)
+  add_test(NAME cache_streaming_test COMMAND cache_streaming_test)
+  set_tests_properties(cache_streaming_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
+
+  add_executable(cache_tiered_test tiered_test.cpp)
+  target_link_libraries(cache_tiered_test PRIVATE gufo_cache_fake)
+  add_test(NAME cache_tiered_test COMMAND cache_tiered_test)
+  set_tests_properties(cache_tiered_test PROPERTIES LABELS "cpu;cache" TIMEOUT 30)
+
+  add_executable(cache_disk_publication_test disk_publication_test.cpp)
+  target_link_libraries(cache_disk_publication_test PRIVATE gufo_cache)
+  target_link_options(cache_disk_publication_test PRIVATE
+    -Wl,--wrap=fsync -Wl,--wrap=write -Wl,--wrap=unlinkat)
+  add_test(NAME cache_disk_publication_test COMMAND cache_disk_publication_test)
+  set_tests_properties(cache_disk_publication_test PROPERTIES LABELS "cpu;cache" TIMEOUT 60)
+  if (GUFO_BUILD_TOOLS)
+    add_executable(cache_disk_publication_bench disk_publication_bench.cpp)
+    target_link_libraries(cache_disk_publication_bench PRIVATE gufo_cache)
+    target_compile_options(cache_disk_publication_bench PRIVATE -UNDEBUG)
+  endif()
 endif()

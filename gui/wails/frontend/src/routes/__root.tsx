@@ -1,11 +1,20 @@
+import { useEffect } from 'react'
 import { createRootRoute, Outlet } from '@tanstack/react-router'
+import { applyFont, interfaceFont } from '@/lib/font'
 import { Toaster } from 'sonner'
 import { ViewShell } from '@/components/view-shell'
 import { GUIError } from '@/components/gui-error'
+import { WhatsNewDialog } from '@/components/whats-new-dialog'
 import { useView } from '@/lib/bindings'
 
 function RootContent() {
   const view = useView()
+  // The saved font decides once the view has arrived.
+  const saved = view.data?.saved.font
+  const loaded = view.data !== undefined
+  useEffect(() => {
+    if (loaded) applyFont(interfaceFont(saved))
+  }, [loaded, saved])
   return (
     <ViewShell>
       <button
@@ -23,6 +32,7 @@ function RootContent() {
         <GUIError error={{ code: 'startup_slow', remedy: '' }} />
       )}
       <Outlet />
+      <WhatsNewDialog />
       <Toaster />
     </ViewShell>
   )

@@ -79,13 +79,15 @@ test('stopped state hides inapplicable actions; override has one recovery box', 
   const box = page.getByRole('region', { name: 'Rejected override' })
   await expect
     .element(box)
-    .toHaveTextContent('Reasoning length setting you changed')
+    .toHaveTextContent('Rethinking penalty (fixed) setting you changed')
   await expect
-    .element(box.getByRole('button', { name: 'Reset Reasoning length' }))
+    .element(
+      box.getByRole('button', { name: 'Reset Rethinking penalty (fixed)' }),
+    )
     .toBeEnabled()
   await expect
     .element(box.getByRole('link', { name: 'Open setting' }))
-    .toHaveAttribute('href', '/#server-setup')
+    .toHaveAttribute('href', '/#setting:--think-marker-bias')
   await expect
     .element(page.getByLabelText('Memory fit'))
     .not.toBeInTheDocument()

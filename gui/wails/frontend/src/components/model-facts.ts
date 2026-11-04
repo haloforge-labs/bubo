@@ -1,5 +1,6 @@
 import type { actions, View } from '@/lib/bindings'
 import { bytes } from '@/lib/format'
+import { modelState } from '@/lib/presentation'
 export { bytes, recommendedModel } from '@/lib/format'
 
 // The space a drive is short by: GiB with one decimal, rounded up to 0.1 GiB so
@@ -49,7 +50,7 @@ export function packageStatus(state: string) {
       } as const
     case 'partial':
       return {
-        word: 'Incomplete',
+        word: modelState.incomplete,
         action: 'repair',
         actionLabel: 'Check or repair files',
       } as const

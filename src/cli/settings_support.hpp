@@ -95,6 +95,15 @@ struct MemoryModelTable {
   // an unconditional second copy of the full session.
   bool cache_on_host = false;
   std::uint64_t vision_hidden_size = 0;
+  // --kv-cache-type q8_0: the context-dependent part of a session (K/V, draft
+  // block K/V, indexer keys, working buffers) as parts per thousand of its f16
+  // value. 1000 = not measured, count the f16 size. Flash Next measured
+  // 2026-11-02 (Total Committed, 1 session, 65,536 -> 196,608 tokens):
+  // 27,936 -> 17,483 bytes per token = 0.626; rounded up so the estimated
+  // SAVING never exceeds the measured one (the absolute figures follow the
+  // table's own f16 offset, which sits about 270 bytes per token below the
+  // measurement for both cache types).
+  std::uint64_t kv_q8_permille = 1000;
 };
 inline const MemoryModelTable* MemoryTableFor(std::string_view package_id) {
   using C = MemoryCoefficientsV1;
@@ -118,15 +127,33 @@ inline const MemoryModelTable* MemoryTableFor(std::string_view package_id) {
       64,
       "Bubo memory model, calibrated on Strix Halo 128 GB",
       false,
-      2560};
+      2560,
+      630};
   static const MemoryModelTable lowmemory = [&] {
     auto table = flash_next;
     table.package_id = prepare::PackageId(prepare::ModelSet::LowMemory);
     table.main_weights_bytes = kLowMemoryCalibratedMainResidentBytes;
     return table;
   }();
+  // The 256-expert Coder: the Flash Next per-token and per-session figures
+  // (measured on the Coder itself, 27,647 B per token against 27.7 KB;
+  // mem-measure 2026-11-02) with its own resident weights and MTP file. It has
+  // no twin, draft head or projector.
+  static const MemoryModelTable coder = [&] {
+    auto table = flash_next;
+    table.package_id = kCoderPackageId;
+    table.main_weights_bytes = kCoderMeasuredMainResidentBytes;
+    table.mtp_bytes = kCoderMtpBytes;
+    table.twin_bytes = 0;
+    table.draft_head_bytes = 0;
+    table.vision_bytes = 0;
+    table.vision_hidden_size = 0;
+    return table;
+  }();
   if (package_id == lowmemory.package_id)
     return &lowmemory;
+  if (package_id == coder.package_id)
+    return &coder;
   if (prepare::ModelSetFromPackageId(package_id))
     return &flash_next;
   return nullptr;
@@ -176,6 +203,7 @@ struct MemoryEstimateInputs {
   std::string profile;
   std::uint64_t context = 0, sessions = 0, ram_cache_bytes = 0;
   bool mtp = false, twin = false, draft_head = false, vision = false;
+  bool kv_q8 = false;  // --kv-cache-type q8_0
   std::optional<std::uint64_t> carve_budget_bytes, host_budget_bytes;
   // GPU and host availability are sampled before model loading. Legacy budget
   // inputs above remain accepted for callers that supply explicit observations.
@@ -210,9 +238,13 @@ inline MemoryTotals ComputeMemoryTotals(const MemoryModelTable& table,
               (inputs.vision ? table.vision_bytes : 0);
   // The fixed/context split is an estimate. Only the aggregate reference
   // coefficient has measurement evidence. Keep it separate in the output.
+  const std::uint64_t context_part =
+      MiBToBytes(table.session_mib - table.fixed_mib);
+  const std::uint64_t scaled_part =
+      inputs.kv_q8 ? (context_part * table.kv_q8_permille + 999) / 1000
+                   : context_part;
   t.per_session = MiBToBytes(table.fixed_mib) +
-                  (MiBToBytes(table.session_mib - table.fixed_mib) * context +
-                   table.reference_context - 1) /
+                  (scaled_part * context + table.reference_context - 1) /
                       table.reference_context;
 
 

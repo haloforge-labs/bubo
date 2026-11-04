@@ -2,6 +2,7 @@ import { afterEach, expect, test } from 'vitest'
 import { page } from 'vitest/browser'
 import { fixture, renderView } from '@/components/test-view'
 import AboutPage from './index'
+import { whatsNewRelease } from './whats-new'
 
 let cleanup = () => {}
 afterEach(() => cleanup())
@@ -52,14 +53,27 @@ test.each([undefined, 1014229359])(
 )
 
 test('About ships the release text for this build', async () => {
-  cleanup = renderView(<AboutPage />, fixture('update-current')).cleanup
+  const view = fixture('update-current')
+  // The fixture is a recorded 0.1.1 build; the bundled text is for the release being made.
+  view.product = { ...view.product!, version: whatsNewRelease! }
+  view.update.current_version = whatsNewRelease!
+  cleanup = renderView(<AboutPage />, view).cleanup
   await expect
     .element(
-      page.getByRole('heading', { name: "What's new in 0.1.1", exact: true }),
+      page.getByRole('heading', {
+        name: `What's new in ${whatsNewRelease}`,
+        exact: true,
+      }),
     )
     .toBeVisible()
-  await expect
-    .element(page.getByText('The Bubo app.', { exact: true }))
-    .toBeVisible()
+  const section = page.getByRole('region', {
+    name: `What's new in ${whatsNewRelease}`,
+  })
+  await expect.element(section.getByRole('listitem').first()).toBeVisible()
+  // The release text is a numbered list with its details nested under an item.
+  const list = section.element().querySelector('ol')
+  expect(list).not.toBeNull()
+  expect(list!.children.length).toBeGreaterThanOrEqual(3)
+  expect(section.element().textContent).not.toMatch(/(^|\s)1\. /)
   expect(document.body.textContent).not.toContain('Fixture release notes')
 })

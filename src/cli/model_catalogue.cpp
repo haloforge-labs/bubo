@@ -59,6 +59,16 @@ void ReadInfo(CatalogueEntry& entry, const Value& row) {
   entry.selection_label = OptString(row, "selection_label");
   entry.system_memory_note = OptString(row, "system_memory_note");
   entry.size_split_source = OptString(row, "size_split_source");
+  if (const auto* experts = row.find("routed_experts");
+      experts && !experts->is_null()) {
+    const auto count = meta::Integer(*experts);
+    if (count == 0 || count > 65535)
+      throw std::invalid_argument("routed_experts must be 1 to 65535");
+    entry.routed_experts = static_cast<std::uint32_t>(count);
+  }
+  if (const auto* resident = row.find("measured_main_resident_bytes");
+      resident && !resident->is_null())
+    entry.measured_main_resident_bytes = meta::Integer(*resident);
   for (const auto* key : {"gpu_bytes", "system_memory_bytes"}) {
     const auto* value = row.find(key);
     if (value && !value->is_null())
@@ -99,6 +109,8 @@ CatalogueEntry FlashNext(prepare::ModelSet set) {
   entry.default_status = set == prepare::ModelSet::Huihui ? "default" : "none";
   entry.download_enabled = true;
   entry.flash_next_set = set;
+  // The full model. The 256-expert Coder is a separate catalogue entry.
+  entry.routed_experts = 512;
   const auto root = meta::Parse(kEmbedded);
   const auto& info =
       meta::Required(meta::Required(root, "flash_next"),
@@ -215,7 +227,9 @@ CatalogueEntry ParseEntry(const Value& row) {
                    "gpu_bytes",
                    "system_memory_bytes",
                    "system_memory_note",
-                   "size_split_source"});
+                   "size_split_source",
+                   "routed_experts",
+                   "measured_main_resident_bytes"});
   CatalogueEntry entry;
   ReadInfo(entry, row);
   entry.id = meta::String(meta::Required(row, "id"));
@@ -410,6 +424,7 @@ CatalogueLoad ParseCatalogue(std::string_view json_text) {
         root, {"schema_version", "catalogue_version", "flash_next", "entries"});
     if (meta::Integer(meta::Required(root, "schema_version")) != 1)
       throw std::invalid_argument("unsupported catalogue schema_version");
+    load.version = meta::String(meta::Required(root, "catalogue_version"));
     const auto& rows = meta::Required(root, "entries");
     if (!rows.is_array())
       throw std::invalid_argument("entries must be an array");

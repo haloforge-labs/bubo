@@ -12,12 +12,15 @@
 #include "src/core/reasoning.hpp"
 #include "src/core/sampling.hpp"
 #include "src/core/text_sampling_defaults.hpp"
+#include "src/models/qwen38_flash_next/kv_cache.hpp"
 
 namespace gufo::cli {
 
 /// Options for `gufo prompt` and `gufo chat` execution.
 struct PromptOptions {
   std::string model_path;
+  models::qwen38_flash_next::KvCacheType kv_cache_type =
+      models::qwen38_flash_next::KvCacheType::kF16;
   std::string vision_model_path;
   std::vector<std::string> image_paths;
   bool add_vision_id{false};

@@ -1,4 +1,4 @@
-import { afterEach, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { page } from 'vitest/browser'
 import {
   coreView,
@@ -9,16 +9,18 @@ import { actions } from '@/lib/bindings'
 import { MemoryFit } from './components/memory-fit'
 import { renderView } from '@/components/test-view'
 
+// The default window: a row has the room for its hint beside the control.
+beforeEach(() => page.viewport(1280, 829))
 afterEach(() => vi.restoreAllMocks())
 
-test('Mode uses only CLI GUI profiles and resolves the saved stock alias', async () => {
+test('Profile uses only CLI GUI profiles and resolves the saved stock alias', async () => {
   const view = coreView('stopped-saved-estimate')
   view.saved.profile = legacyProfile.profile
   view.switch_overrides.find((row) => row.name === '--profile')!.saved =
     view.saved.profile
   mountCorePage('/settings', view)
   await page.getByRole('tab', { name: 'Advanced' }).click()
-  const mode = page.getByRole('combobox', { name: 'Mode', exact: true })
+  const mode = page.getByRole('combobox', { name: 'Profile', exact: true })
   await expect
     .poll(() =>
       Array.from((mode.element() as HTMLSelectElement).options).map(

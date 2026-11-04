@@ -72,3 +72,44 @@ test('without GPU observations Logs shows no fabricated history', async () => {
     .toBeVisible()
   expect(document.querySelector('.recharts-wrapper')).toBeNull()
 })
+
+test('a flat series, including all zeros, draws no chart; a varying one does', async () => {
+  const view = fixture()
+  const mounted = renderView(<LogsPage />, view)
+  cleanup = mounted.cleanup
+  const at = Date.now()
+  mounted.client.setQueryData(
+    ['gpu-history', view.instance?.instance_id ?? view.generation],
+    Array.from({ length: 6 }, (_, index) => ({
+      at: at - (5 - index) * 2000,
+      gpu: {
+        use_pct: index * 15,
+        memory_used_bytes: 0,
+        temperature_c: 55,
+        chip_power_w: 0,
+      },
+    })),
+  )
+  await expect
+    .element(page.getByRole('figure', { name: 'GPU use history' }))
+    .toBeVisible()
+  for (const flat of ['GPU memory', 'GPU temperature', 'Chip power'])
+    expect(document.body.textContent).not.toContain(flat)
+})
+
+test('GPU history charts follow the page grid, not the window', async () => {
+  const view = fixture()
+  const mounted = renderView(<LogsPage />, view)
+  cleanup = mounted.cleanup
+  const at = Date.now()
+  mounted.client.setQueryData(
+    ['gpu-history', view.instance?.instance_id ?? view.generation],
+    Array.from({ length: 6 }, (_, index) => ({
+      at: at - (5 - index) * 2000,
+      gpu: { use_pct: index * 15, temperature_c: 40 + index * 3 },
+    })),
+  )
+  const section = page.getByRole('region', { name: 'GPU history' })
+  await expect.element(section).toBeVisible()
+  expect(section.element().innerHTML).not.toMatch(/\bsm:grid-cols/)
+})

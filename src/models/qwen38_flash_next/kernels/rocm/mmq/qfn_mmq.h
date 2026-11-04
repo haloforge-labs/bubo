@@ -3,8 +3,23 @@
 #include <hip/hip_runtime.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "dispatch_trace.h"
 extern "C" {
+// Host-only observation of the actual rectangular routed GEMM dispatches.
+// Never passed to a device kernel or used to choose its shape.
+void qfn_mmq_trace_routed(qfn_mmq_dispatch_trace *trace);
 int qfn_mmq_init(int device);
+// Process-wide host launch observations, including captures but not replays.
+// Width is the kernel block's token waves, in 1..8; invalid keys return zero.
+unsigned long long qfn_mmq_iq_decode_launch_count(int weight_type, int variant,
+                                                int width);
+void qfn_mmq_release_stream(hipStream_t stream);
+int qfn_mmq_head_rescore(const void* weights, const void* input,
+                          const int32_t* ids, float* output, int cols,
+                          int shortlist, int weight_rows, int width,
+                          void* packed, float* cross, hipStream_t stream);
+// Commit one arena before capture; zero bytes still enables the growth guard.
+int qfn_mmq_reserve_stream(hipStream_t stream, size_t bytes, size_t* reserved);
 
 void qfn_mmq_set_routed_max_expert_rows(int rows);
 
@@ -36,6 +51,13 @@ int qfn_mmq_moe_vec(int weight_type, const void* W, const float* X_f32,
                     const int32_t* ids, float* out, int M, int K, int n_tokens,
                     int n_experts, int n_expert_used, hipStream_t stream,
                     const void* W_b = nullptr, float* out_b = nullptr);
+
+// Explicit benchmark variants for packed routed experts. Values are declared
+// in iq_decode_bits.hpp. Production dispatch reads no variant environment.
+int qfn_mmq_moe_vec_iq_bench(int weight_type, const void* W,
+    const float* X_f32, const int32_t* ids, float* out, int M, int K,
+    int n_tokens, int n_experts, int n_expert_used, hipStream_t stream,
+    const void* W_b, float* out_b, int variant);
 
 // Q4_K/Q5_K/Q8_0 gate/up for 1–8 tokens, with the SwiGLU result in out.
 // Q4_K also accepts up to 64 independent rows, grouped by expert.
@@ -92,6 +114,39 @@ int qfn_mmq_q8_0_dense_vec_preq(const void* W_q8_0, const void* W_gate,
                                 int K, hipStream_t stream);
 /// Host launch submissions (including graph capture), process lifetime.
 unsigned long long qfn_mmq_iq4_dense_launch_count();
+// Explicit bench/operator variants. The production adapter applies its source
+// policy and an optional process-lifetime dense IQ diagnostic override.
+int qfn_mmq_dense_vec_preq_variant(int type, const void* weights,
+    const void* input, const int32_t* zero_ids, float* output,
+    int M, int N, int K, int variant, hipStream_t stream);
+unsigned long long qfn_mmq_dense_gemv_launch_count(int type, int variant, int width);
+/// Engine calls under GUFO_DENSE_IQ_VARIANT=dot4 by dense_gemv::Dot4Route
+/// (0: ran dot4; else the reason the call kept its route), process lifetime.
+unsigned long long qfn_mmq_dense_dot4_route_count(int route);
+// Bench-only ablation entries (dense_gemv_bench --ablate). They are not
+// dense_gemv::Variant values and production dispatch never calls them. Each
+// launch is counted; the bench aborts a cell whose counters disagree with the
+// kernel it asked for.
+// K-quant matrix-unit kernel stage (kquant_stage.hpp). Returns the kernel id
+// type * 256 + stage, or negative: -1 unsupported request, -3 launch error.
+// extra_lds_bytes adds dynamic LDS to force fewer resident CTAs per
+// multiprocessor (on gfx11 the WGP: two CUs sharing 128 KiB of LDS).
+int qfn_mmq_kquant_stage_launch(int type, int stage, const void* weights,
+    const void* input, float* output, int K, int M, int N, int extra_lds_bytes,
+    hipStream_t stream);
+unsigned long long qfn_mmq_kquant_stage_launch_count(int type, int stage, int width);
+/// Resident CTAs per multiprocessor (WGP on gfx11) the runtime reports for the stage kernel with the
+/// extra dynamic LDS; negative on error.
+int qfn_mmq_kquant_stage_occupancy(int type, int stage, int extra_lds_bytes);
+/// reuse1 loads rung: weight loads and fragment decode only, one row per wave.
+int qfn_mmq_reuse1_loads_launch(int type, const void* weights,
+    const void* input, float* output, int M, int K, hipStream_t stream);
+unsigned long long qfn_mmq_reuse1_loads_launch_count(int type);
+/// Q8_0 controls for 1..8 rows: kind 0 = production dp4a route, kind 1 =
+/// matrix-unit kernel (the production route only uses it from nine rows).
+int qfn_mmq_q8_0_control_launch(int kind, const void* W_q8_0, const void* X_q8,
+    float* out, int M, int N, int K, hipStream_t stream);
+unsigned long long qfn_mmq_q8_0_control_launch_count(int kind, int width);
 /// Decode twin: dense projections of 1..8 pre-quantised Q8_1 activation rows.
 /// IQ4_XS / IQ4_NL decode weights once for all columns. Other types retain
 /// the one-expert vector dispatch. zero_ids holds >= N zeros; output is [N][M].
@@ -168,6 +223,10 @@ int qfn_mmq_iq2_s_moe_raw(
     int M, int K, int n_tokens, int n_experts, int n_expert_used,
     hipStream_t stream);
 int qfn_mmq_q2_0_moe_raw(
+    const void * W, const float * X_f32, const int32_t * ids, float * out,
+    int M, int K, int n_tokens, int n_experts, int n_expert_used,
+    hipStream_t stream);
+int qfn_mmq_iq1_m_moe_raw(
     const void * W, const float * X_f32, const int32_t * ids, float * out,
     int M, int K, int n_tokens, int n_experts, int n_expert_used,
     hipStream_t stream);

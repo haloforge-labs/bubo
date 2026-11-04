@@ -632,7 +632,7 @@ bool Engine::DFlashDraftPass(std::int32_t x, std::uint32_t count,
       seq, vocab, d.sel_rank, d.sel_topk, stream_);
   TokenProb(d.logits, stok + 1, d.conf, count, vocab, stream_);
   if (pruned)
-    fn::RemapIds(stok + 1, count, draft_map_, stream_);
+    fn::RemapIds(stok + 1, count, draft_map_, draft_vocab_, stream_);
   if (!Ok(hipMemcpyAsync(d.host + 1, stok + 1, count * 4, hipMemcpyDeviceToHost,
                          stream_),
           "dflash drafts", error) ||

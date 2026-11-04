@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -20,10 +21,15 @@
 #include "src/models/qwen/vision/encoder.hpp"
 #include "src/models/qwen/vision/prompt.hpp"
 #include "src/models/qwen38_flash_next/config.hpp"
+#include "src/models/qwen38_flash_next/device_accept.hpp"
+#include "src/models/qwen38_flash_next/draft_chain.hpp"
+#include "src/models/qwen38_flash_next/kv_cache.hpp"
 #include "src/models/qwen38_flash_next/mtp_policy.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
+#include "src/models/qwen38_flash_next/ngram.hpp"
 #include "src/models/qwen38_flash_next/prefill_diag.hpp"
 #include "src/models/qwen38_flash_next/prompt_lookup.hpp"
+#include "src/models/qwen38_flash_next/refusal_direction.hpp"
 
 namespace gufo::core {
 class GgufReader;
@@ -41,11 +47,14 @@ struct ModelWeights;
 struct MtpWeights;
 class NgramTable;
 struct MtpCandidateLogits;
+class ContinuationAdapter;
+class ContinuationHooks;
 namespace rocm {
 class DeviceModel;
 class Executor;
 class Session;
 class SnapshotState;
+struct PrefillCheckpoint;
 }  // namespace rocm
 
 /// Tokens the MTP draft head may propose.
@@ -73,6 +82,7 @@ struct ModelOptions {
   /// Fixed serving capacity used by the calibrated MTP cost model. Keeping
   /// it independent of scheduler timing preserves seeded request replay.
   std::uint32_t decode_concurrency = 1;
+  std::optional<RopeScaling> rope_scaling{};
   /// Opt-in MTP draft policies. Verification is unchanged, so outputs keep
   /// the target distribution (greedy text is byte-identical); they change
   /// how many tokens a cycle proposes and how cheaply.
@@ -92,6 +102,10 @@ struct ModelOptions {
 #ifdef GUFO_NPU
   std::shared_ptr<npu::ServerPrefill> npu_prefill;
 #endif
+  /// Ordinary trunk and MTP K/V only; indexer and recurrent state are
+  /// unchanged.
+  KvCacheType kv_cache_type = KvCacheType::kF16;
+  RefusalOverrides refusal;
 };
 
 class Session;
@@ -131,6 +145,7 @@ public:
   [[nodiscard]] std::uint32_t ExecutorMaxBatch() const noexcept;
   /// Prints the decode-twin counters under `tag`; no-op without a twin.
   void LogTwinCounters(const char* tag) const;
+  [[nodiscard]] std::string_view RefusalIdentity() const;
   [[nodiscard]] std::uint32_t PrefillCheckpointSlack() const noexcept;
   /// Host memory a new checkpoint of `payload_bytes` covering `token_count`
   /// tokens will hold: its session part while the device can hold the rest
@@ -145,6 +160,9 @@ public:
     return options_.max_context;
   }
   [[nodiscard]] bool HasMtp() const noexcept;
+  [[nodiscard]] KvCacheType CacheType() const noexcept {
+    return options_.kv_cache_type;
+  }
   [[nodiscard]] std::uint32_t DecodeConcurrency() const noexcept {
     return options_.decode_concurrency;
   }
@@ -154,7 +172,7 @@ public:
   [[nodiscard]] const tokenization::QwenTokenizer& tokenizer() const noexcept {
     return *tokenizer_;
   }
-  [[nodiscard]] std::size_t ResidentBytes() const noexcept;
+  [[nodiscard]] std::size_t ResidentBytes() const;
   /// Worst-case private device state, including the configured rollback cap.
   [[nodiscard]] std::size_t SessionBytes(core::SessionMode mode,
                                          std::uint32_t context) const noexcept;
@@ -194,6 +212,7 @@ private:
   std::unique_ptr<MtpWeights> mtp_weights_;
   std::unique_ptr<tokenization::QwenTokenizer> tokenizer_;
   std::unique_ptr<NgramTable> ngram_;
+  DecodeCycleOptions cycle_options_;
   std::unique_ptr<rocm::DeviceModel> device_;
   std::unique_ptr<rocm::Executor> executor_;
   std::shared_ptr<qwen::vision::Encoder> vision_;
@@ -206,6 +225,7 @@ private:
   DraftHeadSwitchConfig head_switch_config_;
 
   friend class Session;
+  friend class ContinuationAdapter;
 };
 
 /// One conversation's context. Sync feeds a prompt (reusing whatever prefix
@@ -224,14 +244,16 @@ public:
   /// read during this one; it never changes the result.
   [[nodiscard]] bool Sync(std::span<const std::int32_t> prompt,
                           std::string* error_msg = nullptr,
-                          std::span<const std::int32_t> next = {});
+                          std::span<const std::int32_t> next = {},
+                          std::size_t request_prompt_tokens = 0);
   /// Prefills through a stable text boundary in the same forward, returning
   /// a checkpoint of that boundary while the live session reaches prompt.
   [[nodiscard]] bool SyncThrough(
       std::span<const std::int32_t> prompt, std::uint32_t boundary,
       std::unique_ptr<SessionSnapshot>* checkpoint,
       std::string* error_msg = nullptr, double* capture_ms = nullptr,
-      std::chrono::steady_clock::time_point* capture_started = nullptr);
+      std::chrono::steady_clock::time_point* capture_started = nullptr,
+      std::size_t request_prompt_tokens = 0);
   [[nodiscard]] bool Evaluate(std::int32_t token,
                               std::string* error_msg = nullptr);
   /// Appends `tokens` through the decode arithmetic: one token as a decode
@@ -240,10 +262,17 @@ public:
   /// instead (a session without MTP). `rows` receives every token's
   /// next-token logits (tokens.size() * vocab). For numerical A/B of the
   /// kernels.
-  [[nodiscard]] bool TeacherForce(std::span<const std::int32_t> tokens,
-                                  std::vector<float>* rows,
-                                  std::string* error_msg = nullptr,
-                                  bool prefill = false);
+  struct LogitEvalHeadRows {
+    std::vector<float> target, draft;
+    std::vector<std::int32_t> draft_tokens;
+  };
+  /// Debug-only head inputs. Successors contains the known next token for
+  /// each target row; draft rows use teacher-forced trunk hidden states.
+  [[nodiscard]] bool TeacherForce(
+      std::span<const std::int32_t> tokens, std::vector<float>* rows,
+      std::string* error_msg = nullptr, bool prefill = false,
+      LogitEvalHeadRows* heads = nullptr,
+      std::span<const std::int32_t> successors = {});
   struct TeacherForceRequest {
     Session* session;
     std::span<const std::int32_t> tokens;
@@ -316,7 +345,12 @@ public:
   [[nodiscard]] std::size_t AllocatedBytes() const noexcept;
   void ConfigureVision(std::shared_ptr<const qwen::vision::Prompt> prompt);
   /// A new request reusing cached context starts its own acceptance history.
-  void ResetDraftPolicy() noexcept { draft_length_.Reset(); }
+  void ResetDraftPolicy();
+  /// `reused_tokens` rows of the prompt come from the cache; the request cuts
+  /// its new rows only when they are numerous (PrefillExpertCutsRequest).
+  void ConfigurePrefillRequest(std::size_t full_prompt_tokens,
+                               std::size_t reused_tokens);
+  [[nodiscard]] NgramTotals NgramRowTotals() const noexcept;
 
   struct SpeculativeStats {
     std::uint64_t cycles{0};
@@ -343,8 +377,17 @@ public:
     return stats_;
   }
 
-  /// Compatibility version; bump on payload or inference arithmetic changes.
-  static constexpr std::uint32_t kSnapshotPayloadVersion = 18;
+  /// F16/plain compatibility version. Type-dependent producers and checkers
+  /// use ExpectedKvPayloadVersion; older or mismatched state is rejected.
+  static constexpr std::uint32_t kSnapshotPayloadVersion =
+      kKvCacheNumericsEpoch;
+  /// Portable preflight shared with CPU tests; unknown types fail closed even
+  /// when both a malformed payload and caller happen to name the same value.
+  [[nodiscard]] static constexpr bool IsCompatibleSnapshotPayload(
+      std::uint32_t version, KvCacheType type, KvCacheType expected) noexcept {
+    return IsKnownKvCacheType(type) && IsKnownKvCacheType(expected) &&
+           type == expected && version == ExpectedKvPayloadVersion(expected);
+  }
   /// Bytes a snapshot of the current context occupies.
   [[nodiscard]] std::uint64_t SnapshotBytes() const;
   [[nodiscard]] std::uint64_t PrefillCheckpointBytes(
@@ -369,7 +412,12 @@ public:
 
 private:
   friend class Model;
+  friend class ContinuationAdapter;
   Session(std::shared_ptr<Model> model, std::unique_ptr<rocm::Session> session);
+  void ResetImpl(bool reuse_mtp);
+  using PrefillCapture = std::function<void(const rocm::PrefillCheckpoint&)>;
+  bool SyncThroughComponents(std::span<const std::int32_t>, std::uint32_t,
+                             const PrefillCapture&, std::string*);
 
   template<bool CaptureStarted = false>
   bool Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
@@ -377,13 +425,17 @@ private:
             std::unique_ptr<SessionSnapshot>* checkpoint = nullptr,
             double* capture_ms = nullptr,
             std::chrono::steady_clock::time_point* capture_started = nullptr,
-            std::span<const std::int32_t> after = {});
+            std::span<const std::int32_t> after = {},
+            std::size_t request_prompt_tokens = 0,
+            const PrefillCapture& capture = {});
   bool SyncImpl(
       std::span<const std::int32_t> prompt, std::string* error_msg,
       std::uint32_t boundary, std::unique_ptr<SessionSnapshot>* checkpoint,
       double* capture_ms = nullptr,
       std::chrono::steady_clock::time_point* capture_started = nullptr,
-      std::span<const std::int32_t> next = {});
+      std::span<const std::int32_t> next = {},
+      std::size_t request_prompt_tokens = 0,
+      const PrefillCapture& capture = {});
   std::unique_ptr<SessionSnapshot> SaveSnapshotImpl(
       const rocm::Session& state, std::span<const std::int32_t> tokens,
       std::span<const float> logits, std::uint32_t hidden_rows,
@@ -411,7 +463,8 @@ private:
   bool PrepareDecode(const DecodeRequest& request, PendingDecode* pending,
                      std::string* error_msg, bool defer_head = false,
                      std::optional<std::uint32_t> batch_drafts = {});
-  static void AppendDraft(PendingDecode& pending);
+  void AppendDraft(PendingDecode& pending);
+  void LogCycleCounters(bool final) const;
   /// Prompt lookup: appends copied proposals up to `cap` chain tokens.
   bool AppendLookup(PendingDecode& pending, std::size_t cap);
   bool FinishDecode(const DecodeRequest& request, const PendingDecode& pending,
@@ -420,6 +473,13 @@ private:
   std::shared_ptr<Model> model_;
   std::unique_ptr<rocm::Session> session_;
   std::vector<std::int32_t> tokens_;
+  // Number of initial rows actually computed under the cut policy. Decode
+  // output and protected prompt rows do not increase this frontier.
+  std::size_t prefill_cut_rows_{0};
+  std::size_t request_prompt_tokens_{0};
+  // False when the current request's new rows run under the normal arithmetic
+  // (see ConfigurePrefillRequest). An unconfigured request keeps the policy.
+  bool request_cuts_{true};
   /// True when, after the committed context plus chain[0, keep), the most
   /// recent of <think> / </think> / <tool_call> is <think> (lenient acceptance
   /// gate; a backward scan, so it is restore- and rollback-safe by
@@ -430,7 +490,8 @@ private:
   /// A sampled cycle's rollback left the frontier row in flight (see
   /// FinishDecode): logits_ is stale until EnsureFrontier fetches it.
   mutable bool frontier_pending_{false};
-  bool EnsureFrontier(std::string* error_msg = nullptr) const;
+  bool EnsureFrontier(std::string* error_msg = nullptr,
+                      bool allow_shortlist = false) const;
   /// GPU-selected top candidates of logits_, valid only from a sampled MTP
   /// cycle's FinishDecode until the next PrepareDecode consumes them.
   MtpCandidateLogits anchor_candidates_{};
@@ -439,6 +500,10 @@ private:
   std::vector<float> verify_logits_;
   std::uint32_t hidden_base_{0};  ///< first position whose hidden row is kept
   MtpLengthController draft_length_;
+  DraftPolicyTotals cycle_totals_;
+  DeviceAcceptTotals device_accept_totals_;
+  DraftChainTotals draft_chain_totals_;
+  std::uint32_t falsify_rounds_{0};
   /// DraftVocabulary::kAuto: mode from committed output; tokens_ before
   /// head_scanned_ are observed or are prompt / teacher-forced context.
   DraftHeadSwitch head_switch_;
@@ -451,6 +516,7 @@ private:
   [[nodiscard]] std::span<const std::uint8_t> ImageIdentity(
       std::size_t token_count) const;
   bool valid_{true};
+  ContinuationHooks* continuation_hooks_{nullptr};
   [[nodiscard]] bool MtpEnabled() const noexcept;
 };
 

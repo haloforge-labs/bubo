@@ -37,6 +37,10 @@ target_compile_options(gufo-a3b PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-O2>)
 target_link_libraries(gufo-a3b PRIVATE gufo_qwen36_a3b)
 
 if(BUILD_TESTING)
+  add_executable(qwen36_a3b_prefill_capture EXCLUDE_FROM_ALL
+    ${PROJECT_SOURCE_DIR}/tests/models/qwen36_a3b/prefill_capture.cpp)
+  target_link_libraries(qwen36_a3b_prefill_capture PRIVATE gufo_qwen36_a3b)
+
   # These operator checks link the existing HIP runtime. The Get check uses
   # synthetic host regions and never calls HIP; the op check needs a GPU slot.
   foreach(name IN ITEMS weight_types kquant_ops)

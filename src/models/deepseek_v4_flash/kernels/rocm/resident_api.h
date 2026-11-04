@@ -4,6 +4,8 @@
 #include <cstdint>
 
 #ifdef __cplusplus
+#include "src/core/platform/mapped_file.hpp"
+
 extern "C" {
 #endif
 
@@ -39,6 +41,14 @@ void ds4_gpu_release_support_map(void);
 void ds4_gpu_set_small_batch_mode(int enabled);
 int ds4_gpu_dspark_capture_features_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *hc, uint32_t out_row_stride, uint32_t slot_offset, uint32_t n_embd, uint32_t n_hc, uint32_t n_rows);
 void ds4_gpu_cleanup(void);
+// Store disjoint rows up to one compression boundary. Pooling and the
+// ratio-four shift must finish before another span reuses these state slots.
+int ds4_gpu_compressor_store_batch_tensor(
+    const ds4_gpu_tensor* kv, const ds4_gpu_tensor* sc,
+    ds4_gpu_tensor* state_kv, ds4_gpu_tensor* state_score,
+    const void* model_map, uint64_t model_size, uint64_t ape_offset,
+    uint32_t ape_type, uint32_t head_dim, uint32_t ratio, uint32_t pos0,
+    uint32_t n_tokens);
 int ds4_gpu_compressor_prefill_ratio4_replay_tensor(ds4_gpu_tensor *comp_cache, ds4_gpu_tensor *state_kv, ds4_gpu_tensor *state_score, const ds4_gpu_tensor *kv, const ds4_gpu_tensor *sc, const void *model_map, uint64_t model_size, uint64_t ape_offset, uint32_t ape_type, uint64_t norm_offset, uint32_t norm_type, uint32_t head_dim, uint32_t pos0, uint32_t n_tokens, uint32_t n_rot, uint32_t n_ctx_orig, bool quantize_fp8, float freq_base, float freq_scale, float ext_factor, float attn_factor, float beta_fast, float beta_slow, float rms_eps, ds4_gpu_tensor *comp_mirror_f16);
 int ds4_gpu_compressor_prefill_state_ratio4_tensor(ds4_gpu_tensor *state_kv, ds4_gpu_tensor *state_score, const ds4_gpu_tensor *kv_tail, const ds4_gpu_tensor *sc_tail, const void *model_map, uint64_t model_size, uint64_t ape_offset, uint32_t ape_type, uint32_t head_dim, uint32_t pos0);
 int ds4_gpu_compressor_prefill_tensor(ds4_gpu_tensor *comp_cache, ds4_gpu_tensor *state_kv, ds4_gpu_tensor *state_score, const ds4_gpu_tensor *kv, const ds4_gpu_tensor *sc, const void *model_map, uint64_t model_size, uint64_t ape_offset, uint32_t ape_type, uint64_t norm_offset, uint32_t norm_type, uint32_t head_dim, uint32_t ratio, uint32_t pos0, uint32_t n_tokens, uint32_t n_rot, uint32_t n_ctx_orig, bool quantize_fp8, float freq_base, float freq_scale, float ext_factor, float attn_factor, float beta_fast, float beta_slow, float rms_eps, ds4_gpu_tensor *comp_mirror_f16);
@@ -129,7 +139,7 @@ int ds4_gpu_routed_moe_one_tensor(
     float clamp, const ds4_gpu_tensor* x);
 int ds4_gpu_router_select_batch_tensor(ds4_gpu_tensor *selected, ds4_gpu_tensor *weights, ds4_gpu_tensor *probs, const void *model_map, uint64_t model_size, uint64_t bias_offset, uint64_t hash_offset, uint32_t hash_rows, uint32_t n_expert_groups, uint32_t n_group_used, bool has_bias, bool hash_mode, const ds4_gpu_tensor *logits, const ds4_gpu_tensor *tokens, uint32_t n_expert, uint32_t n_expert_used, float expert_weight_scale, uint32_t n_tokens);
 int ds4_gpu_router_select_tensor(ds4_gpu_tensor *selected, ds4_gpu_tensor *weights, ds4_gpu_tensor *probs, const void *model_map, uint64_t model_size, uint64_t bias_offset, uint64_t hash_offset, uint32_t hash_rows, uint32_t token, uint32_t n_expert, uint32_t n_expert_used, float expert_weight_scale, uint32_t n_expert_groups, uint32_t n_group_used, bool has_bias, bool hash_mode, const ds4_gpu_tensor *logits);
-int ds4_gpu_set_model_fd(int fd);
+int ds4_gpu_set_model_fd(gufo::platform::PlatformFile fd);
 int ds4_gpu_set_model_map_range(const void *model_map, uint64_t model_size, uint64_t map_offset, uint64_t map_size, uint64_t max_tensor_bytes);
 int ds4_gpu_shared_down_hc_expand_q8_0_tensor(ds4_gpu_tensor *out_hc, ds4_gpu_tensor *shared_out, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim, const ds4_gpu_tensor *shared_mid, const ds4_gpu_tensor *routed_out, const ds4_gpu_tensor *residual_hc, const ds4_gpu_tensor *split, uint32_t n_embd, uint32_t n_hc);
 int ds4_gpu_shared_gate_up_swiglu_q8_0_tensor(
@@ -144,7 +154,12 @@ int ds4_gpu_attention_noncausal_raw_batch_heads_tensor(
     uint64_t sinks_offset, const ds4_gpu_tensor* q,
     const ds4_gpu_tensor* raw_kv, uint32_t n_tokens, uint32_t n_raw,
     uint32_t raw_cap, uint32_t raw_start, uint32_t n_head, uint32_t head_dim);
-int ds4_gpu_dspark_markov_argmax_tensor(ds4_gpu_tensor *out_index, ds4_gpu_tensor *scratch_key, const ds4_gpu_tensor *logits_row, const void *model_map, uint64_t model_size, uint64_t w1_offset, uint64_t w2_offset, uint32_t vocab, uint32_t markov_rank, uint32_t previous_token);
+// Sequential Markov choices stay device-side until the complete chain is read.
+int ds4_gpu_dspark_markov_chain_tensor(
+    ds4_gpu_tensor* out_index, ds4_gpu_tensor* scratch_key,
+    const ds4_gpu_tensor* logits_rows, const void* model_map,
+    uint64_t model_size, uint64_t w1_offset, uint64_t w2_offset, uint32_t vocab,
+    uint32_t markov_rank, uint32_t previous_token, uint32_t rows);
 int ds4_gpu_dspark_candidates_tensor(
     ds4_gpu_tensor* out, ds4_gpu_tensor* scratch, const ds4_gpu_tensor* logits,
     uint64_t logits_stride, const ds4_gpu_tensor* hidden,

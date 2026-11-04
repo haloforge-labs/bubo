@@ -34,9 +34,8 @@ no libomp license is needed for those absent files. The package gate rejects
 libomp files/imports in our archive. Production HIP closure remains OPEN
 and must be re-checked. The gate cannot inspect the ROCm wheels that
 `bubo prepare runtime` downloads separately from AMD. Those are AMD's files;
-the supplied runtime inventory lists `libomp140.x86_64.dll` in
-`tools/release/runtime-notices/OPEN-ITEMS.md`, with source/license provenance
-still OPEN. That DLL is not in the selected `runtime-members.tsv` extraction
+the supplied runtime inventory lists `libomp140.x86_64.dll`, with
+source/license provenance still OPEN. That DLL is not in the selected `runtime-members.tsv` extraction
 list; its presence in the exact wheels is not established by this CPU check.
 Release CRT and UCRT system imports are permitted; CRT files, including
 `concrt*.dll`, `vccorlib`, `vcomp*.dll`, `ucrtbase.dll` and

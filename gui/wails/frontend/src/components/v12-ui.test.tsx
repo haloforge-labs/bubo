@@ -73,18 +73,12 @@ test.each(['failed', 'cancelled'])(
   },
 )
 
-test('stopped Connect explains what will appear and links to Server without Start', async () => {
+test('stopped Connect is one linked sentence to Server without Start', async () => {
   cleanup = renderView(<ConnectPage />, fixture('stopped')).cleanup
   await expect
-    .element(
-      page.getByText(
-        'No server is running, so there is nothing to connect to yet.',
-      ),
-    )
-    .toBeVisible()
-  await expect
-    .element(page.getByRole('link', { name: 'Server page' }))
+    .element(page.getByRole('link', { name: 'Start the server to connect.' }))
     .toHaveAttribute('href', '/')
+  expect(document.body.textContent).not.toContain('nothing to connect to yet')
   expect(document.body.textContent).not.toContain('appear here once it runs')
   await expect
     .element(page.getByRole('button', { name: 'Start server' }))
@@ -169,11 +163,7 @@ test('setup model choice offers all three published options and downloads the se
     .mockResolvedValue(bridgeReply({ plan: recordedPlan() }))
   mountCorePage('/onboarding', view)
   await expect
-    .element(
-      page.getByText(
-        /optimized for Qwen3.8 Flash Next on Strix Halo computers running Windows/,
-      ),
-    )
+    .element(page.getByText(/Needs a Strix Halo computer running Windows/))
     .toBeVisible()
   expect(document.body.textContent).not.toContain(recommended.id)
   const choice = page.getByRole('combobox', { name: 'Model to download' })

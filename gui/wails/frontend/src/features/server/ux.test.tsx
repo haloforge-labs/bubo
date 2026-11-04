@@ -6,7 +6,7 @@ import { bridgeReply } from '@/components/bridge-test-reply'
 
 afterEach(() => vi.restoreAllMocks())
 
-test('setup comes before running telemetry and Server draws no charts', async () => {
+test('the facts of a running server come before the setup and Server draws no charts', async () => {
   const view = coreView('ready-busy')
   view.gpu = {
     use_pct: 73,
@@ -19,11 +19,12 @@ test('setup comes before running telemetry and Server draws no charts', async ()
   await expect
     .element(page.getByRole('region', { name: 'Server setup', exact: true }))
     .toBeVisible()
+  // While the server runs, its facts come first and the setup follows.
   expect(
     document
-      .querySelector('[aria-label="Server setup"]')!
+      .querySelector('[aria-label="Reported request rates"]')!
       .compareDocumentPosition(
-        document.querySelector('[aria-label="Reported request rates"]')!,
+        document.querySelector('[aria-label="Server setup"]')!,
       ) & Node.DOCUMENT_POSITION_FOLLOWING,
   ).toBeTruthy()
   await expect

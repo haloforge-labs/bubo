@@ -2,6 +2,7 @@ import { afterEach, expect, test, vi } from 'vitest'
 import { page } from 'vitest/browser'
 import { fixture, renderView } from '@/components/test-view'
 import { actions } from '@/lib/bindings'
+import { settingLabel } from '@/lib/presentation'
 import { RegistrySection } from './registry-section'
 
 let cleanup = () => {}
@@ -73,6 +74,7 @@ test('the marker-list placeholder is unset and never written as a filename', asy
   const row = view.switches.find(
     (row) => row.name === 'GUFO_THINK_MARKER_LIST',
   )!
+  const label = settingLabel(row)
   view.switches = [row]
   const state = view.switch_overrides.find((state) => state.name === row.name)!
   const save = vi.spyOn(actions, 'PatchPreferences').mockResolvedValue({})
@@ -80,22 +82,21 @@ test('the marker-list placeholder is unset and never written as a filename', asy
     <RegistrySection view={view} audience={row.audience} />,
     view,
   ).cleanup
+  // Unset: the row offers its default as a button named Change ..., not a
+  // filename field.
   await expect
-    .element(
-      page.getByText('Custom marker-list file: not set (built-in list)', {
-        exact: true,
-      }),
-    )
-    .toBeVisible()
+    .element(page.getByRole('button', { name: `Change ${label}`, exact: true }))
+    .toHaveTextContent('Default')
+  expect(
+    page.getByRole('textbox', { name: label, exact: true }).query(),
+  ).toBeNull()
   cleanup()
   state.saved = 'C:/fixture/markers.txt'
   cleanup = renderView(
     <RegistrySection view={view} audience={row.audience} />,
     view,
   ).cleanup
-  await page
-    .getByRole('textbox', { name: row.label!, exact: true })
-    .fill('none')
+  await page.getByRole('textbox', { name: label, exact: true }).fill('none')
   await page.getByRole('button', { name: 'Save changes' }).click()
   expect(save).toHaveBeenCalledExactlyOnceWith({ set: {}, clear: [row.name] })
 })
@@ -109,7 +110,9 @@ test('unmodified CLI defaults in hidden Debug rows do not block an Advanced edit
     view,
   ).cleanup
   await page.getByRole('textbox', { name: 'Find a setting' }).fill(row.name)
-  await page.getByRole('textbox', { name: row.label!, exact: true }).fill('6')
+  await page
+    .getByRole('textbox', { name: 'Max draft tokens', exact: true })
+    .fill('6')
   await page.getByRole('button', { name: 'Save changes' }).click()
   await expect.poll(() => save.mock.calls.length).toBe(1)
   expect(save).toHaveBeenCalledExactlyOnceWith({

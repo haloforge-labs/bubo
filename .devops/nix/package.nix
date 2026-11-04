@@ -4,24 +4,34 @@
   cmake,
   ninja,
   pkg-config,
+  makeWrapper,
   icu,
   curl,
   libpng,
   libjpeg,
   libwebp,
+  libsndfile,
+  soxr,
   openssl,
   ffmpeg-headless,
+  ccache,
   rocmPackages,
   releaseVersion ? null,
   revision,
+  sourceRoot ? ../..,
 }:
 
 let
+  # Keep SVM available for managed model/state allocations, but prevent
+  # compaction of ROCr's queue save areas and HIP's runtime-owned buffers from
+  # suspending inference.
+  rocmRuntime = rocmPackages.rocm-runtime.overrideAttrs (old: {
+    patches = (old.patches or [ ]) ++ [ ./patches/rocr-fixed-cwsr-rocm10.patch ];
+  });
   engineVersion = builtins.replaceStrings [ "\n" "\r" ] [ "" "" ] (builtins.readFile ../../version.txt);
   productVersion = builtins.replaceStrings [ "\n" "\r" ] [ "" "" ] (builtins.readFile ../../tools/release/product_version.txt);
   packageVersion =
     if releaseVersion == null then "0-unstable-${revision}" else releaseVersion;
-  sourceRoot = ../..;
   productionSource = lib.cleanSourceWith {
     src = sourceRoot;
     filter =
@@ -47,6 +57,7 @@ let
       || relativePath == "tests/models/deepseek_v4_flash/fixtures/antirez-ds4.json";
   };
 in
+assert lib.versions.majorMinor rocmPackages.clr.version == "10.1";
 stdenv.mkDerivation {
   pname = "bubo";
   version = packageVersion;
@@ -56,6 +67,7 @@ stdenv.mkDerivation {
     cmake
     ninja
     pkg-config
+    makeWrapper
     rocmPackages.clr
   ];
 
@@ -65,6 +77,8 @@ stdenv.mkDerivation {
     libpng
     libjpeg
     libwebp
+    libsndfile
+    soxr
     openssl
     ffmpeg-headless
     rocmPackages.clr
@@ -85,7 +99,37 @@ stdenv.mkDerivation {
     "-DCMAKE_HIP_COMPILER=${rocmPackages.llvm.clang}/bin/clang"
   ];
 
+  # CI exposes a persistent /tmp/gufo-ccache through extra-sandbox-paths for
+  # C/C++ sources. Keep HIP uncached: Clang emits a bundled preprocessor output
+  # whose included headers ccache 4.13.6 does not record. A header-only change
+  # can then reuse a stale HIP object, including one from the timing baseline.
+  preConfigure = ''
+    ccache_dir=/tmp/gufo-ccache
+    if [[ -d "$ccache_dir" && -w "$ccache_dir" ]]; then
+      export CCACHE_DIR="$ccache_dir"
+      export CCACHE_COMPILERCHECK=content
+      export CCACHE_MAXSIZE=4G
+      export CCACHE_NOHASHDIR=true
+      export CCACHE_UMASK=000
+      cmakeFlagsArray+=(
+        "-DGUFO_CCACHE_PROGRAM=${ccache}/bin/ccache"
+      )
+      ${ccache}/bin/ccache --zero-stats
+    fi
+  '';
+  postBuild = ''
+    if [[ -n "''${CCACHE_DIR:-}" ]]; then
+      ${ccache}/bin/ccache --show-stats
+    fi
+  '';
+
   doInstallCheck = true;
+  postFixup = ''
+    # HIP loads ROCr transitively. Select the patched ABI-compatible runtime
+    # without rebuilding the unchanged HIP/BLAS compiler and kernel libraries.
+    wrapProgram "$out/bin/bubo" \
+      --prefix LD_LIBRARY_PATH : "${rocmRuntime}/lib"
+  '';
   installCheckPhase = ''
     runHook preInstallCheck
 
@@ -101,7 +145,7 @@ stdenv.mkDerivation {
   '';
 
   passthru = {
-    inherit releaseVersion revision rocmPackages;
+    inherit releaseVersion revision rocmPackages rocmRuntime;
     toolchain = {
       targetPlatform = "x86_64-linux";
       targetGpu = "gfx1151";

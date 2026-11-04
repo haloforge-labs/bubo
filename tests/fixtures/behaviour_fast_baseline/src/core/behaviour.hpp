@@ -144,7 +144,7 @@ struct LoopBreaker {
         int answer_repeats = 32;
         int answer_tokens = 512;
         int think_max_period = kMaxPeriod;
-        int answer_max_period = 16;
+        int answer_max_period = kMaxPeriod;
     } cfg;
 
     struct event {

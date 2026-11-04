@@ -13,6 +13,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "src/core/platform/mapped_file.hpp"
+
 namespace gufo::minimax_h3 {
 
 enum class DType : std::uint8_t {
@@ -247,6 +249,7 @@ public:
 private:
   struct Mapping {
     std::filesystem::path shard;
+    platform::RawMappedFile mapping_file;
     void* host{nullptr};
     void* device_alias{nullptr};
     std::size_t bytes{0};

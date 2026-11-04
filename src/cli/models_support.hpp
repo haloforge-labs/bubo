@@ -1,6 +1,6 @@
 #pragma once
 
-// bubo models list / bubo models estimate.
+// bubo models list / bubo models estimate / bubo models check-side-file.
 //
 // Nothing here starts a server, loads weights or touches the network. A GGUF
 // file is read by its header only. The engine's own loaders decide whether a
@@ -13,6 +13,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <utility>
 #include <string_view>
 #include <vector>
 
@@ -21,6 +22,10 @@
 #include "src/cli/model_catalogue.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/core/json.hpp"
+
+namespace gufo::server {
+struct ReleaseResolution;
+}
 
 namespace bubo::cli {
 struct ModelsCommandOptions {
@@ -31,6 +36,14 @@ struct ModelsCommandOptions {
   std::string model;
   std::string profile = std::string(gufo::cli::kDefaultProfile);
   std::uint64_t context = 0, sessions = 1;
+  std::string kv_cache_type;  // estimate: "", f16 or q8_0
+  // estimate: --switch NAME=VALUE, any serve switch the user saved. Flags are
+  // kept as serve takes them (`--name=value`, or `--name`); environment
+  // settings are set in this process before the estimate resolves them.
+  std::vector<std::string> serve_args;
+  std::vector<std::pair<std::string, std::string>> serve_env;
+  // check-side-file: the helper file and its role (mtp, mmproj, draft_head).
+  std::string side_file, role;
   bool help = false;
 };
 bool ParseModelsCommand(std::span<const char* const> args,
@@ -99,10 +112,17 @@ struct EstimateRequest {
   std::uint64_t context =
       0;  // 0: serve release-profile context (native if unset)
   std::uint64_t sessions = 1;
+  std::string kv_cache_type;  // "" (serve's default, f16), f16 or q8_0
+  // Further serve flags, in serve's spelling (`--name=value`, `--name`).
+  std::vector<std::string> serve_args;
   std::optional<std::uint64_t> available_bytes, host_available_bytes;
   PlanningMemoryBudgets capacity_budgets;
   // Sum of the files the user selected. Unset: all shards found for a path.
   std::optional<std::uint64_t> weights_bytes;
+  // serve's already resolved settings and package id. EstimateForGguf uses them
+  // instead of resolving the model path again.
+  const gufo::server::ReleaseResolution* resolved = nullptr;
+  std::string resolved_package_id;
 };
 struct EstimateResult {
   std::string state;                  // "estimated" | "none_yet"
@@ -111,7 +131,20 @@ struct EstimateResult {
   std::string evidence_label;
   std::vector<std::string> notes;
   gufo::json::Value fit_inputs = gufo::json::Value::object();
+  // What serve can do with this model; null when the model is not known.
+  gufo::json::Value capabilities;
 };
+// {"routed_experts" (only when above zero), "prefill_mode_fast": {"available",
+// "reason"}, "refusal_direction": {"available", "reason"}}. `architecture` is
+// general.architecture (or a folder's model_type); the family and the refusal
+// rules are serve's own (PrefillFastRefusalFor, RefusalDirectionRefusalFor),
+// so the hint matches what `serve` does.
+gufo::json::Value ModelCapabilities(std::string_view architecture,
+                                    std::uint32_t routed_experts,
+                                    bool already_abliterated = false);
+// The same for a catalogue entry, from the entry's architecture and its stated
+// routed_experts, before any file is on this computer.
+gufo::json::Value CatalogueCapabilities(const CatalogueEntry&);
 EstimateResult EstimateForGguf(const Inspection&, const EstimateRequest&);
 EstimateResult EstimateForCatalogueEntry(
     const CatalogueEntry&, const std::filesystem::path& models_root,

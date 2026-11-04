@@ -93,18 +93,37 @@ test('diagnostics preview and local support bundle use typed actions and preserv
   expect(diagnose).toHaveBeenCalledTimes(1)
   expect(preview).toHaveBeenCalledTimes(1)
   await page
-    .getByRole('textbox', { name: 'Local ZIP path' })
+    .getByRole('textbox', { name: 'ZIP file path' })
     .fill('C:\\fixture-support.zip')
-  await page
-    .getByRole('button', { name: 'Save support bundle locally' })
-    .click()
+  await page.getByRole('button', { name: 'Save support bundle' }).click()
   expect(save).toHaveBeenCalledWith('C:\\fixture-support.zip')
   await expect
     .element(page.getByRole('alert'))
     .toHaveTextContent('bundle_write_failed: Choose another local path.')
   await expect
-    .element(page.getByText('Support bundle saved locally.'))
+    .element(page.getByText('Support bundle saved.'))
     .not.toBeInTheDocument()
+})
+
+test('a saved support bundle is confirmed once, on Logs, as a plain status line', async () => {
+  const view = fixture()
+  view.bundle_preview = 'fixture support files'
+  vi.spyOn(actions, 'SaveBundle').mockResolvedValue(
+    {} as Awaited<ReturnType<typeof actions.SaveBundle>>,
+  )
+  cleanup = renderView(<LogsPage />, view).cleanup
+  const path = page.getByRole('textbox', { name: 'ZIP file path' })
+  await expect.element(path).toBeVisible()
+  expect(path.element().getAttribute('placeholder')).toBe(
+    'C:\\Users\\…\\bubo-support.zip',
+  )
+  await path.fill('C:\\fixture-support.zip')
+  await page.getByRole('button', { name: 'Save support bundle' }).click()
+  await expect
+    .element(page.getByRole('status'))
+    .toHaveTextContent('Support bundle saved.')
+  expect(document.body.textContent).not.toContain('saved locally')
+  expect(document.querySelectorAll('[role="alert"]')).toHaveLength(0)
 })
 
 test.each(['Ready', 'Stopped', 'Attached-external'] as const)(

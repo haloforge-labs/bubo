@@ -24,7 +24,7 @@ Add its complete row to `src/cli/serve/release_switches.json`, including `group`
 
 `GUFO_MAX_IMAGE_TOKENS` accepts positive integers. The disk cache byte caps use unsigned integers. The C++ value validator and the JSON schema must agree with these catalog rules.
 
-Counts: user 35, advanced 13, debug 177.
+Counts: user 38, advanced 18, debug 220.
 
 | Switch | Group | Audience | Purpose |
 | --- | --- | --- | --- |
@@ -35,20 +35,21 @@ Counts: user 35, advanced 13, debug 177.
 | `--cache-disk-staging-bytes` | Memory | user | Limit RAM used to stage disk prompt snapshots. |
 | `--cache-ram-bytes` | Memory | user | Set the RAM snapshot cache budget. |
 | `--context` | Memory | user | Set the context token limit for each session. |
-| `--debug-hooks` | Other | debug | Control debug hooks. |
-| `--dflash-model` | Other | debug | Control dflash model. |
+| `--debug-hooks` | Other | debug | None |
+| `--dflash-model` | Other | debug | None |
 | `--draft-head-model` | Speed | advanced | Select the prepared MTP draft head. |
-| `--draft-policy` | Speed | debug | Control draft policy. |
+| `--draft-policy` | Speed | debug | None |
 | `--draft-tokens` | Speed | advanced | Set the maximum speculative draft length. |
-| `--dspark-model` | Other | debug | Control dspark model. |
+| `--dspark-model` | Other | debug | None |
 | `--exact` | Other | debug | Select the exact profile. |
 | `--frequency-penalty` | Behaviour | user | Penalize tokens by their generated occurrence count. |
-| `--help` | Other | debug | Control help. |
+| `--help` | Other | debug | None |
 | `--host` | Server | user | Set the server listen address. |
+| `--kv-cache-type` | Memory | user | Use about half the cache memory, so more or longer conversations fit; replies can differ slightly from the default. |
 | `--log-level` | Server | debug | Set the amount of server log detail. |
 | `--log-progress` | Server | debug | Log prompt processing progress. |
 | `--loop-breaker` | Behaviour | user | Stop repeated answer and thinking loops. |
-| `--manifest` | Other | debug | Control manifest. |
+| `--manifest` | Other | debug | None |
 | `--max-buffered-output-bytes` | Server | debug | Limit buffered output for each request. |
 | `--max-buffered-output-total` | Server | debug | Limit buffered output across all requests. |
 | `--max-connections` | Server | debug | Limit simultaneous HTTP connections. |
@@ -56,13 +57,13 @@ Counts: user 35, advanced 13, debug 177.
 | `--max-pending` | Server | debug | Limit queued requests. |
 | `--max-pending-per-client` | Server | debug | Limit queued requests from each client. |
 | `--max-request-bytes` | Server | debug | Set the maximum HTTP request body size. |
-| `--max-score-tokens` | Server | debug | Control max score tokens. |
+| `--max-score-tokens` | Server | debug | None |
 | `--max-tokens` | Behaviour | user | Limit new tokens generated per request. |
 | `--min-draft-tokens` | Speed | advanced | Set the minimum speculative draft length. |
 | `--min-keep` | Behaviour | user | Retain a minimum number of sampling candidates. |
 | `--min-p` | Behaviour | user | Filter tokens by probability relative to the best token. |
 | `--mmproj` | Memory | user | Set the vision file. |
-| `--model` | Other | user | Control model. |
+| `--model` | Other | user | Path of the model file to load. |
 | `--mtp-draft-vocab` | Speed | advanced | Select the MTP draft head vocabulary. |
 | `--mtp-model` | Speed | advanced | Set the MTP file. |
 | `--mtp-policy` | Speed | advanced | Select the MTP draft length controller. |
@@ -77,16 +78,23 @@ Counts: user 35, advanced 13, debug 177.
 | `--npu-prefill` | Hardware and memory | user | Use NPU prefill when available. |
 | `--port` | Server | user | Set the server listen port. |
 | `--prefill-chunk` | Speed | advanced | Limit prompt tokens between active decode rounds. |
+| `--prefill-mode` | Speed | user | Experimental. Reads prompts of 4,096+ new tokens up to 16 % faster with fewer experts. Decode uses all experts. |
 | `--presence-penalty` | Behaviour | user | Penalize tokens already generated in the response. |
 | `--preserve-thinking` | Behaviour | debug | Select which thinking history to retain. |
 | `--print-effective-settings` | Other | debug | Print resolved settings as JSON and exit. |
 | `--profile` | Other | user | Select the release settings profile. |
 | `--prompt-lookup` | Speed | advanced | Propose tokens from an earlier conversation match. |
 | `--reasoning-effort` | Behaviour | user | Set the default reasoning effort. |
+| `--refusal-direction` | Behaviour | user | Turn the direction projection on or off. |
+| `--refusal-direction-file` | Behaviour | advanced | Choose the direction file used when the projection is on. |
+| `--refusal-direction-layer-end` | Behaviour | advanced | Set the last layer for stream mode, inclusive. Ignored in sites mode. |
+| `--refusal-direction-layer-start` | Behaviour | advanced | Set the first layer for stream mode, inclusive. Ignored in sites mode. |
+| `--refusal-direction-mode` | Behaviour | advanced | Choose whether to project selected outputs or the residual stream. |
+| `--refusal-direction-strength` | Behaviour | advanced | Set the projection strength. 1 removes the direction; 0 has no effect. |
 | `--repeat-last-n` | Behaviour | user | Set the recent token window for repetition penalties. |
 | `--repeat-penalty` | Behaviour | user | Penalize recently used tokens. |
 | `--request-timeout-ms` | Server | debug | Limit request time in milliseconds. |
-| `--root` | Other | debug | Control root. |
+| `--root` | Other | debug | None |
 | `--seed` | Behaviour | user | Set the random sampling seed. |
 | `--served-model-name` | Server | user | Set the model identifier exposed by the API. |
 | `--sessions` | Memory | user | Set the number of preallocated request sessions. |
@@ -94,100 +102,117 @@ Counts: user 35, advanced 13, debug 177.
 | `--stall-timeout-ms` | Server | debug | Exit as device lost when generation makes no progress for this many milliseconds. |
 | `--temperature` | Behaviour | user | Set the randomness of token sampling. |
 | `--think` | Behaviour | user | Set the default reasoning mode. |
-| `--think-marker-bias` | Behaviour | user | Set a fixed thinking marker probability bias. |
+| `--think-marker-bias` | Behaviour | user | Uses one rethinking penalty at every reasoning effort, replacing the per-effort values. Negative numbers lower the chance of "wait" restarts. |
 | `--top-k` | Behaviour | user | Limit sampling to the highest probability candidates. |
 | `--top-p` | Behaviour | user | Filter sampling candidates by cumulative probability. |
 | `--trace` | Other | debug | Write request and generation content to a JSONL file. |
-| `--ttl` | Other | debug | Control ttl. |
+| `--ttl` | Other | debug | None |
 | `--twin-model` | Hardware and memory | user | Select the prepared dense twin. |
-| `--verbose` | Other | debug | Control verbose. |
+| `--verbose` | Other | debug | None |
 | `--verify-model` | Other | advanced | Hash all eight manifest files plus distinct overrides before loading (about 2-4 minutes on SSD). |
-| `--voice` | Other | debug | Control voice. |
-| `--voice-lang` | Other | debug | Control voice lang. |
-| `--voice-text` | Other | debug | Control voice text. |
-| `A3B_ATTN_CHECK` | Other | debug | Control the a3b attn check setting. |
-| `A3B_ATTN_PRECISE` | Other | debug | Control the a3b attn precise setting. |
-| `A3B_DECODE_ATTN` | Other | debug | Control the a3b decode attn setting. |
-| `A3B_DFLASH_PROFILE` | Other | debug | Control the a3b dflash profile setting. |
-| `A3B_NO_RESUME` | Other | debug | Control the a3b no resume setting. |
-| `A3B_PROBE_ONLY` | Other | debug | Control the a3b probe only setting. |
-| `A3B_WIDE_ATTN_CHECK` | Other | debug | Control the a3b wide attn check setting. |
-| `A3B_WIDE_BF16_BLAS` | Other | debug | Control the a3b wide bf16 blas setting. |
-| `A3B_WIDE_BLAS_F32` | Other | debug | Control the a3b wide blas f32 setting. |
-| `A3B_WIDE_DEBUG` | Other | debug | Control the a3b wide debug setting. |
-| `A3B_WIDE_F16_MAXCOLS` | Other | debug | Control the a3b wide f16 maxcols setting. |
-| `A3B_WIDE_F16_MINROWS` | Other | debug | Control the a3b wide f16 minrows setting. |
-| `A3B_WIDE_FN_ATTN` | Other | debug | Control the a3b wide fn attn setting. |
-| `A3B_WIDE_NO_DOWN64` | Other | debug | Control the a3b wide no down64 setting. |
-| `A3B_WIDE_NO_F16` | Other | debug | Control the a3b wide no f16 setting. |
-| `A3B_WIDE_PROFILE` | Other | debug | Control the a3b wide profile setting. |
+| `--voice` | Other | debug | None |
+| `--voice-lang` | Other | debug | None |
+| `--voice-text` | Other | debug | None |
+| `A3B_ATTN_CHECK` | Other | debug | None |
+| `A3B_ATTN_PRECISE` | Other | debug | None |
+| `A3B_DECODE_ATTN` | Other | debug | None |
+| `A3B_DFLASH_PROFILE` | Other | debug | None |
+| `A3B_NO_RESUME` | Other | debug | None |
+| `A3B_PROBE_ONLY` | Other | debug | None |
+| `A3B_WIDE_ATTN_CHECK` | Other | debug | None |
+| `A3B_WIDE_BF16_BLAS` | Other | debug | None |
+| `A3B_WIDE_BLAS_F32` | Other | debug | None |
+| `A3B_WIDE_DEBUG` | Other | debug | None |
+| `A3B_WIDE_F16_MAXCOLS` | Other | debug | None |
+| `A3B_WIDE_F16_MINROWS` | Other | debug | None |
+| `A3B_WIDE_FN_ATTN` | Other | debug | None |
+| `A3B_WIDE_NO_DOWN64` | Other | debug | None |
+| `A3B_WIDE_NO_F16` | Other | debug | None |
+| `A3B_WIDE_PROFILE` | Other | debug | None |
 | `BUBO_API_KEY` | Other | debug | Provide the server API key; --api-key takes precedence. |
 | `BUBO_MANIFEST` | Other | debug | Select bubo-package.json; explicit --manifest takes precedence. |
 | `BUBO_MMPROJ` | Memory | debug | Select the vision projector; explicit --mmproj takes precedence. |
 | `BUBO_MTP_MODEL` | Speed | debug | Select the MTP file; explicit --mtp-model takes precedence. |
 | `BUBO_RUNTIME_DIR` | Other | debug | Set the prepared runtime folder. |
-| `DS4_LOCK_FILE` | Other | debug | Control the ds4 lock file setting. |
+| `DS4_LOCK_FILE` | Other | debug | None |
 | `GPU_MAX_HW_QUEUES` | Other | debug | Set the hardware queue cap. |
-| `GUFO_A3B_DATA` | Other | debug | Control a3b data. |
-| `GUFO_A3B_MODEL` | Other | debug | Control a3b model. |
-| `GUFO_BATCH_DRAFT_HEAD` | Other | debug | Control batch draft head. |
+| `GUFO_A3B_DATA` | Other | debug | None |
+| `GUFO_A3B_MODEL` | Other | debug | None |
+| `GUFO_BATCH_DRAFT_HEAD` | Other | debug | None |
 | `GUFO_CACHE_HOST_FLOOR_MB` | Memory | debug | Reserve available host RAM during snapshot admission. |
-| `GUFO_CACHE_REMOVAL_LOG` | Memory | debug | Control cache removal log. |
-| `GUFO_DEBUG_HOOKS` | Other | debug | Control debug hooks. |
-| `GUFO_DEEPSEEK_DSPARK_TIMING` | Other | debug | Control deepseek dspark timing. |
-| `GUFO_DEEPSEEK_DSPARK_TRACE` | Other | debug | Control deepseek dspark trace. |
-| `GUFO_DEEPSEEK_DSPARK_WIDTH_TRACE` | Other | debug | Control deepseek dspark width trace. |
-| `GUFO_DEEPSEEK_ROCM_DECODE_STAGE_PROFILE` | Other | debug | Control deepseek rocm decode stage profile. |
-| `GUFO_DEEPSEEK_ROCM_GRAPH_PREFILL_PROFILE` | Other | debug | Control deepseek rocm graph prefill profile. |
-| `GUFO_DEEPSEEK_ROCM_GRAPH_TOKEN_PROFILE` | Other | debug | Control deepseek rocm graph token profile. |
-| `GUFO_DEEPSEEK_ROCM_INDEXER_STAGE_PROFILE` | Other | debug | Control deepseek rocm indexer stage profile. |
-| `GUFO_DEEPSEEK_ROCM_LAYER_STAGE_PROFILE` | Other | debug | Control deepseek rocm layer stage profile. |
-| `GUFO_DEEPSEEK_ROCM_Q_STAGE_PROFILE` | Other | debug | Control deepseek rocm q stage profile. |
-| `GUFO_DENSE_TWIN_ALLOW_Q8` | Other | debug | Control dense twin allow q8. |
+| `GUFO_CACHE_REMOVAL_LOG` | Memory | debug | None |
+| `GUFO_DEBUG_HOOKS` | Other | debug | None |
+| `GUFO_DECODE_IQ_ROUTING_PATH` | Other | debug | Export narrow-pass expert routing for diagnostic replay. |
+| `GUFO_DEEPSEEK_DSPARK_TIMING` | Other | debug | None |
+| `GUFO_DEEPSEEK_DSPARK_TRACE` | Other | debug | None |
+| `GUFO_DEEPSEEK_DSPARK_WIDTH_TRACE` | Other | debug | None |
+| `GUFO_DEEPSEEK_ROCM_DECODE_STAGE_PROFILE` | Other | debug | None |
+| `GUFO_DEEPSEEK_ROCM_GRAPH_PREFILL_PROFILE` | Other | debug | None |
+| `GUFO_DEEPSEEK_ROCM_GRAPH_TOKEN_PROFILE` | Other | debug | None |
+| `GUFO_DEEPSEEK_ROCM_INDEXER_STAGE_PROFILE` | Other | debug | None |
+| `GUFO_DEEPSEEK_ROCM_LAYER_STAGE_PROFILE` | Other | debug | None |
+| `GUFO_DEEPSEEK_ROCM_Q_STAGE_PROFILE` | Other | debug | None |
+| `GUFO_DENSE_IQ_VARIANT` | Speed | debug | Select a diagnostic dense kernel for the process lifetime. |
+| `GUFO_DENSE_TWIN_ALLOW_Q8` | Other | debug | None |
 | `GUFO_DENSE_TWIN_BATCH` | Hardware and memory | debug | Enable dense twin decode with multiple sessions. |
 | `GUFO_DENSE_TWIN_MAX_N` | Hardware and memory | debug | Limit the dense twin batch width. |
 | `GUFO_DENSE_TWIN_MODEL` | Hardware and memory | debug | Select the four bit dense weights used for decode and verify. |
-| `GUFO_DENSE_TWIN_SHADOW` | Other | debug | Control dense twin shadow. |
-| `GUFO_DENSE_TWIN_TRACE` | Other | debug | Control dense twin trace. |
-| `GUFO_DISK_BOUNDARY_ALIGN` | Memory | debug | Control disk boundary align. |
+| `GUFO_DENSE_TWIN_SHADOW` | Other | debug | None |
+| `GUFO_DENSE_TWIN_TRACE` | Other | debug | None |
+| `GUFO_DENSE_W1` | Speed | debug | Enable the production dense vector kernel for single-row projections. |
+| `GUFO_DEVICE_ACCEPT` | Speed | debug | Queue greedy speculative rollback before reading acceptance on the host. |
+| `GUFO_DISK_BOUNDARY_ALIGN` | Memory | debug | None |
 | `GUFO_DISK_DEFER` | Memory | debug | Defer disk writes until idle. |
-| `GUFO_DISK_DEFER_MS` | Memory | debug | Control disk defer ms. |
-| `GUFO_DISK_EVICT_BACKLOG_BYTES` | Memory | debug | Control disk evict backlog bytes. |
+| `GUFO_DISK_DEFER_MS` | Memory | debug | None |
+| `GUFO_DISK_EVICT_BACKLOG_BYTES` | Memory | debug | None |
 | `GUFO_DISK_EVICT_DOMINATED` | Memory | debug | Skip snapshots covered by a longer retained snapshot. |
 | `GUFO_DISK_EVICT_SKIP_TOKENS` | Memory | debug | Skip snapshot writes close to an existing persisted prefix. |
-| `GUFO_DISK_IDLE_MS` | Memory | debug | Control disk idle ms. |
+| `GUFO_DISK_IDLE_MS` | Memory | debug | None |
 | `GUFO_DISK_INPASS` | Memory | debug | Enable disk snapshots during prefill passes. |
 | `GUFO_DISK_PERSIST` | Memory | debug | Persist disk snapshots on eviction after idle. |
-| `GUFO_DISK_SLICE` | Memory | debug | Control disk slice. |
-| `GUFO_DISPATCH_TELEMETRY` | Other | debug | Control dispatch telemetry. |
+| `GUFO_DISK_SLICE` | Memory | debug | None |
+| `GUFO_DISPATCH_RESERVE_MIB` | Memory | debug | Set the device heap reserve in MiB. |
+| `GUFO_DISPATCH_TELEMETRY` | Other | debug | None |
+| `GUFO_DRAFT_CHAIN` | Speed | debug | Run a fixed greedy draft depth in one captured graph. |
+| `GUFO_DRAFT_FALSIFY` | Other | debug | Replace draft proposals with deterministic incorrect tokens for verifier checks. |
+| `GUFO_DRAFT_FALSIFY_CYCLES` | Other | debug | Limit the number of falsified draft cycles in each request. |
 | `GUFO_DRAFT_OUT_MODEL` | Speed | debug | Select the four bit output head used for MTP drafts. |
+| `GUFO_DRAFT_POLICY` | Speed | debug | Select the MTP draft length policy. |
 | `GUFO_DRAFT_VOCAB_AUTO` | Speed | debug | Set thresholds for automatic draft vocabulary selection. |
 | `GUFO_EOG_BOUNDARY` | Behaviour | debug | Permit EOG tokens at allowed boundaries. |
 | `GUFO_EOG_DEFER_P` | Behaviour | debug | Set the deferred stop probability. |
 | `GUFO_EOG_MIN_PROB` | Behaviour | debug | Set the minimum EOG probability required to stop. |
 | `GUFO_EOG_MIN_PROB_EXACT` | Behaviour | debug | Compute EOG probability over the full vocabulary. |
-| `GUFO_EVAL_API_KEY` | Other | debug | Control eval api key. |
-| `GUFO_EVAL_ARTIFACT_ID` | Other | debug | Control eval artifact id. |
-| `GUFO_EVAL_MODEL_REVISION` | Other | debug | Control eval model revision. |
-| `GUFO_EVAL_SERVER_COMMIT` | Other | debug | Control eval server commit. |
-| `GUFO_EVAL_SERVER_CONFIG` | Other | debug | Control eval server config. |
-| `GUFO_EVAL_SERVER_LABEL` | Other | debug | Control eval server label. |
+| `GUFO_EVAL_API_KEY` | Other | debug | None |
+| `GUFO_EVAL_ARTIFACT_ID` | Other | debug | None |
+| `GUFO_EVAL_MODEL_REVISION` | Other | debug | None |
+| `GUFO_EVAL_SERVER_COMMIT` | Other | debug | None |
+| `GUFO_EVAL_SERVER_CONFIG` | Other | debug | None |
+| `GUFO_EVAL_SERVER_LABEL` | Other | debug | None |
 | `GUFO_EXPERT_OVERLAY_KEEP` | Memory | debug | Name the routed-expert tensors that keep the base model's weights when an overlay is set. |
 | `GUFO_EXPERT_OVERLAY_MODEL` | Memory | debug | Replace the routed experts of the model with those of another GGUF of the same architecture. |
 | `GUFO_EXPERT_V2K` | Speed | debug | Grouped expert kernel (decode). |
-| `GUFO_FFMPEG` | Other | debug | Control ffmpeg. |
-| `GUFO_FFPROBE` | Other | debug | Control ffprobe. |
-| `GUFO_GROUPED_DOWN` | Other | debug | Control grouped down. |
-| `GUFO_HIPBLASLT_PLAN_CACHE` | Other | debug | Control hipblaslt plan cache. |
+| `GUFO_FFMPEG` | Other | debug | None |
+| `GUFO_FFPROBE` | Other | debug | None |
+| `GUFO_GROUPED_DOWN` | Other | debug | None |
+| `GUFO_HC_BF16_DENSE` | Speed | debug | Use the narrow BF16 hyper-connection projection kernel. |
+| `GUFO_HC_INJECT_BF16_FUSED` | Speed | debug | Fuse BF16 hyper-connection inject weights into the scalar decode epilogue. |
+| `GUFO_HC_LOAD_Q8` | Speed | debug | Narrow BF16 hyper-connection weights to Q8_0 in memory while loading. |
+| `GUFO_HC_LOAD_Q8_POISON` | Speed | debug | Poison buffers the weight loader releases and keep device ones allocated to expose stale reads. |
+| `GUFO_HC_LOAD_Q8_VERIFY` | Speed | debug | Compare converted and draft-block weights on the device with the file after loading. |
+| `GUFO_HEAD_CHECK` | Other | debug | Compare shortlisted head results against the full output head. |
+| `GUFO_HEAD_SHORTLIST` | Speed | debug | Opt in to experimental shortlist scoring and exact rescoring for eligible output head calls; off by default. |
+| `GUFO_HIPBLASLT_PLAN_CACHE` | Other | debug | None |
 | `GUFO_HOST` | Server | debug | Set the server address through the environment. |
 | `GUFO_INCREMENTAL_TOKENIZE` | Speed | debug | Reuse verified text render and token prefixes for exact conversation appends. Inspect incremental_tokenize counters in render timeline events. |
-| `GUFO_IQ4_WIDE_VARIANT` | Other | debug | Control iq4 wide variant. |
-| `GUFO_IQ4_WMMA_WAVES` | Other | debug | Control iq4 wmma waves. |
+| `GUFO_IQ4_WIDE_VARIANT` | Other | debug | None |
+| `GUFO_IQ4_WMMA_WAVES` | Other | debug | None |
 | `GUFO_IQ_ROUTE_MIN_ROWS` | Speed | debug | Set the minimum forward-pass rows for the IQ expert WMMA route. |
 | `GUFO_LENIENT` | Speed | debug | Accept near miss MTP drafts inside thinking spans. |
 | `GUFO_LENIENT_LAMBDA` | Speed | debug | Set the lenient speculative acceptance bound. |
 | `GUFO_LENIENT_THINK_ONLY` | Speed | debug | Limit lenient acceptance to thinking output. |
 | `GUFO_LOGIT_BIAS` | Behaviour | debug | Enable request token probability adjustments. |
+| `GUFO_LOGIT_EVAL_DUMP` | Other | debug | Write head inputs and full logits during logit-eval. |
 | `GUFO_LOG_SYNC` | Other | debug | Write logs synchronously for crash diagnostics. |
 | `GUFO_LOOP_BREAKER` | Behaviour | debug | Stop repeated answer and thinking loops. |
 | `GUFO_LOOP_BREAKER_EOG_CLOSE` | Other | debug | Close a detected loop with an EOG token. |
@@ -196,9 +221,10 @@ Counts: user 35, advanced 13, debug 177.
 | `GUFO_LOOP_BREAKER_TRANSITION_TEXT` | Other | debug | Set the text used for loop breaker transitions. |
 | `GUFO_MASK_THREADS` | Speed | debug | Set worker threads for tool grammar mask cache misses. |
 | `GUFO_MAX_IMAGE_TOKENS` | Memory | user | Limit image tokens admitted for a request. |
-| `GUFO_MEM_ACCOUNTING` | Other | debug | Control mem accounting. |
+| `GUFO_MEM_ACCOUNTING` | Other | debug | None |
 | `GUFO_MODEL_SUPPRESS_TOKENS` | Behaviour | debug | Enable model token suppression. |
-| `GUFO_MOE_BENCH` | Other | debug | Control moe bench. |
+| `GUFO_MOE_BENCH` | Other | debug | None |
+| `GUFO_MOE_FUSION` | Speed | debug | Combine narrow expert output and the residual update in one launch. |
 | `GUFO_MTP_TRACE` | Speed | debug | Write one trace line for each decode cycle. |
 | `GUFO_NPU_CHIP_POWER` | Hardware and memory | debug | Log chip power during NPU prefill with literal zero or one. |
 | `GUFO_NPU_DIR` | Hardware and memory | debug | Locate NPU artifacts for enabled prefill. |
@@ -214,42 +240,67 @@ Counts: user 35, advanced 13, debug 177.
 | `GUFO_NPU_TEST_FAIL_CHUNK` | Hardware and memory | debug | Report one NPU prefill chunk of each request as invalid, to test the GPU retry. |
 | `GUFO_NPU_TIMEOUT_MS` | Hardware and memory | debug | Bound NPU completion to one through eight thousand milliseconds. |
 | `GUFO_NPU_WEIGHT_GUARD` | Hardware and memory | debug | Re-send a changed NPU weight buffer with literal zero or one. |
-| `GUFO_PLATFORM_TUNING` | Other | debug | Control Windows timing and memory placement switches. |
+| `GUFO_PLATFORM_TUNING` | Other | debug | None |
+| `GUFO_PLE_READAHEAD` | Speed | debug | Start PLE table reads when anchor and draft token IDs become available. |
 | `GUFO_PORT` | Server | debug | Set the server port through the environment. |
-| `GUFO_PREFILL_DIAG` | Other | debug | Control prefill diag. |
+| `GUFO_PREFILL_DIAG` | Other | debug | None |
+| `GUFO_PREFILL_EXPERTS` | Speed | debug | Set how many routed experts each token keeps during prompt prefill. |
+| `GUFO_PREFILL_EXPERTS_AUDIT` | Speed | debug | Select how much the prefill expert cut records. |
+| `GUFO_PREFILL_EXPERTS_FOLD` | Speed | debug | Set the file of per-layer scalars for the fold prefill expert mode. |
+| `GUFO_PREFILL_EXPERTS_KFILE` | Speed | debug | Set the file of per-layer expert counts for prefill. |
+| `GUFO_PREFILL_EXPERTS_MASS` | Speed | debug | Set the routing mass that mass mode keeps in each prefill token. |
+| `GUFO_PREFILL_EXPERTS_MODE` | Speed | debug | Select how the prefill expert cut rescales the kept experts. |
+| `GUFO_PREFILL_EXPERTS_TAIL` | Speed | debug | Set how many final prompt tokens keep all experts in prefill. |
 | `GUFO_PREFILL_FORWARD_TOKENS` | Speed | debug | Set the maximum tokens in each prefill forward pass. |
-| `GUFO_PREFILL_STEP_LOG` | Other | debug | Control prefill step log. |
-| `GUFO_PREFILL_TARGET_MS` | Other | debug | Control prefill target ms. |
+| `GUFO_PREFILL_NATIVE_GEMM` | Speed | debug | Run native GGUF dense layers through a blocked matrix GEMM in prefill: 1 uses int8, 2 (default) adds 16-bit K-quants. |
+| `GUFO_PREFILL_STAGEB` | Other | debug | Write prefill expert samples to a directory for calibration. |
+| `GUFO_PREFILL_STAGEB_LAYERS` | Other | debug | Select the layers that the prefill expert samples cover. |
+| `GUFO_PREFILL_STAGEB_ROWS` | Other | debug | Set the token interval between prefill expert samples. |
+| `GUFO_PREFILL_STAGEB_STRIDE` | Other | debug | Set the token interval between accumulated prefill expert statistics. |
+| `GUFO_PREFILL_STEP_LOG` | Other | debug | None |
+| `GUFO_PREFILL_TARGET_MS` | Other | debug | None |
+| `GUFO_PREFILL_TELEMETRY` | Other | debug | Write prefill routing telemetry to a directory. |
+| `GUFO_PREFILL_TELEMETRY_LAYERS` | Other | debug | Select the layers that the prefill telemetry covers. |
 | `GUFO_PRODUCTION_SAMPLING` | Other | debug | Enable the production sampling preset. |
-| `GUFO_QWEN27_DRAFTLOG` | Other | debug | Control qwen27 profile. |
-| `GUFO_QWEN27_FLUSH` | Other | debug | Control qwen27 profile. |
-| `GUFO_QWEN27_LOOKUP` | Other | debug | Control qwen27 profile. |
-| `GUFO_QWEN27_LOOKUP_MODE` | Other | debug | Control qwen27 profile. |
-| `GUFO_QWEN27_PROFILE` | Other | debug | Control qwen27 profile. |
+| `GUFO_QWEN27_DRAFTLOG` | Other | debug | None |
+| `GUFO_QWEN27_FLUSH` | Other | debug | None |
+| `GUFO_QWEN27_LOOKUP` | Other | debug | None |
+| `GUFO_QWEN27_LOOKUP_MODE` | Other | debug | None |
+| `GUFO_QWEN27_PROFILE` | Other | debug | None |
 | `GUFO_REASONING_BUDGET` | Other | debug | Enable request reasoning token budgets. |
-| `GUFO_REQUIRE_GFX1151` | Other | debug | Control require hip. |
-| `GUFO_REQUIRE_GPU` | Other | debug | Control require hip. |
-| `GUFO_REQUIRE_HIP` | Other | debug | Control require hip. |
+| `GUFO_REFUSAL_DIRECTION` | Behaviour | debug | Remove a configured refusal direction from selected model outputs. |
+| `GUFO_REFUSAL_DIRECTION_ENABLED` | Behaviour | debug | Enable or disable the direction projection. |
+| `GUFO_REFUSAL_DIRECTION_LAYER_END` | Behaviour | debug | Choose the last stream layer. |
+| `GUFO_REFUSAL_DIRECTION_LAYER_START` | Behaviour | debug | Choose the first stream layer. |
+| `GUFO_REFUSAL_DIRECTION_MODE` | Behaviour | debug | Choose the projection mode. |
+| `GUFO_REFUSAL_DIRECTION_STRENGTH` | Behaviour | debug | Override the fitted direction strength. |
+| `GUFO_REQUIRE_GFX1151` | Other | debug | None |
+| `GUFO_REQUIRE_GPU` | Other | debug | None |
+| `GUFO_REQUIRE_HIP` | Other | debug | None |
 | `GUFO_ROUTED_LANEROW` | Speed | debug | Enable the routed expert prefill kernel. |
 | `GUFO_ROUTED_WMMA_IQ` | Speed | debug | Enable the F16 WMMA route for supported IQ and Q2 expert weights. |
 | `GUFO_SPEC_EOG_STOP` | Speed | debug | Permit speculative EOG stops. |
-| `GUFO_SURVIVAL_FLOOR` | Other | debug | Control survival floor. |
+| `GUFO_SURVIVAL_FLOOR` | Other | debug | None |
 | `GUFO_THINK_EOG_GUARD` | Behaviour | debug | Block end of turn inside an unfinished thinking span. |
 | `GUFO_THINK_GUARD_ESCALATE` | Behaviour | debug | Close an unfinished thinking span after this many blocked end-of-turn tries. 0 turns it off. |
-| `GUFO_THINK_MARKER_BIAS` | Behaviour | debug | Set a fixed thinking marker probability bias. |
-| `GUFO_THINK_MARKER_BIAS_BY_EFFORT` | Behaviour | user | Map reasoning effort to think marker bias. |
+| `GUFO_THINK_MARKER_BIAS` | Behaviour | debug | Uses one rethinking penalty at every reasoning effort. Negative numbers lower the chance of "wait" and "let me rethink" restarts. |
+| `GUFO_THINK_MARKER_BIAS_BY_EFFORT` | Behaviour | user | Lowers the chance of "wait" and "let me rethink" restarts while the model thinks. It does not cut thinking off. |
 | `GUFO_THINK_MARKER_ENTROPY_GATE` | Behaviour | debug | Gate thinking marker bias at a raw top-k entropy threshold in nats. |
-| `GUFO_THINK_MARKER_LIST` | Behaviour | debug | Control think marker list. |
-| `GUFO_TRACE` | Other | debug | Control trace. |
-| `GUFO_WEIGHT_UPLOAD_READERS` | Other | debug | Control weight upload readers. |
-| `HOME` | Other | debug | Control home. |
+| `GUFO_THINK_MARKER_LIST` | Behaviour | debug | None |
+| `GUFO_THINK_NUDGE` | Behaviour | debug | Insert an unfinished reasoning prefix when the model attempts to end an open thinking span. |
+| `GUFO_THINK_NUDGE_MAX` | Behaviour | debug | Limit thinking stop nudge insertions per request. Zero disables insertions. |
+| `GUFO_THINK_NUDGE_TEXT` | Behaviour | debug | Set the unfinished thinking stop nudge prefix, tokenized without special tokens. |
+| `GUFO_TRACE` | Other | debug | None |
+| `GUFO_TRACE_STAGES` | Other | debug | Trace decode stages inside verification graphs. |
+| `GUFO_WEIGHT_UPLOAD_READERS` | Other | debug | None |
+| `HOME` | Other | debug | None |
 | `HOST` | Server | debug | Set the server address through the environment fallback. |
-| `LOCALAPPDATA` | Other | debug | Control localappdata. |
+| `LOCALAPPDATA` | Other | debug | None |
 | `PATH` | Other | debug | Select runtime DLL search paths. |
 | `PORT` | Server | debug | Set the server port through the environment fallback. |
-| `QWEN3_ASR_ARTIFACTS` | Other | debug | Control the qwen3 asr artifacts setting. |
-| `QWEN3_ASR_MODEL_ROOT` | Other | debug | Control the qwen3 asr model root setting. |
-| `QWEN3_ASR_TEST_WAV` | Other | debug | Control the qwen3 asr test wav setting. |
-| `TEMP` | Other | debug | Control the temp setting. |
+| `QWEN3_ASR_ARTIFACTS` | Other | debug | None |
+| `QWEN3_ASR_MODEL_ROOT` | Other | debug | None |
+| `QWEN3_ASR_TEST_WAV` | Other | debug | None |
+| `TEMP` | Other | debug | None |
 | `TERM` | Other | debug | Identify the terminal for human status output. |
-| `XDG_CACHE_HOME` | Memory | debug | Control xdg cache home. |
+| `XDG_CACHE_HOME` | Memory | debug | None |

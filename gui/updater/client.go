@@ -93,6 +93,7 @@ func New(cfg Config) (*Client, *Failure) {
 	c.http = &http.Client{
 		Timeout: 30 * time.Minute,
 		Transport: &http.Transport{
+			Proxy:                 releaseProxy,
 			TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: cfg.RootCAs},
 			DisableCompression:    true,
 			ResponseHeaderTimeout: 30 * time.Second,
@@ -114,6 +115,8 @@ func New(cfg Config) (*Client, *Failure) {
 			return nil
 		},
 	}
+	// Retry the removal of helper copies that a finished update could not delete.
+	c.removeFinishedHelpers()
 	return c, nil
 }
 

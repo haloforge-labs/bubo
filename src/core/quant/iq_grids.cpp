@@ -4,6 +4,7 @@
 namespace gufo::quant {
 
 namespace {
+#include "src/core/quant/iq1_grid.inc"
 
 constexpr std::uint8_t kSignsIq2xs[128] = {
     0, 129, 130, 3, 132, 5, 6, 135, 136, 9, 10, 139,
@@ -527,6 +528,7 @@ constexpr std::uint32_t kIq3xxsGrid[256] = {
 const std::uint8_t* SignsIq2xs() noexcept { return kSignsIq2xs; }
 const std::uint64_t* Iq2xxsGrid() noexcept { return kIq2xxsGrid; }
 const std::uint64_t* Iq2xsGrid() noexcept { return kIq2xsGrid; }
+const std::uint64_t* Iq1sGrid() noexcept { return kIq1sGrid; }
 const std::uint64_t* Iq2sGrid() noexcept { return kIq2sGrid; }
 const std::uint32_t* Iq3xxsGrid() noexcept { return kIq3xxsGrid; }
 

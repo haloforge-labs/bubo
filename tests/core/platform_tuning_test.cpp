@@ -3,6 +3,7 @@
 #include <string>
 
 #include "src/core/platform/tuning.hpp"
+#include "src/core/platform/env.hpp"
 
 namespace {
 
@@ -17,9 +18,9 @@ void Expect(bool condition, const std::string& message) {
 
 gufo::platform::Tuning Parse(const char* spec) {
   if (spec == nullptr) {
-    ::unsetenv("GUFO_PLATFORM_TUNING");
+    gufo::platform::UnsetEnv("GUFO_PLATFORM_TUNING");
   } else {
-    ::setenv("GUFO_PLATFORM_TUNING", spec, 1);
+    gufo::platform::SetEnv("GUFO_PLATFORM_TUNING", spec);
   }
   return gufo::platform::detail::ParseTuning();
 }

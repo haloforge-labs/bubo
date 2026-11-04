@@ -89,7 +89,7 @@ test('running identity and path stay read-only while the saved picker is for nex
     .element(identity)
     .toHaveTextContent(folderPath(view.current_model.model_path))
   await expect
-    .element(page.getByRole('combobox', { name: 'Model for next start' }))
+    .element(page.getByRole('combobox', { name: 'Next model' }))
     .toHaveValue(saved.manifest_path!)
   await expect.element(identity.getByRole('combobox')).not.toBeInTheDocument()
 })

@@ -24,7 +24,7 @@ struct CanonicalFingerprint {
   std::string gpu_pci_id{"1002:1586"};
   std::string kernel_release;
   std::string rocm_version{"7.2.3"};
-  std::string cxx_compiler{"GCC 15.3.0"};
+  std::string cxx_compiler{"unknown"};
   std::string cpp_standard{"C++20"};
 
   [[nodiscard]] std::string CanonicalJson() const;
@@ -34,6 +34,9 @@ struct CanonicalFingerprint {
 struct MachineFingerprint {
   std::string fingerprint_id;
   CanonicalFingerprint canonical;
+  // Display only: outside the canonical form, so the id is unchanged.
+  std::string os_name{"Linux"};
+  std::string target_platform{"x86_64-linux"};
 
   [[nodiscard]] std::string ToJson() const;
   [[nodiscard]] std::string ToHuman() const;

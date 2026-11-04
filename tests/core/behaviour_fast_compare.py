@@ -6,11 +6,11 @@ import sys
 
 old, new, out = sys.argv[1:]
 frozen = Path(__file__).resolve().parents[1] / 'fixtures/behaviour_fast_baseline/src/core'
-# Frozen at c847e6df on 2026-10-11; previously a40d37f. Provenance: tests/fixtures/behaviour_fast_baseline/README.md.
+# Frozen at c847e6df on 2026-10-11; previously a40d37f. behaviour.hpp: answer_max_period 16 -> kMaxPeriod (0.1.2 repeat guard), see the README. Provenance: tests/fixtures/behaviour_fast_baseline/README.md.
 expected = {
     'sampling.cpp': '232ac3b2a47ff48d7ea2ebaee3b1b478b5b6d84ee70f75f61cc632e471395816',
     'sampling.hpp': '00ebc5cd7559fd95529c84af164f07f8b869666a3e975d06e3440028c51b0e64',
-    'behaviour.hpp': 'f5370a56190de6e897a5a9b52757e607017dd9bb771f81c26d6d31ea74a44b0e',
+    'behaviour.hpp': 'f552de878d79c29cc44e3ef3a97d62f5d3df850478451cc2910cf614d0055b2c',
 }
 for name, digest in expected.items():
     if hashlib.sha256((frozen / name).read_bytes()).hexdigest() != digest:

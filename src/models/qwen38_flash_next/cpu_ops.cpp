@@ -2,6 +2,8 @@
 
 #include <cmath>
 #include <cstring>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "src/core/quant/ggml_dequant.hpp"
@@ -87,6 +89,9 @@ void DequantizeRow(const TensorRef& t, std::uint64_t e, std::uint64_t row,
     case GgmlType::kIQ2_XXS:
       gufo::quant::DequantizeIQ2_XXS(src, out, k);
       break;
+    case GgmlType::kIQ1_M:
+      gufo::quant::DequantizeIQ1_M(src, out, k);
+      break;
     case GgmlType::kQ2_0:
       gufo::quant::DequantizeQ2_0(src, out, k);
       break;
@@ -96,12 +101,16 @@ void DequantizeRow(const TensorRef& t, std::uint64_t e, std::uint64_t row,
     case GgmlType::kQ5_K:
       gufo::quant::DequantizeQ5_K(src, out, k);
       break;
+    case GgmlType::kQ3_K:
+      gufo::quant::DequantizeQ3_K(src, out, k);
+      break;
     case GgmlType::kQ6_K:
       gufo::quant::DequantizeQ6_K(src, out, k);
       break;
     default:
-      std::memset(out, 0, k * sizeof(float));
-      break;
+      throw std::invalid_argument("tensor " + std::string(t.name) + " type=" +
+                                  std::string(core::ToString(t.type)) +
+                                  " pass=cpu-reference: no dequantizer");
   }
 }
 
@@ -169,16 +178,23 @@ float Softplus(float x) noexcept {
 }
 
 void Rope(float* x, std::uint32_t heads, std::uint32_t head_dim,
-          std::uint32_t rotary_dim, std::uint32_t pos, float theta) {
+          std::uint32_t rotary_dim, std::uint32_t pos, float theta,
+          const YarnRope& yarn) {
   const std::uint32_t half = rotary_dim / 2;
   for (std::uint32_t h = 0; h < heads; ++h) {
     float* v = x + static_cast<std::size_t>(h) * head_dim;
     for (std::uint32_t i = 0; i < half; ++i) {
-      const float freq = std::pow(theta, -2.0F * static_cast<float>(i) /
-                                             static_cast<float>(rotary_dim));
+      float freq = std::pow(theta, -2.0F * static_cast<float>(i) /
+                                       static_cast<float>(rotary_dim));
+      if (yarn.enabled != 0)
+        freq *= YarnPairMultiplier(yarn, i);
       const float angle = static_cast<float>(pos) * freq;
-      const float c = std::cos(angle);
-      const float s = std::sin(angle);
+      float c = std::cos(angle);
+      float s = std::sin(angle);
+      if (yarn.enabled != 0) {
+        c *= yarn.mscale;
+        s *= yarn.mscale;
+      }
       const float a = v[i];
       const float b = v[i + half];
       v[i] = a * c - b * s;

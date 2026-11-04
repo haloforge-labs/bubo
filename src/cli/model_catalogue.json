@@ -1,6 +1,6 @@
 {
  "schema_version": 1,
- "catalogue_version": "2026-10-26",
+ "catalogue_version": "2026-11-01",
  "flash_next": {
   "architecture": "qwen4exp",
   "model_family": "qwen3.8-flash-next",
@@ -488,6 +488,64 @@
    "disabled_reason": null,
    "packaging": "safetensors_folder",
    "estimate_note": "Bubo has no memory estimate for this model yet."
+  },
+  {
+   "id": "qwen38-flash-next-coder-ista-gsq-rco-256",
+   "display_name": "Qwen3.8 Flash Next Coder (ISTA GSQ-RCO, 256 experts)",
+   "technical_name": "Qwen3.8-Flash-Next · ISTA-DASLab GSQ-RCO Coder (256 experts)",
+   "selection_label": "ISTA-DASLab Coder (256 experts)",
+   "family_group": "qwen3.8-flash-next-coder",
+   "routed_experts": 256,
+   "about": "Qwen3.8 Flash Next is a model by Alibaba Qwen. ISTA-DASLab made this coding version with its GSQ and RCO methods: it keeps 256 of the 512 experts in each layer and stores the remaining weights at lower precision to reduce memory use. Bubo pairs it with its standard multi-token prediction (MTP) file. Image input is not available for this entry. Download: about 58.4 GB of model files plus a 2.8 GB MTP file. Memory: about 29 GB of GPU memory for the model, plus the context cache. GB here means 1,000,000,000 bytes. It is offered as a coding alternative.",
+   "about_links": [
+    "https://arxiv.org/abs/2604.18556",
+    "https://arxiv.org/abs/2605.00649"
+   ],
+   "role": "supported",
+   "architecture": "qwen4exp",
+   "repository": "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF",
+   "commit": "bba88856f8c3c0c9e40e45f82d05e228b814ac43",
+   "files": [
+    {
+     "name": "Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M-00001-of-00002.gguf",
+     "repo_path": "IQ1_M/Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M-00001-of-00002.gguf",
+     "url": "https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF/resolve/bba88856f8c3c0c9e40e45f82d05e228b814ac43/IQ1_M/Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M-00001-of-00002.gguf",
+     "bytes": 29608446496,
+     "sha256": "bfa3644db4adfff072fc946c20994f2909d2cf89879d83f80a4c811d4016c211",
+     "role": "main"
+    },
+    {
+     "name": "Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M-00002-of-00002.gguf",
+     "repo_path": "IQ1_M/Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M-00002-of-00002.gguf",
+     "url": "https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF/resolve/bba88856f8c3c0c9e40e45f82d05e228b814ac43/IQ1_M/Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M-00002-of-00002.gguf",
+     "bytes": 28800138432,
+     "sha256": "316b46f3a2dbd68c900f43136ab9449f9dcc3725dfd8c794847c204bc161e113",
+     "role": "main"
+    },
+    {
+     "name": "mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+     "repo_path": "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+     "url": "https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/resolve/766911a6b7369840a91dbcd95f9f997acaab6cd6/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+     "bytes": 2786568256,
+     "sha256": "5ff54097406a905cf3a724c709124ceb0e3e10235ee862298969e91c96fa96e6",
+     "role": "mtp",
+     "repository": "unsloth/Qwen3.8-Flash-Next-GGUF",
+     "commit": "766911a6b7369840a91dbcd95f9f997acaab6cd6",
+     "licence_text": "License: Qwen Community License 1.0. Qwen3.8 Flash Next MTP file by Alibaba Qwen, GGUF by Unsloth."
+    }
+   ],
+   "licence": {
+    "id": "qwen-community-1.0",
+    "name": "Qwen Community License 1.0",
+    "url": "https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/de4b8e4d43b917e7706784d8bb445c9af86a3540/LICENSE",
+    "prompt_line": "License: Qwen Community License 1.0. Qwen3.8 Flash Next by Alibaba Qwen, GGUF by ISTA-DASLab.",
+    "note": "No LICENSE file in the ISTA-DASLab repository. The card text says the weights inherit the licence of the base model; the card metadata says apache-2.0.",
+    "verified_upstream": false
+   },
+   "default_status": "none",
+   "download_enabled": true,
+   "disabled_reason": null,
+   "measured_main_resident_bytes": 29200000000
   }
  ]
 }

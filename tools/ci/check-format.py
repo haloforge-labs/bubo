@@ -26,10 +26,17 @@ def main() -> int:
         and not path.relative_to(root).as_posix().startswith(excluded)
     )
     flags = ["-i"] if args.fix else ["--dry-run", "--Werror"]
-    result = subprocess.run(["clang-format", *flags, *files], cwd=root)
-    if result.returncode == 0:
+    # Keep each invocation below Windows' command-line length limit.
+    returncode = 0
+    for start in range(0, len(files), 128):
+        result = subprocess.run(
+            ["clang-format", *flags, *files[start:start + 128]], cwd=root
+        )
+        if result.returncode:
+            returncode = result.returncode
+    if returncode == 0:
         print(f"PASS: {'Formatted' if args.fix else 'Checked'} {len(files)} C++ files")
-    return result.returncode
+    return returncode
 
 
 if __name__ == "__main__":

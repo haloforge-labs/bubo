@@ -1,6 +1,7 @@
 #ifndef GUFO_SERVER_TEXT_GENERATION_BACKEND_HPP_
 #define GUFO_SERVER_TEXT_GENERATION_BACKEND_HPP_
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -14,8 +15,10 @@
 #include <utility>
 #include <vector>
 
+#include "src/cli/serve/component_cache_metrics.hpp"
 #include "src/cli/serve/debug_timeline.hpp"
 #include "src/cli/serve/diffusion_reads.hpp"
+#include "src/cli/serve/served_model_alias.hpp"
 #include "src/core/reasoning.hpp"
 #include "src/core/sampling.hpp"
 #include "src/core/text_sampling_defaults.hpp"
@@ -273,6 +276,7 @@ public:
   };
 
   struct Result {
+    std::optional<ComponentCacheMetrics> component_cache;
     std::string text;
     std::vector<tokenization::TokenId> tokens;
     std::vector<sampling::TokenLogprob> logprobs;
@@ -300,6 +304,12 @@ public:
     std::size_t draft_accepted_tokens{0};
     std::size_t lookup_tokens{0};
     std::size_t lookup_accepted_tokens{0};
+    /// Hashed n-gram embedding rows gathered for this request, split by how
+    /// each was served.
+    std::size_t ngram_rows{0};
+    std::size_t ngram_dedup_rows{0};
+    std::size_t ngram_cache_hits{0};
+    std::size_t ngram_disk_reads{0};
     std::size_t prefill_tokens{0};
     std::size_t prefill_chunks{0};
     std::size_t active_decode_prefill_chunks{0};
@@ -395,6 +405,18 @@ public:
   TextGenerationBackend& operator=(TextGenerationBackend&&) = delete;
 
   [[nodiscard]] virtual std::string model_id() const = 0;
+  /// Every name requests may select this model by, model_id() first.
+  [[nodiscard]] virtual std::vector<std::string> model_ids() const {
+    return {model_id()};
+  }
+  /// Requests may name the model by any of its ids or by the product alias
+  /// (/v1/models lists the alias, so chat and completions must accept it).
+  [[nodiscard]] bool serves_model(std::string_view name) const {
+    if (name == ServedModelAlias())
+      return true;
+    const auto names = model_ids();
+    return std::ranges::find(names, name) != names.end();
+  }
   [[nodiscard]] virtual bool ready() const = 0;
   /// True once a failed generation showed that the execution device can no
   /// longer run work, for example after a GPU reset. The loss is permanent.
@@ -408,6 +430,10 @@ public:
   }
   /// Whether the loaded backend accepts image inputs in chat requests.
   [[nodiscard]] virtual bool supports_images() const { return false; }
+  /// The served model file and build revision, as llama-server's /props
+  /// reports them. Empty when unknown.
+  [[nodiscard]] virtual std::string model_path() const { return {}; }
+  [[nodiscard]] virtual std::string build_info() const { return {}; }
   /// False when the backend cannot constrain output to a JSON schema
   /// (response_format / text.format); such requests are rejected with 400.
   [[nodiscard]] virtual bool supports_response_format() const { return true; }
@@ -521,7 +547,16 @@ public:
   /// Prompt tokens a chat request would use after template rendering, without
   /// generating. Empty when the backend cannot tell.
   [[nodiscard]] virtual std::optional<std::size_t> count_chat_tokens(
-      const ChatRequest& request) const = 0;
+      const ChatRequest&) const {
+    return std::nullopt;
+  }
+
+  /// The prompt text a chat request renders to through the model's chat
+  /// template, before tokenization. Empty when the backend cannot tell.
+  [[nodiscard]] virtual std::optional<std::string> render_chat_prompt(
+      const ChatRequest&) const {
+    return std::nullopt;
+  }
 };
 
 inline json::Value SerializeDebugTimeline(

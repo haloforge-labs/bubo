@@ -6,12 +6,9 @@
 #include <fstream>
 #include <string>
 
-#ifdef _WIN32
-#include <unistd.h>
-#endif
-
 #include "src/cli/serve/generation_metrics.hpp"
 #include "src/core/json.hpp"
+#include "src/core/platform/os_info.hpp"
 
 namespace gufo::server {
 namespace status_detail {
@@ -144,14 +141,8 @@ inline json::Value RuntimeStatusMetrics(const TextGenerationBackend& backend) {
   }
   sample["slots"] = std::move(slots);
 
-#ifdef _WIN32
-  const auto rss = gufo_resident_bytes();
-  const auto available = gufo_available_physical_bytes();
-#else
-  const auto rss = status_detail::MemoryBytes("/proc/self/status", "VmRSS:");
-  const auto available =
-      status_detail::MemoryBytes("/proc/meminfo", "MemAvailable:");
-#endif
+  const auto rss = platform::ResidentMemoryBytes();
+  const auto available = platform::AvailableMemoryBytes();
   auto memory = json::Value::object();
   memory["rss_bytes"] = rss > 0 ? Counter(rss) : json::Value();
   memory["host_available_bytes"] =

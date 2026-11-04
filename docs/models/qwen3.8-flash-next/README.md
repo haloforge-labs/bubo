@@ -12,7 +12,7 @@ Q6_K's, so the added rounding is small, but it is not bit-identical).
 `qwen38_flash_next_iq_experts_ops_test` checks those expert paths against a
 double-precision reference.
 
-[Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md)
+[Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [KV cache formats](KV-CACHE.md) · [Experiments](EXPERIMENTS.md) · [ROCm 10.1 status](ROCM.md)
 
 ## Load and run
 

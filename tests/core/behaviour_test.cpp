@@ -351,6 +351,543 @@ void GuardAcceptedOnlyAndOff() {
   CHECK(Count(disabled, "guard_escalation", 0));
 }
 
+std::shared_ptr<s::BehaviourConfig> NudgeConfig() {
+  auto b = Config();
+  b->initial_thinking = true;
+  b->think_eog_guard = true;
+  b->loop_eog_close = true;
+  b->think_nudge = true;
+  b->think_nudge_prefix = {4, 5, 6, 7};
+  auto pieces = std::make_shared<std::vector<std::string>>(*b->token_pieces);
+  (*pieces)[4] = "Do";
+  (*pieces)[5] = " I";
+  (*pieces)[6] = " have";
+  (*pieces)[7] = " enough";
+  b->token_pieces = pieces;
+  return b;
+}
+
+void AcceptReplayed(s::SamplerState& sampler, const std::vector<float>& row,
+                    s::TokenId expected) {
+  auto working = sampler;
+  CHECK(working.Sample(row) == expected);
+  working.Accept(expected);
+  sampler.CopyDrawStateFrom(working);
+  sampler.Accept(expected);
+  const auto actual = sampler.SaveDrawState().behaviour;
+  const auto tentative = working.SaveDrawState().behaviour;
+  CHECK(actual->thinking == tentative->thinking);
+  CHECK(actual->force_pos == tentative->force_pos);
+  CHECK(actual->forced == tentative->forced);
+  CHECK(actual->think_nudge_insertions == tentative->think_nudge_insertions);
+  CHECK(actual->closed_after_nudge == tentative->closed_after_nudge);
+}
+
+void ThinkNudgeSequence() {
+  const auto b = NudgeConfig();
+  CHECK(b->think_nudge_text == "Do I have enough" && b->think_nudge_max == 2);
+  s::SamplerState sampler(Sampling(b));
+  std::vector<float> row(16, -10);
+  row[0] = 10;
+  row[2] = 9;
+  for (unsigned insertion = 1; insertion <= 2; ++insertion) {
+    CHECK(!sampler.CanSelectArgmax(0));
+    for (auto token : b->think_nudge_prefix)
+      AcceptReplayed(sampler, row, token);
+    CHECK(Count(sampler, "think_nudge", insertion));
+    CHECK(!sampler.ForcedToken());
+    CHECK(sampler.SaveDrawState().behaviour->guard_blocked_attempts == 0);
+    auto continuation = row;
+    continuation[0] = -10;
+    AcceptReplayed(sampler, continuation, 2);
+  }
+  // The third EOG attempt is the first masked attempt, followed by the
+  // unchanged sixteenth-mask escalation and next-attempt close redirect.
+  for (unsigned masked = 1; masked <= 16; ++masked) {
+    AcceptReplayed(sampler, row, 2);
+    const auto state = sampler.SaveDrawState().behaviour;
+    CHECK(state->guard_blocked_attempts == masked);
+    CHECK(state->guard_escalated == (masked == 16));
+    CHECK(Count(sampler, "think_nudge", 2));
+  }
+  AcceptReplayed(sampler, row, 11);
+  AcceptReplayed(sampler, row, 12);
+  CHECK(!sampler.SaveDrawState().behaviour->thinking);
+  CHECK(Count(sampler, "guard_escalation", 1));
+  CHECK(Count(sampler, "closed_after_nudge", 0));
+  CHECK(sampler.Sample(row) == 0);
+  // Reopening reasoning does not replenish a per-request cap.
+  sampler.Accept(10);
+  AcceptReplayed(sampler, row, 2);
+  CHECK(Count(sampler, "think_nudge", 2));
+  sampler.ResetHistory({});
+  CHECK(Count(sampler, "think_nudge", 0));
+  CHECK(sampler.Sample(row) == 4);
+}
+
+void ThinkNudgeOffIdentityAndExemptions() {
+  auto off = NudgeConfig();
+  off->think_nudge = false;
+  auto old = Config();
+  old->initial_thinking = true;
+  old->think_eog_guard = true;
+  old->loop_eog_close = true;
+  for (float temperature : {0.0F, 1.0F}) {
+    s::SamplerState a(Sampling(off, temperature)),
+        b(Sampling(old, temperature));
+    std::vector<float> row(16, -INFINITY);
+    row[0] = 10;
+    row[2] = 9;
+    for (unsigned step = 0; step < 19; ++step) {
+      if (step == 16)
+        row[2] = -INFINITY;
+      const auto expected = step < 16    ? 2u
+                            : step == 16 ? 11u
+                            : step == 17 ? 12u
+                                         : 0u;
+      CHECK(a.Sample(row) == expected && b.Sample(row) == expected);
+      CHECK(a.rng_state() == b.rng_state());
+      a.Accept(expected);
+      b.Accept(expected);
+      CHECK(a.BehaviourSummary() == b.BehaviourSummary());
+    }
+  }
+  for (int exemption = 0; exemption < 4; ++exemption) {
+    auto cfg = NudgeConfig();
+    auto c = Sampling(cfg);
+    if (exemption == 0)
+      cfg->initial_thinking = false;
+    if (exemption == 1)
+      cfg->loop_exempt = true;
+    if (exemption == 2) {
+      auto constraint = std::make_shared<s::TokenConstraint>();
+      constraint->grammar = s::JsonConstraint::WithTools(
+          nullptr, {{"f", s::JsonConstraint::Object()}}, false, false,
+          s::JsonConstraint::ToolFormat::kQwen);
+      constraint->vocabulary = std::make_shared<s::ConstraintVocabulary>(
+          16, [cfg](std::uint32_t id) {
+            return s::ConstraintVocabulary::Piece{(*cfg->token_pieces)[id],
+                                                  id < 2};
+          });
+      c.constraint = constraint;
+    }
+    if (exemption == 3)
+      cfg->think_nudge_max = 0;
+    s::SamplerState sampler(c);
+    std::vector<float> row(16, -10);
+    row[0] = 10;
+    row[2] = 9;
+    const auto token = sampler.Sample(row);
+    const bool nudged = exemption == 1 || exemption == 2;
+    CHECK(token == (exemption == 0 ? 0u : nudged ? 4u : 2u));
+    sampler.Accept(token);
+    CHECK(sampler.ForcedToken() ==
+          (nudged ? std::optional<s::TokenId>(5) : std::nullopt));
+    CHECK(Count(sampler, "think_nudge", nudged ? 1 : 0));
+  }
+}
+
+std::shared_ptr<s::TokenConstraint> NudgeConstraint(
+    const std::shared_ptr<s::BehaviourConfig>& cfg, bool required = false,
+    bool response_format = false) {
+  auto pieces = std::make_shared<std::vector<std::string>>(*cfg->token_pieces);
+  (*pieces)[16] = "<tool_call>";
+  (*pieces)[17] = "</tool_call>";
+  (*pieces)[18] = "\n<function=bash>\n<parameter=command>\n";
+  (*pieces)[19] = "echo ok";
+  (*pieces)[20] = "\n</parameter>\n</function>\n";
+  (*pieces)[21] = "{\"command\":\"";
+  (*pieces)[22] = "\"}";
+  cfg->token_pieces = pieces;
+  const auto schema = gufo::json::parse(
+      R"({"type":"object","properties":{"command":{"type":"string"}},"required":["command"],"additionalProperties":false})");
+  auto constraint = std::make_shared<s::TokenConstraint>();
+  constraint->grammar =
+      response_format
+          ? s::JsonConstraint::Compile(schema, true)
+          : s::JsonConstraint::WithTools(
+                nullptr,
+                {{"bash",
+                  s::JsonConstraint::ToolParameters(
+                      schema, true, s::JsonConstraint::ToolFormat::kQwen)}},
+                required, false, s::JsonConstraint::ToolFormat::kQwen);
+  constraint->vocabulary = std::make_shared<s::ConstraintVocabulary>(
+      static_cast<std::uint32_t>(pieces->size()), [pieces](std::uint32_t id) {
+        return s::ConstraintVocabulary::Piece{pieces->at(id), id < 2};
+      });
+  return constraint;
+}
+
+void ThinkNudgeToolsSequence() {
+  // Lazy tools, required tools and a non-lazy response format all suspend
+  // their constraint while behaviour-owned thinking is open.
+  for (int mode = 0; mode < 3; ++mode) {
+    auto cfg = NudgeConfig();
+    cfg->loop_exempt = mode != 2;
+    auto c = Sampling(cfg);
+    c.constraint = NudgeConstraint(cfg, mode == 1, mode == 2);
+    s::SamplerState sampler(c);
+    CHECK(!sampler.NeedsConstraintMask());
+    std::vector<float> row(256, -10);
+    row[0] = 10;
+    row[2] = 9;
+    auto speculative = sampler;
+    q::MtpProposal proposal;
+    proposal.size = 1;
+    proposal.ids[0] = proposal.token = 0;
+    proposal.probabilities[0] = proposal.probability = 1;
+    const auto correction = q::VerifyMtpProposal(row, proposal, speculative);
+    CHECK(!correction.accepted && correction.token == 4);
+    CHECK(speculative.ForcingThinkNudge() && !sampler.ForcedToken());
+    for (unsigned insertion = 1; insertion <= 2; ++insertion) {
+      for (auto token : cfg->think_nudge_prefix)
+        AcceptReplayed(sampler, row, token);
+      CHECK(Count(sampler, "think_nudge", insertion));
+      CHECK(!sampler.ForcedToken());
+      CHECK(!sampler.NeedsConstraintMask());
+      CHECK(sampler.SaveDrawState().behaviour->guard_blocked_attempts == 0);
+      auto continuation = row;
+      continuation[0] = -10;
+      AcceptReplayed(sampler, continuation, 2);
+    }
+    for (unsigned masked = 1; masked <= 16; ++masked) {
+      AcceptReplayed(sampler, row, 2);
+      const auto state = sampler.SaveDrawState().behaviour;
+      CHECK(state->guard_blocked_attempts == masked);
+      CHECK(state->guard_escalated == (masked == 16));
+      CHECK(Count(sampler, "think_nudge", 2));
+    }
+    AcceptReplayed(sampler, row, 11);
+    AcceptReplayed(sampler, row, 12);
+    CHECK(!sampler.SaveDrawState().behaviour->thinking);
+    CHECK(Count(sampler, "guard_escalation", 1));
+    CHECK(Count(sampler, "closed_after_nudge", 0));
+    CHECK(sampler.NeedsConstraintMask() == (mode != 0));
+  }
+}
+
+void ThinkNudgeToolsOutsideThinking() {
+  for (bool initial_thinking : {true, false}) {
+    auto cfg = NudgeConfig();
+    cfg->initial_thinking = initial_thinking;
+    cfg->loop_exempt = true;
+    cfg->loop_breaker = true;
+    cfg->loop_tool_args = true;
+    cfg->tool_framing_ids = {16, 17};
+    auto c = Sampling(cfg);
+    c.constraint = NudgeConstraint(cfg);
+    s::SamplerState sampler(c);
+    if (initial_thinking) {
+      sampler.Accept(11);
+      sampler.Accept(12);
+    }
+    CHECK(!sampler.SaveDrawState().behaviour->thinking);
+    std::vector<float> row(256, -10);
+    row[0] = 10;
+    row[19] = 9;
+    CHECK(sampler.Sample(row) == 0);
+    sampler.Accept(16);
+    sampler.Accept(18);
+    CHECK(sampler.NeedsConstraintMask());
+    CHECK(sampler.SaveDrawState().behaviour->tool_call_open);
+    // The active tool grammar owns EOG rejection here, not the think guard.
+    CHECK(sampler.Distribution(row).probability(0) == 0);
+    CHECK(sampler.Sample(row) == 19);
+    CHECK(!sampler.ForcedToken());
+    CHECK(Count(sampler, "think_nudge", 0));
+    CHECK(Count(sampler, "think_eog_guard", 0));
+    sampler.Accept(19);
+    sampler.Accept(20);
+    sampler.Accept(17);
+    CHECK(!sampler.SaveDrawState().behaviour->tool_call_open);
+    CHECK(sampler.Sample(row) == 0);
+    CHECK(Count(sampler, "think_nudge", 0));
+    CHECK(Count(sampler, "think_eog_guard", 0));
+  }
+}
+
+void ThinkNudgeToolsOffIdentity() {
+  for (float temperature : {0.0F, 1.0F}) {
+    auto cfg = NudgeConfig();
+    cfg->think_nudge = false;
+    cfg->loop_exempt = true;
+    cfg->loop_breaker = true;
+    auto current = Sampling(cfg, temperature);
+    current.constraint = NudgeConstraint(cfg);
+    auto old = Config();
+    old->initial_thinking = true;
+    old->think_eog_guard = true;
+    old->loop_eog_close = true;
+    old->loop_exempt = true;
+    old->loop_breaker = true;
+    old->token_pieces = cfg->token_pieces;
+    auto legacy = Sampling(old, temperature);
+    legacy.constraint = current.constraint;
+    s::SamplerState a(current), b(legacy);
+    std::vector<float> row(256, -INFINITY);
+    row[0] = 10;
+    row[2] = 9;
+    for (unsigned step = 0; step < 19; ++step) {
+      if (step == 16)
+        row[2] = -INFINITY;
+      const auto expected = step < 16    ? 2u
+                            : step == 16 ? 11u
+                            : step == 17 ? 12u
+                                         : 0u;
+      CHECK(a.Sample(row) == expected && b.Sample(row) == expected);
+      CHECK(a.rng_state() == b.rng_state());
+      a.Accept(expected);
+      b.Accept(expected);
+      CHECK(a.BehaviourSummary() == b.BehaviourSummary());
+    }
+  }
+}
+
+void ThinkNudgeToolsLoopPolicy() {
+  for (bool nudge_enabled : {false, true}) {
+    auto cfg = NudgeConfig();
+    cfg->think_nudge = nudge_enabled;
+    cfg->loop_breaker = true;
+    cfg->loop_exempt = true;
+    auto c = Sampling(cfg);
+    c.constraint = NudgeConstraint(cfg);
+    s::SamplerState sampler(c);
+    for (int i = 0; i < 4096; ++i)
+      sampler.Accept(2);
+    auto state = sampler.SaveDrawState().behaviour;
+    CHECK(state->loop.count == 0 && state->loop.detections == 0);
+    CHECK(state->loop.nudges == 0 && !state->loop.nudging());
+    CHECK(!state->prefix_used && !state->forcing());
+    bool exempt_summary = false;
+    for (const auto& line : sampler.BehaviourSummary())
+      if (line ==
+          "BEHAVIOUR_ENGAGE name=loop_breaker taken=0 fallback=0 "
+          "reason=grammar_or_tool_request scope=request")
+        exempt_summary = true;
+    CHECK(exempt_summary);
+    if (nudge_enabled) {
+      std::vector<float> row(256, -10);
+      row[0] = 10;
+      row[2] = 9;
+      for (auto token : cfg->think_nudge_prefix)
+        AcceptReplayed(sampler, row, token);
+      for (int i = 0; i < 4096; ++i)
+        sampler.Accept(2);
+      state = sampler.SaveDrawState().behaviour;
+      CHECK(state->loop.count == 0 && state->loop.detections == 0);
+      CHECK(state->loop.nudges == 0 && !state->loop.nudging());
+      CHECK(!state->prefix_used && !state->forcing());
+    }
+  }
+}
+
+void ThinkNudgeSpeculationAndRollback() {
+  auto b = NudgeConfig();
+  auto c = Sampling(b, 1);
+  c.top_k = 1;
+  s::SamplerState sampler(c);
+  std::vector<float> row(16, -INFINITY);
+  row[0] = 10;
+  const auto saved = sampler.SaveDrawState();
+  q::MtpProposal proposal;
+  proposal.size = 1;
+  proposal.ids[0] = proposal.token = 0;
+  proposal.probabilities[0] = proposal.probability = 1;
+  auto working = sampler;
+  const auto verified = q::VerifyMtpProposal(row, proposal, working);
+  CHECK(!verified.accepted && verified.token == 4);
+  CHECK(working.ForcedToken() == 4);
+  CHECK(working.ForcingThinkNudge());
+  const std::vector<float> compact_logits = {10, 9};
+  const std::vector<s::TokenId> compact_ids = {2, 3};
+  CHECK(working.Distribution(compact_logits, compact_ids).probability(0) == 1);
+  CHECK(working.ForcedToken() == 4);
+  CHECK(Count(working, "think_nudge", 0));
+  CHECK(!sampler.ForcedToken());
+  // Discarding a tentative verification preserves the original state.
+  sampler.RestoreDrawState(saved);
+  CHECK(!sampler.ForcedToken());
+  working.DeferSample(verified.token);
+  sampler.CopyDrawStateFrom(working);
+  AcceptReplayed(sampler, row, 4);
+  for (auto token : {5u, 6u, 7u}) {
+    CHECK(sampler.ForcedToken() == token);
+    CHECK(sampler.Distribution(row).probability(token) == 1);
+    CHECK(sampler.Distribution(compact_logits, compact_ids).probability(0) ==
+          1);
+    const std::vector<s::TokenId> with_forced = {2, token};
+    CHECK(sampler.Distribution(compact_logits, with_forced).probability(1) ==
+          1);
+    CHECK(sampler.ForcedToken() == token);
+    CHECK(sampler.CanSelectArgmax(token));
+    AcceptReplayed(sampler, row, token);
+  }
+  CHECK(!sampler.ForcedToken());
+  CHECK(Count(sampler, "think_nudge", 1));
+  CHECK(!sampler.ForcingThinkNudge());
+  // A residual EOG takes the same route as an accepted EOG proposal.
+  s::SamplerState residual(c);
+  proposal.ids[0] = proposal.token = 2;
+  const auto correction = q::VerifyMtpProposal(row, proposal, residual);
+  CHECK(!correction.accepted && correction.token == 4);
+  // Natural prefix text does not start an insertion.
+  s::SamplerState natural(c);
+  row[0] = -INFINITY;
+  row[4] = 10;
+  CHECK(natural.Sample(row) == 4);
+  natural.Accept(4);
+  CHECK(!natural.ForcedToken() && Count(natural, "think_nudge", 0));
+  CHECK(!natural.ForcingThinkNudge());
+  auto external_config = Sampling(b);
+  auto external_budget = std::make_shared<s::ReasoningBudget>();
+  external_budget->tokens = 0;
+  external_budget->forced = {11, 12};
+  external_config.reasoning_budget = external_budget;
+  s::SamplerState external(external_config);
+  CHECK(external.ForcedToken() == 11 && !external.ForcingThinkNudge());
+  external_budget->forced = {0};
+  s::SamplerState terminal(external_config);
+  proposal.ids[0] = proposal.token = 0;
+  const auto forced_stop = q::VerifyMtpProposal(row, proposal, terminal);
+  CHECK(forced_stop.accepted && forced_stop.token == 0);
+  CHECK(!terminal.ForcingThinkNudge() && Count(terminal, "think_nudge", 0));
+  // Deterministic verification discards the rewritten target draw when the
+  // already-computed draft suffix differs, then retries it as an anchor.
+  s::SamplerState greedy(Sampling(b));
+  row[4] = -INFINITY;
+  row[0] = 10;
+  CHECK(q::VerifyDraft(row, 0, greedy, [](int) { return false; }) ==
+        q::DraftDecision::kReject);
+  CHECK(!greedy.ForcedToken());
+  CHECK(greedy.Sample(row) == 4);
+}
+
+void ThinkNudgeTargetMap() {
+  auto nudge = NudgeConfig();
+  auto raw = std::make_shared<s::BehaviourConfig>(*nudge);
+  raw->think_nudge = false;
+  raw->think_eog_guard = false;
+  raw->loop_eog_close = false;
+  std::vector<float> row(16, -INFINITY);
+  row[0] = std::log(.4F);
+  row[2] = std::log(.4F);
+  row[4] = std::log(.2F);
+  q::MtpProposal proposal;
+  proposal.size = 1;
+  proposal.ids[0] = proposal.token = 2;
+  proposal.probabilities[0] = proposal.probability = 1;
+  unsigned redirected = 0, natural = 0, accepted = 0, residual = 0;
+  for (int seed = 0; seed < 2048; ++seed) {
+    auto old_config = Sampling(raw, 1), new_config = Sampling(nudge, 1);
+    old_config.seed = new_config.seed = seed;
+    s::SamplerState old_ar(old_config), new_ar(new_config);
+    const auto original = old_ar.Sample(row);
+    CHECK(new_ar.Sample(row) == (original == 0 ? 4u : original));
+    CHECK(old_ar.rng_state() == new_ar.rng_state());
+    new_ar.Accept(original == 0 ? 4u : original);
+    CHECK(Count(new_ar, "think_nudge", original == 0 ? 1 : 0));
+    redirected += original == 0;
+    natural += original == 4;
+    s::SamplerState old_mtp(old_config), new_mtp(new_config);
+    const auto before = q::VerifyMtpProposal(row, proposal, old_mtp);
+    const auto after = q::VerifyMtpProposal(row, proposal, new_mtp);
+    CHECK(after.token == (before.token == 0 ? 4u : before.token));
+    CHECK(after.accepted == (before.accepted && before.token != 0));
+    CHECK(old_mtp.rng_state() == new_mtp.rng_state());
+    new_mtp.Accept(after.token);
+    CHECK(Count(new_mtp, "think_nudge", before.token == 0 ? 1 : 0));
+    accepted += before.accepted;
+    residual += !before.accepted;
+  }
+  CHECK(redirected > 0 && natural > 0 && accepted > 0 && residual > 0);
+}
+
+void ThinkNudgeNaturalCloseWindow() {
+  for (unsigned gap : {0u, 254u, 255u}) {
+    auto b = NudgeConfig();
+    s::SamplerState sampler(Sampling(b));
+    std::vector<float> row(16, -10);
+    row[0] = 10;
+    row[2] = 9;
+    for (auto token : b->think_nudge_prefix)
+      AcceptReplayed(sampler, row, token);
+    for (unsigned i = 0; i < gap; ++i)
+      sampler.Accept(2);
+    sampler.Accept(11);
+    sampler.Accept(12);
+    CHECK(Count(sampler, "closed_after_nudge", gap <= 254 ? 1 : 0));
+    CHECK(sampler.Sample(row) == 0);
+  }
+  auto b = NudgeConfig();
+  b->reasoning_budget_enabled = true;
+  b->reasoning_budget = 5;
+  s::SamplerState budget(Sampling(b));
+  std::vector<float> row(16, -10);
+  row[0] = 10;
+  row[2] = 9;
+  for (auto token : b->think_nudge_prefix)
+    AcceptReplayed(budget, row, token);
+  budget.Accept(2);
+  AcceptReplayed(budget, row, 11);
+  AcceptReplayed(budget, row, 12);
+  CHECK(Count(budget, "closed_after_nudge", 0));
+  auto two = NudgeConfig();
+  two->think_nudge_prefix = {4};
+  s::SamplerState repeated(Sampling(two));
+  AcceptReplayed(repeated, row, 4);
+  repeated.Accept(2);
+  AcceptReplayed(repeated, row, 4);
+  repeated.Accept(11);
+  repeated.Accept(12);
+  CHECK(Count(repeated, "think_nudge", 2));
+  CHECK(Count(repeated, "closed_after_nudge", 2));
+  for (const auto& forced_close :
+       {std::vector<s::TokenId>{11, 12}, std::vector<s::TokenId>{11}}) {
+    auto external_config = Sampling(NudgeConfig());
+    auto external_budget = std::make_shared<s::ReasoningBudget>();
+    external_budget->tokens = 5;
+    external_budget->forced = forced_close;
+    external_budget->ends = {12};
+    external_config.reasoning_budget = external_budget;
+    s::SamplerState external(external_config);
+    for (auto token : {4u, 5u, 6u, 7u})
+      AcceptReplayed(external, row, token);
+    external.Accept(2);
+    CHECK(external.ForcedToken() == 11 && !external.ForcingThinkNudge());
+    // Bulk acceptance must retain the force origin of every closing token.
+    external.Accept(forced_close);
+    if (forced_close.size() == 1)
+      external.Accept(12);
+    CHECK(!external.SaveDrawState().behaviour->thinking);
+    CHECK(Count(external, "closed_after_nudge", 0));
+  }
+  auto natural_config = Sampling(NudgeConfig());
+  auto unspent_budget = std::make_shared<s::ReasoningBudget>();
+  unspent_budget->tokens = 100;
+  unspent_budget->forced = {11, 12};
+  unspent_budget->ends = {12};
+  natural_config.reasoning_budget = unspent_budget;
+  s::SamplerState with_budget(natural_config);
+  for (auto token : {4u, 5u, 6u, 7u})
+    AcceptReplayed(with_budget, row, token);
+  const std::vector<s::TokenId> model_close = {11, 12};
+  with_budget.Accept(model_close);
+  CHECK(Count(with_budget, "closed_after_nudge", 1));
+  auto interrupted_config = Sampling(NudgeConfig());
+  auto short_budget = std::make_shared<s::ReasoningBudget>();
+  short_budget->tokens = 2;
+  short_budget->forced = {2, 3, 11, 12};
+  short_budget->ends = {12};
+  interrupted_config.reasoning_budget = short_budget;
+  s::SamplerState interrupted(interrupted_config);
+  AcceptReplayed(interrupted, row, 4);
+  AcceptReplayed(interrupted, row, 5);
+  interrupted.Accept(short_budget->forced);
+  CHECK(Count(interrupted, "think_nudge", 1));
+  CHECK(Count(interrupted, "closed_after_nudge", 0));
+  CHECK(interrupted.SaveDrawState().behaviour->think_nudges[0].prefix_end == 0);
+}
+
 int main(){try{
   const auto run=[](const char* name,auto test){std::cout<<"RUN "<<name<<std::endl;test();};
   run("BoundaryPort",BoundaryPort);run("LoopPort",LoopPort);
@@ -363,7 +900,16 @@ int main(){try{
   run("MultiBlockClone",MultiBlockClone);run("RedundantInterventions",RedundantInterventions);
   run("CandidateGlobalTies",CandidateGlobalTies);run("Marker133Ids",Marker133Ids);
   run("LongThinkTransition",LongThinkTransition);run("GuardEscalation",GuardEscalation);
+  run("ThinkNudgeSequence", ThinkNudgeSequence);
+  run("ThinkNudgeOffIdentityAndExemptions", ThinkNudgeOffIdentityAndExemptions);
+  run("ThinkNudgeToolsSequence", ThinkNudgeToolsSequence);
+  run("ThinkNudgeToolsOutsideThinking", ThinkNudgeToolsOutsideThinking);
+  run("ThinkNudgeToolsOffIdentity", ThinkNudgeToolsOffIdentity);
+  run("ThinkNudgeToolsLoopPolicy", ThinkNudgeToolsLoopPolicy);
+  run("ThinkNudgeSpeculationAndRollback", ThinkNudgeSpeculationAndRollback);
+  run("ThinkNudgeTargetMap", ThinkNudgeTargetMap);
+  run("ThinkNudgeNaturalCloseWindow", ThinkNudgeNaturalCloseWindow);
   run("GuardAcceptedOnlyAndOff",GuardAcceptedOnlyAndOff);
   run("EogBoundDecisionIdentity",EogBoundDecisionIdentity);
-  std::cout<<"behaviour_test: 22 groups PASS\n";
+  std::cout << "behaviour_test: 31 groups PASS\n";
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

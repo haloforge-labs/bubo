@@ -1,21 +1,55 @@
 // SPDX-License-Identifier: MIT
 // HIP adapters for the llama.cpp-derived quantized kernels. See VENDOR.md.
-#include "qfn_mmq_prelude.h"
 #include <atomic>
+#include <cstdlib>
+
+#include "qfn_mmq_prelude.h"
+#include "dense_dot4.h"
+#include "scratch_plan.hpp"
 #include "src/cli/serve/logging.hpp"
 namespace qfn_mmq {
+namespace dense = gufo::models::qwen38_flash_next::dense_gemv;
 #include "qfn_mmq.h"
 #include "common.hpp"
 #include "mmq.hpp"
 #include "mmvq.hpp"
 #include "quantize.hpp"
 #include "mmid.hpp"
+static_assert(sizeof(block_q8_1_mmq) ==
+              ::gufo::models::qwen38_flash_next::rocm::mmq::kMmqBlockBytes);
+static_assert(4 * QK8_1 ==
+              ::gufo::models::qwen38_flash_next::rocm::mmq::kMmqValues);
+static_assert(MATRIX_ROW_PADDING ==
+              ::gufo::models::qwen38_flash_next::rocm::mmq::kMmqRowPadding);
+static_assert(sizeof(MoeBatchGroup) == 72);
 static std::atomic<unsigned long long> g_iq4_dense_launches{0};
+static std::atomic<unsigned long long> g_dense_gemv_launches[9][dense::kVariantCount][8]{};
+extern "C" unsigned long long qfn_mmq_dense_gemv_launch_count(
+    int type, int variant, int width) {
+  const int format = gufo::models::qwen38_flash_next::dense_gemv::FormatIndex(type);
+  if (format < 0 || variant < 0 || variant >= dense::kVariantCount || width < 1 || width > 8)
+    return 0;
+  return g_dense_gemv_launches[format][variant][width - 1].load(
+      std::memory_order_relaxed);
+}
 extern "C" unsigned long long qfn_mmq_iq4_dense_launch_count() {
   return g_iq4_dense_launches.load(std::memory_order_relaxed);
 }
+// Engine calls under GUFO_DENSE_IQ_VARIANT=dot4, by dense::Dot4Route: index 0
+// counts the calls dot4 took, the others the calls that kept their route.
+static std::atomic<unsigned long long>
+    g_dense_dot4_routes[dense::kDot4RouteCount]{};
+extern "C" unsigned long long qfn_mmq_dense_dot4_route_count(int route) {
+  if (route < 0 || route >= dense::kDot4RouteCount)
+    return 0;
+  return g_dense_dot4_routes[route].load(std::memory_order_relaxed);
+}
 static int g_routed_max_expert_rows = 0;
 static int g_routed_tile_cols = 0;
+static thread_local qfn_mmq_dispatch_trace *g_routed_trace = nullptr;
+extern "C" void qfn_mmq_trace_routed(qfn_mmq_dispatch_trace *trace) {
+    g_routed_trace = trace;
+}
 extern "C" int qfn_mmq_init(int device) {
     if (device < 0) {
         gufo::server::Logger::Raw("qfn_mmq_init: invalid device %d\n", device);
@@ -136,7 +170,7 @@ int qfn_mmq_dense_impl(
             y_values_per_block +
         get_mmq_x_max_host(cc) * sizeof(block_q8_1_mmq);
 
-    ggml_hip_pool_alloc<char> src1_q8_1_pool(ctx->pool(), nbytes_src1_q8_1);
+    ggml_hip_pool_alloc<char> src1_q8_1_pool(qfn_pool_for_stream(dev, stream), nbytes_src1_q8_1);
     char *src1_q8_1 = src1_q8_1_pool.get();
 
         quantize_mmq_q8_1_hip(
@@ -207,8 +241,19 @@ extern "C" int qfn_mmq_k_dense(int weight_type, const void * W, const float * X,
         case GGML_TYPE_Q4_K: return qfn_mmq_dense_impl<GGML_TYPE_Q4_K>("qfn_mmq_q4_K_dense", W, X, out, M, N, K, stream);
         case GGML_TYPE_Q5_K: return qfn_mmq_dense_impl<GGML_TYPE_Q5_K>("qfn_mmq_q5_K_dense", W, X, out, M, N, K, stream);
         case GGML_TYPE_Q5_1: return qfn_mmq_dense_impl<GGML_TYPE_Q5_1>("qfn_mmq_q5_1_dense", W, X, out, M, N, K, stream);
+        case GGML_TYPE_IQ3_S: return qfn_mmq_dense_impl<GGML_TYPE_IQ3_S>("qfn_mmq_iq3_s_dense", W, X, out, M, N, K, stream);
+        case GGML_TYPE_IQ4_XS: return qfn_mmq_dense_impl<GGML_TYPE_IQ4_XS>("qfn_mmq_iq4_xs_dense", W, X, out, M, N, K, stream);
+        case GGML_TYPE_IQ4_NL: return qfn_mmq_dense_impl<GGML_TYPE_IQ4_NL>("qfn_mmq_iq4_nl_dense", W, X, out, M, N, K, stream);
+        case GGML_TYPE_Q2_0: return qfn_mmq_dense_impl<GGML_TYPE_Q2_0>("qfn_mmq_q2_0_dense", W, X, out, M, N, K, stream);
         default: return -1;
     }
+}
+
+__global__ static void qfn_mmq_zero_skipped_kernel(
+    const int32_t *ids, float *out, uint64_t elements, int rows) {
+    const uint64_t i = uint64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < elements && ids[i / rows] < 0)
+        out[i] = 0.0f;
 }
 
 template <ggml_type type>
@@ -235,8 +280,8 @@ int qfn_mmq_moe_impl(
                 tag, M, K, n_tokens, n_experts, n_expert_used);
         return -1;
     }
-    if (K % 32 != 0) {
-        gufo::server::Logger::Raw("%s: K=%d must be a multiple of 32\n", tag, K);
+    if (K % ggml_blck_size(type) != 0) {
+        gufo::server::Logger::Raw("%s: K=%d must contain whole weight blocks\n", tag, K);
         return -1;
     }
     if (n_expert_used > n_experts) {
@@ -262,9 +307,19 @@ int qfn_mmq_moe_impl(
     const int64_t s01          = (int64_t)K / blck;
     const int64_t s02          = (int64_t)M * s01;
 
-    ggml_hip_pool_alloc<int32_t> ids_src1(ctx->pool(), ne_get_rows);
-    ggml_hip_pool_alloc<int32_t> ids_dst(ctx->pool(), ne_get_rows);
-    ggml_hip_pool_alloc<int32_t> expert_bounds(ctx->pool(), n_experts + 1);
+    if constexpr (type == GGML_TYPE_IQ1_M || type == GGML_TYPE_IQ2_XXS ||
+                  type == GGML_TYPE_IQ2_XS) {
+        const uint64_t elements = uint64_t(M) * ne_get_rows;
+        qfn_mmq_zero_skipped_kernel<<<(elements + 255)/256, 256, 0, stream>>>(
+            ids, out_f32, elements, M);
+        if (W_b)
+            qfn_mmq_zero_skipped_kernel<<<(elements + 255)/256, 256, 0, stream>>>(
+                ids, out_b, elements, M);
+    }
+
+    ggml_hip_pool_alloc<int32_t> ids_src1(qfn_pool_for_stream(dev, stream), ne_get_rows);
+    ggml_hip_pool_alloc<int32_t> ids_dst(qfn_pool_for_stream(dev, stream), ne_get_rows);
+    ggml_hip_pool_alloc<int32_t> expert_bounds(qfn_pool_for_stream(dev, stream), n_experts + 1);
 
     hipMemsetAsync(ids_src1.get(), 0, ne_get_rows * sizeof(int32_t), stream);
     hipMemsetAsync(ids_dst.get(),  0, ne_get_rows * sizeof(int32_t), stream);
@@ -287,7 +342,7 @@ int qfn_mmq_moe_impl(
     const size_t nbytes_src1_q8_1 =
         ne_get_rows * ne10_padded * y_block_size / y_values_per_block +
         get_mmq_x_max_host(cc) * sizeof(block_q8_1_mmq);
-    ggml_hip_pool_alloc<char> src1_q8_1(ctx->pool(), nbytes_src1_q8_1);
+    ggml_hip_pool_alloc<char> src1_q8_1(qfn_pool_for_stream(dev, stream), nbytes_src1_q8_1);
 
     const int64_t s11_src = (int64_t)K;
     const int64_t s12_src = (int64_t)K * ne11;
@@ -349,6 +404,7 @@ int qfn_mmq_moe_impl(
             ? (int64_t)g_routed_max_expert_rows
             : 0;
     args.mmq_x_request = g_routed_tile_cols;
+    args.telemetry = g_routed_trace;
 
     mul_mat_q_case<type>(*ctx, args, stream);
     if (W_b) {
@@ -372,7 +428,8 @@ static int moe_vector_projection(int weight_type, const void* W,
                                  int n_experts, int n_expert_used,
                                  hipStream_t stream, const void* W_b,
                                  float* out_b, bool gated,
-                                 const void* X_q8 = nullptr) {
+                                 const void* X_q8 = nullptr,
+                                 IqDecodeVariant iq_variant = IqDecodeVariant::kPacked2) {
   constexpr const char* tag = "qfn_mmq_moe_vec";
   const auto type = static_cast<ggml_type>(weight_type);
   if (type != GGML_TYPE_Q3_K && type != GGML_TYPE_Q6_K &&
@@ -381,7 +438,7 @@ static int moe_vector_projection(int weight_type, const void* W,
       type != GGML_TYPE_IQ3_S && type != GGML_TYPE_IQ4_XS &&
       type != GGML_TYPE_IQ4_NL && type != GGML_TYPE_IQ3_XXS &&
       type != GGML_TYPE_IQ2_S && type != GGML_TYPE_IQ2_XXS &&
-      type != GGML_TYPE_IQ2_XS && type != GGML_TYPE_Q2_0) {
+      type != GGML_TYPE_IQ2_XS && type != GGML_TYPE_IQ1_M && type != GGML_TYPE_Q2_0) {
     gufo::server::Logger::Raw("%s: unsupported weight type %d\n", tag, weight_type);
     return -1;
   }
@@ -449,7 +506,7 @@ static int moe_vector_projection(int weight_type, const void* W,
   ggml_hip_pool_alloc<char> src1_q8_1_pool;
   char* src1_q8_1_ptr = nullptr;
   if (input_bytes + group_bytes > 0) {
-    src1_q8_1_pool.alloc(ctx->pool(), input_bytes + group_bytes);
+    src1_q8_1_pool.alloc(qfn_pool_for_stream(dev, stream), input_bytes + group_bytes);
     src1_q8_1_ptr = src1_q8_1_pool.get();
   }
   hipError_t err = hipSuccess;
@@ -506,7 +563,7 @@ static int moe_vector_projection(int weight_type, const void* W,
     mul_mat_vec_moe_dispatch(weights, type, input,
                              by_expert ? sorted_ids : ids, output, K, M,
                              n_tokens, n_expert_used, input_stride, stream,
-                             slot_of_rank);
+                             slot_of_rank, iq_variant);
 
     err = hipGetLastError();
     if (err != hipSuccess) {
@@ -528,6 +585,25 @@ extern "C" int qfn_mmq_moe_vec(int weight_type, const void* W,
   return moe_vector_projection(weight_type, W, X_f32, ids, out_f32, M, K,
                                n_tokens, n_experts, n_expert_used, stream, W_b,
                                out_b, false);
+}
+
+extern "C" int qfn_mmq_moe_vec_iq_bench(int weight_type, const void* W,
+    const float* X_f32, const int32_t* ids, float* out, int M, int K,
+    int n_tokens, int n_experts, int n_expert_used, hipStream_t stream,
+    const void* W_b, float* out_b, int variant) {
+  const auto type = static_cast<ggml_type>(weight_type);
+  const auto selected = static_cast<IqDecodeVariant>(variant);
+  const bool original = type == GGML_TYPE_IQ2_S || type == GGML_TYPE_Q2_0;
+  const bool admitted = type == GGML_TYPE_IQ2_XXS || type == GGML_TYPE_IQ2_XS ||
+                        type == GGML_TYPE_IQ1_M || type == GGML_TYPE_IQ3_XXS ||
+                        type == GGML_TYPE_IQ3_S;
+  if ((!original && !admitted) ||
+      !gufo::models::qwen38_flash_next::iq_decode::Supported(
+          selected, type == GGML_TYPE_IQ2_S))
+    return -1;
+  return moe_vector_projection(weight_type, W, X_f32, ids, out, M, K,
+      n_tokens, n_experts, n_expert_used, stream, W_b, out_b, false, nullptr,
+      selected);
 }
 
 extern "C" int qfn_mmq_moe_gated_vec(int weight_type, const void* gate,
@@ -666,6 +742,15 @@ extern "C" int qfn_mmq_iq2_xs_moe_raw(
     return qfn_mmq_moe_impl<GGML_TYPE_IQ2_XS>("qfn_mmq_iq2_xs_moe_raw", W, X, ids, out, M, K,
                                               n_tokens, n_experts, n_expert_used, stream,
                                               nullptr, nullptr);
+}
+
+extern "C" int qfn_mmq_iq1_m_moe_raw(
+        const void * W, const float * X, const int32_t * ids, float * out,
+        int M, int K, int n_tokens, int n_experts, int n_expert_used,
+        hipStream_t stream) {
+    return qfn_mmq_moe_impl<GGML_TYPE_IQ1_M>("qfn_mmq_iq1_m_moe_raw", W, X, ids, out, M, K,
+                                             n_tokens, n_experts, n_expert_used, stream,
+                                             nullptr, nullptr);
 }
 
 extern "C" int qfn_mmq_q2_0_moe_raw(
@@ -880,30 +965,100 @@ extern "C" int qfn_mmq_q8_0_dense_vec_preq(const void* W, const void* W_gate,
   return hipGetLastError() == hipSuccess ? 0 : -3;
 }
 
-extern "C" int qfn_mmq_dense_vec_preq(int weight_type, const void* W,
+extern "C" int qfn_mmq_dense_vec_preq_variant(int weight_type, const void* W,
                                       const void* X_q8, const int32_t* zero_ids,
                                       float* out_f32, int M, int N, int K,
-                                      hipStream_t stream) {
+                                      int variant, hipStream_t stream) {
   const auto type = static_cast<ggml_type>(weight_type);
   if ((type != GGML_TYPE_Q3_K && type != GGML_TYPE_Q6_K &&
-       type != GGML_TYPE_Q4_K && type != GGML_TYPE_Q5_K && type != GGML_TYPE_Q5_1 && type != GGML_TYPE_IQ4_XS && type != GGML_TYPE_IQ4_NL) ||
+       type != GGML_TYPE_Q4_K && type != GGML_TYPE_Q5_K && type != GGML_TYPE_Q5_1 && type != GGML_TYPE_IQ4_XS && type != GGML_TYPE_IQ4_NL &&
+       type != GGML_TYPE_IQ3_S && type != GGML_TYPE_IQ3_XXS &&
+       type != GGML_TYPE_IQ2_XS && type != GGML_TYPE_Q2_0) ||
       !W || !X_q8 || !zero_ids || !out_f32 || M <= 0 || N <= 0 ||
-      N > MMVQ_MAX_BATCH_SIZE || K <= 0 || K % ggml_blck_size(type) != 0) {
+      N > MMVQ_MAX_BATCH_SIZE || K <= 0 || K % ggml_blck_size(type) != 0 ||
+      variant < 0 || variant >= dense::kVariantCount) {
     gufo::server::Logger::Raw("qfn_mmq_dense_vec_preq: bad arguments type=%d M=%d N=%d K=%d\n", weight_type, M, N, K);
     return -1;
   }
   const int input_stride = GGML_PAD(K, MATRIX_ROW_PADDING) / QK8_1;
+  const int format = gufo::models::qwen38_flash_next::dense_gemv::FormatIndex(weight_type);
+  const auto count = [&](int actual) {
+    if (format >= 0)
+      g_dense_gemv_launches[format][actual][N - 1].fetch_add(1, std::memory_order_relaxed);
+  };
+  if (variant == int(dense::Variant::kKQuantWmma)) {
+    if (mul_mat_dense_kquant_wmma_dispatch(
+            W, weight_type, static_cast<const block_q8_1*>(X_q8), out_f32, K, M,
+            N, input_stride, stream)) {
+      if (hipGetLastError() != hipSuccess)
+        return -3;
+      count(variant);
+      return 0;
+    }
+    // The explicit bench entry also protects N1..3 and unsupported formats.
+    variant = int(dense::ProductionVariant(weight_type, N, K));
+  }
+  if (variant == int(dense::Variant::kDot4)) {
+    // Any format the kernel instantiates (the engine selection is narrower,
+    // dense::Dot4Selected). Otherwise the production route runs and the
+    // counters say so; the bench aborts such a cell.
+    if (dense::Dot4Kernel(weight_type) &&
+        gufo::models::qwen38_flash_next::dense_dot4::Dispatch(
+            N, weight_type, W, X_q8, out_f32, M, K, input_stride, stream)) {
+      if (hipGetLastError() != hipSuccess)
+        return -3;
+      count(variant);
+      return 0;
+    }
+    variant = int(dense::ProductionVariant(weight_type, N, K));
+  }
+  if (variant != 0 && mul_mat_vec_dense_reuse_dispatch(
+          W, weight_type, static_cast<const block_q8_1*>(X_q8), out_f32,
+          K, M, N, input_stride, stream, variant)) {
+    if (hipGetLastError() != hipSuccess) return -3;
+    count(variant);
+    if (type == GGML_TYPE_IQ4_XS || type == GGML_TYPE_IQ4_NL)
+      g_iq4_dense_launches.fetch_add(1, std::memory_order_relaxed);
+    return 0;
+  }
   if (type == GGML_TYPE_IQ4_XS || type == GGML_TYPE_IQ4_NL) {
     mul_mat_vec_iq4_dense_dispatch(W, type, static_cast<const block_q8_1*>(X_q8),
                                    out_f32, K, M, N, input_stride, stream);
     if (hipGetLastError() != hipSuccess) return -3;
     g_iq4_dense_launches.fetch_add(1, std::memory_order_relaxed);
+    count(0);
     return 0;
   }
   // dense Q5_1 tensors of the decode twin use the exact dot (see vec_dot_q5_1_q8_1_exact); the expert path keeps the stock one
   mul_mat_vec_moe_dispatch(W, type == GGML_TYPE_Q5_1 ? GGML_TYPE_Q5_1_EXACT : type, static_cast<const block_q8_1*>(X_q8), zero_ids,
                            out_f32, K, M, N, /*experts_used=*/1, input_stride, stream);
-  return hipGetLastError() == hipSuccess ? 0 : -3;
+  if (hipGetLastError() != hipSuccess) return -3;
+  count(0);
+  return 0;
+}
+extern "C" int qfn_mmq_dense_vec_preq(int weight_type, const void* W,
+    const void* X_q8, const int32_t* zero_ids, float* out, int M, int N, int K,
+    hipStream_t stream) {
+  // Fixed for the process lifetime, like GUFO_DENSE_W1. N already belongs to
+  // the captured graph; this override does not add a graph-key dimension.
+  static const int iq_variant = [] {
+    const char* value = std::getenv("GUFO_DENSE_IQ_VARIANT");
+    const int parsed = dense::ParseVariant(value);
+    if (parsed == -2)
+      GGML_ABORT("unknown GUFO_DENSE_IQ_VARIANT: %s", value);
+    return parsed;
+  }();
+  static const bool width_one = [] {
+    const char* value = std::getenv("GUFO_DENSE_W1");
+    return !value || value[0] != '0' || value[1] != '\0';
+  }();
+  const auto variant =
+      dense::SelectVariant(weight_type, N, K, M, iq_variant, width_one);
+  if (iq_variant == int(dense::Variant::kDot4))
+    g_dense_dot4_routes[int(dense::Dot4RouteFor(weight_type, N, K))].fetch_add(
+        1, std::memory_order_relaxed);
+  return qfn_mmq_dense_vec_preq_variant(weight_type, W, X_q8, zero_ids, out,
+                                       M, N, K, int(variant), stream);
 }
 // Batched-only IQ4 adapter: WMMA accepts 1..64 VALID activation rows.
 extern "C" int qfn_mmq_iq4_dense_batch_preq(int weight_type, const void* W,
@@ -954,6 +1109,8 @@ template void mul_mat_q_case<GGML_TYPE_IQ2_S>(
 template void mul_mat_q_case<GGML_TYPE_IQ2_XXS>(
     ggml_backend_hip_context&, const mmq_args&, hipStream_t);
 template void mul_mat_q_case<GGML_TYPE_IQ2_XS>(
+    ggml_backend_hip_context&, const mmq_args&, hipStream_t);
+template void mul_mat_q_case<GGML_TYPE_IQ1_M>(
     ggml_backend_hip_context&, const mmq_args&, hipStream_t);
 template void mul_mat_q_case<GGML_TYPE_Q2_0>(
     ggml_backend_hip_context&, const mmq_args&, hipStream_t);

@@ -42,7 +42,8 @@ void LaunchAttention(const float* q, const float* k, const float* v,
 /// Runs consecutive verification queries with scalar decode arithmetic.
 /// The selected KV cache must already contain all rows. Each row sees only
 /// its causal prefix. Scratch for batch_size rows batches split-K too; a
-/// smaller span retains the scalar split-K fallback.
+/// smaller span retains the scalar split-K fallback. Without scratch,
+/// supported GQA heads use bounded online attention at every causal depth.
 void LaunchCausalDecodeAttention(
     const float* q, const float* gate, float* k_cache, float* v_cache,
     void* k_cache_f16, void* v_cache_f16, float* out_context,
@@ -79,7 +80,8 @@ void LaunchFusedQKNormRoPEKvWrite(
 /// true the KV cache is assumed already written by the fused prefill kernel
 /// (opt-c010-qk-rope-kv). When out_context_bf16 is non-null the context is also
 /// written as BF16, which saves the caller a conversion launch when the next
-/// projection consumes BF16.
+/// projection consumes BF16. Score rows exceeding the gfx1151 LDS budget
+/// use bounded online attention for supported 256-element GQA heads.
 void LaunchBatchedAttention(const float* q, const float* k, const float* v,
                             const float* gate, float* k_cache, float* v_cache,
                             void* k_cache_f16, void* v_cache_f16,
@@ -130,6 +132,9 @@ void LaunchBatchedFusedQKNormRoPEKvWrite(
 /// Optional workspace spans hold temporary KV layouts and must not alias live
 /// inputs, outputs or each other. Heads reuse the workspace in bounded groups
 /// when the full layout does not fit. Persistent KV storage is unchanged.
+/// first_query skips output tiles only; all KV rows are still written. It
+/// must be a multiple of 32 below batch_size. Skipped output/LSE rows are
+/// untouched, and retained rows use the full call's original arithmetic.
 /// Returns false when the shape is unsupported, so the caller can fall back.
 [[nodiscard]] bool LaunchQwenWmmaAttention(
     const float* q, const float* k, const float* v, const float* gate,
@@ -140,7 +145,7 @@ void LaunchBatchedFusedQKNormRoPEKvWrite(
     hipStream_t stream = nullptr, float* lse_out = nullptr,
     std::uint32_t key_begin = 0, bool skip_kv_write = false,
     std::span<float> packed_k_workspace = {},
-    std::span<float> packed_v_workspace = {});
+    std::span<float> packed_v_workspace = {}, std::size_t first_query = 0);
 
 /// Large-batch causal attention using float32 QK/PV GEMMs and one reusable
 /// [batch, context] score buffer.

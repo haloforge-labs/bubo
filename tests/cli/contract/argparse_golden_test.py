@@ -155,6 +155,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--driver", type=Path)
     parser.add_argument("--cli", type=Path, required=True)
+    parser.add_argument("--dependency-dir", type=Path,
+                        help="Bootstrap DLL directory for an unstaged development build")
     parser.add_argument("--record", choices=("pure", "process", "machine", "offline"))
     parser.add_argument("--only", choices=("pure", "process", "machine", "offline"))
     args = parser.parse_args()
@@ -174,7 +176,10 @@ def main():
             bare.parent.mkdir()
             shutil.copy2(args.cli, bare)
             for name in ("z.dll", "libcrypto-3-x64.dll", "libcurl.dll"):  # what bubo.exe itself imports
-                shutil.copy2(args.cli.parent / name, bare.parent / name)
+                source = args.cli.parent / name
+                if not source.exists() and args.dependency_dir:
+                    source = args.dependency_dir / name
+                shutil.copy2(source, bare.parent / name)
         for group in groups:
             if group == "pure":
                 rows = cases()

@@ -141,7 +141,9 @@ export function Lifecycle({
                   ? name === 'restart'
                     ? 'default'
                     : 'outline'
-                  : name === 'stop' || name === 'restart' || view.failure
+                  : // The main action keeps one look in every state: Start when
+                    // stopped, Stop when running.
+                    name === 'restart' || (name === 'start' && view.failure)
                     ? 'outline'
                     : 'default'
               }

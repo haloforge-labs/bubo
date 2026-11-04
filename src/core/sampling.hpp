@@ -16,6 +16,21 @@ namespace gufo::sampling {
 
 using TokenId = std::uint32_t;
 
+/// A reasoning token budget, enforced like llama.cpp's reasoning-budget
+/// sampler (#266). Tokens are counted after the reasoning start, including
+/// reasoning text already in the prompt. Once the budget is spent, and the
+/// last token completed its UTF-8 character, `forced` is emitted token by
+/// token. Any token in `ends` closes reasoning early. Later tokens are answer
+/// content, including literal reasoning tags, as in Gufo's response framing.
+struct ReasoningBudget {
+  std::size_t tokens{0};
+  std::vector<TokenId> forced;
+  std::vector<TokenId> ends;
+  std::vector<TokenId> prompt;
+  /// Indexed by token: its text ends inside a UTF-8 character.
+  std::shared_ptr<const std::vector<bool>> partial_utf8;
+};
+
 /// Model-independent controls for selecting a token from a logit row.
 ///
 /// Filters run in this order: penalties, temperature, top-k, top-p, min-p.
@@ -32,6 +47,8 @@ struct SamplingConfig {
   float frequency_penalty{0.0F};
   float presence_penalty{0.0F};
   std::shared_ptr<const TokenConstraint> constraint;
+  /// Set only for requests that start in their reasoning phase.
+  std::shared_ptr<const ReasoningBudget> reasoning_budget;
   std::shared_ptr<const BehaviourConfig> behaviour;
   // Negative leaves scoring off; otherwise collect the requested top 0..20.
   std::int32_t logprobs{-1};
@@ -53,6 +70,19 @@ struct TokenPenalty {
 struct Probability {
   TokenId token{0};
   double value{0.0};
+};
+
+struct LogitCandidate {
+  TokenId token;
+  float value;
+};
+
+// Known rows needed in addition to an approximate raw top-k. The normalizer
+// flag covers both sampling and behaviour's counterfactual observations.
+struct ShortlistSupport {
+  std::vector<TokenId> ids;
+  bool full_normalizer{false};
+  bool wide_counterfactual{false};
 };
 
 struct TokenLogprob {
@@ -128,6 +158,7 @@ public:
   [[nodiscard]] SamplerState WithoutConstraint() const;
   [[nodiscard]] SamplerState WithoutBehaviour() const;
   [[nodiscard]] bool BehaviourEnabled() const noexcept;
+  [[nodiscard]] ShortlistSupport HeadSupport() const;
   /// Accepted TOOL terminal event; tentative draws alone cannot set it.
   [[nodiscard]] bool ToolArgumentLoopDetected() const noexcept {
     return BehaviourEnabled() && behaviour_state_.loop.stopped_tools != 0;
@@ -139,6 +170,7 @@ public:
       std::span<const TokenId> proposal_ids = {},
       std::span<const float> proposal_probabilities = {},
       TokenId proposed = 0, double q = 0);
+  [[nodiscard]] bool ForcingThinkNudge() const noexcept;
   /// A finite argmax can bypass downloading logits if it satisfies the grammar.
   /// Set penalties_applied only for a winner computed with this state's exact
   /// penalty arithmetic and history; raw model argmaxes leave it false.
@@ -146,11 +178,15 @@ public:
                                      bool penalties_applied = false) const;
   /// A lazy tool grammar can admit the entire vocabulary before a call.
   /// Retain ordinary CPU/GPU sampling while its mask makes no restriction.
+  /// Also true while ForcedToken() is set, so GPU samplers defer to the host.
   [[nodiscard]] bool NeedsConstraintMask() const;
   [[nodiscard]] const JsonConstraint::State& constraint_state() const noexcept {
     return constraint_state_;
   }
   [[nodiscard]] std::span<const TokenId> history() const noexcept;
+  /// The token every sampling path returns next, if any: an exhausted
+  /// reasoning budget forces its end sequence, or a thinking nudge is pending.
+  [[nodiscard]] std::optional<TokenId> ForcedToken() const noexcept;
   [[nodiscard]] std::span<const TokenPenalty> penalties() const noexcept {
     return penalty_counts_;
   }
@@ -194,6 +230,13 @@ public:
   /// Compact logits use token_ids for penalties; returned IDs index logits.
   [[nodiscard]] SamplingDistribution Distribution(
       std::span<const float> logits, std::span<const TokenId> token_ids) const;
+  /// Exact target top-k from a complete candidate union. The caller proves
+  /// that omitted tokens cannot enter the post-penalty top-k. Candidates
+  /// have unique vocabulary IDs; returned IDs are those vocabulary IDs.
+  /// Requires bounded top-k, positive temperature and no active constraint.
+  /// Retains the full-row sampler's FP64 filtering and normalization.
+  [[nodiscard]] SamplingDistribution DistributionFromCandidates(
+      std::span<const LogitCandidate> logits) const;
   /// Distribution(logits) computed from a candidate list instead of the full
   /// row: `values`/`ids` are a correct top-N of the row's logits (by value,
   /// any tie order). Exact whenever it returns a value: it needs top_k > 0,
@@ -227,6 +270,7 @@ private:
       std::size_t vocab = 0,
       std::optional<ThinkMarkerRow> think_marker_row = {}) const;
   void ObserveThinkMarker(const ThinkMarkerRow& row, TokenId actual);
+  void ObserveThinkingEog(TokenId token);
   [[nodiscard]] bool BehaviourTopSafe(
       std::span<const float> values, std::span<const TokenId> ids,
       std::size_t vocab, std::optional<ThinkMarkerRow>& think_marker_row) const;
@@ -242,6 +286,9 @@ private:
       std::span<const float> logits) const;
   [[nodiscard]] SamplingDistribution LinearDistribution(
       std::span<const float> logits) const;
+  [[nodiscard]] SamplingDistribution SelectedDistribution();
+  void StartReasoning();
+  void AdvanceReasoning(TokenId token);
   struct SelectionProof {
     Probability topk_last;
     double full_sum{0}, previous_mass{0};
@@ -255,6 +302,9 @@ private:
   /// second half).
   void FinishSelected(double full_softmax_sum, bool has_full_softmax_sum,
                       SelectionProof* proof = nullptr);
+  void FilterSelected(double full_softmax_sum = 0,
+                      bool has_full_softmax_sum = false,
+                      SelectionProof* proof = nullptr);
 
   SamplingConfig config_;
   // Resolve request opt-in once; speculative sampler copies retain it.
@@ -267,6 +317,15 @@ private:
   std::vector<Probability> candidate_scratch_;
   std::uint64_t rng_state_{0};
   std::optional<TokenId> pending_sample_;
+  enum class ReasoningPhase : std::uint8_t {
+    kOff,
+    kCounting,
+    kWaitingUtf8,
+    kForcing,
+  };
+  ReasoningPhase reasoning_phase_{ReasoningPhase::kOff};
+  std::size_t reasoning_remaining_{0};
+  std::size_t reasoning_forced_{0};
 };
 
 [[nodiscard]] std::uint64_t NextRandom(std::uint64_t* state);

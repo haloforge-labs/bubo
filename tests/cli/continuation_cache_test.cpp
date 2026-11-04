@@ -1,10 +1,15 @@
 #include "src/cli/serve/continuation_cache.hpp"
+#include "src/core/platform/env.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <future>
 #include <iostream>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -1756,8 +1761,843 @@ void TestMissReasonNamesTheDroppedCheckpoint() {
   (void)e;
 }
 
-int main() {
-  ::setenv("GUFO_DISK_EVICT_DOMINATED", "1", 1);
+void TestTailFinalNeverEvicts() {
+  using namespace gufo::server;
+  using Tokens = std::vector<ContinuationToken>;
+  for (const auto scenario : {0, 1, 2, 3}) {
+    std::vector<std::size_t> invalidations(2);
+    std::size_t id = 0;
+    std::size_t removed = 0;
+    std::uint64_t available = 1000;
+    ContinuationCache cache(
+        2, [&] { return std::make_unique<FakeState>(id++, &invalidations); },
+        {.restore = [](ContinuationState&, const ContinuationSnapshot&) {},
+         .capacity_bytes = [=] { return scenario == 0 ? 150 : 1000; },
+         .on_event =
+             [&](const SnapshotEvent& e) {
+               removed += e.action == SnapshotEventAction::kRemoved;
+             },
+         .host_available_bytes = [&] { return available; },
+         .host_floor_bytes = 100},
+        scenario == 1 ? 1 : 2);
+    auto seed = cache.Acquire(Tokens{1, 2});
+    Expect(seed.TryReserveSnapshot(100, 2), "seed final admission fixture");
+    seed.Commit({1, 2}, std::make_shared<FakeSnapshot>(2, 100));
+    auto first = cache.Acquire(Tokens{3, 4});
+    if (scenario == 2)
+      available = 150;  // Evicting the seed could cover the host shortfall.
+    const bool admitted =
+        first.TryReserveSnapshot(100, 2, true, SnapshotPurpose::kTailFinal);
+    Expect(admitted == (scenario == 3),
+           "free-only admission checks bytes, records, and host floor");
+    if (!admitted) {
+      Expect(
+          first.skipped_snapshots() == 1 &&
+              first.skip_reason() ==
+                  (scenario == 2 ? SnapshotEventReason::kHostMemoryFloor
+                                 : SnapshotEventReason::kTailFinalNotPublished),
+          "free-only refusal is counted once with the applicable reason");
+    } else {
+      // Both reservations see the same free record. Publication must recheck
+      // record capacity without evicting the seed or the peer publication.
+      auto second = cache.Acquire(Tokens{5, 6});
+      Expect(
+          second.TryReserveSnapshot(100, 2, true, SnapshotPurpose::kTailFinal),
+          "concurrent final reserves free bytes");
+      Expect(first.PublishSnapshot(
+                 {3, 4}, std::make_shared<FakeSnapshot>(4, 100), true) == 100,
+             "first free final publishes");
+      Expect(second.PublishSnapshot(
+                 {5, 6}, std::make_shared<FakeSnapshot>(6, 100), true) == 0 &&
+                 second.skipped_snapshots() == 1 &&
+                 second.skip_reason() ==
+                     SnapshotEventReason::kTailFinalNotPublished,
+             "record race skips the second final without eviction");
+      second.Invalidate();
+    }
+    first.Invalidate();
+    Expect(
+        removed == 0 && cache.CachedPrefixTokens(Tokens{1, 2}) == 2 &&
+            cache.reserved_snapshot_bytes() == 0,
+        "free-only attempts retain every old record and release reservations");
+  }
+  std::cout << "PASS: TestTailFinalNeverEvicts "
+               "(bytes/records/floor/publication race)\n";
+}
+
+void TestTailBoundaryPreservesSource() {
+  using namespace gufo::server;
+  std::vector<std::size_t> invalidations(1);
+  std::size_t id = 0;
+  std::vector<SnapshotEvent> events;
+  ContinuationCache cache(
+      1, [&] { return std::make_unique<FakeState>(id++, &invalidations); },
+      {.restore = [](ContinuationState&, const ContinuationSnapshot&) {},
+       .capacity_bytes = [] { return 300; },
+       .on_event = [&](const SnapshotEvent& e) { events.push_back(e); }},
+      4);
+  auto root = cache.Acquire(std::vector<ContinuationToken>{1, 2});
+  Expect(root.TryReserveSnapshot(250, 2), "large restored source seed");
+  root.Commit({1, 2}, std::make_shared<FakeSnapshot>(2, 250));
+  auto next = cache.Acquire(std::vector<ContinuationToken>{1, 2, 3, 4});
+  Expect(next.cached_tokens() == 2,
+         "source protection fixture restores real source");
+  Expect(
+      !next.TryReserveSnapshot(100, 3, true, SnapshotPurpose::kTailBoundary) &&
+          next.skip_reason() == SnapshotEventReason::kByteCapacity,
+      "B at one-third budget cannot evict its oversized source");
+  Expect(cache.CachedPrefixTokens(std::vector<ContinuationToken>{1, 2}) == 2 &&
+             std::ranges::none_of(events,
+                                  [](const SnapshotEvent& e) {
+                                    return e.action ==
+                                           SnapshotEventAction::kRemoved;
+                                  }),
+         "failed B keeps the source, with no removal");
+  next.Invalidate();
+  std::cout << "PASS: TestTailBoundaryPreservesSource\n";
+}
+
+void TestTailBoundaryLearnsBranchAfterDescendantRemoval() {
+  using namespace gufo::server;
+  using Tokens = std::vector<ContinuationToken>;
+  constexpr std::size_t q = 100;
+  std::vector<std::size_t> invalidations(1);
+  ContinuationCache cache(
+      1, [&] { return std::make_unique<FakeState>(0, &invalidations); },
+      {.restore = [](ContinuationState&, const ContinuationSnapshot&) {},
+       .capacity_bytes = [] { return 3 * q; }},
+      128);
+  const auto publish = [&](const Tokens& prompt, std::size_t boundary) {
+    auto lease = cache.Acquire(prompt);
+    const auto restored = lease.cached_tokens();
+    lease.BeginTailSnapshotHistory(prompt);
+    Tokens prefix(prompt.begin(), prompt.begin() + boundary);
+    Expect(lease.TryReserveSnapshot(q, boundary, true,
+                                    SnapshotPurpose::kTailBoundary, prefix),
+           "three-payload branch admission");
+    Expect(lease.PublishSnapshot(prefix, std::make_shared<FakeSnapshot>(0, q),
+                                 true) == q,
+           "three-payload branch publication");
+    lease.Commit({});
+    return restored;
+  };
+  const Tokens original(30000, 1);
+  publish(original, 29744);          // S
+  publish(Tokens(31200, 1), 30944);  // T, demotes S
+  publish(Tokens(18256, 2), 18000);  // U, newer than T
+  Tokens branch(32400, 1);
+  branch[29744] = 3;
+  Expect(publish(branch, 32144) == 29744, "fork restores old B, not a grid");
+  Expect(cache.CachedPrefixTokens(Tokens(31200, 1)) == 29744,
+         "the last old divergent descendant was removed");
+  branch.resize(33600, 1);
+  Expect(publish(branch, 33344) == 32144, "fork extension restores new B");
+  std::cout << "branch payloads=3 S29744_after_descendant_removal="
+            << cache.CachedPrefixTokens(original) << std::endl;
+  Expect(cache.CachedPrefixTokens(original) == 29744,
+         "observed branch remains learned after its old descendant disappears");
+  Expect(cache.reserved_snapshot_bytes() == 0,
+         "branch reservations discharged");
+  std::cout << "PASS: three-payload B branch survives descendant removal\n";
+}
+
+void TestTailBoundaryPublicationProtectsSource(std::size_t records) {
+  using namespace gufo::server;
+  using Tokens = std::vector<ContinuationToken>;
+  constexpr std::size_t q = 100;
+  std::vector<std::size_t> invalidations(1);
+  ContinuationCache cache(
+      1, [&] { return std::make_unique<FakeState>(0, &invalidations); },
+      {.restore = [](ContinuationState&, const ContinuationSnapshot&) {},
+       .capacity_bytes = [=] { return (records == 1 ? 3 : records + 1) * q; }},
+      records);
+  const auto seed = [&](Tokens tokens) {
+    auto lease = cache.Acquire(tokens);
+    Expect(lease.TryReserveSnapshot(q, tokens.size()), "record-pressure seed");
+    lease.Commit(tokens, std::make_shared<FakeSnapshot>(0, q));
+  };
+  seed({1, 1});
+  for (std::size_t i = 1; i < records; ++i)
+    seed({static_cast<ContinuationToken>(i + 10)});
+  auto next = cache.Acquire(Tokens{1, 1, 2});
+  Expect(next.cached_tokens() == 2, "incoming B restores protected S");
+  next.BeginTailSnapshotHistory(Tokens{1, 1, 2});
+  Expect(
+      next.TryReserveSnapshot(q, 3, true, SnapshotPurpose::kTailBoundary,
+                              Tokens{1, 1, 2}),
+      "B fits bytes, including equality at one third in the two-record case");
+  const auto retained =
+      records == 1
+          ? next.Commit({1, 1, 2}, std::make_shared<FakeSnapshot>(0, q))
+          : next.PublishSnapshot({1, 1, 2},
+                                 std::make_shared<FakeSnapshot>(0, q), true);
+  std::cout << "source records=" << records << " retained=" << retained
+            << " S=" << cache.CachedPrefixTokens(Tokens{1, 1})
+            << " skipped=" << next.skipped_snapshots()
+            << " reason=" << static_cast<int>(next.skip_reason()) << std::endl;
+  Expect(cache.CachedPrefixTokens(Tokens{1, 1}) == 2,
+         "record publication must preserve S, including source replacement "
+         "override");
+  if (records == 1) {
+    Expect(retained == 0 && next.skipped_snapshots() == 1 &&
+               next.skip_reason() == SnapshotEventReason::kEntryCapacity,
+           "no permitted record refuses B once with entry_capacity");
+  } else {
+    Expect(retained == q && cache.CachedPrefixTokens(Tokens{11}) == 0,
+           "B replaces the permitted unrelated record instead of its source");
+    next.Invalidate();
+  }
+  Expect(cache.reserved_snapshot_bytes() == 0,
+         "record-pressure reservation released");
+  std::cout << "PASS: B source protection records=" << records << '\n';
+}
+
+void TestTailCapturesReserveOutstandingHostFootprint() {
+  using namespace gufo::server;
+  using Tokens = std::vector<ContinuationToken>;
+  constexpr std::uint64_t gib = std::uint64_t{1} << 30;
+  constexpr std::size_t q = 9 * gib / 10;
+  for (const int release : {0, 1, 2, 3}) {
+    std::vector<std::size_t> invalidations(2);
+    std::size_t id = 0;
+    ContinuationCache cache(
+        2, [&] { return std::make_unique<FakeState>(id++, &invalidations); },
+        {.restore = [](ContinuationState&, const ContinuationSnapshot&) {},
+         .capacity_bytes = [] { return 8 * gib; },
+         .host_available_bytes = [] { return 5 * gib; },
+         .host_floor_bytes = 4 * gib},
+        4);
+    auto first = cache.Acquire(Tokens{1});
+    auto second = cache.Acquire(Tokens{2});
+    first.BeginTailSnapshotHistory(Tokens{1});
+    second.BeginTailSnapshotHistory(Tokens{2});
+    // Return from admission on a worker while the copy has not allocated yet.
+    Expect(std::async(std::launch::async,
+                      [&] {
+                        return first.TryReserveSnapshot(
+                            q, 1, true, SnapshotPurpose::kTailFinal);
+                      })
+               .get(),
+           "first pending 0.9 GiB capture fits a 5 GiB reading");
+    const bool second_admitted = std::async(std::launch::async, [&] {
+                                   return second.TryReserveSnapshot(
+                                       q, 1, true, SnapshotPurpose::kTailFinal);
+                                 }).get();
+    std::cout << "host available=" << 5 * gib << " floor=" << 4 * gib
+              << " payload=" << q << " first=1 second=" << second_admitted
+              << " release=" << release << std::endl;
+    Expect(!second_admitted &&
+               second.skip_reason() == SnapshotEventReason::kHostMemoryFloor,
+           "second pending host allocation cannot reuse the same headroom");
+    if (release == 0) {
+      first.SkipSnapshot(SnapshotEventReason::kCaptureFailure, q, 1);
+    } else if (release == 1) {
+      first.Invalidate();
+    } else if (release == 2) {
+      auto moved = std::move(first);
+      moved.SkipSnapshot(SnapshotEventReason::kCaptureFailure, q, 1);
+    } else {
+      Expect(
+          first.PublishSnapshot({1}, std::make_shared<FakeSnapshot>(0, q),
+                                true) == q,
+          "completed capture publishes and discharges outstanding host bytes");
+    }
+    Expect(
+        second.TryReserveSnapshot(q, 1, true, SnapshotPurpose::kTailFinal),
+        "completion/refusal/invalidation/move releases the host reservation");
+    second.Invalidate();
+    first.Invalidate();
+    Expect(cache.reserved_snapshot_bytes() == 0,
+           "all logical reservations released");
+  }
+  // A device checkpoint's tiny header retains the existing below-floor
+  // exemption.
+  std::vector<std::size_t> invalidations(2);
+  std::size_t id = 0;
+  ContinuationCache cache(
+      2, [&] { return std::make_unique<FakeState>(id++, &invalidations); },
+      {.restore = [](ContinuationState&, const ContinuationSnapshot&) {},
+       .capacity_bytes = [] { return 8 * gib; },
+       .host_available_bytes = [] { return 1 * gib; },
+       .host_floor_bytes = 4 * gib,
+       .host_bytes = [](std::uint64_t, std::size_t) { return 1U << 20; }},
+      4);
+  auto a = cache.Acquire(Tokens{1}), b = cache.Acquire(Tokens{2});
+  a.BeginTailSnapshotHistory(Tokens{1});
+  b.BeginTailSnapshotHistory(Tokens{2});
+  Expect(a.TryReserveSnapshot(q, 1, true, SnapshotPurpose::kTailFinal) &&
+             b.TryReserveSnapshot(q, 1, true, SnapshotPurpose::kTailFinal),
+         "pending device-resident headers keep the floor exemption");
+  a.Invalidate();
+  b.Invalidate();
+  std::cout << "PASS: outstanding host footprint and release paths\n";
+}
+
+// These byte sizes are deliberately small, while exercising the native cache's
+// reservation, publication, source, identity and eviction paths directly.
+template<class Lease>
+void BeginNewestHistory(
+    Lease& lease, const std::vector<gufo::server::ContinuationToken>& prompt) {
+  if constexpr (requires { lease.BeginTailSnapshotHistory(prompt, true); })
+    lease.BeginTailSnapshotHistory(prompt, true);
+  else
+    lease.BeginTailSnapshotHistory(prompt);
+}
+
+void TestNewestTailPublication(int scenario) {
+  using namespace gufo::server;
+  using Tokens = std::vector<ContinuationToken>;
+  std::vector<std::size_t> invalidations(3);
+  std::size_t next_id = 0;
+  std::vector<SnapshotEvent> events;
+  std::uint64_t available = 10000;
+  ContinuationCache cache(
+      3, [&] { return std::make_unique<FakeState>(next_id++, &invalidations); },
+      {.restore = [](ContinuationState&, const ContinuationSnapshot&) {},
+       .capacity_bytes = [] { return 1000; },
+       .on_event = [&](const auto& event) { events.push_back(event); },
+       .host_available_bytes = [&] { return available; },
+       .host_floor_bytes = 100},
+      scenario == 12 ? 2 : 16);
+  const Tokens old_prompt(856, 1);
+  Tokens prompt(956, 1);
+  std::fill(prompt.begin() + 849, prompt.begin() + 856, 8);
+  const std::vector<std::uint8_t> old_identity{9}, new_identity{10};
+  const std::vector<ContinuationInputPrefix> old_prefix{{600, {7}}},
+      new_prefix{{700, {7}}};
+  const auto publish = [&](auto& lease, Tokens tokens, std::size_t bytes,
+                           SnapshotPurpose purpose) {
+    Expect(
+        lease.TryReserveSnapshot(bytes, tokens.size(), true, purpose, tokens),
+        "newest seed reserves");
+    Expect(lease.PublishSnapshot(std::move(tokens),
+                                 std::make_shared<FakeSnapshot>(0, bytes),
+                                 true) == bytes,
+           "newest seed publishes");
+  };
+  {
+    auto seed =
+        cache.Acquire(old_prompt, {}, old_identity, {}, true, 0, old_prefix);
+    BeginNewestHistory(seed, old_prompt);
+    publish(seed, Tokens(600, 1),
+            (scenario >= 5 && scenario <= 7) ||
+                    (scenario >= 9 && scenario <= 11) || scenario == 13
+                ? 200
+                : 600,
+            scenario == 3 ? SnapshotPurpose::kBranchPoint
+                          : SnapshotPurpose::kTailBoundary);
+    if (scenario < 3 || scenario == 5 || scenario == 8 || scenario == 13)
+      publish(seed, Tokens(400, 1), 100, SnapshotPurpose::kHistory);
+    if (scenario == 10 || scenario == 11)
+      publish(seed, Tokens(849, 1), 600,
+              scenario == 11 ? SnapshotPurpose::kTailFinal
+                             : SnapshotPurpose::kContinuation);
+    seed.Invalidate();
+  }
+  if (scenario == 13) {
+    for (const auto [count, token] : {std::pair{20, 2}, std::pair{30, 3}}) {
+      auto idle = cache.Acquire(Tokens(count, token));
+      BeginNewestHistory(idle, Tokens(count, token));
+      publish(idle, Tokens(count, token), 200, SnapshotPurpose::kTailBoundary);
+      idle.Invalidate();
+    }
+  }
+  // A foreign live frontier remains in its own execution slot. Idle records
+  // have neither a live frontier nor a lease, so the new B can reclaim them.
+  std::optional<ContinuationCache::Lease> peer;
+  if (scenario >= 5 && scenario <= 7) {
+    peer.emplace(cache.Acquire(Tokens(20, 2)));
+    BeginNewestHistory(*peer, Tokens(20, 2));
+    publish(*peer, Tokens(20, 2), 600, SnapshotPurpose::kTailBoundary);
+    if (scenario == 5)
+      peer->Invalidate();
+    if (scenario == 6) {
+      (void)peer->Commit({}, nullptr, Tokens(20, 2));
+      peer.reset();
+    }
+  }
+  auto current =
+      cache.Acquire(prompt, {}, new_identity, {}, true, 0, new_prefix);
+  Expect(current.cached_tokens() == 600, "newest request restores old B");
+  BeginNewestHistory(current, prompt);
+  if (scenario == 9)
+    publish(current, Tokens(650, 1), 600, SnapshotPurpose::kContinuation);
+  if (scenario == 8)
+    available = 0;
+  std::optional<ContinuationCache::Lease> concurrent;
+  if (scenario == 4) {
+    concurrent.emplace(
+        cache.Acquire(prompt, {}, new_identity, {}, true, 0, new_prefix));
+    Expect(concurrent->cached_tokens() == 600,
+           "another slot finishes restoring the old source before retirement");
+  }
+  events.clear();
+  const auto before = cache.retained_snapshot_bytes();
+  const bool admitted = current.TryReserveSnapshot(
+      700, 700, true, SnapshotPurpose::kTailBoundary, Tokens(700, 1));
+  const bool protected_case =
+      scenario == 3 || scenario == 6 || scenario == 7 || scenario == 8;
+  if (protected_case) {
+    Expect(!admitted && cache.retained_snapshot_bytes() == before,
+           "branch live leased or staging-host protection refuses without "
+           "eviction");
+  } else {
+    Expect(admitted,
+           "new B reserves by retiring its own source before capture");
+    if (scenario == 5 || scenario == 13) {
+      Expect(
+          events.size() == 3 && events[0].token_count == 400 &&
+              events[1].token_count == 600 && events[2].token_count == 20,
+          "new B reclaims own grid then source then oldest idle foreign entry");
+    }
+    if (scenario == 13) {
+      Expect(cache.CachedPrefixTokens(Tokens(20, 2)) == 0 &&
+                 cache.CachedPrefixTokens(Tokens(30, 3)) == 30,
+             "foreign victims use LRU order");
+      Expect(current.PublishSnapshot(Tokens(700, 1),
+                                     std::make_shared<FakeSnapshot>(0, 700),
+                                     true) == 700 &&
+                 cache.retained_snapshot_bytes() == 900,
+             "new B keeps the newer idle conversation when the bytes allow");
+      current.Invalidate();
+      Expect(cache.reserved_snapshot_bytes() == 0, "LRU reservation drains");
+      std::cout << "PASS: newest tail foreign LRU\n";
+      return;
+    }
+    if (scenario == 12) {
+      auto a = cache.Acquire(Tokens{2});
+      auto b = cache.Acquire(Tokens{3});
+      publish(a, Tokens{2}, 50, SnapshotPurpose::kContinuation);
+      publish(b, Tokens{3}, 50, SnapshotPurpose::kContinuation);
+      Expect(current.PublishSnapshot(Tokens(700, 1),
+                                     std::make_shared<FakeSnapshot>(0, 700),
+                                     true) == 0 &&
+                 current.skip_reason() == SnapshotEventReason::kEntryCapacity,
+             "record race cannot evict snapshots published by active peers");
+      Expect(cache.CachedPrefixTokens(Tokens{2}) == 1 &&
+                 cache.CachedPrefixTokens(Tokens{3}) == 1,
+             "both active publishers retain their checkpoints");
+      a.Invalidate();
+      b.Invalidate();
+      current.Invalidate();
+      Expect(cache.reserved_snapshot_bytes() == 0,
+             "record-race reservation drains");
+      std::cout << "PASS: newest tail record-race publishers\n";
+      return;
+    }
+    Expect(cache.CachedPrefixTokens(Tokens(600, 1), old_identity, old_prefix) ==
+               (scenario >= 9 ? 600U : 0U),
+           "own ordinary copies yield before retiring the source");
+    Expect(cache.retained_snapshot_bytes() + cache.reserved_snapshot_bytes() <=
+               1000,
+           "the complete incoming copy stays inside the retained plus reserved "
+           "cap");
+    if (scenario == 1) {
+      current.SkipSnapshot(SnapshotEventReason::kCaptureFailure, 700, 700);
+      Expect(cache.CachedPrefixTokens(Tokens(600, 1), old_identity,
+                                      old_prefix) == 0,
+             "failed capture does not resurrect an already retired source");
+    } else {
+      const auto retained = current.PublishSnapshot(
+          Tokens(700, 1),
+          std::make_shared<FakeSnapshot>(0, scenario == 2 ? 699 : 700), true);
+      if (scenario == 2)
+        Expect(
+            retained == 0 && cache.CachedPrefixTokens(
+                                 Tokens(600, 1), old_identity, old_prefix) == 0,
+            "mismatched publication leaves only surviving fallback entries");
+      else {
+        Expect(retained == 700 &&
+                   cache.CachedPrefixTokens(Tokens(700, 1), new_identity,
+                                            new_prefix) == 700,
+               "valid new B atomically supersedes the old B");
+        Expect(cache.retained_snapshot_bytes() == (scenario >= 9 ? 900U : 700U),
+               "the source stays only when it fits beside the newest B");
+      }
+    }
+  }
+  current.Invalidate();
+  if (peer)
+    peer->Invalidate();
+  Expect(cache.reserved_snapshot_bytes() == 0,
+         "newest reservation drains on every path");
+  std::cout << "PASS: newest tail scenario=" << scenario << '\n';
+}
+
+void TestLargeTailIsolation(int scenario) {
+  using namespace gufo::server;
+  using Tokens = std::vector<ContinuationToken>;
+  std::vector<std::size_t> invalidations(2);
+  std::size_t id = 0;
+  std::vector<SnapshotEvent> events;
+  bool allow = true;
+  std::uint64_t available = 10000;
+  const std::size_t records = scenario == 3 ? 3 : 12;
+  ContinuationCache cache(
+      2, [&] { return std::make_unique<FakeState>(id++, &invalidations); },
+      {.restore = [](ContinuationState&, const ContinuationSnapshot&) {},
+       .capacity_bytes = [] { return 1000; },
+       .on_event = [&](const auto& event) { events.push_back(event); },
+       .host_available_bytes = [&] { return available; },
+       .host_floor_bytes = 100,
+       .allow_new = [&] { return allow; }},
+      records);
+  const Tokens old_prompt(20, 1), prompt(30, 1);
+  Tokens peer(15, scenario == 8 ? 1 : 2);
+  if (scenario == 7)
+    std::fill_n(peer.begin(), 4, 1);
+  const std::vector<std::uint8_t> peer_identity =
+      scenario == 7   ? std::vector<std::uint8_t>{7}
+      : scenario == 8 ? std::vector<std::uint8_t>{8}
+                      : std::vector<std::uint8_t>{};
+  const std::vector<std::uint8_t> old_identity{9}, new_identity{10};
+  const std::vector<ContinuationInputPrefix> old_prefix{{18, {7}}},
+      new_prefix{{28, {7}}};
+  const auto publish = [&](auto& lease, const Tokens& tokens, std::size_t bytes,
+                           SnapshotPurpose purpose) {
+    Expect(
+        lease.TryReserveSnapshot(bytes, tokens.size(), true, purpose, tokens),
+        "seed fits bytes");
+    Expect(lease.PublishSnapshot(
+               tokens, std::make_shared<FakeSnapshot>(0, bytes), true) == bytes,
+           "seed publishes");
+  };
+  const auto own_grid_bytes = scenario == 0 ? 80U : scenario == 2 ? 100U : 0U;
+  const auto source_bytes = scenario == 0                    ? 360U
+                            : scenario == 1 || scenario == 2 ? 300U
+                                                             : 200U;
+  {
+    auto seed =
+        cache.Acquire(old_prompt, {}, old_identity, {}, true, 0, old_prefix);
+    seed.BeginTailSnapshotHistory(old_prompt);
+    if (own_grid_bytes)
+      publish(seed, Tokens(4, 1), own_grid_bytes, SnapshotPurpose::kHistory);
+    if (scenario == 4)
+      publish(seed, Tokens(4, 1), 350, SnapshotPurpose::kBranchPoint);
+    publish(seed, Tokens(18, 1), source_bytes, SnapshotPurpose::kTailBoundary);
+    if (scenario == 0)
+      publish(seed, old_prompt, 180, SnapshotPurpose::kTailFinal);
+    seed.Invalidate();
+  }
+  const auto peer_bytes = scenario == 2 || scenario >= 7 ? 400U : 100U;
+  {
+    auto seed = cache.Acquire(peer, {}, peer_identity);
+    // The unrelated entry may have exactly the incoming identity and prefix
+    // hash. Only prompt ancestry/restore ownership can justify reclaiming it.
+    if (scenario >= 7)
+      seed.BeginTailSnapshotHistory(peer);
+    publish(seed, peer, peer_bytes,
+            scenario >= 7 ? SnapshotPurpose::kTailBoundary
+                          : SnapshotPurpose::kContinuation);
+    seed.Invalidate();
+  }
+  auto next = cache.Acquire(prompt, {}, new_identity, {}, true, 0, new_prefix);
+  Expect(next.cached_tokens() == 18, "new request restores all-cut B");
+  next.BeginTailSnapshotHistory(prompt);
+  if (scenario == 0)
+    publish(next, Tokens(24, 1), 70, SnapshotPurpose::kHistory);
+  events.clear();
+  if (scenario == 5)
+    available = 500;  // 100 floor + 500 incoming cannot use the peer's bytes.
+  if (scenario == 6)
+    allow = false;
+  const std::size_t bytes = scenario == 1 || scenario == 4 ? 600 : 500;
+  const auto before = cache.retained_snapshot_bytes();
+  const bool admitted = next.TryReserveSnapshot(
+      bytes, 28, true, SnapshotPurpose::kTailBoundary, Tokens(28, 1));
+  if (scenario == 0 || scenario == 1) {
+    Expect(admitted, "large B fits after reclaiming only its own entries");
+    if (scenario == 0) {
+      Expect(events.size() == 3, "old grid, old full, current grid reclaimed");
+      for (const auto& event : events)
+        Expect(event.action == SnapshotEventAction::kRemoved &&
+                   (event.token_count == 4 || event.token_count == 20 ||
+                    event.token_count == 24) &&
+                   !event.was_source,
+               "only eligible own entries removed");
+    } else {
+      Expect(events.empty(), "equality fits without eviction");
+      next.SkipSnapshot(SnapshotEventReason::kCaptureFailure, bytes, 28);
+      events.clear();
+      Expect(!next.TryReserveSnapshot(bytes + 1, 28, true,
+                                      SnapshotPurpose::kTailBoundary,
+                                      Tokens(28, 1)),
+             "one byte above isolated capacity refuses without peer eviction");
+      Expect(cache.retained_snapshot_bytes() == before,
+             "one-byte refusal preserves retained bytes");
+      Expect(
+          !next.TryReserveSnapshot(std::numeric_limits<std::size_t>::max(), 28,
+                                   true, SnapshotPurpose::kTailBoundary,
+                                   Tokens(28, 1)) &&
+              !next.TryReserveSnapshot(
+                  0, 28, true, SnapshotPurpose::kTailBoundary, Tokens(28, 1)),
+          "overflow-sized and zero captures refuse");
+      next.Invalidate();
+      Expect(cache.reserved_snapshot_bytes() == 0,
+             "refusals drain reservation");
+      std::cout << "PASS: large B equality/overflow\n";
+      return;
+    }
+    Expect(next.PublishSnapshot(Tokens(28, 1),
+                                std::make_shared<FakeSnapshot>(0, bytes),
+                                true) == bytes,
+           "large B publication succeeds");
+    Expect(cache.retained_snapshot_bytes() == source_bytes + peer_bytes + bytes,
+           "retained bytes equal actual surviving payloads");
+  } else if (scenario == 3) {
+    Expect(admitted, "free record available at large-B reservation");
+    {
+      auto racing = cache.Acquire(Tokens{8});
+      publish(racing, Tokens{8}, 50, SnapshotPurpose::kContinuation);
+      racing.Invalidate();
+    }
+    Expect(next.PublishSnapshot(Tokens(28, 1),
+                                std::make_shared<FakeSnapshot>(0, bytes),
+                                true) == 0 &&
+               next.skipped_snapshots() == 1 &&
+               next.skip_reason() == SnapshotEventReason::kEntryCapacity,
+           "large B cannot evict a peer at record publication");
+  } else {
+    Expect(!admitted, "large B refuses when only protected or peer bytes fit");
+    Expect(cache.retained_snapshot_bytes() == before,
+           "impossible large B preflights before any destructive eviction");
+    for (const auto& event : events)
+      Expect(event.action != SnapshotEventAction::kRemoved,
+             "refused large B preserves even its own older entries");
+    Expect(next.skip_reason() ==
+               (scenario == 5   ? SnapshotEventReason::kHostMemoryFloor
+                : scenario == 6 ? SnapshotEventReason::kMemoryPressure
+                                : SnapshotEventReason::kByteCapacity),
+           "large B refusal reports the actual limiting rule");
+  }
+  Expect(
+      cache.CachedPrefixTokens(Tokens(18, 1), old_identity, old_prefix) == 18,
+      "large B preserves the running restore source");
+  Expect(cache.CachedPrefixTokens(peer, peer_identity) == peer.size(),
+         "large B preserves unrelated session snapshots");
+  next.Invalidate();
+  Expect(cache.reserved_snapshot_bytes() == 0,
+         "large B releases all reservations");
+  std::cout << "PASS: large B isolation scenario=" << scenario << '\n';
+}
+
+// A shared old B proves policy compatibility, not ownership of a sibling's
+// divergent full prompt. Keep logical payloads small and inspect real removals.
+void TestTailLineageIsolation(int scenario) {
+  using namespace gufo::server;
+  using Tokens = std::vector<ContinuationToken>;
+  const bool ancestor = scenario == 1, rewritten = scenario == 2;
+  const bool two_siblings = scenario == 3, different_identity = scenario == 4;
+  const bool equality = scenario == 5, publication = scenario >= 6;
+  std::vector<std::size_t> invalidations(2);
+  std::size_t id = 0;
+  std::vector<SnapshotEvent> events;
+  ContinuationCache cache(
+      2, [&] { return std::make_unique<FakeState>(id++, &invalidations); },
+      {.restore = [](ContinuationState&, const ContinuationSnapshot&) {},
+       .capacity_bytes = [] { return 1000; },
+       .on_event = [&](const auto& event) { events.push_back(event); }},
+      publication ? 4 : 12);
+  const Tokens old_prompt(556, 1);
+  Tokens prompt(656, 1);
+  if (rewritten)
+    prompt[350] = 2;  // Client edits framing after B300, before the new B400.
+  const std::vector<std::uint8_t> old_identity{1}, identity{3};
+  const std::vector<ContinuationInputPrefix> old_prefix{{300, {7}}},
+      prefix{{400, {7}}};
+  const auto first = [](const Tokens& tokens, std::size_t count) {
+    return Tokens(tokens.begin(), tokens.begin() + count);
+  };
+  const auto publish = [&](auto& lease, const Tokens& tokens, std::size_t bytes,
+                           SnapshotPurpose purpose) {
+    Expect(
+        lease.TryReserveSnapshot(bytes, tokens.size(), true, purpose, tokens),
+        "lineage seed fits");
+    Expect(lease.PublishSnapshot(
+               tokens, std::make_shared<FakeSnapshot>(0, bytes), true) == bytes,
+           "lineage seed publishes");
+  };
+  const std::size_t source_bytes = publication ? 100 : 300;
+  {
+    auto seed =
+        cache.Acquire(old_prompt, {}, old_identity, {}, true, 0, old_prefix);
+    seed.BeginTailSnapshotHistory(old_prompt);
+    publish(seed, first(old_prompt, 300), source_bytes,
+            SnapshotPurpose::kTailBoundary);
+    if (rewritten)
+      publish(seed, old_prompt, 556, SnapshotPurpose::kTailFinal);
+    seed.Invalidate();
+  }
+  std::vector<Tokens> siblings;
+  std::vector<std::vector<std::uint8_t>> sibling_identities;
+  std::vector<std::vector<ContinuationInputPrefix>> sibling_prefixes;
+  std::vector<std::size_t> sibling_boundaries;
+  const int sibling_count = rewritten ? 0 : two_siblings ? 2 : 1;
+  std::size_t expected_before = source_bytes + (rewritten ? 556 : 0);
+  for (int n = 0; n < sibling_count; ++n) {
+    const std::size_t boundary = two_siblings ? 120 + 10 * n : 190;
+    Tokens sibling(boundary + 256, 1);
+    if (!ancestor)
+      sibling[boundary] = 2 + n;
+    const std::vector<std::uint8_t> sibling_identity{
+        static_cast<std::uint8_t>(4 + n)};
+    const std::vector<ContinuationInputPrefix> sibling_prefix{
+        {boundary, {static_cast<std::uint8_t>(different_identity ? 8 : 7)}}};
+    const std::size_t boundary_bytes = publication ? 50 : boundary;
+    const std::size_t full_bytes = publication    ? 50
+                                   : equality     ? 110
+                                   : two_siblings ? 200
+                                                  : 446;
+    auto seed = cache.Acquire(sibling, {}, sibling_identity, {}, true, 0,
+                              sibling_prefix);
+    seed.BeginTailSnapshotHistory(sibling);
+    publish(seed, first(sibling, boundary), boundary_bytes,
+            SnapshotPurpose::kTailBoundary);
+    publish(seed, sibling, full_bytes, SnapshotPurpose::kTailFinal);
+    seed.Invalidate();
+    expected_before += boundary_bytes + full_bytes;
+    siblings.push_back(sibling);
+    sibling_identities.push_back(sibling_identity);
+    sibling_prefixes.push_back(sibling_prefix);
+    sibling_boundaries.push_back(boundary);
+  }
+  Expect(cache.retained_snapshot_bytes() == expected_before,
+         "all lineage seeds coexist without eviction");
+  auto next = cache.Acquire(prompt, {}, identity, {}, true, 0, prefix);
+  Expect(next.cached_tokens() == 300, "request restores Y.B300");
+  next.BeginTailSnapshotHistory(prompt);
+  events.clear();
+  const auto boundary = first(prompt, 400);
+  bool admitted = next.TryReserveSnapshot(
+      400, 400, true, SnapshotPurpose::kTailBoundary, boundary);
+  if (equality) {
+    Expect(
+        admitted && events.empty() &&
+            cache.retained_snapshot_bytes() + cache.reserved_snapshot_bytes() ==
+                1000,
+        "equality fits without reclaiming a sibling");
+    next.SkipSnapshot(SnapshotEventReason::kCaptureFailure, 400, 400);
+    events.clear();
+    admitted = next.TryReserveSnapshot(
+        401, 400, true, SnapshotPurpose::kTailBoundary, boundary);
+  }
+  std::size_t published = 0;
+  if (publication) {
+    Expect(admitted, "free record exists during lineage reservation");
+    auto racing = cache.Acquire(Tokens{9});
+    publish(racing, Tokens{9}, 1, SnapshotPurpose::kContinuation);
+    racing.Invalidate();
+    ++expected_before;
+    events.clear();
+    auto snapshot = std::make_shared<FakeSnapshot>(0, 400);
+    published = scenario == 7 ? next.Commit(boundary, snapshot)
+                              : next.PublishSnapshot(boundary, snapshot, true);
+  } else if (ancestor || rewritten) {
+    Expect(admitted, "proven full ancestry or restored rewritten history fits");
+    published = next.PublishSnapshot(
+        boundary, std::make_shared<FakeSnapshot>(0, 400), true);
+  }
+  std::cout << "lineage scenario=" << scenario << " before=" << expected_before
+            << " admitted=" << admitted << " published=" << published
+            << " retained=" << cache.retained_snapshot_bytes() << std::endl;
+  for (const auto& event : events) {
+    if (event.action == SnapshotEventAction::kRemoved)
+      std::cout << "lineage removed tokens=" << event.token_count
+                << " bytes=" << event.snapshot_bytes
+                << " source=" << event.was_source << std::endl;
+  }
+  for (std::size_t n = 0; n < siblings.size(); ++n) {
+    const auto retained = cache.CachedPrefixTokens(
+        siblings[n], sibling_identities[n], sibling_prefixes[n]);
+    std::cout << "lineage sibling=" << n << " full=" << siblings[n].size()
+              << " retained_P=" << retained << std::endl;
+    if (!ancestor) {
+      Expect(retained == siblings[n].size(),
+             "foreign sibling full prompt remains retained");
+      Expect(cache.CachedPrefixTokens(first(siblings[n], sibling_boundaries[n]),
+                                      sibling_identities[n],
+                                      sibling_prefixes[n]) ==
+                 sibling_boundaries[n],
+             "foreign sibling B remains retained");
+    }
+  }
+  if (ancestor || rewritten) {
+    Expect(published == 400 && events.size() == 1 &&
+               events.front().action == SnapshotEventAction::kRemoved &&
+               events.front().token_count == (ancestor ? 446 : 556) &&
+               !events.front().was_source,
+           "only the proven older full prompt is reclaimed for B400");
+    Expect(cache.retained_snapshot_bytes() == (ancestor ? 890 : 700),
+           "proven lineage keeps source and publishes the new B");
+  } else {
+    Expect(publication ? published == 0 : !admitted,
+           "unproven sibling cannot fund isolated B admission or publication");
+    Expect(next.skip_reason() == (publication
+                                      ? SnapshotEventReason::kEntryCapacity
+                                      : SnapshotEventReason::kByteCapacity),
+           "lineage refusal reports the actual capacity limit");
+    Expect(cache.retained_snapshot_bytes() == expected_before,
+           "lineage refusal retains every foreign payload");
+    for (const auto& event : events)
+      Expect(event.action != SnapshotEventAction::kRemoved,
+             "lineage refusal removes no grid, B or full prompt");
+  }
+  Expect(cache.CachedPrefixTokens(first(old_prompt, 300), old_identity,
+                                  old_prefix) == 300,
+         "lineage admission preserves Y restore source");
+  next.Invalidate();
+  Expect(cache.reserved_snapshot_bytes() == 0,
+         "lineage completion releases its reservation");
+  std::cout << "PASS: tail lineage isolation scenario=" << scenario << '\n';
+}
+
+int main(int argc, char** argv) {
+  if (argc == 3 && std::string_view(argv[1]) == "--tail-newest") {
+    TestNewestTailPublication(std::stoi(argv[2]));
+    return 0;
+  }
+  if (argc == 2 && std::string_view(argv[1]).starts_with("--tail-lineage-")) {
+    TestTailLineageIsolation(std::string_view(argv[1]).back() - '0');
+    return 0;
+  }
+  if (argc == 2 && std::string_view(argv[1]).starts_with("--tail-large-")) {
+    const auto scenario = std::string_view(argv[1]).back() - '0';
+    TestLargeTailIsolation(scenario);
+    return 0;
+  }
+  if (argc == 2) {
+    const std::string_view test(argv[1]);
+    if (test == "--tail-branch-review") {
+      TestTailBoundaryLearnsBranchAfterDescendantRemoval();
+      return 0;
+    }
+    if (test == "--tail-source-review") {
+      TestTailBoundaryPublicationProtectsSource(2);
+      TestTailBoundaryPublicationProtectsSource(128);
+      TestTailBoundaryPublicationProtectsSource(1);
+      return 0;
+    }
+    if (test == "--tail-source-review-128" ||
+        test == "--tail-source-review-1") {
+      TestTailBoundaryPublicationProtectsSource(
+          test == "--tail-source-review-128" ? 128 : 1);
+      return 0;
+    }
+    if (test == "--tail-host-review") {
+      TestTailCapturesReserveOutstandingHostFootprint();
+      return 0;
+    }
+  }
+  for (int scenario = 0; scenario <= 7; ++scenario)
+    TestTailLineageIsolation(scenario);
+  for (int scenario = 0; scenario <= 8; ++scenario)
+    TestLargeTailIsolation(scenario);
+  TestTailBoundaryLearnsBranchAfterDescendantRemoval();
+  TestTailBoundaryPublicationProtectsSource(2);
+  TestTailBoundaryPublicationProtectsSource(128);
+  TestTailBoundaryPublicationProtectsSource(1);
+  TestTailCapturesReserveOutstandingHostFootprint();
+  gufo::platform::SetEnv("GUFO_DISK_EVICT_DOMINATED", "1");
   TestEvictedEntryCoveredByRetainedLongerEntryIsNotOffered();
   TestHostMemoryFloorEvictsThenRefuses();
   TestHostMemoryFloorChargesHostBytes();
@@ -1796,6 +2636,8 @@ int main() {
   TestReplacedSourceDoesNotEvictAnotherBranchTail();
   TestCacheCandidateDetailIsDebugTierOnly();
   TestWaitingAcquireReportsCandidateSkips();
+  TestTailFinalNeverEvicts();
+  TestTailBoundaryPreservesSource();
   std::cout << "All continuation cache tests passed\n";
   return 0;
 }

@@ -7,7 +7,8 @@ export type NavLink = {
   url: NonNullable<LinkProps['to']>
 }
 export type NavGroup = {
-  title: string
+  // A group with one fixed set of links has no heading.
+  title?: string
   items: NavLink[]
 }
 export type SidebarData = { navGroups: NavGroup[] }

@@ -231,6 +231,49 @@ func recommendationIn(table *supervisor.RecommendedContext, sessions int) (super
 	return supervisor.RecommendedContextRow{}, false
 }
 
+var serveResolvedContext = regexp.MustCompile(`Resolved (\d+) tokens per session`)
+
+// resolvedContextFromLogs returns the last "Resolved N tokens per session ..." value that serve
+// wrote to the supervisor's disk logs (stderr.<n>.log in dir), oldest file first.
+func resolvedContextFromLogs(dir string) (uint64, bool) {
+	var last uint64
+	found := false
+	for _, name := range []string{"stderr.2.log", "stderr.1.log", "stderr.0.log"} {
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			continue
+		}
+		for _, m := range serveResolvedContext.FindAllSubmatch(b, -1) {
+			if n, err := strconv.ParseUint(string(m[1]), 10, 64); err == nil && n > 0 {
+				last, found = n, true
+			}
+		}
+	}
+	return last, found
+}
+
+// contextResolutionOK decides whether the effective context of the served model is acceptable
+// for a start with no context override. The effective value must be a recommended row value (the
+// table minimum, or a multiple of stepTokens, within minTokens..maxTokens). Then, if serve's own
+// resolved number is known, the effective value must equal it; otherwise it must lie within one
+// step of the snapshot row taken before the start.
+func contextResolutionOK(effective, snapshot, stepTokens, minTokens, maxTokens, served uint64, haveServed bool) bool {
+	if effective == 0 || stepTokens == 0 || effective < minTokens || (maxTokens > 0 && effective > maxTokens) {
+		return false
+	}
+	if effective != minTokens && effective%stepTokens != 0 {
+		return false
+	}
+	if haveServed {
+		return effective == served
+	}
+	diff := effective - snapshot
+	if snapshot > effective {
+		diff = snapshot - effective
+	}
+	return diff <= stepTokens
+}
+
 func setting(v supervisor.View, key string) (supervisor.ViewSetting, bool) {
 	for _, row := range v.Settings {
 		if row.Name == key || row.Name == "--"+key {
@@ -274,7 +317,7 @@ func (r *Runner) mvpStart(ctx context.Context, s *Step, sessions int) bool {
 	s.Check("memory fits and recommendation present", memoryPresent(v) && *v.MemoryEstimate.Fits, "CLI memory fields (no fit recomputation)")
 	if v.MemoryEstimate != nil {
 		s.Set("memory_estimate", v.MemoryEstimate)
-		s.Check("CLI recommends selected allocation", v.MemoryEstimate.Recommended != nil && *v.MemoryEstimate.Recommended, "recommended=%v reason=%v", v.MemoryEstimate.Recommended, v.MemoryEstimate.RecommendationReason)
+		s.Check("CLI recommends selected allocation", v.MemoryEstimate.Recommended != nil && *v.MemoryEstimate.Recommended, "recommended=%s reason=%s", asJSON(v.MemoryEstimate.Recommended), asJSON(v.MemoryEstimate.RecommendationReason))
 	}
 	if r.cfg.Fake {
 		s.Set("gpu_check", "not exercised: fake mode does not construct a GPU probe")
@@ -282,7 +325,7 @@ func (r *Runner) mvpStart(ctx context.Context, s *Step, sessions int) bool {
 		v, err = r.waitView(ctx, r.sup, r.cfg.QueryTimeout, func(v supervisor.View) (bool, error) {
 			return v.GPU != nil && v.GPU.TemperatureC != nil && v.GPU.ChipPowerW != nil, nil
 		})
-		s.Check("GPU temperature and chip power", err == nil, "GPU=%+v error=%v", v.GPU, err)
+		s.Check("GPU temperature and chip power", err == nil, "GPU=%s error=%v", asJSON(v.GPU), err)
 	}
 	// Absence in saved preferences and the actual argument list proves the
 	// default profile request. The name itself remains a CLI-owned fact.
@@ -436,6 +479,7 @@ func (r *Runner) mvpTwo(ctx context.Context, s *Step) {
 	if !s.Check("second supervisor", err == nil, "%v", err) {
 		return
 	}
+	logDir := filepath.Join(r.cfg.Out, fmt.Sprintf("supervisor-logs-%d-mvp-two", r.supN))
 	v, err := r.waitView(ctx, sup, r.cfg.QueryTimeout*2, func(v supervisor.View) (bool, error) {
 		return v.Initialized && v.Product != nil && v.Instance == nil, nil
 	})
@@ -459,10 +503,33 @@ func (r *Runner) mvpTwo(ctx context.Context, s *Step) {
 	}
 	v = r.view(sup)
 	contextSetting, found := setting(v, "context")
-	want := strconv.FormatUint(uint64(row.ContextPerSession), 10)
-	s.Check("CLI resolved context without override", found && contextSetting.Effective.Text == want && contextSetting.Source == "recommended_context", "expected=%s effective=%+v", want, contextSetting)
+	// The recommendation follows free host RAM in step_tokens steps, so the snapshot taken before
+	// the start can differ by one step from what serve resolved. Compare with serve's own line
+	// when the supervisor disk log has it; else accept the effective value within one step.
+	served, haveServed := resolvedContextFromLogs(logDir)
+	effective, effectiveOK := uint64(0), false
+	if found {
+		if n, perr := strconv.ParseUint(contextSetting.Effective.Text, 10, 64); perr == nil {
+			effective, effectiveOK = n, true
+		}
+	}
+	var step, minTokens, maxTokens uint64
+	if est != nil && est.RecommendedContext != nil {
+		step, minTokens, maxTokens = uint64(est.RecommendedContext.StepTokens), uint64(est.RecommendedContext.MinimumContextTokens), uint64(est.RecommendedContext.ContextMaxTokens)
+	}
+	servedText := "none (not in the supervisor disk log)"
+	if haveServed {
+		servedText = strconv.FormatUint(served, 10)
+		s.Set("serve_resolved_context", served)
+	}
+	want := fmt.Sprintf("%d (snapshot before start; serve-resolved=%s; step=%d, range %d..%d)", row.ContextPerSession, servedText, step, minTokens, maxTokens)
+	s.Check("CLI resolved context without override", found && effectiveOK && contextResolutionOK(effective, uint64(row.ContextPerSession), step, minTokens, maxTokens, served, haveServed) && contextSetting.Source == "default" && contextSetting.Requested.Kind == "null", "expected=%s effective=%s source=default (contract enum; the reason names recommended_context) setting=%s", want, contextSetting.Effective.Text, asJSON(contextSetting))
 	if v.MemoryEstimate != nil {
-		s.Check("CLI memory uses two-session context", v.MemoryEstimate.Sessions == 2 && uint64(v.MemoryEstimate.ContextTokens) == uint64(row.ContextPerSession), "sessions=%d context=%d", v.MemoryEstimate.Sessions, v.MemoryEstimate.ContextTokens)
+		memoryWant := uint64(row.ContextPerSession)
+		if effectiveOK {
+			memoryWant = effective
+		}
+		s.Check("CLI memory uses two-session context", v.MemoryEstimate.Sessions == 2 && uint64(v.MemoryEstimate.ContextTokens) == memoryWant, "sessions=%d context=%d expected=%d", v.MemoryEstimate.Sessions, v.MemoryEstimate.ContextTokens, memoryWant)
 	}
 	r.mvpBurst(ctx, s, 2)
 	r.mvpStop(ctx, s)

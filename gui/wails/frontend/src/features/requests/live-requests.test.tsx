@@ -26,7 +26,11 @@ test('recorded writing stays live and every active session has its own phase and
   await expect.element(live).toHaveTextContent('1,345 / 1,373')
   await expect.element(live).toHaveTextContent('1,345 cached')
   await expect.element(live).toHaveTextContent('97%')
-  await expect.element(live).toHaveTextContent('Observed elapsed')
+  await expect.element(live).toHaveTextContent('Elapsed')
+  expect(live.element().textContent).not.toContain('Observed elapsed')
+  await expect
+    .element(live.getByRole('button', { name: 'About Live requests' }))
+    .toBeVisible()
   await expect
     .element(live.getByRole('table', { name: 'Active sessions' }))
     .toBeVisible()
@@ -38,13 +42,24 @@ test('recorded writing stays live and every active session has its own phase and
     .toHaveTextContent('60')
 })
 
+test('an unknown live rate is a dash, and a session with no rate yet draws no plot', async () => {
+  const view = liveRequestView('reading')
+  Object.assign(view.slots[0]!, { prefill_tps: undefined })
+  view.live_samples = []
+  cleanup = renderView(<RequestsPage />, view).cleanup
+  const live = page.getByRole('region', { name: 'Live requests', exact: true })
+  await expect.element(live).toHaveTextContent('Waiting for rate')
+  expect(live.element().querySelector('.recharts-wrapper')).toBeNull()
+  expect(live.element().textContent).not.toContain('Waiting for token progress')
+})
+
 test('an unknown live rate remains a dash and prefill has a live chart', async () => {
   const view = liveRequestView('reading')
   Object.assign(view.slots[0]!, { prefill_tps: undefined })
   cleanup = renderView(<RequestsPage />, view).cleanup
   const live = page.getByRole('region', { name: 'Live requests', exact: true })
   await expect.element(live).toBeVisible()
-  expect(live.element().textContent).toMatch(/—|-/)
+  expect(live.element().textContent).toContain('—')
   expect(live.element().textContent).not.toContain('0.0 tok/s')
   await expect
     .element(page.getByRole('figure', { name: /Live request rates/ }).first())

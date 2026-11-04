@@ -89,6 +89,69 @@ std::vector<float> Download(HipBuffer<float>* source, std::size_t count) {
   return values;
 }
 
+// Compare identical F32 arithmetic after exact BF16 widening. The finite
+// pass makes NaN guards observable; the raw-pattern pass includes NaNs,
+// infinities, signed zero and subnormals without numerical comparisons.
+void CheckBf16Inject() {
+  for (const auto hidden : {2560U, 257U}) {
+    for (const bool raw_patterns : {false, true}) {
+      constexpr std::size_t kGuard = 256;
+      const std::size_t weights = kStreams * kStreams * hidden;
+      std::vector<std::uint16_t> bf16(weights + kGuard, 0x7FC0U);
+      std::vector<float> f32(weights + kGuard);
+      const std::uint32_t nan = 0x7FC00000U;
+      for (auto& value : f32)
+        std::memcpy(&value, &nan, sizeof(value));
+      std::uint32_t seed = 0x1234ABCDU;
+      for (std::size_t i = 0; i < weights; ++i) {
+        const auto bits = static_cast<std::uint16_t>(NextRandom(&seed));
+        bf16[i] = raw_patterns ? bits : (bits & 0x807FU) | 0x3D00U;
+        if (raw_patterns && i < 8) {
+          constexpr std::uint16_t edges[] = {0x0000, 0x8000, 0x0001, 0x8001,
+                                             0x7F80, 0xFF80, 0x7FC0, 0x7F81};
+          bf16[i] = edges[i];
+        }
+        const std::uint32_t wide = std::uint32_t{bf16[i]} << 16;
+        std::memcpy(&f32[i], &wide, sizeof(wide));
+      }
+      HipBuffer<std::uint16_t> d_bf16(bf16.size());
+      HipBuffer<float> d_f32(f32.size());
+      CheckHip(hipMemcpy(d_bf16.get(), bf16.data(), d_bf16.bytes(),
+                         hipMemcpyHostToDevice),
+               "BF16 weights and guards");
+      Upload(&d_f32, f32);
+      for (std::uint32_t tokens = 1; tokens <= 8; ++tokens) {
+        const std::size_t mixed_count = tokens * hidden;
+        const std::size_t inject_count =
+            tokens * kStreams * q::HcInjectParts(hidden);
+        HipBuffer<float> xn(mixed_count * kStreams),
+            gate(mixed_count * kStreams);
+        HipBuffer<float> mixed_f32(mixed_count), mixed_bf16(mixed_count);
+        HipBuffer<float> inject_f32(inject_count), inject_bf16(inject_count);
+        Upload(&xn, MakeValues(mixed_count * kStreams, 0x12345678U, 0.5F));
+        Upload(&gate, MakeValues(mixed_count * kStreams, 0x87654321U, 0.1F));
+        q::HcMixEpilogue(xn.get(), gate.get(), d_f32.get(), mixed_f32.get(),
+                         inject_f32.get(), tokens, hidden, kStreams, nullptr);
+        q::HcMixEpilogue(xn.get(), gate.get(), d_bf16.get(), mixed_bf16.get(),
+                         inject_bf16.get(), tokens, hidden, kStreams, nullptr,
+                         nullptr, gufo::core::GgmlType::kBF16);
+        CheckHip(hipDeviceSynchronize(), "BF16 inject comparison");
+        const auto a = Download(&mixed_f32, mixed_count);
+        const auto b = Download(&mixed_bf16, mixed_count);
+        const auto c = Download(&inject_f32, inject_count);
+        const auto d = Download(&inject_bf16, inject_count);
+        if (std::memcmp(a.data(), b.data(), mixed_f32.bytes()) != 0 ||
+            std::memcmp(c.data(), d.data(), inject_f32.bytes()) != 0)
+          throw std::runtime_error("BF16 inject differs from widened F32");
+        if (!raw_patterns && !std::all_of(d.begin(), d.end(), [](float v) {
+              return std::isfinite(v);
+            }))
+          throw std::runtime_error("BF16 inject read a NaN weight guard");
+      }
+    }
+  }
+}
+
 // Fusing the projection must preserve every downstream representation,
 // including the inject partials' reduction order and quantization ties.
 void CheckFusedProjection(std::uint32_t tokens) {
@@ -190,6 +253,7 @@ void CheckFusedProjection(std::uint32_t tokens) {
 
 int main() {
   try {
+    CheckBf16Inject();
     CheckFusedProjection(96);
     CheckFusedProjection(2049);
     constexpr std::size_t kHcDim = static_cast<std::size_t>(kHidden) * kStreams;

@@ -255,7 +255,10 @@
             "also": {
               "type": "array",
               "items": {
-                "type": "number"
+                "type": [
+                  "number",
+                  "string"
+                ]
               }
             },
             "format": {

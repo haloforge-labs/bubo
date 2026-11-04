@@ -193,10 +193,11 @@ Snapshot Files(const fs::path& root) {
     return result;
   result.emplace(root, std::make_pair(0, fs::last_write_time(root)));
   for (const auto& entry : fs::recursive_directory_iterator(root)) {
+    // Query current metadata; Windows enumeration can cache older timestamps.
     result.emplace(
         entry.path(),
         std::make_pair(entry.is_regular_file() ? entry.file_size() : 0,
-                       entry.last_write_time()));
+                       fs::last_write_time(entry.path())));
   }
   return result;
 }

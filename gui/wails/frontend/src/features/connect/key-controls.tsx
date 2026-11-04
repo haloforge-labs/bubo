@@ -106,12 +106,12 @@ export function KeyControls({ view }: { view: View }) {
     }
   }, [shown, keep])
   return (
-    <section className="space-y-3" aria-label="API key">
-      <h3 className="text-xl">API key</h3>
+    <section className="space-y-2" aria-label="API key">
+      <h3 className="text-lg">API key</h3>
       <p className="font-mono break-all text-sm" data-testid="key-value">
         {shown || view.key.mask || '••••'}
       </p>
-      <div className="flex flex-wrap gap-3">
+      <div className="flex flex-wrap gap-2">
         {shown ? (
           <>
             <Button variant="outline" onClick={hide}>
@@ -159,7 +159,7 @@ export function KeyControls({ view }: { view: View }) {
           }}
           done="Copied snippet with key."
         >
-          Copy address and key
+          Copy config with key
         </ActionButton>
         <Button
           variant="outline"

@@ -149,6 +149,13 @@ func lifecycleActions(in ViewInput) LifecycleActions {
 	return a
 }
 
+// ignoreStatusModelMissing is true for the CLI status sample's model_missing
+// when the saved setup names a model file and no package manifest. An error
+// from a real start attempt (Snapshot.LastError) is never ignored.
+func ignoreStatusModelMissing(saved Settings, code string) bool {
+	return code == "model_missing" && saved.ModelPath != "" && saved.ManifestPath == ""
+}
+
 func savedSetupAvailability(in ViewInput) ActionAvailability {
 	s := in.Snapshot
 	if !s.Initialized {
@@ -161,7 +168,11 @@ func savedSetupAvailability(in ViewInput) ActionAvailability {
 	// Retain the CLI's missing-file verdict until preparation or a fresh sample
 	// clears it; lifecycle Stop does not depend on the next setup's readiness.
 	var failureCode, failureRemedy string
-	if s.LastError != nil {
+	if s.LastError == nil && s.Status.LastError != nil && ignoreStatusModelMissing(in.Saved, s.Status.LastError.Code) {
+		// For `status --model <file>` the CLI reports the default package as
+		// missing (readiness.model false, last_error model_missing). A saved model
+		// file does not use that package, so this sample does not block a start.
+	} else if s.LastError != nil {
 		if name := s.LastError.Switch; name != "" {
 			saved, stillSet := in.Saved.SwitchOverrides[name]
 			attempted, known := s.RunningSwitchOverrides[name]

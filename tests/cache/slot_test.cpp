@@ -462,6 +462,62 @@ void TeardownAndCancelledAdmission() {
   }
   assert(ledger.Snapshot().total_bytes == 0);
 }
+void ConcurrentValidityDuringTeardown() {
+  for (bool backed : {false, true}) {
+    for (int round = 0; round < 20; ++round) {
+      Fixture f;
+      const auto source =
+          f.adapter.BorrowRowsView(f.lease.Execution(), kTarget, 0, 4);
+      const std::vector<std::byte> expected(source.begin(), source.end());
+      auto buffer = std::make_shared<std::vector<std::byte>>(source.size());
+      auto pool =
+          f.ledger.Reserve(ResourceCategory::kBackingFree, source.size())
+              .Convert();
+      auto rows =
+          backed ? f.lease.Borrow(
+                       kTarget, 0, 4,
+                       pool.ReserveBacking(ResourceCategory::kBackingAssigned),
+                       buffer, *buffer, source)
+                 : f.lease.Observe(kTarget, 0, 4, source);
+      std::barrier ready(5);
+      std::atomic<bool> finished{false};
+      std::vector<std::thread> readers;
+      for (int i = 0; i < 4; ++i)
+        readers.emplace_back([&] {
+          assert(rows->IsValid());
+          ready.arrive_and_wait();
+          while (!finished.load()) {
+            const bool valid = rows->IsValid();
+            if (backed)
+              assert(valid);
+          }
+          for (int j = 0; j < 100; ++j)
+            assert(rows->IsValid() == backed);
+        });
+      ready.arrive_and_wait();
+      // Completed backing must remain valid across later source generations;
+      // unbacked observations retire on the first reset.
+      for (int generation = 0; generation < 8; ++generation) {
+        f.lease.Reset();
+        const std::array<Token, 4> replacement{9, 8, 7, 6};
+        f.adapter.Append(f.lease.Execution(), replacement, replacement);
+      }
+      f.slots.reset();
+      f.lease = {};
+      finished.store(true);
+      for (auto& reader : readers)
+        reader.join();
+      if (backed) {
+        auto pin = rows->Pin();
+        assert(pin.Owner() && !pin.Location());
+        assert(std::vector<std::byte>(pin.Bytes().begin(), pin.Bytes().end()) ==
+               expected);
+      } else {
+        Throws([&] { (void)rows->Pin(); });
+      }
+    }
+  }
+}
 // Simulate an adapter that resets its generation while omitting preservation.
 class BadAdapter final : public Adapter {
 public:
@@ -528,7 +584,9 @@ void MissedGuard() {
     auto rows = lease.Borrow(
         kTarget, 0, 4, pool.ReserveBacking(ResourceCategory::kBackingAssigned),
         buffer, *buffer);
+    assert(rows->IsValid());
     adapter.guard->AfterReset();
+    assert(!rows->IsValid());
     (void)rows->Pin();
     _exit(0);
   }
@@ -539,6 +597,34 @@ void MissedGuard() {
 }
 }  // namespace
 int main() {
+  {
+    Fixture fixture;
+    auto rows =
+        fixture.lease.Observe(kTarget, 0, 4,
+                              fixture.adapter.BorrowRowsView(
+                                  fixture.lease.Execution(), kTarget, 0, 4));
+    assert(rows->IsValid() && !rows->HasBacking());
+    auto persistence = rows->PinPersistence();
+    assert(fixture.ledger.Snapshot().persistence_pinned_bytes == 0);
+    Throws([&] { (void)Payload::Borrowed(rows); });
+    auto pin = rows->Pin();
+    assert(pin.Bytes().size() == 4 * sizeof(Token));
+    auto mutate = std::async(std::launch::async, [&] {
+      fixture.adapter.GuardRows(fixture.lease.Execution(), kTarget, 0, 4);
+    });
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (rows->IsValid() && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::yield();
+    assert(!rows->IsValid());
+    assert(mutate.wait_for(0ms) == std::future_status::timeout);
+    (void)rows->PinPersistence();  // Optional jobs fail at their next row read.
+    Throws([&] { (void)rows->Pin(); });
+    pin = {};
+    assert(mutate.wait_for(2s) == std::future_status::ready);
+    mutate.get();
+    assert(fixture.ledger.Snapshot().bytes[static_cast<std::size_t>(
+               ResourceCategory::kBackingFree)] == 0);
+  }
   Paths();
   Failures();
   EveryPreservationConversion();
@@ -550,6 +636,7 @@ int main() {
   RestoreAndContinue();
   CancellationSteps();
   TeardownAndCancelledAdmission();
+  ConcurrentValidityDuringTeardown();
   MissedGuard();
   std::cout << "slot leases and mutation checks passed\n";
 }

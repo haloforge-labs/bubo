@@ -30,12 +30,12 @@ function networkView(): View {
   return view
 }
 
-// The recorded status lists client templates, and each one has its own
-// "Copy address and key" button. These tests mean the one in the API key group.
+// The recorded status lists client examples, and each one has its own
+// "Copy with key" button. These tests mean the Pi one in the API key group.
 function apiKeyCopy() {
   return page
     .getByRole('region', { name: 'API key', exact: true })
-    .getByRole('button', { name: 'Copy address and key', exact: true })
+    .getByRole('button', { name: 'Copy config with key', exact: true })
 }
 
 test('addresses are copied exactly as supplied and missing URLs stay unavailable', async () => {
@@ -61,7 +61,7 @@ test('LAN off never reveals or copies a key and uses partial preferences for LAN
   const save = vi.spyOn(actions, 'PatchPreferences').mockResolvedValue({})
   cleanup = renderView(<ConnectPage />, fixture()).cleanup
   await expect
-    .element(page.getByRole('button', { name: 'Copy address and key' }))
+    .element(page.getByRole('button', { name: 'Copy config with key' }))
     .not.toBeInTheDocument()
   await expect
     .element(page.getByRole('button', { name: 'Show', exact: true }))
@@ -77,7 +77,7 @@ test('LAN off never reveals or copies a key and uses partial preferences for LAN
   expect(reveal).not.toHaveBeenCalled()
 })
 
-test('ported live LAN key reset frame stays masked; only Copy address and key reaches the clipboard', async () => {
+test('ported live LAN key reset frame stays masked; only Copy config with key reaches the clipboard', async () => {
   const planted = 'PLANTED-KEY-TEST-ONLY'
   const reveal = vi
     .spyOn(actions, 'RevealKey')
@@ -93,7 +93,10 @@ test('ported live LAN key reset frame stays masked; only Copy address and key re
     .element(page.getByRole('status'))
     .toHaveTextContent('used after restart')
   expect(document.body.textContent).not.toContain(planted)
-  await page.getByRole('button', { name: 'Copy snippet', exact: true }).click()
+  await page
+    .getByRole('region', { name: 'Pi (coding agent)', exact: true })
+    .getByRole('button', { name: 'Copy', exact: true })
+    .click()
   expect(clipboard).toHaveBeenLastCalledWith(view.pi_snippet)
   expect(reveal).not.toHaveBeenCalled()
   await apiKeyCopy().click()
@@ -182,7 +185,7 @@ test('a pending Show response cannot reveal a key after LAN turns off', async ()
   const off = fixture()
   mounted.client.setQueryData(viewKey, off)
   await expect
-    .element(page.getByRole('button', { name: 'Copy address and key' }))
+    .element(page.getByRole('button', { name: 'Copy config with key' }))
     .not.toBeInTheDocument()
   resolve('PLANTED-LATE-KEY-TEST-ONLY')
   await expect
@@ -227,7 +230,7 @@ test('secret transport failures stay typed and never echo the rejected payload',
   expect(clipboard).not.toHaveBeenCalled()
 })
 
-test('ported key store failure stays off without Copy address and key', async () => {
+test('ported key store failure stays off without Copy config with key', async () => {
   const view = fixture()
   view.key.unavailable = failedFrame.lan.unavailable
   cleanup = renderView(<ConnectPage />, view).cleanup
@@ -247,7 +250,7 @@ test('ported key store failure stays off without Copy address and key', async ()
     .element(page.getByRole('switch', { name: 'Local network access' }))
     .not.toBeChecked()
   await expect
-    .element(page.getByRole('button', { name: 'Copy address and key' }))
+    .element(page.getByRole('button', { name: 'Copy config with key' }))
     .not.toBeInTheDocument()
 })
 
@@ -332,7 +335,7 @@ test('CLI client templates copy selected LAN endpoints and include a key only on
   const clipboard = vi.spyOn(actions, 'CopyText').mockResolvedValue({})
   cleanup = renderView(<ConnectPage />, view).cleanup
   await page
-    .getByRole('combobox', { name: 'Address for client templates' })
+    .getByRole('combobox', { name: 'Client address' })
     .selectOptions('https://lan.example.test:9443')
   const snippet = view.client_snippets![0]!
   const section = page.getByRole('region', { name: snippet.title, exact: true })
@@ -341,7 +344,7 @@ test('CLI client templates copy selected LAN endpoints and include a key only on
     fillSnippet(view, snippet.template, 'https://lan.example.test:9443'),
   )
   await section
-    .getByRole('button', { name: 'Copy address and key', exact: true })
+    .getByRole('button', { name: 'Copy with key', exact: true })
     .click()
   expect(copy).toHaveBeenCalledOnce()
   expect(clipboard).toHaveBeenLastCalledWith(
@@ -386,7 +389,7 @@ test('client templates with LAN off offer only plain copy and never fetch a key'
   const clipboard = vi.spyOn(actions, 'CopyText').mockResolvedValue({})
   cleanup = renderView(<ConnectPage />, view).cleanup
   await expect
-    .element(page.getByRole('button', { name: 'Copy address and key' }))
+    .element(page.getByRole('button', { name: 'Copy config with key' }))
     .not.toBeInTheDocument()
   const snippet = view.client_snippets![0]!
   await page
@@ -397,4 +400,122 @@ test('client templates with LAN off offer only plain copy and never fetch a key'
     fillSnippet(view, snippet.template),
   )
   expect(key).not.toHaveBeenCalled()
+})
+
+test('a saved network change that is not active yet reads as after restart, and current access follows what is active', async () => {
+  const view = networkView()
+  view.key.lan_access = true
+  view.key.lan_active = false
+  const mounted = renderView(<ConnectPage />, view)
+  cleanup = mounted.cleanup
+  await expect.element(page.getByText('On after restart')).toBeVisible()
+  await expect
+    .element(page.getByText('Only this computer can connect now.'))
+    .toBeVisible()
+  const off = structuredClone(view)
+  off.key.lan_access = false
+  off.key.lan_active = true
+  mounted.client.setQueryData(viewKey, off)
+  await expect.element(page.getByText('Off after restart')).toBeVisible()
+  await expect
+    .element(page.getByText('Other devices can connect now.'))
+    .toBeVisible()
+  const settled = structuredClone(view)
+  settled.key.lan_active = true
+  mounted.client.setQueryData(viewKey, settled)
+  await expect
+    .element(
+      page.getByText(
+        'Every client must send the key, including clients on this computer.',
+      ),
+    )
+    .toBeVisible()
+  expect(document.body.textContent).not.toContain('after restart,')
+})
+
+test('network adapters use the address row: adapter name, address, copy', async () => {
+  const clipboard = vi.spyOn(actions, 'CopyText').mockResolvedValue({})
+  const view = networkView()
+  cleanup = renderView(<ConnectPage />, view).cleanup
+  const first = view.key.addresses![0]!
+  await expect.element(page.getByText(first.adapter).first()).toBeVisible()
+  await page
+    .getByRole('button', { name: 'Copy network address' })
+    .first()
+    .click()
+  expect(clipboard).toHaveBeenLastCalledWith(first.url)
+})
+
+test('client configuration is one section: examples and Pi share heading and copy row, default address says what it is', async () => {
+  const view = fixture('cli-page-facts-authenticated')
+  view.endpoints = {
+    openai_base_url: 'https://example.test/v1',
+    anthropic_base_url: 'https://example.test',
+  }
+  view.key = { ...networkView().key }
+  view.key.addresses = [
+    {
+      adapter: 'Fixture LAN',
+      ipv4: '192.0.2.10',
+      url: 'https://lan.example.test:9443',
+    },
+  ]
+  cleanup = renderView(<ConnectPage />, view).cleanup
+  await expect
+    .element(page.getByRole('heading', { name: 'Client configuration' }))
+    .toBeVisible()
+  const select = page.getByRole('combobox', { name: 'Client address' })
+  await expect.element(select).toHaveTextContent('Server address')
+  const pi = page.getByRole('region', {
+    name: 'Pi (coding agent)',
+    exact: true,
+  })
+  await expect
+    .element(pi.getByRole('button', { name: 'Pi (coding agent)' }))
+    .toBeVisible()
+  await expect
+    .element(pi.getByRole('button', { name: 'Copy', exact: true }))
+    .toBeVisible()
+  expect(document.body.textContent).not.toContain('Client templates')
+  expect(document.body.textContent).not.toContain(
+    'Copy this configuration into your client.',
+  )
+})
+
+test('client examples are collapsed, with Copy on the summary line; opening one shows its code', async () => {
+  const view = fixture('cli-page-facts-loopback')
+  const clipboard = vi.spyOn(actions, 'CopyText').mockResolvedValue({})
+  cleanup = renderView(<ConnectPage />, view).cleanup
+  const snippet = view.client_snippets![0]!
+  const section = page.getByRole('region', { name: snippet.title, exact: true })
+  await expect.element(section).toBeVisible()
+  const details = section.element().querySelector('details')!
+  expect(details.open).toBe(false)
+  // Copy works without opening the example.
+  await section.getByRole('button', { name: 'Copy', exact: true }).click()
+  expect(clipboard).toHaveBeenCalledOnce()
+  expect(details.open).toBe(false)
+  await section.getByRole('button', { name: snippet.title }).click()
+  expect(details.open).toBe(true)
+  await expect
+    .element(section.element().querySelector('pre') as HTMLElement)
+    .toBeVisible()
+})
+
+test('a loopback server address is called this computer', async () => {
+  const view = fixture('cli-page-facts-loopback')
+  view.key = {
+    ...networkView().key,
+    addresses: [
+      {
+        adapter: 'Fixture LAN',
+        ipv4: '192.0.2.10',
+        url: 'https://lan.example.test:9443',
+      },
+    ],
+  }
+  cleanup = renderView(<ConnectPage />, view).cleanup
+  await expect
+    .element(page.getByRole('combobox', { name: 'Client address' }))
+    .toHaveTextContent('This computer')
 })

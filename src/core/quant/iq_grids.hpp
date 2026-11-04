@@ -13,6 +13,8 @@ namespace gufo::quant {
 [[nodiscard]] const std::uint64_t* Iq2xxsGrid() noexcept;
 /// 512 entries of eight magnitudes.
 [[nodiscard]] const std::uint64_t* Iq2xsGrid() noexcept;
+/// 2048 entries of eight signed ternary values.
+[[nodiscard]] const std::uint64_t* Iq1sGrid() noexcept;
 /// 1024 entries of eight magnitudes.
 [[nodiscard]] const std::uint64_t* Iq2sGrid() noexcept;
 /// 256 entries; each packs four uint8 magnitudes (one group of four elements).

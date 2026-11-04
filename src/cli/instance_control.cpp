@@ -755,6 +755,46 @@ std::optional<DiscoveryRecord> ReadDiscovery(std::string_view instance_id,
 #endif
 }
 
+#ifdef _WIN32
+namespace {
+// True only when the recorded process is provably gone: no such PID, a PID that
+// now has another creation time, or an exited process.
+bool ProcessGone(const InstanceIdentity& identity) {
+  Handle process(OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                             FALSE, identity.pid));
+  if (!process)
+    return GetLastError() == ERROR_INVALID_PARAMETER;
+  // A process identity is its PID plus its creation time. Another creation time
+  // on this PID means Windows reused the PID, so the recorded process is gone.
+  if (CreationTime(process.Get()) != identity.process_creation_time)
+    return true;
+  // A retained, exited process object can no longer answer an image-path
+  // query. Its matching creation time and signalled handle confirm exit.
+  return WaitForSingleObject(process.Get(), 0) == WAIT_OBJECT_0;
+}
+
+// A record of a process that is gone is dropped from the scan once it is a day
+// old. Servers leave one record per start, so the folder grows without limit,
+// and status reads every record. Deleting is limited in time so that the first
+// call after an upgrade stays short; later calls finish the work.
+constexpr auto kDeadRecordAge = std::chrono::hours(24);
+constexpr auto kPruneBudget = std::chrono::milliseconds(300);
+
+bool OldDeadRecord(const DiscoveryRecord& record, const fs::path& file) {
+  std::error_code error;
+  const auto written = fs::last_write_time(file, error);
+  if (error ||
+      fs::file_time_type::clock::now() - written < kDeadRecordAge)
+    return false;
+  try {
+    return ProcessGone(record.identity);
+  } catch (const std::exception&) {
+    return false;
+  }
+}
+}  // namespace
+#endif
+
 std::vector<DiscoveryRecord> DiscoverRecords(std::string_view root) {
   std::vector<DiscoveryRecord> records;
   std::error_code error;
@@ -774,6 +814,7 @@ std::vector<DiscoveryRecord> DiscoverRecords(std::string_view root) {
   RejectReparse(handle.Get());
   if (!PrivateOwner(handle.Get()))
     throw ControlError(16, "discovery directory is not private to its owner");
+  std::vector<fs::path> dead;
   for (const auto& entry : fs::directory_iterator(directory)) {
     const auto filename = entry.path().filename().u8string();
     const std::string name(filename.begin(), filename.end());
@@ -782,11 +823,23 @@ std::vector<DiscoveryRecord> DiscoverRecords(std::string_view root) {
       continue;
     try {
       auto record = ReadDiscovery(std::string_view(name).substr(0, 32), root);
+      if (record && OldDeadRecord(*record, entry.path())) {
+        // It could never become an instance: its process is gone.
+        dead.push_back(entry.path());
+        continue;
+      }
       if (record)
         records.push_back(std::move(*record));
     } catch (const ControlError&) {
       // Discovery is a hint. An invalid entry cannot become an instance.
     }
+  }
+  const auto pruning = std::chrono::steady_clock::now();
+  for (const auto& file : dead) {
+    if (std::chrono::steady_clock::now() - pruning >= kPruneBudget)
+      break;
+    std::error_code ignored;
+    fs::remove(file, ignored);
   }
   return records;
 #else
@@ -811,16 +864,7 @@ bool RecordedStopped(const DiscoveryRecord& record) {
   }
   // The caller obtained this record through ReadDiscovery, which checked the
   // owner and protected ACL. A tombstone alone cannot authorize live control.
-  Handle process(OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
-                             FALSE, record.identity.pid));
-  if (!process)
-    return GetLastError() == ERROR_INVALID_PARAMETER;
-  if (CreationTime(process.Get()) != record.identity.process_creation_time)
-    return false;
-  // A retained, exited process object can no longer answer an image-path
-  // query. Its matching creation time and signalled handle confirm exit;
-  // the record's canonical path and owner security were checked above.
-  return WaitForSingleObject(process.Get(), 0) == WAIT_OBJECT_0;
+  return ProcessGone(record.identity);
 #else
   (void)record;
   Unsupported();

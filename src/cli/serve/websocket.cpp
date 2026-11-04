@@ -1,9 +1,6 @@
 #include "src/cli/serve/websocket.hpp"
 
-#include <netinet/in.h>
-#include <netinet/tcp.h>
 #include <openssl/evp.h>
-#include <sys/socket.h>
 
 #include <array>
 #include <cctype>
@@ -12,7 +9,7 @@
 #include <cstring>
 
 #include "src/cli/serve/audio_stream.hpp"
-#include "src/core/platform/socket.hpp"
+#include "src/core/platform/net.hpp"
 #include "src/core/utf8.hpp"
 
 namespace gufo::server {
@@ -88,11 +85,15 @@ WebSocket::WebSocket(int fd, std::string buffered)
     : fd_(fd), buffered_(std::move(buffered)) {
   // Frame headers and audio payloads are separate writes; do not wait for a
   // delayed TCP acknowledgement before sending the payload.
-  const int no_delay = 1;
-  (void)platform::SetSocketOption(fd_, IPPROTO_TCP, TCP_NODELAY, no_delay);
+  (void)net::SetNoDelay(fd_);
   // Bound backpressure from a client that stops consuming audio. Read timeout
   // stays at the server's idle timeout.
-  (void)platform::SetSocketTimeout(fd_, SO_SNDTIMEO, std::chrono::seconds{5});
+  (void)net::SetSendTimeout(fd_, 5'000);
+  if (const long long recv_timeout_ms = net::SocketRecvTimeoutMs(fd_);
+      recv_timeout_ms >= 0) {
+    idle_ = std::chrono::milliseconds(recv_timeout_ms);
+  }
+  last_send_ = std::chrono::steady_clock::now().time_since_epoch().count();
   reader_ = std::jthread([this] { ReadLoop(); });
 }
 
@@ -100,9 +101,8 @@ WebSocket::~WebSocket() {
   Close();
   // Cancellation can wake the consumer before the reader finishes its close
   // reply. Let that writer complete before shutting down the send half.
-  platform::StopSocketReads(fd_);
   reader_.join();
-  (void)::shutdown(fd_, SHUT_RDWR);
+  (void)net::ShutdownSocket(fd_, net::ShutdownHow::kReadWrite);
 }
 
 bool WebSocket::Read(char* data, std::size_t size) {
@@ -115,14 +115,19 @@ bool WebSocket::Read(char* data, std::size_t size) {
       size -= count;
       continue;
     }
-#ifdef _WIN32
-    // See platform::StopSocketReads: wake periodically to observe closed_.
-    if (!platform::WaitReadable(fd_, std::chrono::milliseconds(50)))
+    const auto count = net::Receive(fd_, data, size, 0);
+    if (count < 0 && net::IsSocketInterrupted())
       continue;
-#endif
-    const auto count = platform::SocketRecv(fd_, data, size, 0);
-    if (count < 0 && errno == EINTR)
-      continue;
+    if (count < 0 && net::IsSocketWouldBlockOrTimeout()) {
+      // A client that only listens to streamed output is not idle.
+      const std::chrono::steady_clock::duration since_send(
+          std::chrono::steady_clock::now().time_since_epoch().count() -
+          last_send_.load());
+      if (since_send < idle_)
+        continue;
+      Close(1001);
+      return false;
+    }
     if (count <= 0)
       return false;
     data += count;
@@ -147,16 +152,17 @@ bool WebSocket::Send(std::uint8_t opcode, std::string_view bytes) {
   }
   for (auto part : {std::string_view(header), bytes}) {
     while (!part.empty()) {
-      const auto count =
-          platform::SocketSend(fd_, part.data(), part.size(), MSG_NOSIGNAL);
-      if (count < 0 && errno == EINTR)
+      const auto count = static_cast<long long>(
+          net::SendNoSignal(fd_, part.data(), part.size()));
+      if (count < 0 && net::IsSocketInterrupted())
         continue;
       if (count <= 0) {
         MarkClosed();
-        (void)::shutdown(fd_, SHUT_RDWR);
+        (void)net::ShutdownSocket(fd_, net::ShutdownHow::kReadWrite);
         return false;
       }
       part.remove_prefix(static_cast<std::size_t>(count));
+      last_send_ = std::chrono::steady_clock::now().time_since_epoch().count();
     }
   }
   return true;
@@ -175,7 +181,24 @@ void WebSocket::Close(std::uint16_t code) {
   const std::array<char, 2> payload{static_cast<char>(code >> 8),
                                     static_cast<char>(code & 255)};
   (void)Send(8, std::string_view(payload.data(), payload.size()));
-  platform::StopSocketReads(fd_);
+  // Drain unread client bytes before half-closing: on Windows, shutting down
+  // the receive direction with unread data queued aborts the connection with
+  // RST and discards the close frame just queued above.
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+  while (true) {
+    const auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now())
+            .count();
+    if (remaining <= 0 ||
+        net::PollReadable(fd_, static_cast<int>(remaining)) <= 0)
+      break;
+    char sink[2048];
+    if (net::Receive(fd_, sink, sizeof(sink), 0) <= 0)
+      break;
+  }
+  (void)net::ShutdownSocket(fd_, net::ShutdownHow::kReadWrite);
 }
 
 bool WebSocket::MarkClosed() {

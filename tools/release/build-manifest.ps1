@@ -55,10 +55,12 @@ $dirty = [bool](& git -C $root status --porcelain=v1)
 $compiler = $cache['CMAKE_CXX_COMPILER']
 $clang = (& $compiler -v 2>&1 | ForEach-Object { "$_" }) -join "`n"
 if ($LASTEXITCODE) { throw 'Cannot identify compiler' }
+# The manifest ships in the public archive: it lists build settings only, with no absolute build paths.
+function Hide-BuildPath([string]$Text) { [regex]::Replace($Text, '(?i)(?<![A-Z])(-[IL])?[A-Z]:[\\/][^\s"'';,\[\]]*', '$1<path>') }
 $flags = [ordered]@{}
 foreach ($key in @($cache.Keys | Sort-Object)) {
-  if ($key -match '^(GUFO_|ENGINE_ENABLE_HIP$|BUILD_TESTING$|CMAKE_(BUILD_TYPE|CXX_FLAGS.*|C_FLAGS.*|HIP_.*|LINKER_TYPE|TOOLCHAIN_FILE)$|VCPKG_|.*_VERSION.*$|FIND_PACKAGE_MESSAGE_DETAILS_)') {
-    $flags[$key] = $cache[$key]
+  if ($key -match '^(GUFO_(BRAND|BUILD_TOOLS|ENABLE_[A-Z_]+|PLATFORM_ONLY|WITH_A3B)$|ENGINE_ENABLE_HIP$|BUILD_TESTING$|CMAKE_(BUILD_TYPE|HIP_ARCHITECTURES|LINKER_TYPE|(C|CXX|HIP)_FLAGS(_RELEASE|_RELWITHDEBINFO)?)$|VCPKG_(TARGET_TRIPLET|MANIFEST_MODE|PREFER_SYSTEM_LIBS)$|.*_VERSION$)') {
+    $flags[$key] = Hide-BuildPath ([string]$cache[$key])
   }
 }
 $triplet = $cache['VCPKG_TARGET_TRIPLET']
@@ -111,7 +113,7 @@ $manifest = [ordered]@{
   schema_version = 1
   source = [ordered]@{commit=$commit; short_commit=$short; dirty=$dirty}
   product = $brand
-  toolchain = [ordered]@{compiler=$compiler; clang_v=$clang; msvc_tools_version=$cache['BUILD_MANIFEST_MSVC_TOOLS_VERSION']; windows_sdk_version=$cache['BUILD_MANIFEST_WINDOWS_SDK_VERSION']}
+  toolchain = [ordered]@{compiler=(Split-Path -Leaf $compiler); clang_v=(Hide-BuildPath $clang); msvc_tools_version=$cache['BUILD_MANIFEST_MSVC_TOOLS_VERSION']; windows_sdk_version=$cache['BUILD_MANIFEST_WINDOWS_SDK_VERSION']}
   cmake = $flags
   vcpkg = [ordered]@{mode=$(if ($cache['VCPKG_MANIFEST_MODE'] -eq 'ON') {'manifest'} else {'classic'}); triplet=$triplet; registry_commit=$registryCommit; registry_dirty=$registryDirty; manifest_baseline=$cache['VCPKG_BASELINE']; registry_baseline_sha256=(Get-FileHash -LiteralPath $baselineFile -Algorithm SHA256).Hash.ToLowerInvariant(); installed_ports=$ports; linked_ports=$linkedPorts}
   files = $hashes

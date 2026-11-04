@@ -90,6 +90,15 @@ func sizeofProcessEntry32() uintptr {
 	return unsafeSizeof(e)
 }
 
+// asJSON shows a check value with its pointers followed, for evidence text.
+func asJSON(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err.Error()
+	}
+	return string(b)
+}
+
 func procText(list []ProcInfo) string {
 	var parts []string
 	for _, p := range list {

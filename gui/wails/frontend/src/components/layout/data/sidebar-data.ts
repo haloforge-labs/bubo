@@ -12,7 +12,6 @@ import type { SidebarData } from '../types'
 export const sidebarData: SidebarData = {
   navGroups: [
     {
-      title: 'Workspace',
       items: [
         { title: 'Server', url: '/', icon: Server },
         { title: 'Models', url: '/models', icon: Boxes },

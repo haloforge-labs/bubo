@@ -1,8 +1,11 @@
 #include "src/cli/machine_adapter.hpp"
 
+#include <chrono>
 #include <cmath>
 #include <iostream>
+#include <memory>
 #include <string>
+#include <thread>
 
 namespace {
 using bubo::cli::AvailableReading;
@@ -31,7 +34,7 @@ const Value& At(const Value& value, const char* key, Rest... rest) {
   return child ? At(*child, rest...) : kNull;
 }
 
-struct Fake final : bubo::cli::MachineProbe {
+struct Fake : bubo::cli::MachineProbe {
   MachineReading overlay =
       AvailableReading("ded574b5-45a0-4f42-8737-46345c09c238", "fake overlay",
                        "fake", "guid", "2026-10-14T00:00:00Z");
@@ -120,6 +123,15 @@ void CheckReadings(const Value& node, const std::string& path) {
 }
 
 constexpr double kGiB = 1073741824.0;
+
+// A driver call that blocks, as the power service or the AMD library can on a
+// cold start.
+struct Stuck final : Fake {
+  bubo::cli::MachineReading OverlayScheme() override {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    return Fake::OverlayScheme();
+  }
+};
 }  // namespace
 
 int main() {
@@ -505,6 +517,34 @@ int main() {
     Check(!readings.total_budget.available &&
               !readings.total_budget.reason.empty(),
           "MissingLocalTotalIsUnknownWithReason");
+  }
+  {  // a blocked driver call gives an unavailable, named reading in time
+    const auto start = std::chrono::steady_clock::now();
+    auto probe = bubo::cli::MakeBoundedMachineProbe(
+        std::make_shared<Stuck>(), std::chrono::milliseconds(200),
+        std::chrono::milliseconds(2000));
+    const auto overlay = probe->OverlayScheme();
+    const auto mode = probe->EffectivePowerMode();
+    const auto host = probe->HostPhysicalMemory();
+    const auto waited = std::chrono::steady_clock::now() - start;
+    Check(!overlay.available &&
+              overlay.reason.find("did not answer in 200 ms") !=
+                  std::string::npos &&
+              overlay.source.find("PowerGetEffectiveOverlayScheme") !=
+                  std::string::npos,
+          "BlockedCallIsUnavailableAndNamed");
+    Check(mode.available && host.available, "OtherCallsStillAnswer");
+    Check(waited < std::chrono::milliseconds(1000), "BlockedCallIsBounded");
+    Check(bubo::cli::MachineProbeHasAbandonedCall(), "AbandonedCallIsReported");
+  }
+  {  // a spent total budget skips the remaining slow calls
+    auto probe = bubo::cli::MakeBoundedMachineProbe(
+        std::make_shared<Fake>(), std::chrono::milliseconds(200),
+        std::chrono::milliseconds(0));
+    const auto overlay = probe->OverlayScheme();
+    Check(!overlay.available &&
+              overlay.reason.find("Skipped") != std::string::npos,
+          "SpentBudgetSkipsSlowCalls");
   }
   {  // the real probe never throws
     auto probe = bubo::cli::CreateSystemMachineProbe();

@@ -4,7 +4,7 @@ import { Header } from '@/components/layout/header'
 import { Main } from '@/components/layout/main'
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar'
 import type { View } from '@/lib/bindings'
-import { UpdateBanner } from '@/components/update-banner'
+import { hasUpdateBanner, UpdateBanner } from '@/components/update-banner'
 import { CopyText } from '@/components/copy-text'
 
 export function AppShell({
@@ -34,7 +34,10 @@ export function AppShell({
     <SidebarProvider>
       <AppSidebar gettingStarted={gettingStarted} version={product?.version} />
       <SidebarInset className="min-w-0">
-        <Header className="min-h-20 border-b">
+        <Header
+          bare={!showServerSummary && !hasUpdateBanner(update)}
+          className="border-b"
+        >
           {showServerSummary && (
             <div className="text-sm" role="status">
               {statusLabel ?? serverState}
@@ -80,7 +83,7 @@ export function AppShell({
             </>
           )}
         </Header>
-        <Main id="main-content" className="p-6 md:p-10">
+        <Main id="main-content" className="p-6">
           {children}
         </Main>
       </SidebarInset>

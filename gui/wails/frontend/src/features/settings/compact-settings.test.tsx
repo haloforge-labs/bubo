@@ -5,11 +5,11 @@ import SettingsPage from './index'
 
 let cleanup = () => {}
 afterEach(() => cleanup())
-test('Advanced contains Mode, memory and hardware with plain help and a label/help filter', async () => {
+test('Advanced contains Profile, memory and hardware with plain help and a label/help filter', async () => {
   cleanup = renderView(<SettingsPage />, fixture()).cleanup
   await page.getByRole('tab', { name: 'Advanced' }).click()
   await expect
-    .element(page.getByRole('combobox', { name: 'Mode', exact: true }))
+    .element(page.getByRole('combobox', { name: 'Profile', exact: true }))
     .toBeVisible()
   await expect
     .element(
@@ -22,17 +22,20 @@ test('Advanced contains Mode, memory and hardware with plain help and a label/he
   const filter = page.getByRole('textbox', { name: 'Find a setting' })
   await filter.fill('tunes the engine')
   await expect
-    .element(page.getByRole('combobox', { name: 'Mode', exact: true }))
+    .element(page.getByRole('combobox', { name: 'Profile', exact: true }))
     .toBeVisible()
   await expect
     .element(page.getByText('NPU prefill', { exact: true }))
     .not.toBeInTheDocument()
   await filter.fill('')
-  expect(document.querySelector('[data-setting="--twin-model"]')).toBeNull()
-  expect(
-    document.querySelector('[data-setting="--draft-head-model"]'),
-  ).toBeNull()
-  await page.getByRole('button', { name: 'About Mode', exact: true }).click()
+  // Package-supplied files are Debug rows: the collapsed Debug fold hides them.
+  for (const name of ['--twin-model', '--draft-head-model'])
+    expect(
+      document
+        .querySelector<HTMLElement>(`[data-setting="${name}"]`)
+        ?.checkVisibility() ?? false,
+    ).toBe(false)
+  await page.getByRole('button', { name: 'About Profile', exact: true }).click()
   await expect
     .element(
       page.getByText(

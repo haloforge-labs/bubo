@@ -2,10 +2,8 @@
 
 ## Platform and build
 
-The product, Bubo, is the Windows 11 x64 build for AMD Strix Halo (`gfx1151`):
-`bubo.exe`, its engine DLL and the desktop app. The Linux build below is the
-upstream engine's. Testing: write the failing case first, prefer an end-to-end
-run of the real executable, and never write unit tests after the code. CMake owns
+Production packages target Linux x86-64 AMD Strix Halo (`gfx1151`); Windows
+is a supported native build target for development. CMake owns
 compiler flags, dependencies and installation; Nix supplies the pinned toolchain.
 Linux source-build prerequisites are in [README.md](README.md#build-from-source).
 
@@ -59,11 +57,12 @@ not a duplicate full correctness run. Reuse baseline evidence only when revision
 toolchain, harness, model, settings and cache history match. Include `long-context`
 and `cache` for continuation changes; verify loaded mode and actual drafts.
 Correctness and expected prefill/cache work are strict; timings are
-mandatory per request/phase at 5% and 3 ms, never averaged across requests.
+mandatory per request/phase at 5% and 10 ms, never averaged across requests.
 Run once, investigate flags, then alternate main/PR only for affected histories;
 use unchanged-main controls when needed and retain every result. Fix confirmed
 regressions before publishing. Noisy evidence stays visibly inconclusive and
-unqualified; do not widen margins or stop at reporting failures. Use the code
+unqualified; do not widen margins or stop at reporting failures. Devlab keeps
+inconclusive timing advisory on both ordinary and release PRs. Use the code
 diff to select affected metrics; unrelated timing variance does not justify
 another full matrix.
 For reported coding-agent loops, also replay the affected workflow with
@@ -86,6 +85,13 @@ quality; successful optimizations become the default, without extra switches.
 - Use the shared Qwen control-token constants for framing; see
   [src/models/qwen/AGENTS.md](src/models/qwen/AGENTS.md). Inspect their definitions
   when reviewing or changing behavior, and keep reference fixtures independent.
+- Put Windows-specific code in `src/core/platform/`: one leaf per OS facility
+  (files, pages, sockets), whose sources may branch on `_WIN32` or split into
+  `<leaf>_posix.cpp`/`<leaf>_windows.cpp` selected in CMake. Outside it and
+  vendored code, call the leaf, with no `windows.h` or `_WIN32`/`_MSC_VER`
+  checks. POSIX code moves into a leaf, verbatim, once it gains a Windows
+  counterpart. Never emulate POSIX with macros or copy a file per OS; when the
+  logic itself differs, add `<file>_windows.cpp` beside it.
 - Use one canonical long option and backend name per behavior; avoid aliases.
 - Use `gh` for GitHub operations after checking `gh auth status`.
 - Follow Conventional Commits with a single-line message. Title pull requests

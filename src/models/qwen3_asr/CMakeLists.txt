@@ -12,7 +12,7 @@ add_library(gufo_qwen3_asr STATIC
 )
 
 target_include_directories(gufo_qwen3_asr PUBLIC ${PROJECT_SOURCE_DIR})
-target_link_libraries(gufo_qwen3_asr PUBLIC ICU::uc Threads::Threads)
+target_link_libraries(gufo_qwen3_asr PUBLIC gufo_core ICU::uc Threads::Threads)
 
 if (ENGINE_ENABLE_HIP)
   target_sources(gufo_qwen3_asr PRIVATE

@@ -3,6 +3,7 @@
 
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 
@@ -286,11 +287,14 @@ private:
   }
 
   // One ADLX sample per probe, taken on first use.
+  // The bounded probe can start Gpu() and Vgm() on two threads.
   const AdlxSample& Adlx() {
+    std::lock_guard<std::mutex> lock(adlx_mutex_);
     if (!adlx_)
       adlx_ = std::make_unique<AdlxSample>(SampleAdlx());
     return *adlx_;
   }
+  std::mutex adlx_mutex_;
   std::unique_ptr<AdlxSample> adlx_;
 };
 #else
@@ -313,11 +317,14 @@ private:
     return UnavailableReading("none", "none", unit, UtcTime(),
                               "This machine adapter reads Windows only.");
   }
+  // The bounded probe can start Gpu() and Vgm() on two threads.
   const AdlxSample& Adlx() {
+    std::lock_guard<std::mutex> lock(adlx_mutex_);
     if (!adlx_)
       adlx_ = std::make_unique<AdlxSample>(SampleAdlx());
     return *adlx_;
   }
+  std::mutex adlx_mutex_;
   std::unique_ptr<AdlxSample> adlx_;
 };
 #endif

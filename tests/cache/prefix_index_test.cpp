@@ -162,9 +162,50 @@ void SelectionTable() {
         assert(result.candidates.back().boundary == 2);
       assert(index.CachedPrefixTokens(Query(c.prompt, c.stable)) ==
              (c.prompt.size() >= 3 && c.prompt[1] == 2 ? 3 : 0));
+      const auto checkpoints = index.Lookup(Query(c.prompt));
+      for (Rows minimum = 0; minimum <= c.prompt.size() + 1; ++minimum) {
+        const bool expected = std::ranges::any_of(
+            checkpoints.candidates, [&](const auto& candidate) {
+              return !candidate.live && candidate.boundary >= minimum;
+            });
+        auto query = Query(c.prompt, c.stable);
+        query.reuse = false;
+        assert(index.HasCheckpoint(query, minimum) == expected);
+      }
     }
     assert(ledger.Snapshot().total_bytes == 0);
   }
+}
+void CheckpointPresence() {
+  ResourceLedger ledger{kIndexLimits};
+  PrefixIndex index{ledger};
+  index.Register({1}, kIndexComponents);
+  const Tokens tokens{1, 2, 3, 4};
+  (void)index.Insert(IndexLive(tokens));
+  assert(!index.HasCheckpoint(Query(tokens), 0));
+  const auto short_id =
+      index.Insert(IndexCheckpoint(ledger, Tokens{1, 2}), ResidentComponents());
+  const auto long_id = index.Insert(IndexCheckpoint(ledger, tokens, {1}, {9}),
+                                    ResidentComponents());
+  assert(index.HasCheckpoint(Query(tokens), 2));
+  assert(!index.HasCheckpoint(Query(tokens), 3));
+  assert(index.HasCheckpoint(Query(tokens, 0, {9}), 4));
+  assert(!index.HasCheckpoint(Query(Tokens{1, 2, 9, 4}, 0, {9}), 4));
+  index.SetAvailability(
+      long_id, {{{1}, true, false}, {{2}, true, false}, {{3}, false, false}});
+  assert(!index.HasCheckpoint(Query(tokens, 0, {9}), 4));
+  index.Erase(short_id);
+  assert(!index.HasCheckpoint(Query(tokens), 2));
+  index.SetAvailability(long_id, ResidentComponents());
+  auto invalid = Query(tokens);
+  invalid.input = InputIdentity(1);
+  Invalid([&] { (void)index.HasCheckpoint(invalid, 0); });
+  // A resident presence check needs no candidate-list reservation, even when
+  // every further metadata admission is refused.
+  const auto before = ledger.Snapshot().total_bytes;
+  ledger.FailAfter(LedgerStep::kReserve, 0);
+  assert(index.HasCheckpoint(Query(tokens, 0, {9}), 4));
+  assert(ledger.Snapshot().total_bytes == before);
 }
 void ImagesAndLearning() {
   ResourceLedger ledger{kIndexLimits};
@@ -275,6 +316,7 @@ void CheckpointPrivateBoundary() {
     assert(index.Lookup(Query(tokens)).reason ==
            SelectionReason::kMissingComponent);
     assert(index.CachedPrefixTokens(Query(tokens)) == 0);
+    assert(!index.HasCheckpoint(Query(tokens), 0));
     index.Erase(entry);
   }
   const auto deep =
@@ -527,8 +569,48 @@ void AdmissionAndValidation() {
   assert(index.Lookup(Query(original)).selected->entry == id);
 }
 }  // namespace
+// An adapter whose prefill depends on where a pass starts restores only from
+// aligned boundaries, or from a snapshot of the whole prompt; live frontiers
+// (decode rows) are exempt.
+static void RestoreAlignmentSkipsUnalignedBoundaries() {
+  ResourceLedger ledger{kIndexLimits};
+  PrefixIndex index{ledger};
+  index.Register({1}, kIndexComponents);
+  const Tokens base{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
+  for (const std::size_t size : {4, 7, 11})
+    (void)index.Insert(
+        IndexCheckpoint(ledger, Tokens(base.begin(), base.begin() + size)),
+        ResidentComponents());
+  Tokens longer = base;
+  longer.insert(longer.end(), {12, 13, 14});
+  auto aligned = [&](const Tokens& tokens, Rows alignment) {
+    auto query = Query(tokens);
+    query.restore_alignment = alignment;
+    return query;
+  };
+  assert(index.Lookup(aligned(longer, 1)).selected->boundary == 11);
+  assert(index.Lookup(aligned(longer, 4)).selected->boundary == 4);
+  assert(index.CachedPrefixTokens(aligned(longer, 4)) == 4);
+  // The whole prompt needs no pass: an exact retry may restore an odd boundary.
+  assert(index.Lookup(aligned(base, 4)).selected->boundary == 11);
+  // Nothing aligned below an odd-only history: a miss, not an odd restore.
+  const Tokens odd{30, 31, 32, 33, 34, 35, 36};
+  (void)index.Insert(IndexCheckpoint(ledger, odd), ResidentComponents());
+  Tokens odd_longer = odd;
+  odd_longer.insert(odd_longer.end(), {37, 38});
+  assert(index.Lookup(aligned(odd_longer, 1)).selected->boundary == 7);
+  assert(!index.Lookup(aligned(odd_longer, 4)).selected);
+  // A live frontier comes from decode and stays restorable.
+  const Tokens frontier{50, 51, 52, 53, 54, 55, 56};
+  (void)index.Insert(IndexLive(frontier, {7}));
+  Tokens frontier_longer = frontier;
+  frontier_longer.insert(frontier_longer.end(), {57, 58});
+  const auto live = index.Lookup(aligned(frontier_longer, 4));
+  assert(live.selected && live.selected->live && live.selected->boundary == 7);
+}
 int main() {
   SelectionTable();
+  CheckpointPresence();
   ImagesAndLearning();
   CoherenceAndFallback();
   CheckpointPrivateBoundary();
@@ -538,5 +620,6 @@ int main() {
   DeferredCompaction();
   AdmissionBeforeAllocation();
   AdmissionAndValidation();
+  RestoreAlignmentSkipsUnalignedBoundaries();
   std::cout << "prefix index tests passed\n";
 }

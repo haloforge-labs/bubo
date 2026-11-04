@@ -26,9 +26,6 @@ for (const split of ['64', '72']) {
       )
     }
     expect(options.find((option) => option.selected)?.disabled).toBe(false)
-    await expect
-      .element(page.getByLabelText('Setup steps'))
-      .toHaveTextContent('(default model)')
   })
 }
 
@@ -43,4 +40,26 @@ test('128 GiB keeps its existing first-run choice and enabled full-size options'
     expect(option.disabled).toBe(false)
     expect(option.textContent).not.toContain('Does not fit this computer')
   }
+})
+
+test('first-run choices leave out a supported entry that has its own family group', async () => {
+  const view = coreView('onboarding-96-64')
+  const template = view.models!.catalogue.find(
+    (entry) => entry.id === 'huihui-qwen38-flash-next-lowmemory-v1',
+  )!
+  view.models!.catalogue.push({
+    ...template,
+    id: 'fixture-coder-entry',
+    display_name: 'Fixture Coder',
+    selection_label: 'Fixture Coder',
+    family_group: 'fixture-coder-group',
+  })
+  mountCorePage('/onboarding', view)
+  const select = page.getByLabelText('Model to download')
+  await expect.element(select).toBeVisible()
+  const element = select.element() as HTMLSelectElement
+  expect(element.options).toHaveLength(3)
+  expect([...element.options].map((option) => option.value)).not.toContain(
+    'fixture-coder-entry',
+  )
 })

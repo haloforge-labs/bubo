@@ -33,4 +33,24 @@ foreach ($changed in @($false,$true)) {
   if ($index -lt 0 -or $script:forwarded[$index+1] -cne $Notes) { throw 'Builder lost summary file path' }
   $checks++
 }
+# THIRD-PARTY.txt names the GUI inventory once: the paragraph is added only when the runtime text lacks it.
+$noteFunction = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Add-GuiThirdPartyNote' }, $true)
+if (-not $noteFunction) { throw 'Add-GuiThirdPartyNote is missing' }
+. ([scriptblock]::Create($noteFunction.Extent.Text))
+$scratch = Join-Path ([IO.Path]::GetTempPath()) ("assemble-note-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force $scratch | Out-Null
+try {
+  $plain = Join-Path $scratch 'plain.txt'
+  Set-Content -LiteralPath $plain -Value 'Runtime notices only.'
+  Add-GuiThirdPartyNote $plain
+  Add-GuiThirdPartyNote $plain
+  $count = ([regex]::Matches((Get-Content -LiteralPath $plain -Raw), 'licenses/gui/THIRD-PARTY-GUI\.md')).Count
+  if ($count -ne 1) { throw "A runtime text without the GUI paragraph must get it once, got $count" }
+  $named = Join-Path $scratch 'named.txt'
+  Set-Content -LiteralPath $named -Value "GUI and updater`nThe desktop package's generated inventory is licenses/gui/THIRD-PARTY-GUI.md`n(source: docs/release/THIRD-PARTY-GUI.md)."
+  $before = Get-Content -LiteralPath $named -Raw
+  Add-GuiThirdPartyNote $named
+  if ((Get-Content -LiteralPath $named -Raw) -cne $before) { throw 'A runtime text that already names the GUI inventory must stay unchanged' }
+  $checks += 2
+} finally { Remove-Item -LiteralPath $scratch -Recurse -Force }
 Write-Output "PASS: assembly interface $checks checks; false/zero/empty and changed/list/64-bit bytes preserved; no package required"

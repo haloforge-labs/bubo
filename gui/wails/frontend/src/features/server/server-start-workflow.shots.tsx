@@ -17,7 +17,9 @@ test('Stopped Server starts the setup on screen without a separate Save', async 
     scenario: 'stopped-unsaved',
     view,
     prepare: async () => {
-      await page.getByLabelText('Sessions', { exact: true }).fill('2')
+      await page
+        .getByRole('spinbutton', { name: 'Sessions', exact: true })
+        .fill('2')
       await expect
         .element(
           page.getByRole('button', { name: 'Start server', exact: true }),

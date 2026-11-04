@@ -1,4 +1,5 @@
 #include "src/models/qwen38_flash_next/weights.hpp"
+#include "src/models/qwen38_flash_next/native_dispatch.hpp"
 
 #include <cstdlib>
 #include <initializer_list>
@@ -43,8 +44,12 @@ struct Format {
       return {256, 74};
     case GgmlType::kIQ2_XXS:
       return {256, 66};
+    case GgmlType::kIQ1_M:
+      return {256, 56};
     case GgmlType::kQ2_0:
       return {64, 18};
+    case GgmlType::kQ3_K:
+      return {256, 110};
     case GgmlType::kQ4_K:
       return {256, 144};
     case GgmlType::kQ5_K:
@@ -71,7 +76,8 @@ struct Binder {
   /// Binds `name` with the exact shape and one of the accepted formats.
   TensorRef Get(const std::string& name, std::uint64_t cols, std::uint64_t rows,
                 std::uint64_t experts, std::initializer_list<GgmlType> types,
-                bool required = true) {
+                bool required = true,
+                const char* passes = "decode/verify/prefill") {
     TensorRef t;
     const auto* info = reader.FindTensor(name);
     if (info == nullptr) {
@@ -98,8 +104,9 @@ struct Binder {
     }
     const Format format = FormatOf(info->type);
     if (!type_ok || format.block == 0 || cols % format.block != 0) {
-      Fail("tensor " + name + " has unsupported format " +
-           std::string(core::ToString(info->type)));
+      Fail("tensor " + name + " type=" +
+           std::string(core::ToString(info->type)) +
+           " pass=" + passes + ": unsupported storage or kernel format");
       return t;
     }
     t.data = info->data;
@@ -154,13 +161,18 @@ struct Binder {
     const std::string p = "blk." + std::to_string(il) + ".";
     const std::uint64_t hidden = c.hidden_size;
     const std::uint64_t hc_dim = c.HcDim();
-    const auto dense = {GgmlType::kQ8_0, GgmlType::kBF16, GgmlType::kF16,
-                        GgmlType::kF32};
-    // IQ3_XXS, IQ2_S and Q2_0 are the ISTA GSQ-RCO IQ3_S rung's extra expert types (GPU routes: step 3 of the memory lane).
-    const auto experts = {GgmlType::kQ4_K,   GgmlType::kQ5_K,  GgmlType::kQ6_K,
-                          GgmlType::kQ5_1,   GgmlType::kQ8_0,  GgmlType::kIQ3_S,
-                          GgmlType::kIQ4_XS, GgmlType::kIQ4_NL, GgmlType::kIQ3_XXS,
-                          GgmlType::kIQ2_S,  GgmlType::kQ2_0};
+    const auto dense = kNativeDenseTypes;
+
+    std::string routed_error;
+    const auto routed = RoutedWeights::Bind(reader, c, il, &routed_error);
+    if (!routed) {
+      Fail(routed_error);
+      return l;
+    }
+    l.router = routed->router;
+    l.ffn_gate_exps = routed->gate;
+    l.ffn_up_exps = routed->up;
+    l.ffn_down_exps = routed->down;
 
     l.hc_attn = Mixer(p + "hc_attn", c, true);
     l.hc_ffn = Mixer(p + "hc_ffn", c, true);
@@ -214,19 +226,13 @@ struct Binder {
       l.ple_norm_conv =
           Get(p + "ple_norm_conv.weight", hc_dim, 1, 1, {GgmlType::kF32});
       l.ple_conv1d = Get(p + "ple_conv1d.weight", c.ple_conv_kernel, hc_dim, 1,
-                         {GgmlType::kF32});
+                         {GgmlType::kF32, GgmlType::kF16}, true,
+                         "PLE-convolution/decode/verify/prefill");
     }
 
-    l.router = Get(p + "ffn_gate_inp.weight", hidden, c.num_experts, 1,
-                   {GgmlType::kF32});
-    l.ffn_gate_exps = Get(p + "ffn_gate_exps.weight", hidden, c.expert_ff,
-                          c.num_experts, experts);
-    l.ffn_up_exps = Get(p + "ffn_up_exps.weight", hidden, c.expert_ff,
-                        c.num_experts, experts);
-    l.ffn_down_exps = Get(p + "ffn_down_exps.weight", c.expert_ff, hidden,
-                          c.num_experts, experts);
     l.shexp_gate_inp =
-        Get(p + "ffn_gate_inp_shexp.weight", hidden, 1, 1, {GgmlType::kF32});
+        Get(p + "ffn_gate_inp_shexp.weight", hidden, 1, 1,
+            {GgmlType::kF32, GgmlType::kBF16});
     l.shexp_gate =
         Get(p + "ffn_gate_shexp.weight", hidden, c.shared_expert_ff, 1, dense);
     l.shexp_up =
@@ -257,6 +263,43 @@ std::size_t TensorRef::RowBytes() const noexcept {
   return static_cast<std::size_t>(cols / f.block) * f.bytes;
 }
 
+std::optional<RoutedWeights> RoutedWeights::Bind(const core::GgufReader& reader,
+                                                 const Config& c,
+                                                 std::uint32_t layer,
+                                                 std::string* error_msg) {
+  Binder b{reader, error_msg};
+  const std::string p = "blk." + std::to_string(layer) + ".";
+  const auto* router = reader.FindTensor(p + "ffn_gate_inp.weight");
+  if (c.num_experts == 256 && router && router->dimensions.size() >= 2 &&
+      router->dimensions[1] == 512) {
+    b.Fail("tensor " + p +
+           "ffn_gate_inp.weight: unsupported 512-row masked "
+           "router with 256 retained experts; expected compact 256-row router "
+           "and matching compact expert stacks (no original-id mask mapping)");
+    return std::nullopt;
+  }
+  // Get derives every extent from the descriptors and checks it against the
+  // metadata. Never infer a default count or remap original expert ids.
+  // Keep in sync with the tiled switch in Executor::Experts (executor.cpp).
+  const auto types = {GgmlType::kQ4_K,   GgmlType::kQ5_K,   GgmlType::kQ6_K,
+                      GgmlType::kQ5_1,   GgmlType::kQ8_0,   GgmlType::kIQ3_S,
+                      GgmlType::kIQ4_XS, GgmlType::kIQ4_NL, GgmlType::kIQ3_XXS,
+                      GgmlType::kIQ2_S,  GgmlType::kQ2_0,   GgmlType::kIQ2_XXS,
+                      GgmlType::kIQ2_XS, GgmlType::kIQ1_M,  GgmlType::kQ3_K};
+  RoutedWeights w;
+  w.router = b.Get(p + "ffn_gate_inp.weight", c.hidden_size, c.num_experts, 1,
+                   {GgmlType::kF32, GgmlType::kBF16});
+  w.gate = b.Get(p + "ffn_gate_exps.weight", c.hidden_size, c.expert_ff,
+                 c.num_experts, types);
+  w.up = b.Get(p + "ffn_up_exps.weight", c.hidden_size, c.expert_ff,
+               c.num_experts, types);
+  w.down = b.Get(p + "ffn_down_exps.weight", c.expert_ff, c.hidden_size,
+                 c.num_experts, types);
+  if (!b.ok)
+    return std::nullopt;
+  return w;
+}
+
 std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
                                                std::string* error_msg) {
   auto config = Config::FromGguf(reader, true, error_msg);
@@ -267,8 +310,7 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
   ModelWeights w;
   w.config = *config;
   const Config& c = w.config;
-  const auto dense = {GgmlType::kQ8_0, GgmlType::kQ6_K, GgmlType::kBF16,
-                      GgmlType::kF16, GgmlType::kF32};
+  const auto dense = kNativeDenseTypes;
 
   {
     // The vocabulary is the embedding row count; no metadata key carries it.
@@ -279,10 +321,13 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
     }
     w.config.vocab_size = static_cast<std::uint32_t>(info->dimensions[1]);
   }
-  w.token_embd =
-      b.Get("token_embd.weight", c.hidden_size, c.vocab_size, 1, dense);
+  w.token_embd = b.Get("token_embd.weight", c.hidden_size, c.vocab_size, 1,
+                        {GgmlType::kF32, GgmlType::kF16, GgmlType::kBF16,
+                         GgmlType::kQ8_0, GgmlType::kQ6_K, GgmlType::kIQ4_XS,
+                         GgmlType::kIQ3_S}, true, "embedding-gather/trunk/draft");
   w.output =
-      b.Get("output.weight", c.hidden_size, c.vocab_size, 1, dense, false);
+      b.Get("output.weight", c.hidden_size, c.vocab_size, 1, dense, false,
+            "head-GEMV/draft-head/verify/prefill");
   if (w.output.empty()) {
     w.output = w.token_embd;
   }
@@ -339,8 +384,9 @@ std::optional<MtpWeights> MtpWeights::Bind(const core::GgufReader& reader,
 
 std::optional<TensorRef> BindDraftOutput(const core::GgufReader& reader, const TensorRef& trunk_output, std::string* error_msg) {
   Binder b{reader, error_msg};
-  if (trunk_output.empty() || trunk_output.type != GgmlType::kQ8_0) {
-    b.Fail("draft output head: the trunk output head must be Q8_0");
+  if (trunk_output.empty() ||
+      NativeDenseKernel(trunk_output.type, false) == nullptr) {
+    b.Fail("draft output head: unsupported trunk output head");
     return std::nullopt;
   }
   TensorRef t = b.Get("output.weight", trunk_output.cols, trunk_output.rows, 1, {GgmlType::kQ4_K, GgmlType::kQ5_K});
@@ -353,11 +399,10 @@ std::optional<TwinWeights> TwinWeights::Bind(const core::GgufReader& reader,
                                              std::string* error_msg) {
   Binder b{reader, error_msg};
   TwinWeights t;
-  // DEBUG (identity / fake-quant controls only): GUFO_DENSE_TWIN_ALLOW_Q8=1 lets the twin file carry Q8_0 tensors, which then run through the ordinary Q8_0 dense path in small passes.
-  const char* allow_q8_env = std::getenv("GUFO_DENSE_TWIN_ALLOW_Q8");
-  const bool allow_q8 = allow_q8_env != nullptr && *allow_q8_env != '\0' && *allow_q8_env != '0';
-  const auto four_bit = {GgmlType::kQ4_K, GgmlType::kQ5_K, GgmlType::kQ5_1, GgmlType::kIQ4_XS, GgmlType::kIQ4_NL};
-  const auto four_bit_or_q8 = {GgmlType::kQ4_K, GgmlType::kQ5_K, GgmlType::kQ5_1, GgmlType::kIQ4_XS, GgmlType::kIQ4_NL, GgmlType::kQ8_0};
+  const auto types = {GgmlType::kQ8_0,   GgmlType::kQ6_K,  GgmlType::kQ5_K,
+                      GgmlType::kQ5_1,   GgmlType::kQ4_K,  GgmlType::kIQ4_XS,
+                      GgmlType::kIQ4_NL, GgmlType::kIQ3_S, GgmlType::kBF16,
+                      GgmlType::kF16,    GgmlType::kF32};
   std::set<std::string> keep;  // explicit keep-Q8 list (names, comma-separated in the string KV)
   if (const auto list = reader.GetMetadataString("gufo.dense_twin.keep_q8")) {
     std::size_t pos = 0;
@@ -376,14 +421,16 @@ std::optional<TwinWeights> TwinWeights::Bind(const core::GgufReader& reader,
     LayerWeights l;
     l.linear = base.linear;
     const std::string p = "blk." + std::to_string(il) + ".";
-    // A trunk Q8_0 tensor needs its twin; any other trunk type is left alone and must be absent from the twin file.
+    // A native quantized trunk can use the same dense replacement file.
     const auto take = [&](TensorRef& dst, const TensorRef& base_tensor, const std::string& name) {
       const bool present = reader.FindTensor(name) != nullptr;
       if (keep.count(name) != 0) {
         if (present) {
           b.Fail("twin tensor " + name + " is both in the twin file and in its keep_q8 list");
-        } else if (base_tensor.empty() || base_tensor.type != GgmlType::kQ8_0) {
-          b.Fail("keep_q8 lists " + name + " but the trunk tensor is not Q8_0");
+        } else if (base_tensor.empty() ||
+                   NativeDenseKernel(base_tensor.type, false) == nullptr) {
+          b.Fail("keep_q8 lists " + name +
+                 " but the trunk tensor is not a supported dense tensor");
         } else {
           kept_seen.insert(name);
           ++t.kept_tensors;
@@ -391,15 +438,20 @@ std::optional<TwinWeights> TwinWeights::Bind(const core::GgufReader& reader,
         }
         return;
       }
-      if (base_tensor.empty() || base_tensor.type != GgmlType::kQ8_0) {
-        if (present) b.Fail("twin tensor " + name + " mirrors a trunk tensor that is not Q8_0");
+      if (base_tensor.empty() ||
+          NativeDenseKernel(base_tensor.type, false) == nullptr) {
+        if (present)
+          b.Fail("twin tensor " + name +
+                 " has no supported dense trunk tensor");
         return;
       }
       if (!present) {
+        if (base_tensor.type != GgmlType::kQ8_0)
+          return;
         b.Fail("twin file is missing " + name + " (the trunk copy is Q8_0; no silent fallback)");
         return;
       }
-      dst = allow_q8 ? b.Get(name, base_tensor.cols, base_tensor.rows, 1, four_bit_or_q8) : b.Get(name, base_tensor.cols, base_tensor.rows, 1, four_bit);
+      dst = b.Get(name, base_tensor.cols, base_tensor.rows, 1, types);
       if (dst.empty()) return;
       ++t.tensors;
       t.bytes_4bit += dst.SizeBytes();
@@ -424,8 +476,29 @@ std::optional<TwinWeights> TwinWeights::Bind(const core::GgufReader& reader,
     take(l.shexp_down, base.shexp_down, p + "ffn_down_shexp.weight");
     t.layers.push_back(std::move(l));
   }
+  // Output HC is optional so existing dense twins retain their contract.
+  for (const auto& pair : {std::pair{&t.hc_head.down, &trunk.hc_head.down},
+                           std::pair{&t.hc_head.up, &trunk.hc_head.up}}) {
+    const auto* base = pair.second;
+    const char* name = pair.first == &t.hc_head.down ? "output_hc_down.weight"
+                                                     : "output_hc_up.weight";
+    if (reader.FindTensor(name)) {
+      if (base->empty()) {
+        b.Fail(std::string("twin tensor ") + name + " has no trunk tensor");
+        continue;
+      }
+      *pair.first = b.Get(name, base->cols, base->rows, 1, types);
+      if (!pair.first->empty()) {
+        ++t.tensors;
+        t.bytes_4bit += pair.first->SizeBytes();
+        t.bytes_8bit += base->SizeBytes();
+      }
+    }
+  }
   for (const auto& name : keep)
-    if (kept_seen.count(name) == 0 && b.ok) b.Fail("keep_q8 lists " + name + " which is not a Q8_0 tensor of the twin set");
+    if (kept_seen.count(name) == 0 && b.ok)
+      b.Fail("keep_q8 lists " + name +
+             " which is not a supported tensor of the twin set");
   if (b.ok && t.tensors == 0) b.Fail("twin file contains no twinned tensor");
   if (!b.ok) return std::nullopt;
   return t;

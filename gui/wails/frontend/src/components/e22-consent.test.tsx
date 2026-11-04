@@ -12,6 +12,7 @@ import {
 } from '@/components/core-page-test-support'
 import { PlanSummary } from '@/components/model-download'
 import { shortByShown, bytes } from '@/components/model-facts'
+import { openDiscover } from '@/features/models/discover-test-support'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -60,6 +61,7 @@ async function openConsent(view: View, shown: ReturnType<typeof plan>) {
   view.models!.prepared_models = []
   vi.spyOn(actions, 'Download').mockResolvedValue(bridgeReply({ plan: shown }))
   mountCorePage('/models', view)
+  await openDiscover()
   await page
     .getByRole('button', { name: 'Download', exact: true })
     .first()

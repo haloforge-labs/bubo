@@ -28,7 +28,7 @@ export function AppSidebar({
         <nav aria-label="Main navigation">
           {sidebarData.navGroups.map((props) => (
             <NavGroup
-              key={props.title}
+              key={props.items[0]?.url}
               {...props}
               gettingStarted={gettingStarted}
             />

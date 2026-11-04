@@ -74,6 +74,8 @@ QwenGpuExecutor::QwenGpuExecutor(std::shared_ptr<const QwenGpuModel> model,
 }
 
 QwenGpuExecutor::~QwenGpuExecutor() {
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeRelease();
   (void)hipStreamSynchronize(arena_.stream);
   for (const auto event : prefill_events_) {
     if (event)
@@ -131,9 +133,16 @@ QwenGpuMemoryUsage QwenGpuExecutor::GetMemoryUsage() const {
 }
 
 void QwenGpuExecutor::Reset() noexcept {
+  try {
+    if (continuation_hooks_)
+      continuation_hooks_->BeforeReset();
+  } catch (...) {
+    reset_failure_ = std::current_exception();
+    return;
+  }
   replaying_ssm_state_ = false;
   next_token_.reset();
-  h_prompt_hidden_.clear();
+  h_prompt_hidden_.Clear();
   h_verification_hidden_.clear();
   h_verification_logits_.clear();
   h_last_hidden_.clear();
@@ -141,6 +150,8 @@ void QwenGpuExecutor::Reset() noexcept {
   last_hidden_offset_ = 0;
   try {
     arena_.Reset();
+    if (continuation_hooks_)
+      continuation_hooks_->AfterReset();
     reset_failure_ = nullptr;
   } catch (...) {
     reset_failure_ = std::current_exception();
@@ -170,9 +181,10 @@ void QwenGpuExecutor::ConfigureVision(
 
 void QwenGpuExecutor::RestoreSnapshot(const QwenGpuSnapshot& snapshot) {
   CheckReset();
+  models::qwen::ContinuationRestore restore(continuation_hooks_);
   replaying_ssm_state_ = false;
   next_token_.reset();
-  h_prompt_hidden_.clear();
+  h_prompt_hidden_.Clear();
   h_verification_hidden_.clear();
   h_verification_logits_.clear();
   h_last_hidden_.clear();
@@ -181,15 +193,17 @@ void QwenGpuExecutor::RestoreSnapshot(const QwenGpuSnapshot& snapshot) {
   arena_.RestoreSnapshot(snapshot);
   vision_input_.RestoreLayout(snapshot.vision_layout_, arena_.stream);
   graph_executor_.Reset();
+  restore.Commit(snapshot.ValidContext());
 }
 
 void QwenGpuExecutor::RestoreCompactSnapshot(
     std::span<const std::uint8_t> payload,
     std::uint32_t expected_valid_context) {
   CheckReset();
+  models::qwen::ContinuationRestore restore(continuation_hooks_);
   replaying_ssm_state_ = false;
   next_token_.reset();
-  h_prompt_hidden_.clear();
+  h_prompt_hidden_.Clear();
   h_verification_hidden_.clear();
   h_verification_logits_.clear();
   h_last_hidden_.clear();
@@ -199,6 +213,7 @@ void QwenGpuExecutor::RestoreCompactSnapshot(
   vision_input_.RestoreLayout(QwenGpuSnapshot::ReadRopeLayout(payload),
                               arena_.stream);
   graph_executor_.Reset();
+  restore.Commit(expected_valid_context);
 }
 
 void QwenGpuExecutor::SaveState(std::uint32_t valid_context) {
@@ -209,20 +224,28 @@ void QwenGpuExecutor::SaveState(std::uint32_t valid_context) {
   if (arena_.BeginSsmReplayCapture()) {
     graph_executor_.Reset();
   }
+  if (continuation_hooks_)
+    continuation_hooks_->AfterSaveState();
 }
 
 void QwenGpuExecutor::RestoreState() {
   qwen27::PhaseScope profile(qwen27::Phase::kState);
   CheckReset();
+  models::qwen::ContinuationRestore restore(continuation_hooks_, true);
   if (arena_.IsSsmReplayCaptureActive())
     arena_.DisableSsmReplayCapture();
   arena_.RestoreState();
   replaying_ssm_state_ = true;
+  restore.Commit(arena_.saved_context_);
+  if (continuation_hooks_)
+    continuation_hooks_->AfterSaveState();
 }
 
 void QwenGpuExecutor::FinishVerification() {
   CheckReset();
   arena_.DisableSsmReplayCapture();
+  if (continuation_hooks_)
+    continuation_hooks_->AfterFinishVerification();
 }
 
 void QwenGpuExecutor::ReplaySsmState(std::uint32_t position,
@@ -230,14 +253,9 @@ void QwenGpuExecutor::ReplaySsmState(std::uint32_t position,
   qwen27::PhaseScope profile(qwen27::Phase::kState);
   const auto& config = weights_.config;
   auto scratch = arena_.GetScratchView();
-  // Lazy save: the live state is the saved state. Replay into the spare
-  // (the first launch of each layer reads the live state) and swap, so the
-  // saved state stays intact for a later rollback.
-  const bool out_of_place = count != 0 && arena_.SavedStateAliasesLive();
-  float* const conv_state =
-      out_of_place ? arena_.SpareConvState() : arena_.d_ssm_conv_state;
-  void* const deltanet_state =
-      out_of_place ? arena_.SpareDeltanetState() : arena_.d_ssm_deltanet_state;
+  // The replay is one pass: it reads the restored (pinned) state and leaves it
+  // intact for a second RestoreState.
+  const auto recurrent_state = arena_.BeginRecurrentWrite();
   for (std::uint32_t layer_idx = 0; layer_idx < config.num_layers;
        ++layer_idx) {
     const auto& layer = weights_.layers[layer_idx];
@@ -246,19 +264,19 @@ void QwenGpuExecutor::ReplaySsmState(std::uint32_t position,
     }
 
     // Layers have independent recorded inputs and recurrent state. Replay each
-    // layer's committed rows together, splitting only at ring/scratch bounds.
+    // layer's committed rows together, splitting only at ring/scratch bounds;
+    // a layer's later splits continue from what its first launch wrote.
+    auto layer_state = recurrent_state;
     for (std::uint32_t offset = 0; offset < count;) {
       const auto start = position + offset;
       const auto until_wrap = static_cast<std::uint32_t>(
           kSsmReplayCapacity - (start % kSsmReplayCapacity));
       const auto rows =
           std::min({count - offset, until_wrap, arena_.GetMaxBatch()});
-      const bool first = out_of_place && offset == 0;
       LaunchSSMConvRecurrenceRows(
           arena_.GetReplayQkv(layer_idx, start),
-          static_cast<const float*>(layer.ssm_conv1d.data), conv_state,
-          scratch.ssm.conv_out.data(), deltanet_state,
-          arena_.GetReplayAlpha(layer_idx, start),
+          static_cast<const float*>(layer.ssm_conv1d.data), layer_state,
+          scratch.ssm.conv_out.data(), arena_.GetReplayAlpha(layer_idx, start),
           arena_.GetReplayBeta(layer_idx, start),
           static_cast<const float*>(layer.ssm_a.data),
           static_cast<const float*>(layer.ssm_dt.data), nullptr, nullptr,
@@ -266,14 +284,11 @@ void QwenGpuExecutor::ReplaySsmState(std::uint32_t position,
           config.ssm_group_count, config.ssm_time_step_rank,
           config.ssm_state_size, config.SsmValueSize(), rows,
           config.ssm_time_step_rank, config.ssm_inner_size, arena_.stream, {},
-          arena_.GetRecurrentStateStorage(),
-          first ? arena_.d_ssm_conv_state : nullptr,
-          first ? arena_.d_ssm_deltanet_state : nullptr);
+          arena_.GetRecurrentStateStorage());
+      layer_state = layer_state.Continued();
       offset += rows;
     }
   }
-  if (out_of_place)
-    arena_.CommitOutOfPlaceState();
 }
 
 std::span<const float> QwenGpuExecutor::CopyLastLogits() {
@@ -323,6 +338,8 @@ tokenization::TokenId QwenGpuExecutor::SampleCachedLogits(
   HIP_CHECK(hipMemcpyAsync(scratch.decode.logits.data(), logits.data(),
                            logits.size_bytes(), hipMemcpyHostToDevice,
                            arena_.stream));
+  if (continuation_hooks_)
+    continuation_hooks_->AfterLogits();
   return SampleLastLogits(sampler);
 }
 
@@ -473,10 +490,17 @@ std::span<const float> QwenGpuExecutor::CopyVerificationLogits(
   return h_logits_;
 }
 
+void QwenGpuExecutor::ReservePromptHiddenCapture(
+    std::size_t layer_count, cache::ResourceLedger* ledger) {
+  const std::size_t bound = std::size_t{GetMaxPromptBatch()} * layer_count *
+                            weights_.config.hidden_size;
+  h_prompt_hidden_.Reserve(bound, bound, ledger);
+}
+
 void QwenGpuExecutor::SetPromptHiddenCapture(
     bool enabled, std::span<const std::uint32_t> target_layer_ids) {
   capture_prompt_hidden_ = enabled;
-  h_prompt_hidden_.clear();
+  h_prompt_hidden_.Clear();
   h_verification_hidden_.clear();
   h_verification_logits_.clear();
   arena_.SetTargetLayerCapture(enabled ? target_layer_ids
@@ -510,7 +534,6 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::Generate(
     const models::GenerationOptions& options,
     const std::function<bool(tokenization::TokenId, std::string_view)>&
         on_token) {
-  next_token_.reset();
   Reset();
   return GenerateFromPrefix(prompt_tokens, 0, options, on_token);
 }

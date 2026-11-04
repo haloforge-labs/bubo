@@ -308,7 +308,7 @@ void ShippedData() {
   Require(shipped.error.empty(),
           "shipped catalogue is valid: " + shipped.error);
   Require(ValidateCatalogue(shipped.entries).empty(), "revalidates");
-  Require(shipped.entries.size() == 11, "eleven shipped entries");
+  Require(shipped.entries.size() == 12, "twelve shipped entries");
   const auto find = [&](std::string_view id) {
     const auto* entry = bubo::cli::FindCatalogueEntry(shipped.entries, id);
     Require(entry != nullptr, std::string("entry ") + std::string(id));

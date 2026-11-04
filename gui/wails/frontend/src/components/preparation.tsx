@@ -87,6 +87,29 @@ export function Preparation({
       ? view.phase === 'preparing_engine'
       : view.phase === 'downloading_model') && !view.approval
   if (progressOnly && !busy) return null
+  const showsAction =
+    !busy &&
+    !progressOnly &&
+    !view.approval &&
+    (!hideRepair || !view.runtime.readiness.runtime)
+  const prepareError =
+    !busy &&
+    !progressOnly &&
+    !view.approval &&
+    !view.actions.prepare.allowed &&
+    view.actions.prepare.reason_code !== 'busy' &&
+    !!view.actions.prepare.reason_code &&
+    view.actions.prepare.reason_code !== 'not_applicable'
+  // A step with nothing to show or do takes no room.
+  if (
+    !busy &&
+    !showsAction &&
+    !prepareError &&
+    !view.plan_error &&
+    !view.approval &&
+    !command.error
+  )
+    return null
   return (
     <section aria-label="Prepare or repair Bubo" className="space-y-3">
       <ActionError error={command.error} />
@@ -153,9 +176,7 @@ export function Preparation({
             />
           )}
         </>
-      ) : !progressOnly &&
-        !view.approval &&
-        (!hideRepair || !view.runtime.readiness.runtime) ? (
+      ) : showsAction ? (
         <Button
           variant={primary ? 'default' : 'outline'}
           disabled={
@@ -172,21 +193,15 @@ export function Preparation({
               : 'Check or repair Bubo files'}
         </Button>
       ) : null}
-      {!busy &&
-        !progressOnly &&
-        !view.approval &&
-        !view.actions.prepare.allowed &&
-        view.actions.prepare.reason_code !== 'busy' &&
-        view.actions.prepare.reason_code &&
-        view.actions.prepare.reason_code !== 'not_applicable' && (
-          <GUIError
-            error={{
-              code: view.actions.prepare.reason_code,
-              remedy: view.actions.prepare.reason,
-            }}
-            recovery={false}
-          />
-        )}
+      {prepareError && (
+        <GUIError
+          error={{
+            code: view.actions.prepare.reason_code,
+            remedy: view.actions.prepare.reason,
+          }}
+          recovery={false}
+        />
+      )}
       {view.plan_error && <GUIError error={view.plan_error} recovery={false} />}
       <Dialog
         open={!progressOnly && !!view.approval}

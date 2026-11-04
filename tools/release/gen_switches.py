@@ -64,7 +64,7 @@ def validate_allowed(row):
             not all(type(value) in (str, bool, int, float) for value in allowed['values'])):
         raise ValueError(row['name'] + ': invalid allowed values')
     if 'also' in allowed and (not isinstance(allowed['also'], list) or
-            not all(type(value) in (int, float) and math.isfinite(value) for value in allowed['also'])):
+            not all((type(value) in (int, float) and math.isfinite(value)) or type(value) is str for value in allowed['also'])):
         raise ValueError(row['name'] + ': invalid allowed alternatives')
     if 'format' in allowed and not isinstance(allowed['format'], str):
         raise ValueError(row['name'] + ': invalid allowed format')
@@ -101,6 +101,8 @@ def validate_value(row, value):
     if allowed['type'] == 'string':
         # Platform tuning names are owned and checked by the C++ tuning reader.
         return
+    if value in [alt for alt in allowed.get('also', []) if isinstance(alt, str)]:
+        return   # a word the reader also accepts (--cache-ram-bytes off)
     if rule == 'forward':
         # PrefillChunkTokens intentionally accepts a signed decimal prefix.
         prefix = re.match(r'[ \t\r\n\v\f]*[+-]?[0-9]+', value)
@@ -147,7 +149,10 @@ def validate(data):
             if row[key] not in allowed:
                 raise ValueError(name + ': unknown ' + key)
         for key in ['purpose', 'default_text']:
-            if not isinstance(row[key], str) or not row[key].strip():
+            if not isinstance(row[key], str):
+                raise ValueError(name + ': empty ' + key)
+            # A debug-audience row may have no purpose: a made-up sentence is worse than none.
+            if not row[key].strip() and not (key == 'purpose' and row['audience'] == 'debug'):
                 raise ValueError(name + ': empty ' + key)
         if 'label' in row and (not isinstance(row['label'], str) or not row['label'].strip()):
             raise ValueError(name + ': invalid label')
@@ -189,7 +194,7 @@ def validate(data):
             raise ValueError(name + ': invalid feature metadata')
         if row['class'] == 'REMOVED' and row['restart_required']:
             raise ValueError(name + ': removed switch cannot require restart')
-        if row['experimental'] and name != 'GUFO_EXPERT_V2K':
+        if row['experimental'] and name not in {'GUFO_EXPERT_V2K', 'GUFO_DENSE_IQ_VARIANT', 'GUFO_DECODE_IQ_ROUTING_PATH', '--kv-cache-type', 'GUFO_DEVICE_ACCEPT', 'GUFO_DRAFT_CHAIN', 'GUFO_MOE_FUSION'}:
             raise ValueError(name + ': experimental switch not approved')
         if (row['kind'] == 'flag') != name.startswith('--'):
             raise ValueError(name + ': kind mismatch')
@@ -390,7 +395,7 @@ def render_schema():
                                    'values': {'type': 'array', 'items': {'type': ['boolean', 'number', 'string']}},
                                    'minimum': {'type': 'number'}, 'maximum': {'type': 'number'},
                                    'exclusive_minimum': {'type': 'number'},
-                                   'also': {'type': 'array', 'items': {'type': 'number'}},
+                                   'also': {'type': 'array', 'items': {'type': ['number', 'string']}},
                                    'format': string}},
     }
     return json.dumps({'$schema': 'https://json-schema.org/draft/2020-12/schema',

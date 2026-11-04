@@ -6,6 +6,8 @@
 #include <span>
 #include <string>
 
+#include "src/cli/kv_cache_options.hpp"
+
 void TestDefaultOptions() {
   const std::array<const char*, 2> args = {"Hello", "world"};
   const auto opt = gufo::cli::ParsePromptOptions(args);
@@ -22,6 +24,52 @@ void TestDefaultOptions() {
   assert(!opt->verbose);
   assert(opt->draft_tokens == 7);
   assert(opt->min_draft_tokens == 1);
+}
+
+void TestKvCacheType() {
+  using gufo::models::qwen38_flash_next::KvCacheType;
+  const auto defaults = gufo::cli::ParsePromptOptions(std::array{"Hello"});
+  assert(defaults && defaults->kv_cache_type == KvCacheType::kF16);
+  for (const auto value : {"f16", "q8_0"}) {
+    const auto parsed = gufo::cli::ParsePromptOptions(
+        std::array{"--kv-cache-type", value, "Hello"});
+    assert(parsed && parsed->kv_cache_type == (std::string_view(value) == "f16"
+                                                   ? KvCacheType::kF16
+                                                   : KvCacheType::kQ8_0));
+  }
+  for (const auto value : {"", "q8", "Q8_0", "bf16", "q4_0"}) {
+    std::string error;
+    assert(!gufo::cli::ParsePromptOptions(std::array{"--kv-cache-type", value},
+                                          &error));
+    assert(error == "--kv-cache-type must be f16, q8_0 or q8_0-rotated");
+  }
+  assert(!gufo::cli::ParsePromptOptions(
+      std::array{"--kv-cache-type", "q8_0", "--cpu"}));
+  const auto rotated = gufo::cli::ParsePromptOptions(
+      std::array{"--kv-cache-type", "q8_0-rotated", "Hello"});
+  assert(rotated && rotated->kv_cache_type == KvCacheType::kQ8_0Rotated);
+  std::string rotated_error;
+  assert(!gufo::cli::ParsePromptOptions(
+      std::array{"--kv-cache-type", "q8_0-rotated", "--cpu"}, &rotated_error));
+  assert(rotated_error ==
+         "--kv-cache-type q8_0-rotated requires the ROCm backend");
+  assert(gufo::cli::ValidateKvCacheTypeForArchitecture(
+      KvCacheType::kQ8_0Rotated, "qwen4exp", nullptr));
+  assert(!gufo::cli::ValidateKvCacheTypeForArchitecture(
+      KvCacheType::kQ8_0Rotated, "qwen3next", nullptr));
+  assert(!gufo::cli::ValidateKvCacheTypeForArchitecture(
+      static_cast<KvCacheType>(99), "qwen4exp", nullptr));
+  std::string error;
+  assert(gufo::cli::ValidateKvCacheTypeForArchitecture(KvCacheType::kQ8_0,
+                                                       "qwen4exp", &error));
+  for (const auto architecture :
+       {"qwen2", "qwen3", "qwen3next", "deepseek4", ""}) {
+    assert(!gufo::cli::ValidateKvCacheTypeForArchitecture(
+        KvCacheType::kQ8_0, architecture, &error));
+    assert(error.find("requires Qwen3.8-Flash-Next") != std::string::npos);
+    assert(gufo::cli::ValidateKvCacheTypeForArchitecture(KvCacheType::kF16,
+                                                         architecture, &error));
+  }
 }
 
 void TestExplicitFlags() {
@@ -230,6 +278,7 @@ void TestSamplingAndReasoningFlags() {
 
 int main() {
   TestDefaultOptions();
+  TestKvCacheType();
   TestExplicitFlags();
   TestSamplingAndReasoningFlags();
   TestFlashMtpFlags();

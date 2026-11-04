@@ -1,7 +1,16 @@
 cmake_minimum_required(VERSION 3.21)
 project(gufo LANGUAGES C CXX)
-if (NOT CMAKE_SYSTEM_NAME MATCHES "^(Linux|Windows)$" OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
-  message(FATAL_ERROR "Gufo requires Linux or Windows x86-64 with an AMD gfx1151 GPU")
+# Production remains Linux x86-64 on gfx1151; Windows x86-64 is a supported
+# native build target sharing the same source tree.
+if (NOT (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+  message(FATAL_ERROR "Gufo requires Linux or Windows on x86-64 with an AMD gfx1151 GPU")
+endif()
+if (WIN32)
+  # Declared before any subdirectory: windows.h must never define the
+  # min/max macros that break std::min/std::max and rocPRIM device headers.
+  # PSAPI_VERSION=2 resolves GetProcessMemoryInfo through kernel32 directly.
+  add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN PSAPI_VERSION=2)
 endif()
 if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
@@ -45,21 +54,51 @@ configure_file(src/cli/brand.hpp.in generated/src/cli/brand.hpp @ONLY)
 configure_file(src/cli/brand.json.in generated/brand.json @ONLY)
 include_directories(${CMAKE_BINARY_DIR}/generated)
 include_directories(${CMAKE_SOURCE_DIR})
-if (WIN32)
-  # Windows: POSIX shadow headers (compat/win32/include) plus their Win32
-  # implementation, linked into every target. The UCRT's own deprecated POSIX
-  # aliases are disabled so they cannot collide with the shim.
-  include_directories(BEFORE ${CMAKE_SOURCE_DIR}/compat/win32/include)
-  add_compile_definitions(_CRT_DECLARE_NONSTDC_NAMES=0 WIN32_LEAN_AND_MEAN
-    NOMINMAX _CRT_SECURE_NO_WARNINGS _USE_MATH_DEFINES)
-  # Linux gives every thread 8 MiB of stack; Windows defaults to 1 MiB, and
-  # std::thread inherits the executable's reserve size. Match Linux.
-  add_link_options(LINKER:/STACK:8388608)
-  add_library(gufo_posix_compat STATIC
-    compat/win32/posix.cpp
-    compat/win32/spawn.cpp)
-  target_link_libraries(gufo_posix_compat PUBLIC ws2_32 psapi)
-  link_libraries(gufo_posix_compat)
+
+# Reuse the compiler cache whenever it is installed, as the CPU check
+# derivations do. HIP kernels stay uncached: hipcc drive files and bitcode
+# paths need their own hit-rate measurement before they join the cache.
+find_program(GUFO_CCACHE_PROGRAM NAMES ccache)
+if (GUFO_CCACHE_PROGRAM)
+  set(CMAKE_C_COMPILER_LAUNCHER "${GUFO_CCACHE_PROGRAM}")
+  set(CMAKE_CXX_COMPILER_LAUNCHER "${GUFO_CCACHE_PROGRAM}")
+  # Newer CMake gives clang-cl gcc-style depfiles (-clang:-MD), which ccache
+  # rejects as unsupported; /showIncludes is cacheable.
+  if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    set(GUFO_CCACHE_CLANG_CL ON)
+    foreach(lang C CXX)
+      set(CMAKE_DEPFILE_FLAGS_${lang} "/showIncludes")
+      set(CMAKE_${lang}_DEPFILE_FORMAT msvc)
+    endforeach()
+  endif()
+  message(STATUS "gufo: compiling C and CXX through ${GUFO_CCACHE_PROGRAM}")
+else()
+  message(STATUS "gufo: ccache not found, compiling without a launcher")
+endif()
+
+# Windows host checks build only the OS leaves, the CPU cache library and
+# their portable tests. The rest of the tree targets Linux only.
+option(GUFO_PLATFORM_ONLY
+  "Build only the platform leaves, the CPU cache and their portable tests" OFF)
+if (GUFO_PLATFORM_ONLY)
+  find_package(Threads REQUIRED)
+  add_compile_options(-Wall -Wextra -Wpedantic -UNDEBUG)
+  add_subdirectory(src/core/platform)
+  add_subdirectory(src/cache)
+  include(CTest)
+  if (BUILD_TESTING)
+    if (NOT WIN32)
+      find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    endif()
+    include(cmake/PlatformTests.cmake)
+    add_subdirectory(tests/cache)
+  endif()
+  return()
+endif()
+# Linux libstdc++ must be parsed before HIP defines its __noinline__ macro.
+if (NOT WIN32)
+  add_compile_options(
+    "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include \"${CMAKE_SOURCE_DIR}/src/core/hip/libstdcxx_noinline.hpp\">")
 endif()
 find_package(ICU REQUIRED COMPONENTS uc i18n)
 find_package(Threads REQUIRED)
@@ -67,9 +106,21 @@ find_package(CURL REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(PNG REQUIRED)
 find_package(JPEG REQUIRED)
+if (WIN32)
+  # Windows has no system pkg-config; locate the pkgconf tool vcpkg installs.
+  # .pc files resolve via CMAKE_PREFIX_PATH, which the vcpkg toolchain already
+  # points at the manifest install tree.
+  find_program(PKG_CONFIG_EXECUTABLE pkgconf REQUIRED
+    HINTS "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/tools/pkgconf")
+endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(WEBP REQUIRED IMPORTED_TARGET libwebp)
+pkg_check_modules(SNDFILE REQUIRED IMPORTED_TARGET sndfile)
+pkg_check_modules(SOXR REQUIRED IMPORTED_TARGET soxr)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+# Public prefill policy headers use shared SHA-256, including metadata-only
+# targets that do not link the inference libraries.
+include_directories(SYSTEM ${OPENSSL_INCLUDE_DIR})
 set(GUFO_FFMPEG_EXECUTABLE "ffmpeg" CACHE STRING
   "FFmpeg executable used for generated media")
 set(GUFO_FFPROBE_EXECUTABLE "ffprobe" CACHE STRING
@@ -81,9 +132,11 @@ set(CMAKE_HIP_ARCHITECTURES gfx1151 CACHE STRING "HIP architecture")
 if (ENGINE_ENABLE_HIP AND NOT CMAKE_HIP_ARCHITECTURES STREQUAL "gfx1151")
   message(FATAL_ERROR "Gufo kernels require CMAKE_HIP_ARCHITECTURES=gfx1151")
 endif()
-# Standard ROCm installations; custom prefixes use CMAKE_PREFIX_PATH.
+# Standard ROCm installations; custom prefixes use CMAKE_PREFIX_PATH. As a
+# system prefix /opt/rocm is searched after CMAKE_PREFIX_PATH in the
+# environment, so a development shell's ROCm wins over the host's.
 if (EXISTS /opt/rocm)
-  list(APPEND CMAKE_PREFIX_PATH /opt/rocm)
+  list(APPEND CMAKE_SYSTEM_PREFIX_PATH /opt/rocm)
 endif()
 if (WIN32 AND DEFINED ENV{HIP_PATH})
   list(APPEND CMAKE_PREFIX_PATH $ENV{HIP_PATH})
@@ -98,15 +151,52 @@ if (ENGINE_ENABLE_HIP)
       CACHE STRING "HIP flags" FORCE)
   endif()
   enable_language(HIP)
+  # clang-cl compiles HIP like C++ on Windows, so ccache covers it there.
+  if (GUFO_CCACHE_CLANG_CL)
+    set(CMAKE_HIP_COMPILER_LAUNCHER "${GUFO_CCACHE_PROGRAM}")
+    set(CMAKE_DEPFILE_FLAGS_HIP "/showIncludes")
+    set(CMAKE_HIP_DEPFILE_FORMAT msvc)
+    message(STATUS "gufo: compiling HIP through ${GUFO_CCACHE_PROGRAM}")
+  endif()
   find_package(hip REQUIRED)
   find_package(hipblas REQUIRED)
   find_package(hipblaslt REQUIRED)
   find_package(rocblas REQUIRED)
+  find_package(rocm-core CONFIG QUIET)
   find_path(HIPCUB_INCLUDE_DIR hipcub/hipcub.hpp REQUIRED)
   find_path(ROCPRIM_INCLUDE_DIR rocprim/rocprim.hpp REQUIRED)
   find_path(ROCWMMA_INCLUDE_DIR rocwmma/rocwmma.hpp REQUIRED)
   message(STATUS "gufo: HIP target ${CMAKE_HIP_ARCHITECTURES}")
+  if (WIN32)
+    # The AMD driver installs an older amdhip64 into System32 that shadows
+    # the TheRock runtime on the DLL search path; executables must carry the
+    # matching runtime beside them (the exe directory precedes System32).
+    # ROCM_PATH comes from cmake/toolchains/windows-therock.cmake (HIP_PATH).
+    file(GLOB GUFO_HIP_RUNTIME_DLLS "${ROCM_PATH}/bin/*.dll")
+    if (NOT GUFO_HIP_RUNTIME_DLLS)
+      message(FATAL_ERROR "No HIP runtime DLLs under ROCM_PATH=${ROCM_PATH}/bin")
+    endif()
+    message(STATUS "gufo: staging ${GUFO_HIP_RUNTIME_DLLS}")
+  endif()
 endif()
+
+function(gufo_stage_hip_runtime target)
+  if (ENGINE_ENABLE_HIP AND WIN32 AND GUFO_HIP_RUNTIME_DLLS)
+    add_custom_command(TARGET ${target} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              ${GUFO_HIP_RUNTIME_DLLS} $<TARGET_FILE_DIR:${target}>)
+    # rocBLAS/hipBLASLt resolve their Tensile kernel libraries relative to
+    # their own DLL location, so the data directories ship beside the exe.
+    foreach(data_dir rocblas hipblaslt)
+      if (EXISTS "${ROCM_PATH}/bin/${data_dir}")
+        add_custom_command(TARGET ${target} POST_BUILD
+          COMMAND ${CMAKE_COMMAND} -E copy_directory
+                  "${ROCM_PATH}/bin/${data_dir}"
+                  "$<TARGET_FILE_DIR:${target}>/${data_dir}")
+      endif()
+    endforeach()
+  endif()
+endfunction()
 
 if (ENGINE_ENABLE_HIP)
   add_subdirectory(src/models/deepseek_v4_flash)
@@ -121,6 +211,9 @@ add_subdirectory(src/models/qwen3_tts)
 # Qwen3-ASR â€” model-private 1.7B speech recognition runtime.
 add_subdirectory(src/models/qwen3_asr)
 
+# EmbeddingGemma 2 is a model-private BF16 text/image embedding runtime.
+add_subdirectory(src/models/embedding_gemma2)
+
 # Compiler warnings and sanitizers
 option(GUFO_ENABLE_WARNINGS "Enable compiler warnings" ON)
 option(GUFO_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
@@ -131,18 +224,87 @@ if (GUFO_ENABLE_WARNINGS)
   endif()
 endif()
 
-if (GUFO_ENABLE_SANITIZERS)
+if (GUFO_ENABLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
   add_link_options(-fsanitize=address,undefined)
+endif()
+
+if (WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  # CMake drives lld-link directly, which skips the clang-cl driver and its
+  # runtime selection. Code using __builtin_cpu_supports (the disk CRC
+  # dispatch) needs the builtins' __cpu_model at link time.
+  # Ask the compiler in use for its runtime directory.
+  if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    set(gufo_clang_forward "/clang:")
+  else()
+    set(gufo_clang_forward "")
+  endif()
+  execute_process(COMMAND "${CMAKE_CXX_COMPILER}" "${gufo_clang_forward}-print-runtime-dir"
+                  OUTPUT_VARIABLE GUFO_CLANG_RT_DIR
+                  OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  set(GUFO_CLANG_RT_BUILTINS
+      "${GUFO_CLANG_RT_DIR}/clang_rt.builtins-x86_64.lib")
+  if (EXISTS "${GUFO_CLANG_RT_BUILTINS}")
+    add_link_options("${GUFO_CLANG_RT_BUILTINS}")
+  else()
+    message(WARNING "clang_rt.builtins not found under '${GUFO_CLANG_RT_DIR}'")
+  endif()
+  # The PDB path the linker writes into each executable and DLL is the build
+  # tree's absolute path. Keep the file name only, so a shipped binary does not
+  # carry the builder's folders.
+  add_link_options("LINKER:/PDBALTPATH:%_PDB%")
+  if (ENGINE_ENABLE_HIP)
+    execute_process(COMMAND "${CMAKE_CXX_COMPILER}" "${gufo_clang_forward}-print-resource-dir"
+                    OUTPUT_VARIABLE GUFO_CLANG_RESOURCE_DIR
+                    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    set(GUFO_HIP_CMATH "${GUFO_CLANG_RESOURCE_DIR}/include/__clang_hip_cmath.h")
+    if (EXISTS "${GUFO_HIP_CMATH}")
+      file(READ "${GUFO_HIP_CMATH}" GUFO_HIP_CMATH_CONTENT)
+      if (NOT GUFO_HIP_CMATH_CONTENT MATCHES "GUFO_MSVC_CMATH_PATCH"
+          AND NOT CMAKE_HIP_FLAGS MATCHES "compat/win32/hip_include")
+        message(FATAL_ERROR
+          "TheRock HIP math headers are not patched for MSVC 14.40+; run: "
+          "python tools/windows/patch_sdk_math.py")
+      endif()
+    endif()
+  endif()
+endif()
+
+if (WIN32)
+  # Platform layer: WinSock (net), process memory counters (logging), BCrypt
+  # and the registry (os_info).
+  set(GUFO_PLATFORM_LIBS ws2_32 iphlpapi bcrypt advapi32)
 endif()
 
 add_subdirectory(src/cache)
 
 if (ENGINE_ENABLE_HIP)
+  add_library(gufo_hip_host STATIC src/core/hip/host_allocations.cpp)
+  target_link_libraries(gufo_hip_host PUBLIC hip::host gufo_platform)
+  # HIP loads ROCr through libamdhip64's own RUNPATH, so a build tree runs
+  # the unpatched runtime unless LD_LIBRARY_PATH names the patched one (the
+  # Nix package wraps `gufo` for this). With GUFO_ROCR_LIBRARY_DIR (the Nix
+  # shells export it) every HIP binary links that ROCr directly: the loader
+  # maps it first and HIP reuses it, one soname per process.
+  set(GUFO_ROCR_LIBRARY_DIR "" CACHE PATH
+      "ROCr runtime directory HIP binaries load (empty: HIP's own)")
+  set(gufo_rocr_dir "${GUFO_ROCR_LIBRARY_DIR}")
+  if (NOT gufo_rocr_dir AND DEFINED ENV{GUFO_ROCR_LIBRARY_DIR})
+    set(gufo_rocr_dir "$ENV{GUFO_ROCR_LIBRARY_DIR}")
+  endif()
+  if (gufo_rocr_dir AND NOT WIN32)
+    find_library(GUFO_ROCR_LIBRARY hsa-runtime64 PATHS "${gufo_rocr_dir}"
+                 NO_DEFAULT_PATH NO_CACHE REQUIRED)
+    target_link_libraries(gufo_hip_host PUBLIC
+                          "${GUFO_ROCR_LIBRARY}")
+    message(STATUS "gufo: ROCr runtime ${GUFO_ROCR_LIBRARY}")
+  endif()
+  target_include_directories(gufo_hip_host PUBLIC ${PROJECT_SOURCE_DIR})
   add_library(gufo_cache_hip STATIC
     src/core/hip/committed_backing.cpp
+    src/core/hip/staging.cpp
     src/core/hip/transfer_pool.cpp)
-  target_link_libraries(gufo_cache_hip PUBLIC gufo_cache hip::host)
+  target_link_libraries(gufo_cache_hip PUBLIC gufo_cache gufo_hip_host hip::host)
   if (BUILD_TESTING)
     target_compile_options(gufo_cache_hip PRIVATE -UNDEBUG)
   endif()
@@ -151,6 +313,8 @@ if (ENGINE_ENABLE_HIP)
     target_link_libraries(cache_idle_spill_bench PRIVATE gufo_cache_hip)
     add_executable(cache_backing_bench tests/cache/backing_bench.cpp)
     target_link_libraries(cache_backing_bench PRIVATE gufo_cache_hip)
+    add_executable(cache_streaming_bench tests/cache/streaming_bench.cpp)
+    target_link_libraries(cache_streaming_bench PRIVATE gufo_cache_hip)
   endif()
 endif()
 
@@ -168,6 +332,7 @@ add_library(gufo_diagnostics STATIC
   src/cli/diagnose/diagnose.cpp
 )
 target_include_directories(gufo_diagnostics PUBLIC ${CMAKE_SOURCE_DIR})
+target_link_libraries(gufo_diagnostics PUBLIC gufo_platform)
 target_compile_definitions(gufo_diagnostics PRIVATE
   GUFO_REVISION="${GUFO_REVISION}")
 
@@ -175,8 +340,14 @@ if (ENGINE_ENABLE_HIP)
   target_sources(gufo_diagnostics PRIVATE
     src/core/hip/allocation_benchmark.hip)
   target_compile_definitions(gufo_diagnostics PRIVATE ENGINE_ENABLE_HIP=1)
+  if (rocm-core_FOUND)
+    target_compile_definitions(gufo_diagnostics PRIVATE
+      GUFO_ROCM_VERSION="${rocm-core_VERSION}")
+  endif()
   target_link_libraries(gufo_diagnostics PRIVATE hip::host roc::hipblas roc::rocblas)
 endif()
+
+add_subdirectory(src/core/platform)
 
 add_library(gufo_core STATIC
   src/core/image.cpp
@@ -193,7 +364,8 @@ add_library(gufo_core STATIC
   src/models/minimax_h3/dit.cpp
   src/models/minimax_h3/generation.cpp
   src/models/minimax_h3/json.cpp
-  src/models/minimax_h3/media.cpp
+  "$<$<PLATFORM_ID:Windows>:src/models/minimax_h3/media_windows.cpp>"
+  "$<$<NOT:$<PLATFORM_ID:Windows>>:src/models/minimax_h3/media_posix.cpp>"
   src/models/minimax_h3/prompt_encoder.cpp
   src/models/minimax_h3/runtime.cpp
   src/models/minimax_h3/sampling.cpp
@@ -205,6 +377,7 @@ add_library(gufo_core STATIC
   src/eval/extract.cpp
   src/eval/regrade.cpp
   src/core/hip/hipblaslt_plan_database.cpp
+  src/core/quant/bf16_q8_0.cpp
   src/core/quant/ggml_dequant.cpp
   src/core/quant/iq_grids.cpp
   src/core/quant/ggml_gemm.cpp
@@ -213,8 +386,9 @@ target_include_directories(gufo_core PUBLIC ${CMAKE_SOURCE_DIR})
 target_compile_definitions(gufo_core PRIVATE
   GUFO_FFMPEG_EXECUTABLE="${GUFO_FFMPEG_EXECUTABLE}"
   GUFO_FFPROBE_EXECUTABLE="${GUFO_FFPROBE_EXECUTABLE}")
-target_link_libraries(gufo_core PUBLIC ICU::uc ICU::i18n Threads::Threads
-  PNG::PNG JPEG::JPEG PkgConfig::WEBP CURL::libcurl OpenSSL::Crypto)
+target_link_libraries(gufo_core PUBLIC gufo_platform ICU::uc ICU::i18n
+  Threads::Threads PNG::PNG JPEG::JPEG PkgConfig::WEBP CURL::libcurl
+  OpenSSL::Crypto)
 
 if(GUFO_ENABLE_NPU)
   # Qwen objects in gufo_core contain NPU references. Give every core
@@ -250,6 +424,11 @@ if(GUFO_ENABLE_OPENMP)
   endif()
 endif()
 
+if (WIN32 AND NOT ENGINE_ENABLE_HIP)
+  # CPU server tests use the real host RAM/commit readings too.
+  target_sources(gufo_core PRIVATE src/core/platform/memory_readings.cpp)
+endif()
+
 if (ENGINE_ENABLE_HIP)
   set_property(SOURCE src/models/minimax_h3/dit.hip
     APPEND PROPERTY COMPILE_OPTIONS -O2)
@@ -263,6 +442,7 @@ if (ENGINE_ENABLE_HIP)
     src/models/minimax_h3/sampling.hip
     src/models/minimax_h3/video_vae.hip
     src/models/minimax_h3/attention.hip
+    src/core/hip/snapshot_copy.hip
     src/core/hip/weight_upload.cpp
     src/core/speculative/speculative_verifier.cpp
   )
@@ -274,14 +454,14 @@ if (ENGINE_ENABLE_HIP)
   target_include_directories(gufo_core SYSTEM PRIVATE
     ${HIPCUB_INCLUDE_DIR}
     ${ROCPRIM_INCLUDE_DIR})
-  target_link_libraries(gufo_core PUBLIC hip::host roc::hipblas
+  target_link_libraries(gufo_core PUBLIC gufo_hip_host hip::host roc::hipblas
     roc::hipblaslt roc::rocblas)
 endif()
 
 add_library(gufo_llm_cli STATIC
   src/cli/bench/bench.cpp
   src/cli/prompt/prompt.cpp)
-target_link_libraries(gufo_llm_cli PUBLIC gufo_core)
+target_link_libraries(gufo_llm_cli PUBLIC gufo_core gufo_qwen38_flash_next)
 if(ENGINE_ENABLE_HIP)
   target_sources(gufo_llm_cli PRIVATE src/cli/prompt/gemma4_prompt.cpp)
   target_link_libraries(gufo_llm_cli PUBLIC gufo_deepseek_v4_flash
@@ -291,7 +471,7 @@ endif()
 add_library(gufo_logging STATIC src/cli/serve/logging.cpp src/cli/serve/trace.cpp)
 target_include_directories(gufo_logging PUBLIC ${PROJECT_SOURCE_DIR})
 target_compile_features(gufo_logging PUBLIC cxx_std_20)
-target_link_libraries(gufo_logging PUBLIC Threads::Threads)
+target_link_libraries(gufo_logging PUBLIC Threads::Threads gufo_platform)
 target_link_libraries(gufo_qwen38_flash_next PUBLIC gufo_logging)
 if(TARGET gufo_qwen38_flash_next_mmq)
   target_link_libraries(gufo_qwen38_flash_next_mmq PUBLIC gufo_logging)
@@ -309,6 +489,8 @@ add_library(gufo_http STATIC
   src/cli/serve/image_api.cpp
   src/cli/serve/audio_asr_api.cpp
   src/cli/serve/asr_service.cpp
+  src/cli/serve/embeddings_api.cpp
+  src/cli/serve/embedding_service.cpp
   src/cli/serve/audio_tts_api.cpp
   src/cli/serve/tts_service.cpp
   src/cli/serve/video_api.cpp
@@ -318,8 +500,11 @@ add_library(gufo_http STATIC
   src/cli/serve/asr_websocket.cpp
   src/cli/serve/tts_websocket.cpp
   src/cli/serve/openai_chat.cpp
+  # The DeepSeek tool-call scanner lives with its model; its renderer stays in
+  # the engine library, so no translation unit is linked twice.
+  src/models/deepseek_v4_flash/tool_calls.cpp
 )
-target_link_libraries(gufo_http PUBLIC gufo_logging gufo_core gufo_gemma4 gufo_qwen3_tts gufo_qwen3_asr gufo_qwen_image_21)
+target_link_libraries(gufo_http PUBLIC gufo_logging gufo_core gufo_gemma4 gufo_qwen3_tts gufo_qwen3_asr gufo_qwen_image_21 gufo_embedding_gemma2)
 
 set(bubo_command_sources
   src/cli/main.cpp
@@ -330,6 +515,7 @@ set(bubo_command_sources
   src/cli/serve/serve.cpp
   src/cli/serve/continuation_cache.cpp
   src/cli/serve/continuation_disk_store.cpp
+  src/cli/serve/component_text_cache.cpp
   src/cli/serve/text_model_runner.cpp
   src/cli/serve/text_generation_scheduler.cpp
   src/cli/serve/inference_backend.cpp
@@ -370,6 +556,7 @@ set(bubo_prepare_sources
   src/cli/machine_adapter.cpp
   src/cli/machine_warnings.cpp
   src/cli/machine_adapter_system.cpp
+  src/cli/machine_adapter_bounded.cpp
   src/cli/machine_adapter_adlx.cpp
   src/cli/support_bundle.cpp
   src/cli/stop.cpp
@@ -408,9 +595,10 @@ if(WIN32 AND BUBO_ADLX_SDK_DIR)
   target_include_directories(bubo_prepare PRIVATE "${BUBO_ADLX_SDK_DIR}")
   target_compile_definitions(bubo_prepare PRIVATE BUBO_HAS_ADLX=1)
 endif()
-target_link_libraries(bubo_prepare PUBLIC CURL::libcurl OpenSSL::Crypto ZLIB::ZLIB gufo_logging)
+target_link_libraries(bubo_prepare PUBLIC CURL::libcurl OpenSSL::Crypto ZLIB::ZLIB gufo_logging gufo_platform)
 add_library(bubo_models STATIC
   src/cli/models_support.cpp
+  src/cli/side_file_check.cpp
   src/cli/serve/model_manifest.cpp
   src/cli/serve/release_profile.cpp)
 target_link_libraries(bubo_models PUBLIC bubo_prepare gufo_core gufo_qwen38_flash_next gufo_gemma4)
@@ -461,7 +649,8 @@ else()
 endif()
 target_link_libraries(${bubo_inference_target} PRIVATE bubo_prepare bubo_models)
 add_dependencies(gufo bubo_prepare_release_gate)
-target_link_libraries(${bubo_inference_target} PRIVATE gufo_diagnostics gufo_core gufo_llm_cli gufo_http gufo_diffusion_gemma CURL::libcurl)
+target_link_libraries(${bubo_inference_target} PRIVATE gufo_cache gufo_diagnostics gufo_core gufo_llm_cli gufo_http gufo_diffusion_gemma CURL::libcurl)
+gufo_stage_hip_runtime(${bubo_inference_target})
 set_target_properties(gufo PROPERTIES OUTPUT_NAME "${GUFO_BRAND}")
 if(GUFO_ENABLE_NPU)
   npu_attach_runtime(${bubo_inference_target})
@@ -481,9 +670,9 @@ target_compile_definitions(${bubo_inference_target} PRIVATE
   GUFO_H3_INSTALLED_SOURCE_MANIFEST="${CMAKE_INSTALL_PREFIX}/share/gufo/models/minimax_h3/MINIMAX_H3_FL2VA_BF16.source-manifest.json")
 
 if (ENGINE_ENABLE_HIP)
-  target_link_libraries(${bubo_inference_target} PRIVATE gufo_deepseek_v4_flash)
+  target_link_libraries(${bubo_inference_target} PRIVATE gufo_cache_hip gufo_deepseek_v4_flash)
 endif()
-target_link_libraries(${bubo_inference_target} PRIVATE gufo_qwen3_tts gufo_qwen3_asr)
+target_link_libraries(${bubo_inference_target} PRIVATE gufo_qwen3_tts gufo_qwen3_asr gufo_embedding_gemma2)
 
 if (GUFO_BRAND STREQUAL "gufo" AND WIN32)
   # Symlinks need Developer Mode or elevation on Windows; ship a copy.
@@ -539,6 +728,12 @@ if (ENGINE_ENABLE_HIP AND GUFO_BUILD_TOOLS)
 endif()
 
 install(TARGETS gufo DESTINATION bin)
+# --prefill-mode fast reads these scalars from the executable directory.
+install(FILES src/models/qwen38_flash_next/prefill-fold-L3.txt DESTINATION bin)
+add_custom_command(TARGET ${bubo_inference_target} POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${CMAKE_CURRENT_SOURCE_DIR}/src/models/qwen38_flash_next/prefill-fold-L3.txt
+          $<TARGET_FILE_DIR:${bubo_inference_target}>/prefill-fold-L3.txt)
 if(TARGET bubo_engine)
   install(TARGETS bubo_engine RUNTIME DESTINATION bin LIBRARY DESTINATION bin)
 endif()
@@ -566,14 +761,19 @@ include(CTest)
 
 # Test assertions remain active when model code uses production optimization.
 if (BUILD_TESTING)
-  add_compile_options(-UNDEBUG)
+  if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options(-UNDEBUG)
+  elseif (MSVC)
+    add_compile_options(/UNDEBUG)
+  endif()
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   add_subdirectory(tests/prepare)
+  # The checkpoint grid also controls GPU-only prefill passes.
+  add_executable(npu_prefill_plan_test tests/npu/prefill_plan_test.cpp)
+  target_include_directories(npu_prefill_plan_test PRIVATE "${CMAKE_SOURCE_DIR}")
+  add_test(NAME npu_prefill_plan_test COMMAND npu_prefill_plan_test)
+  set_tests_properties(npu_prefill_plan_test PROPERTIES LABELS "cpu;npu;fake")
   if(GUFO_ENABLE_NPU)
-    add_executable(npu_prefill_plan_test tests/npu/prefill_plan_test.cpp)
-    target_include_directories(npu_prefill_plan_test PRIVATE "${CMAKE_SOURCE_DIR}")
-    add_test(NAME npu_prefill_plan_test COMMAND npu_prefill_plan_test)
-    set_tests_properties(npu_prefill_plan_test PROPERTIES LABELS "cpu;npu;fake")
     add_executable(npu_xrt_runtime_test
       tests/npu/xrt_runtime_test.cpp src/npu/xrt_runtime_policy.cpp)
     add_test(NAME npu_xrt_runtime_test COMMAND npu_xrt_runtime_test)
@@ -776,9 +976,24 @@ if (BUILD_TESTING)
   add_library(device_loss_faults SHARED EXCLUDE_FROM_ALL
     tests/functional/device_loss_faults.cpp)
   target_link_libraries(device_loss_faults PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
+  # Linux-only: the gate interposes fsync via dlsym(RTLD_NEXT) and reads
+  # /proc/self/fd, neither of which exists on Windows.
+  if (NOT WIN32)
   add_library(cache_disk_faults SHARED
     tests/functional/cache_disk_faults.cpp)
   target_link_libraries(cache_disk_faults PRIVATE ${CMAKE_DL_LIBS})
+  endif()
+  # The fault libraries are LD_PRELOADed into uninstrumented processes (the
+  # test's Python, a release server); a sanitized library aborts there with
+  # "ASan runtime does not come first".
+  if (GUFO_ENABLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    foreach(preload device_loss_faults cache_disk_faults)
+      if (TARGET ${preload})
+        target_compile_options(${preload} PRIVATE -fno-sanitize=all)
+        target_link_options(${preload} PRIVATE -fno-sanitize=all)
+      endif()
+    endforeach()
+  endif()
 
   add_subdirectory(tests/models/qwen)
   add_subdirectory(tests/models/qwen27b)
@@ -787,6 +1002,8 @@ if (BUILD_TESTING)
   gufo_qwen3_asr_register_tests()
   gufo_qwen_image_21_register_tests()
   gufo_diffusion_gemma_register_tests()
+
+  add_subdirectory(tests/models/embedding_gemma2)
 
   add_test(NAME gufo_version COMMAND gufo --version)
   gufo_escape_version_regex("${GUFO_BRAND}" brand_regex)
@@ -832,6 +1049,9 @@ if (BUILD_TESTING)
   add_test(NAME gufo_serve_tts_help COMMAND gufo serve tts --help)
   set_tests_properties(gufo_serve_tts_help PROPERTIES
     LABELS "cpu;server;cli;qwen3-tts")
+  add_test(NAME gufo_serve_embedding_help COMMAND gufo serve embedding --help)
+  set_tests_properties(gufo_serve_embedding_help PROPERTIES
+    LABELS "cpu;server;cli;embedding-gemma2")
 
   add_test(NAME strix_serve_help COMMAND gufo serve --help)
   set_tests_properties(strix_serve_help PROPERTIES LABELS "cpu;server;cli")
@@ -843,7 +1063,7 @@ if (BUILD_TESTING)
   file(TO_CMAKE_PATH "${GUFO_PRODUCTION_ENV_SPEC}" GUFO_PRODUCTION_ENV_SPEC_PATH)
   add_executable(log_async_test tests/cli/log_async_test.cpp src/cli/serve/logging.cpp)
   target_compile_definitions(log_async_test PRIVATE GUFO_LOG_TESTING=1)
-  target_link_libraries(log_async_test PRIVATE Threads::Threads)
+  target_link_libraries(log_async_test PRIVATE Threads::Threads gufo_platform)
   add_test(NAME log_async_test COMMAND log_async_test)
   set_tests_properties(log_async_test PROPERTIES LABELS "cpu;cli;release;check-pr" TIMEOUT 45)
 
@@ -879,6 +1099,11 @@ if (BUILD_TESTING)
   endif()
   add_test(NAME release_profile_test COMMAND release_profile_test)
   set_tests_properties(release_profile_test PROPERTIES LABELS "cpu;cli;release;check-pr")
+  add_test(NAME think_nudge_profile_test COMMAND release_profile_test --think-nudge)
+  set_tests_properties(think_nudge_profile_test PROPERTIES LABELS "cpu;cli;release;contract")
+  # The program-name literal scan on its own: red on its own until the legacy lines are fixed or allow-listed.
+  add_test(NAME brand_literal_scan_test COMMAND release_profile_test --brand-scan)
+  set_tests_properties(brand_literal_scan_test PROPERTIES LABELS "cpu;cli;release;brand")
 
   add_executable(arg_parser_test
     tests/cli/arg_parser_test.cpp
@@ -919,9 +1144,10 @@ if (BUILD_TESTING)
   add_executable(tool_argument_loop_test tests/core/tool_argument_loop_test.cpp
     src/cli/serve/continuation_cache.cpp
     src/cli/serve/continuation_disk_store.cpp
+    src/cli/serve/component_text_cache.cpp
     src/cli/serve/text_model_runner.cpp
     src/cli/serve/text_generation_scheduler.cpp)
-  target_link_libraries(tool_argument_loop_test PRIVATE gufo_logging gufo_core)
+  target_link_libraries(tool_argument_loop_test PRIVATE gufo_logging gufo_core gufo_cache)
   add_test(NAME tool_argument_loop_test COMMAND tool_argument_loop_test)
   set_tests_properties(tool_argument_loop_test PROPERTIES LABELS "cpu;sampling;behaviour")
 
@@ -975,8 +1201,17 @@ if (BUILD_TESTING)
   add_test(NAME json_test COMMAND json_test)
   set_tests_properties(json_test PROPERTIES LABELS "cpu;json")
 
+  add_executable(heap_placement_test tests/core/heap_placement_test.cpp)
+  target_link_libraries(heap_placement_test PRIVATE gufo_core)
+  add_test(NAME heap_placement_test COMMAND heap_placement_test)
+  set_tests_properties(heap_placement_test PROPERTIES LABELS "cpu;hip;core")
+
+  add_executable(sampling_test tests/core/sampling_test.cpp)
+  target_link_libraries(sampling_test PRIVATE gufo_core)
+  add_test(NAME sampling_test COMMAND sampling_test)
+  set_tests_properties(sampling_test PROPERTIES LABELS "cpu;sampling")
   add_executable(platform_tuning_test tests/core/platform_tuning_test.cpp)
-  target_link_libraries(platform_tuning_test PRIVATE gufo_logging)
+  target_link_libraries(platform_tuning_test PRIVATE gufo_logging gufo_platform)
   add_test(NAME platform_tuning_test COMMAND platform_tuning_test)
   set_tests_properties(platform_tuning_test PROPERTIES LABELS "cpu")
 
@@ -987,6 +1222,7 @@ if (BUILD_TESTING)
     src/cli/serve/logging.cpp
     src/cli/serve/openai_chat.cpp
     src/models/deepseek_v4_flash/chat_template.cpp
+    src/models/deepseek_v4_flash/tool_calls.cpp
   )
   target_link_libraries(openai_chat_test PRIVATE gufo_core gufo_gemma4 bubo_prepare)
   add_test(NAME openai_chat_test COMMAND openai_chat_test)
@@ -1001,7 +1237,8 @@ if (BUILD_TESTING)
     src/cli/serve/release_profile.cpp
     src/cli/serve/logging.cpp
     src/cli/serve/openai_chat.cpp
-    src/models/deepseek_v4_flash/chat_template.cpp)
+    src/models/deepseek_v4_flash/chat_template.cpp
+    src/models/deepseek_v4_flash/tool_calls.cpp)
   target_link_libraries(qwen_incremental_http_test PRIVATE
     gufo_core gufo_gemma4 bubo_prepare)
   add_test(NAME qwen_incremental_http_test COMMAND qwen_incremental_http_test)
@@ -1014,25 +1251,38 @@ if (BUILD_TESTING)
   add_test(NAME quote_tracker_test COMMAND quote_tracker_test)
   set_tests_properties(quote_tracker_test PROPERTIES LABELS "cpu;server;api")
 
+  # the trace suite simulates RLIMIT_FSIZE
+  if (NOT WIN32)
   add_executable(trace_test tests/cli/trace_test.cpp)
-  target_link_libraries(trace_test PRIVATE gufo_logging)
+  target_link_libraries(trace_test PRIVATE gufo_logging gufo_platform)
   add_test(NAME trace_test COMMAND trace_test)
   set_tests_properties(trace_test PROPERTIES LABELS "cpu;server;trace")
+  endif()
 
   add_executable(cache_disk_limits_test tests/cli/cache_disk_limits_test.cpp)
   add_test(NAME cache_disk_limits_test COMMAND cache_disk_limits_test)
   set_tests_properties(cache_disk_limits_test PROPERTIES LABELS "cpu;server;cli" TIMEOUT 30)
 
+  # These HTTP/WebSocket suites drive raw POSIX sockets or fork() directly.
+  if (NOT WIN32)
   add_executable(http_server_test tests/cli/http_server_test.cpp)
   target_link_libraries(http_server_test PRIVATE gufo_http)
   add_test(NAME http_server_test COMMAND http_server_test)
   add_test(NAME debug_hooks_http_test COMMAND http_server_test --debug-hooks)
   set_tests_properties(debug_hooks_http_test PROPERTIES LABELS "cpu;debug-hooks" TIMEOUT 30)
   set_tests_properties(http_server_test PROPERTIES LABELS "cpu;server;http" TIMEOUT 30)
+
+  add_executable(http_server_signals_test tests/cli/http_server_signals_test.cpp)
+  target_link_libraries(http_server_signals_test PRIVATE gufo_http)
+  add_test(NAME http_server_signals_test COMMAND http_server_signals_test)
+  set_tests_properties(http_server_signals_test
+    PROPERTIES LABELS "cpu;server;http" TIMEOUT 60)
+
   add_executable(audio_websocket_test tests/cli/audio_websocket_test.cpp)
   target_link_libraries(audio_websocket_test PRIVATE gufo_http)
   add_test(NAME audio_websocket_test COMMAND audio_websocket_test)
   set_tests_properties(audio_websocket_test PROPERTIES LABELS "cpu;server;audio" TIMEOUT 30)
+  endif()
 
   add_test(NAME serve_cli_test
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli/serve_test.py
@@ -1045,7 +1295,18 @@ if (BUILD_TESTING)
   set_tests_properties(kernel_resources_parser_test PROPERTIES
     LABELS "cpu;kernels" TIMEOUT 30)
 
-  if(ENGINE_ENABLE_HIP)
+  add_test(NAME check_docs_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/check_docs_test.py)
+  set_tests_properties(check_docs_test PROPERTIES LABELS "cpu;docs" TIMEOUT 30)
+
+  add_test(NAME check_pr_title_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/check_pr_title_test.py)
+  set_tests_properties(check_pr_title_test PROPERTIES LABELS "cpu;docs" TIMEOUT 30)
+
+  # It reads the code objects of an ELF gufo binary; the Windows binary is a PE file the script cannot parse.
+  if(ENGINE_ENABLE_HIP AND TARGET gufo AND NOT WIN32)
     # A compiler update can make a kernel spill with no source change. Clang 23
     # increased the scratch of the Q8 prefill GEMM from 0 to 480 bytes. This
     # test fails if a kernel uses more scratch than the baseline allows. It
@@ -1090,12 +1351,66 @@ if (BUILD_TESTING)
   set_tests_properties(continuation_cache_test PROPERTIES
     LABELS "cpu;server;cache;state;lifecycle")
 
+  add_executable(component_text_cache_test
+    tests/cli/component_text_cache_test.cpp
+    src/cli/serve/component_text_cache.cpp
+    src/cli/serve/continuation_cache.cpp
+    src/cli/serve/continuation_disk_store.cpp
+    src/cli/serve/text_model_runner.cpp)
+  target_link_libraries(component_text_cache_test PRIVATE gufo_cache_fake gufo_core gufo_logging gufo_qwen38_flash_next)
+  add_test(NAME component_text_cache_test COMMAND component_text_cache_test)
+  set_tests_properties(component_text_cache_test PROPERTIES LABELS "cpu;server;cache;state;lifecycle")
+  add_test(NAME qfn_packed_ingress_publication_test
+    COMMAND ${CMAKE_COMMAND} -E env GUFO_TEST_PACKED_INGRESS_ONLY=1
+      $<TARGET_FILE:component_text_cache_test>)
+  set_tests_properties(qfn_packed_ingress_publication_test PROPERTIES
+    LABELS "cpu;server;cache;qwen38_flash_next")
+  add_test(NAME qfn_rotated_process_local_disk_test
+    COMMAND ${CMAKE_COMMAND} -E env GUFO_TEST_ROTATED_PROCESS_LOCAL_ONLY=disk
+      $<TARGET_FILE:component_text_cache_test>)
+  set_tests_properties(qfn_rotated_process_local_disk_test PROPERTIES
+    LABELS "cpu;server;cache;qwen38_flash_next")
+  add_executable(qfn_kv_ingress_validation_test
+    tests/cli/qfn_kv_ingress_validation_test.cpp)
+  target_link_libraries(qfn_kv_ingress_validation_test PRIVATE
+    gufo_qwen38_flash_next gufo_cache)
+  target_compile_options(qfn_kv_ingress_validation_test PRIVATE
+    -fno-fast-math -ffp-contract=off -frounding-math)
+  add_test(NAME qfn_kv_ingress_validation_test COMMAND qfn_kv_ingress_validation_test)
+  set_tests_properties(qfn_kv_ingress_validation_test PROPERTIES
+    LABELS "cpu;server;cache;qwen38_flash_next")
+
+  add_executable(component_async_replay_test
+    tests/cli/component_async_replay_test.cpp
+    src/cli/serve/component_text_cache.cpp
+    src/cli/serve/continuation_cache.cpp
+    src/cli/serve/continuation_disk_store.cpp
+    src/cli/serve/text_model_runner.cpp)
+  target_link_libraries(component_async_replay_test PRIVATE gufo_cache_fake gufo_core gufo_logging)
+  target_compile_options(component_async_replay_test PRIVATE -UNDEBUG)
+  add_test(NAME component_async_replay_test COMMAND component_async_replay_test)
+  add_test(NAME component_async_registration_adjacent
+    COMMAND component_async_replay_test --registration-layout=adjacent)
+  add_test(NAME component_async_registration_gapped
+    COMMAND component_async_replay_test --registration-layout=gapped)
+  set_tests_properties(component_async_replay_test
+    component_async_registration_adjacent component_async_registration_gapped PROPERTIES
+    LABELS "cpu;server;cache;state;lifecycle" TIMEOUT 180)
+
+  add_executable(component_sequence_test tests/cli/component_sequence_test.cpp)
+  target_link_libraries(component_sequence_test PRIVATE gufo_cache)
+  add_test(NAME component_sequence_test COMMAND component_sequence_test)
+  add_test(NAME component_sequence_fork_test COMMAND component_sequence_test --fork)
+  set_tests_properties(component_sequence_test component_sequence_fork_test PROPERTIES
+    LABELS "cpu;cache;prefill;acceptance" TIMEOUT 180)
+
   add_executable(text_model_runner_test
     tests/cli/text_model_runner_test.cpp
     src/cli/serve/continuation_cache.cpp
     src/cli/serve/continuation_disk_store.cpp
-    src/cli/serve/text_model_runner.cpp)
-  target_link_libraries(text_model_runner_test PRIVATE gufo_logging gufo_core)
+    src/cli/serve/component_text_cache.cpp
+  src/cli/serve/text_model_runner.cpp)
+  target_link_libraries(text_model_runner_test PRIVATE gufo_logging gufo_core gufo_cache)
   add_test(NAME text_model_runner_test COMMAND text_model_runner_test)
   # The fake runners admit snapshots through the real host-memory floor; with it
   # on, the test fails whenever this machine has under 4 GiB free. The floor
@@ -1104,16 +1419,53 @@ if (BUILD_TESTING)
     LABELS "cpu;server;runner;cache;state;lifecycle"
     ENVIRONMENT "GUFO_CACHE_HOST_FLOOR_MB=0")
 
+  add_executable(prefill_tail_component_test
+    tests/cli/prefill_tail_component_test.cpp
+    src/cli/serve/component_text_cache.cpp
+    src/cli/serve/continuation_cache.cpp
+    src/cli/serve/continuation_disk_store.cpp
+    src/cli/serve/text_model_runner.cpp)
+  target_link_libraries(prefill_tail_component_test PRIVATE
+    gufo_cache_fake gufo_core gufo_logging)
+  set(prefill_tail_tests)
+  foreach(case IN ITEMS TestExpertTailRequestBoundary TestExpertTailSnapshotEdges
+      TestFastWarmSessionRunsNormal TestFastLongPromptThenWarmTurns
+      TestFastRestoreInsideCutRegion TestFastThresholdEdge)
+    add_test(NAME prefill_tail_component.${case}
+      COMMAND prefill_tail_component_test --test ${case})
+    list(APPEND prefill_tail_tests prefill_tail_component.${case})
+  endforeach()
+  foreach(scenario RANGE 0 13)
+    add_test(NAME prefill_tail_component.newest_${scenario}
+      COMMAND prefill_tail_component_test --tail-newest ${scenario})
+    list(APPEND prefill_tail_tests prefill_tail_component.newest_${scenario})
+  endforeach()
+  foreach(capacity IN ITEMS 4 8)
+    add_test(NAME prefill_tail_component.real_sequence_${capacity}
+      COMMAND prefill_tail_component_test --tail-real-sequence ${capacity})
+    list(APPEND prefill_tail_tests prefill_tail_component.real_sequence_${capacity})
+  endforeach()
+  add_test(NAME prefill_tail_component.default_golden
+    COMMAND prefill_tail_component_test --tail-default-golden)
+  list(APPEND prefill_tail_tests prefill_tail_component.default_golden)
+  set_tests_properties(${prefill_tail_tests} PROPERTIES
+    LABELS "cpu;server;cache;prefill;acceptance"
+    ENVIRONMENT "GUFO_CACHE_HOST_FLOOR_MB=0" TIMEOUT 120)
+
+  # the disk-store suite exercises permission faults with chmod and lstat
+  if (NOT WIN32)
   add_executable(continuation_disk_store_test
     tests/cli/continuation_disk_store_test.cpp
     src/cli/serve/continuation_disk_store.cpp
-    src/cli/serve/text_model_runner.cpp
+    src/cli/serve/component_text_cache.cpp
+  src/cli/serve/text_model_runner.cpp
     src/cli/serve/continuation_cache.cpp)
-  target_link_libraries(continuation_disk_store_test PRIVATE gufo_logging gufo_core)
+  target_link_libraries(continuation_disk_store_test PRIVATE gufo_logging gufo_core gufo_cache)
   add_test(NAME continuation_disk_store_test
     COMMAND continuation_disk_store_test)
   set_tests_properties(continuation_disk_store_test PROPERTIES
     LABELS "cpu;server;cache;disk;state;lifecycle")
+  endif()
 
   add_executable(logit_sampler_test tests/cli/logit_sampler_test.cpp)
   target_link_libraries(logit_sampler_test PRIVATE gufo_core)
@@ -1141,9 +1493,10 @@ if (BUILD_TESTING)
     tests/cli/text_generation_scheduler_test.cpp
     src/cli/serve/continuation_cache.cpp
     src/cli/serve/continuation_disk_store.cpp
-    src/cli/serve/text_model_runner.cpp
+    src/cli/serve/component_text_cache.cpp
+  src/cli/serve/text_model_runner.cpp
     src/cli/serve/text_generation_scheduler.cpp)
-  target_link_libraries(text_generation_scheduler_test PRIVATE gufo_logging gufo_core)
+  target_link_libraries(text_generation_scheduler_test PRIVATE gufo_logging gufo_core gufo_cache)
   add_test(NAME text_generation_scheduler_test
     COMMAND text_generation_scheduler_test)
   add_test(NAME debug_hooks_timeline_test COMMAND text_generation_scheduler_test --debug-hooks)
@@ -1185,17 +1538,18 @@ if (BUILD_TESTING)
     tests/cli/video_jobs_test.cpp
     src/cli/serve/video_jobs.cpp
   )
-  target_link_libraries(video_jobs_test PRIVATE gufo_logging gufo_core)
+  target_link_libraries(video_jobs_test PRIVATE gufo_logging gufo_core gufo_cache)
   add_test(NAME video_jobs_test COMMAND video_jobs_test)
   set_tests_properties(video_jobs_test PROPERTIES
-    LABELS "cpu;server;video;minimax-h3;queue;cancellation;quality")
+    LABELS "cpu;server;video;minimax-h3;queue;cancellation;quality"
+    SKIP_RETURN_CODE 77)
 
   add_executable(video_api_test
     tests/cli/video_api_test.cpp
     src/cli/serve/video_api.cpp
     src/cli/serve/video_jobs.cpp
   )
-  target_link_libraries(video_api_test PRIVATE gufo_logging gufo_core)
+  target_link_libraries(video_api_test PRIVATE gufo_logging gufo_core gufo_cache)
   add_test(NAME video_api_test COMMAND video_api_test)
   set_tests_properties(video_api_test PROPERTIES
     LABELS "cpu;server;api;video;minimax-h3;quality")
@@ -1205,6 +1559,11 @@ if (BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/h3_profile_test.py)
   set_tests_properties(h3_profile_test PROPERTIES
     LABELS "cpu;profiling;video;minimax-h3;quality")
+
+  add_test(NAME stage_trace_table_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/stage_trace_table_test.py)
+  set_tests_properties(stage_trace_table_test PROPERTIES LABELS "cpu;profiling")
 
   add_test(NAME h3_preset_quality_test
     COMMAND ${Python3_EXECUTABLE}
@@ -1240,7 +1599,8 @@ if (BUILD_TESTING)
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/serving_bench_test.py)
   set_tests_properties(serving_bench_test PROPERTIES
-    LABELS "cpu;tools;server;benchmarks;statistics;json")
+    LABELS "cpu;tools;server;benchmarks;statistics;json"
+    SKIP_RETURN_CODE 77)
 
   add_test(NAME functional_runner_test
     COMMAND ${Python3_EXECUTABLE}
@@ -1250,11 +1610,14 @@ if (BUILD_TESTING)
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/functional/test_cache_workloads.py)
   set_tests_properties(cache_workloads_test PROPERTIES LABELS "cpu;server;functional")
+  # the fault runner needs the Linux-only gate library
+  if (NOT WIN32)
   add_test(NAME cache_disk_faults_test
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/functional/cache_disk_faults_test.py
       $<TARGET_FILE:cache_disk_faults>)
   set_tests_properties(cache_disk_faults_test PROPERTIES LABELS "cpu;server;functional")
+  endif()
 
   add_test(NAME speculative_corpus_test
     COMMAND ${Python3_EXECUTABLE}
@@ -1269,7 +1632,7 @@ if (BUILD_TESTING)
     LABELS "cpu;tools;profiling")
 
   add_executable(gpu_queues_test tests/diagnostics/gpu_queues_test.cpp)
-  target_link_libraries(gpu_queues_test PRIVATE gufo_diagnostics)
+  target_link_libraries(gpu_queues_test PRIVATE gufo_diagnostics gufo_platform)
   add_test(NAME gpu_queues_test COMMAND gpu_queues_test)
   set_tests_properties(gpu_queues_test PROPERTIES LABELS "cpu;diagnostics;serving")
 
@@ -1289,22 +1652,28 @@ if (BUILD_TESTING)
   set_tests_properties(allocation_benchmark_test PROPERTIES
     LABELS "gpu;hip;gfx1151;diagnostics;allocation;opt-c091")
 
+  # the prefetch fixture uses mkstemp and mmap
+  if (NOT WIN32)
   add_executable(gguf_reader_test tests/core/gguf_reader_test.cpp)
   target_link_libraries(gguf_reader_test PRIVATE gufo_core)
 
   add_test(NAME gguf_reader_test COMMAND gguf_reader_test)
   set_tests_properties(gguf_reader_test PROPERTIES LABELS "cpu;core;gguf;model_config")
+  endif()
 
   add_executable(image_resize_test tests/core/image_resize_test.cpp)
   target_link_libraries(image_resize_test PRIVATE gufo_core)
   add_test(NAME image_resize_test COMMAND image_resize_test)
   set_tests_properties(image_resize_test PROPERTIES LABELS "cpu;core;image;vision")
 
+  # the digest-cache case restores mtimes with utimensat
+  if (NOT WIN32)
   add_executable(gguf_identity_test tests/core/gguf_identity_test.cpp)
   target_link_libraries(gguf_identity_test PRIVATE gufo_core)
 
   add_test(NAME gguf_identity_test COMMAND gguf_identity_test)
   set_tests_properties(gguf_identity_test PROPERTIES LABELS "cpu;core;gguf")
+  endif()
 
   add_executable(minimax_h3_runtime_test
     tests/models/minimax_h3_runtime_test.cpp)
@@ -1442,18 +1811,43 @@ if (BUILD_TESTING)
   set_tests_properties(eval_http_test PROPERTIES
     LABELS "cpu;quality;eval;http;cli;server")
 
+  # The eval client fixture drives raw POSIX sockets directly.
+  if (NOT WIN32)
   add_executable(eval_http_client_test
     tests/quality/eval_http_client_test.cpp src/eval/http_client.cpp)
   target_include_directories(eval_http_client_test PRIVATE ${PROJECT_SOURCE_DIR})
   target_link_libraries(eval_http_client_test PRIVATE CURL::libcurl Threads::Threads)
   add_test(NAME eval_http_client_test COMMAND eval_http_client_test)
   set_tests_properties(eval_http_client_test PROPERTIES LABELS "cpu;quality;eval;http")
+  endif()
 
   add_executable(kernel_bench_test tests/benchmarks/kernel_bench_test.cpp)
   target_link_libraries(kernel_bench_test PRIVATE gufo_kernel_bench_support)
   add_test(NAME kernel_bench_test COMMAND kernel_bench_test)
   set_tests_properties(kernel_bench_test PROPERTIES
     LABELS "cpu;benchmarks;statistics;json")
+
+  # the publish suite drives descriptors through dup2
+  if (NOT WIN32)
+  add_executable(platform_publish_test
+    tests/core/platform_publish_test.cpp src/core/platform/publish.cpp)
+  target_link_libraries(platform_publish_test PRIVATE Threads::Threads)
+  if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(platform_publish_test PRIVATE "-Wl,--wrap=fsync")
+  endif()
+  add_test(NAME platform_publish_test COMMAND platform_publish_test)
+  set_tests_properties(platform_publish_test PROPERTIES LABELS "cpu;platform")
+  endif()
+
+  # the prefault fixture maps pages with mmap
+  if (NOT WIN32)
+  add_executable(platform_prefault_test tests/core/platform_prefault_test.cpp)
+  target_link_libraries(platform_prefault_test PRIVATE Threads::Threads)
+  add_test(NAME platform_prefault_test COMMAND platform_prefault_test)
+  set_tests_properties(platform_prefault_test PROPERTIES LABELS "cpu;platform")
+  endif()
+
+  include(cmake/PlatformTests.cmake)
 
   add_executable(hipblaslt_plan_cache_test
     tests/core/hipblaslt_plan_cache_test.cpp)
@@ -1617,6 +2011,22 @@ if (BUILD_TESTING)
       LABELS "gpu;hip;gfx1151;minimax-h3;audio;vae;quality;external-model;very-slow"
       SKIP_RETURN_CODE 77)
 
+    add_executable(hip_memory_visibility_test
+      tests/core/hip_memory_visibility_test.hip)
+    target_link_libraries(hip_memory_visibility_test PRIVATE gufo_core hip::host)
+    add_test(NAME hip_memory_visibility_test COMMAND hip_memory_visibility_test)
+    add_test(NAME hip_memory_visibility_restricted_test
+      COMMAND hip_memory_visibility_test --deny-long-term-pins)
+    add_test(NAME hip_memory_visibility_driver_test COMMAND hip_memory_visibility_test)
+    set_tests_properties(hip_memory_visibility_restricted_test PROPERTIES
+      SKIP_RETURN_CODE 77)
+    set_tests_properties(hip_memory_visibility_test hip_memory_visibility_restricted_test PROPERTIES
+      LABELS "gpu;hip;gfx1151"
+      ENVIRONMENT "HSA_USERPTR_FOR_PAGED_MEM=1")
+    set_tests_properties(hip_memory_visibility_driver_test PROPERTIES
+      LABELS "gpu;hip;gfx1151"
+      ENVIRONMENT "HSA_USERPTR_FOR_PAGED_MEM=0")
+
     add_executable(hip_weight_upload_test tests/core/hip_weight_upload_test.cpp)
     target_link_libraries(hip_weight_upload_test PRIVATE gufo_core)
     add_test(NAME hip_weight_upload_test COMMAND hip_weight_upload_test)
@@ -1662,6 +2072,11 @@ endif()
 
 if (BUILD_TESTING)
   # Compile the release layer and its CPU regressions as one named group.
+  foreach(target IN ITEMS model_manifest_test model_manifest_mutant_stamp_match
+      model_manifest_mutant_automatic_hash)
+    target_compile_definitions(${target} PRIVATE
+      BUBO_MANIFEST_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+  endforeach()
   add_executable(brand_test tests/cli/brand_test.cpp)
   add_test(NAME brand_test COMMAND brand_test)
   set_tests_properties(brand_test PROPERTIES LABELS "cpu")
@@ -1684,3 +2099,27 @@ if(GUFO_WITH_A3B AND TARGET gufo_qwen36_a3b)
   target_compile_definitions(${bubo_inference_target} PRIVATE GUFO_WITH_A3B=1)
   target_compile_definitions(bubo_models PRIVATE GUFO_WITH_A3B=1)
 endif()
+
+# A test that starts bubo.exe writes discovery records, prepared-default pointers
+# and caches under %LOCALAPPDATA%\Bubo. Tests must not touch the real ones: a
+# full ctest run left about 100 records in the owner's folder, and status reads
+# every record. Each test that does not set its own LOCALAPPDATA gets a scratch
+# folder in the build tree.
+function(bubo_isolate_test_state dir)
+  get_property(subdirs DIRECTORY "${dir}" PROPERTY SUBDIRECTORIES)
+  foreach(sub IN LISTS subdirs)
+    bubo_isolate_test_state("${sub}")
+  endforeach()
+  get_property(tests DIRECTORY "${dir}" PROPERTY TESTS)
+  file(TO_NATIVE_PATH "${CMAKE_BINARY_DIR}/test-localappdata" scratch)
+  foreach(name IN LISTS tests)
+    get_property(env TEST "${name}" DIRECTORY "${dir}" PROPERTY ENVIRONMENT)
+    if(NOT env MATCHES "(^|;)LOCALAPPDATA=")
+      set_property(TEST "${name}" DIRECTORY "${dir}" APPEND PROPERTY
+                   ENVIRONMENT "LOCALAPPDATA=${scratch}")
+    endif()
+  endforeach()
+endfunction()
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/test-localappdata")
+cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}" CALL
+               bubo_isolate_test_state "${CMAKE_SOURCE_DIR}")

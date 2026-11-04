@@ -64,7 +64,7 @@ test('V12 Server sections and current figures', async () => {
     .toBeVisible()
   shell()
   await capture('setup-status')
-  for (const name of ['Network', 'Addresses']) {
+  for (const name of ['Addresses']) {
     const section = page.getByRole('region', { name, exact: true })
     await expect.element(section).toBeVisible()
     section.element().scrollIntoView({ block: 'start' })

@@ -10,24 +10,6 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 const border = (name: string) =>
   getComputedStyle(page.getByRole('button', { name, exact: true }).element())
     .borderTopWidth
@@ -107,10 +89,11 @@ test('6c, 6d: Downloading… while it downloads; Installing… and Later disable
   finish({})
 })
 
-test('6e: the privacy note beside Check for updates stays', async () => {
+test('6e: the privacy note beside Check for updates stays, behind its info icon', async () => {
   cleanup = renderView(<AboutPage />, fixture('update-current')).cleanup
+  await page.getByRole('button', { name: 'About update checks' }).click()
   await expect
-    .element(page.getByText(/sends your installed version in its User-Agent/))
+    .element(page.getByText(/sends only your installed version/i))
     .toBeVisible()
 })
 

@@ -384,6 +384,45 @@ void Head(GgmlType type, int tokens, bool gathered) {
   }
 }
 
+void QuantizedBlockSums() {
+  constexpr std::uint32_t width = 1024;
+  std::vector<float> input(width, 0.011F), ones(width, 1.0F);
+  for (std::size_t i = 0; i < input.size(); i += 32)
+    input[i] = 1.0F;
+  Device x(input), gamma(ones), values(width * sizeof(float));
+  Device encoded(width / 32 * sizeof(a3b::Q8_1Block));
+  for (const bool normalized : {false, true}) {
+    if (normalized) {
+      a3b::AddNormQuant(x.As<float>(), nullptr, gamma.As<float>(),
+                       values.As<float>(), encoded.As<a3b::Q8_1Block>(), 1,
+                       width, 1e-6F, nullptr);
+    } else {
+      a3b::GateQuant(x.As<float>(), gamma.As<float>(), width,
+                    a3b::GateMode::kMul, encoded.As<a3b::Q8_1Block>(),
+                    values.As<float>(), 1, width, nullptr);
+    }
+    std::vector<float> actual_values(width);
+    std::vector<a3b::Q8_1Block> actual(width / 32);
+    Hip(hipMemcpy(actual_values.data(), values.data, width * sizeof(float),
+                  hipMemcpyDeviceToHost));
+    Hip(hipMemcpy(actual.data(), encoded.data,
+                  actual.size() * sizeof(a3b::Q8_1Block),
+                  hipMemcpyDeviceToHost));
+    for (std::size_t block = 0; block < actual.size(); ++block) {
+      int sumq = 0;
+      float maximum = 0;
+      for (std::size_t lane = 0; lane < 32; ++lane) {
+        sumq += actual[block].qs[lane];
+        maximum = std::max(maximum,
+                           std::abs(actual_values[block * 32 + lane]));
+      }
+      const float expected = Half((maximum / 127.0F) * sumq);
+      Require(__high2float(actual[block].ds) == expected,
+              "A3B Q8_1 stored sum must equal d*sum(quantized codes)");
+    }
+  }
+}
+
 void Mmq(GgmlType type) {
   constexpr int rows = 37, cols = 512, tokens = 9;
   const auto w = MakeWeights(type, rows, cols, 719);
@@ -415,6 +454,7 @@ int main() {
   try {
     Hip(hipSetDevice(0));
     Require(qfn_mmq_init(0) == 0, "MMQ init failed");
+    QuantizedBlockSums();
     for (auto type :
          {GgmlType::kQ3_K, GgmlType::kQ4_K, GgmlType::kQ5_K, GgmlType::kQ6_K}) {
       std::cout << gufo::core::ToString(type) << '\n';

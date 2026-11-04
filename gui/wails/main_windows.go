@@ -45,6 +45,9 @@ func main() {
 	healthToken := flag.String(strings.TrimPrefix(updater.HealthFlag, "--"), "", "Updater health token")
 	healthDeadline := flag.String(strings.TrimPrefix(updater.HealthDeadlineFlag, "--"), "", "Updater health deadline")
 	flag.Parse()
+	if exe, err := os.Executable(); err == nil && refuseDuringUpdate(*healthToken, supervisor.GUIPackageRoot(exe)) {
+		return
+	}
 	lease, primary, err := supervisor.AcquireSingleInstance()
 	if err != nil {
 		panic(err)
@@ -80,6 +83,8 @@ func main() {
 		a.service.SetStartupNotice("login_start_failed", loginStartErr.Error())
 	}
 	a.service.UseKeys(keys)
+	// An update launch carries the health token; the helper starts it hidden.
+	a.service.ShowOnDOMReady(*healthToken != "")
 	a.service.AttachModels(settingsPath, supervisor.DefaultCLIPath(), *cli)
 	var updates *supervisor.UpdateService
 	updates = supervisor.NewUpdateService(supervisor.UpdateServiceConfig{
@@ -95,8 +100,10 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	workWidth, workHeight := workAreaLogical()
+	windowWidth, windowHeight := clampWindowSize(settings.WindowWidth, settings.WindowHeight, workWidth, workHeight)
 	err = wails.Run(&options.App{
-		Title: "Bubo control", Width: 900, Height: 640, MinWidth: 560, MinHeight: 360,
+		Title: "Bubo control", Width: windowWidth, Height: windowHeight, MinWidth: minWindowWidth, MinHeight: minWindowHeight,
 		StartHidden:      startHidden,
 		BackgroundColour: options.NewRGB(250, 248, 241),
 		AssetServer:      &assetserver.Options{Assets: frontend},

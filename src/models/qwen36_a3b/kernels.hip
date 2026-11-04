@@ -77,6 +77,8 @@ __global__ void Bf16ExpertsKernel(const std::uint16_t* __restrict__ w,
   const std::uint32_t row = blockIdx.x * (blockDim.x / 32) + threadIdx.x / 32;
   if (row >= m) return;
   const std::int32_t e = ids[pair];
+  if (e < 0)
+    return;
   const auto* wrow = reinterpret_cast<const std::uint32_t*>(
       w + (static_cast<std::size_t>(e) * m + row) * k);
   const float* xr = x + static_cast<std::size_t>(r) * k;

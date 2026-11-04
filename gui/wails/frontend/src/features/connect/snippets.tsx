@@ -1,7 +1,9 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { ActionButton } from '@/components/action-feedback'
 import { CopyText } from '@/components/copy-text'
 import { Label } from '@/components/ui/label'
+import { Disclosure } from '@/components/disclosure'
+import { pageGrid } from '@/components/page-grid'
 import { requireActionSuccess } from '@/lib/bindings'
 import { actions, type View } from '@/lib/bindings'
 
@@ -45,6 +47,52 @@ export function fillSnippet(
   return defaultKey ? result.replaceAll('{api_key}', defaultKey) : result
 }
 
+// One example: a collapsed Disclosure named for the client, with its Copy
+// actions on the same line. Every example, including the Pi configuration, is
+// built from this. An opened example takes the whole row to read the code.
+function Example({
+  title,
+  text,
+  missing,
+  children,
+}: {
+  title: string
+  text: string | undefined
+  missing: string
+  children?: ReactNode
+}) {
+  return (
+    <section
+      aria-label={title}
+      className="min-w-0 has-[details[open]]:col-span-full"
+    >
+      <div className="flex flex-wrap items-start gap-x-3 gap-y-1">
+        <Disclosure
+          className="min-w-0 flex-1 basis-40"
+          summaryClassName="h-9"
+          summary={title}
+        >
+          {text === undefined ? (
+            <p data-code="not_reported" className="pb-2 text-sm">
+              {missing}
+            </p>
+          ) : (
+            <pre className="mb-2 max-h-80 overflow-auto border bg-secondary p-3 text-xs whitespace-pre-wrap break-all">
+              {text}
+            </pre>
+          )}
+        </Disclosure>
+        {text !== undefined && (
+          <div className="flex flex-wrap gap-2">
+            <CopyText compact label="Copy" text={text} />
+            {children}
+          </div>
+        )}
+      </div>
+    </section>
+  )
+}
+
 function Snippet({
   view,
   template,
@@ -65,41 +113,51 @@ function Snippet({
     /* Missing endpoints stay visibly unavailable. */
   }
   return (
-    <section aria-label={title} className="space-y-3">
-      <h3 className="text-xl">{title}</h3>
-      {text === undefined ? (
-        <p data-code="not_reported">
-          {view.serving
-            ? 'This client address has not been reported.'
-            : 'Start the server to see the client address.'}
-        </p>
-      ) : (
-        <>
-          <pre className="max-h-80 overflow-auto border bg-secondary p-4 text-xs whitespace-pre-wrap break-all">
-            {text}
-          </pre>
-          <div className="flex gap-3">
-            <CopyText label="Copy" text={text} />
-            {view.key.lan_access &&
-              view.key.present &&
-              view.key.copy_with_key && (
-                <ActionButton
-                  action={async () => {
-                    const { value: key } = requireActionSuccess(
-                      await actions.RevealKey(),
-                    )
-                    const keyed = fillSnippet(view, template, address, key)
-                    await actions.CopyText(keyed)
-                  }}
-                  done="Copied snippet with key."
-                >
-                  Copy address and key
-                </ActionButton>
-              )}
-          </div>
-        </>
+    <Example
+      title={title}
+      text={text}
+      missing={
+        view.serving
+          ? 'This client address has not been reported.'
+          : 'Start the server to see the client address.'
+      }
+    >
+      {view.key.lan_access && view.key.present && view.key.copy_with_key && (
+        <ActionButton
+          size="sm"
+          action={async () => {
+            const { value: key } = requireActionSuccess(
+              await actions.RevealKey(),
+            )
+            const keyed = fillSnippet(view, template, address, key)
+            await actions.CopyText(keyed)
+          }}
+          done="Copied snippet with key."
+        >
+          Copy with key
+        </ActionButton>
       )}
-    </section>
+    </Example>
+  )
+}
+
+// The address the examples use. The default is what the server reports; it is
+// "This computer" only when that address really is loopback.
+function reportsLoopback(view: View) {
+  const urls = Object.values(view.endpoints ?? {}).filter(Boolean)
+  return (
+    urls.length > 0 &&
+    urls.every((url) => {
+      try {
+        const host = new URL(url).hostname
+        return (
+          /^127(?:\.\d+){3}$/.test(host) ||
+          ['localhost', '[::1]'].includes(host)
+        )
+      } catch {
+        return false
+      }
+    })
   )
 }
 
@@ -109,20 +167,21 @@ export function ClientSnippets({ view }: { view: View }) {
   const address = addresses.some((entry) => entry.url === selected)
     ? selected
     : ''
-  if (!view.client_snippets?.length) return null
   return (
-    <section aria-label="Client templates" className="space-y-6">
-      <h2 className="text-2xl">Client templates</h2>
+    <section aria-label="Client configuration" className="space-y-2">
+      <h2 className="text-lg">Client configuration</h2>
       {!!addresses.length && (
-        <div className="space-y-2">
-          <Label htmlFor="client-address">Address for client templates</Label>
+        <div className="flex items-center gap-3">
+          <Label htmlFor="client-address">Client address</Label>
           <select
             id="client-address"
-            className="h-9 w-full border bg-background px-2 text-sm"
+            className="h-9 min-w-0 flex-1 border bg-background px-2 text-sm"
             value={address}
             onChange={(event) => setSelected(event.target.value)}
           >
-            <option value="">Reported server endpoints</option>
+            <option value="">
+              {reportsLoopback(view) ? 'This computer' : 'Server address'}
+            </option>
             {addresses.map((entry) => (
               <option key={entry.url} value={entry.url}>
                 {entry.adapter} · {entry.url}
@@ -131,18 +190,25 @@ export function ClientSnippets({ view }: { view: View }) {
           </select>
         </div>
       )}
-      {view.client_snippets.map((snippet) => (
-        <Snippet
-          key={snippet.kind}
-          view={view}
-          address={address}
-          title={snippet.title}
-          template={snippet.template}
-          defaultKey={
-            snippet.requires_key ? undefined : snippet.default_api_key
-          }
+      <div className={pageGrid}>
+        {(view.client_snippets ?? []).map((snippet) => (
+          <Snippet
+            key={snippet.kind}
+            view={view}
+            address={address}
+            title={snippet.title}
+            template={snippet.template}
+            defaultKey={
+              snippet.requires_key ? undefined : snippet.default_api_key
+            }
+          />
+        ))}
+        <Example
+          title="Pi (coding agent)"
+          text={view.pi_snippet || undefined}
+          missing="Client configuration not reported."
         />
-      ))}
+      </div>
     </section>
   )
 }

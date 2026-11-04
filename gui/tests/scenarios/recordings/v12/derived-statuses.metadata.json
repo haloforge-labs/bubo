@@ -75,8 +75,8 @@
     "copied_from": "v12/status-main.json",
     "copied_sha256": "b5460e96cb564afa63d800486242c4bdce2854138cd22fbb730d4b9e90c1753c",
     "registry_from": "v12/switches.json",
-    "registry_sha256": "4b8d744a1f13569e76415af8b2f62cf2aa088663ab5a09404611f6767d1ea51f",
-    "fixture_sha256": "b01eec42592711bb939bf2e7560bf33f349697e541589b8af64fbc95ab962f03"
+    "registry_sha256": "ffd7164e61c394c55051762756db4cb3f12935bcb132a171a409bc2b7d39120b",
+    "fixture_sha256": "b09cc9ed94167ca4013695d2fc875a778bd08de242180e4013bf3504cfc9b538"
   },
   {
     "file": "status-gate-idle.json",
@@ -164,8 +164,8 @@
     "copied_from": "v12/status-main.json",
     "copied_sha256": "b5460e96cb564afa63d800486242c4bdce2854138cd22fbb730d4b9e90c1753c",
     "registry_from": "v12/switches.json",
-    "registry_sha256": "4b8d744a1f13569e76415af8b2f62cf2aa088663ab5a09404611f6767d1ea51f",
-    "fixture_sha256": "a4a59f31f9412d412f8c401fb37097ae6187f4b1d4b5f363620c44975fd3a0d5"
+    "registry_sha256": "ffd7164e61c394c55051762756db4cb3f12935bcb132a171a409bc2b7d39120b",
+    "fixture_sha256": "8cec8cefd71577422ba835ad9a76fe6307b766581ce5c69d6599e2ad7cfb2a00"
   },
   {
     "file": "status-gate-busy.json",
@@ -253,8 +253,8 @@
     "copied_from": "v12/status-main.json",
     "copied_sha256": "b5460e96cb564afa63d800486242c4bdce2854138cd22fbb730d4b9e90c1753c",
     "registry_from": "v12/switches.json",
-    "registry_sha256": "4b8d744a1f13569e76415af8b2f62cf2aa088663ab5a09404611f6767d1ea51f",
-    "fixture_sha256": "8f02888b2e2e651494402d3fc63b85db89c93497ee194d59017faf44eb83c23f"
+    "registry_sha256": "ffd7164e61c394c55051762756db4cb3f12935bcb132a171a409bc2b7d39120b",
+    "fixture_sha256": "7bdf3e4c66f6f2918b2a67ac808d0a9d3918c5811e5bb5fc8293f6dba7cf6026"
   },
   {
     "file": "status-lrel8-busy.json",
@@ -342,8 +342,8 @@
     "copied_from": "v12/status-main.json",
     "copied_sha256": "b5460e96cb564afa63d800486242c4bdce2854138cd22fbb730d4b9e90c1753c",
     "registry_from": "v12/switches.json",
-    "registry_sha256": "4b8d744a1f13569e76415af8b2f62cf2aa088663ab5a09404611f6767d1ea51f",
-    "fixture_sha256": "e2905e4c203ecbc0ea015cabe3ce9a61177c2ac0d56b870b0500c01dc7407cc4"
+    "registry_sha256": "ffd7164e61c394c55051762756db4cb3f12935bcb132a171a409bc2b7d39120b",
+    "fixture_sha256": "b90ff1f9e869266c322b4e9a29d760f73cc7a828fa2144a8c4612a764f577323"
   },
   {
     "file": "status-engine-missing.json",
@@ -361,7 +361,7 @@
     "copied_from": "v12/status-main.json",
     "copied_sha256": "b5460e96cb564afa63d800486242c4bdce2854138cd22fbb730d4b9e90c1753c",
     "registry_from": "v12/switches.json",
-    "registry_sha256": "4b8d744a1f13569e76415af8b2f62cf2aa088663ab5a09404611f6767d1ea51f",
+    "registry_sha256": "ffd7164e61c394c55051762756db4cb3f12935bcb132a171a409bc2b7d39120b",
     "fixture_sha256": "2128ddb5d08bd211c075f9bb89c3a74ab69b77c82c8385ec91324fde96255821"
   },
   {
@@ -493,7 +493,7 @@
     "copied_from": "v12/status-main.json",
     "copied_sha256": "b5460e96cb564afa63d800486242c4bdce2854138cd22fbb730d4b9e90c1753c",
     "registry_from": "v12/switches.json",
-    "registry_sha256": "4b8d744a1f13569e76415af8b2f62cf2aa088663ab5a09404611f6767d1ea51f",
+    "registry_sha256": "ffd7164e61c394c55051762756db4cb3f12935bcb132a171a409bc2b7d39120b",
     "fixture_sha256": "32f6046834eea6c9dde42198c841d9a567139bc3e4b3500a6a2fa14833b3106c"
   },
   {
@@ -625,7 +625,7 @@
     "copied_from": "v12/status-main.json",
     "copied_sha256": "b5460e96cb564afa63d800486242c4bdce2854138cd22fbb730d4b9e90c1753c",
     "registry_from": "v12/switches.json",
-    "registry_sha256": "4b8d744a1f13569e76415af8b2f62cf2aa088663ab5a09404611f6767d1ea51f",
+    "registry_sha256": "ffd7164e61c394c55051762756db4cb3f12935bcb132a171a409bc2b7d39120b",
     "fixture_sha256": "4aa78ebc77dfefb9626e401cfce77eb5f90f67ebbfacc027ae6e41329df97ee0"
   }
 ]

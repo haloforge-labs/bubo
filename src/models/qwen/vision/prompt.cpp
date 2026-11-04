@@ -8,12 +8,14 @@
 
 #include "src/core/crypto/sha256.hpp"
 #include "src/models/qwen/control_tokens.hpp"
+#include "src/models/qwen/vision/image_cache.hpp"
 
 namespace gufo::models::qwen::vision {
 namespace {
 constexpr std::uint32_t kResizeFactor = kPatchSize * kMergeSize;
 constexpr std::uint32_t kMinPixels = 65536;
 constexpr std::uint32_t kMaxPixels = 16777216;
+constexpr std::uint32_t kLowDetailMaxSide = 512;
 
 std::uint32_t RoundEven(double x) {
   const double floor = std::floor(x);
@@ -168,7 +170,8 @@ void RopeLayout::Validate(std::uint32_t max_context) const {
   }
 }
 
-core::Image ResizeImage(const core::Image& image) {
+core::Image ResizeImage(const core::Image& image,
+                        tokenization::ChatMessage::ImageDetail detail) {
   if (image.width == 0 || image.height == 0 ||
       std::uint64_t{image.width} * image.height > core::kMaxImagePixels ||
       image.pixels.size() != std::size_t{image.width} * image.height * 3 ||
@@ -183,6 +186,17 @@ core::Image ResizeImage(const core::Image& image) {
   std::uint32_t width =
       RoundEven(static_cast<double>(image.width) / kResizeFactor) *
       kResizeFactor;
+  const auto raise_to_minimum = [&] {
+    const double beta =
+        std::sqrt(static_cast<double>(kMinPixels) /
+                  (static_cast<double>(image.width) * image.height));
+    height = static_cast<std::uint32_t>(
+                 std::ceil(image.height * beta / kResizeFactor)) *
+             kResizeFactor;
+    width = static_cast<std::uint32_t>(
+                std::ceil(image.width * beta / kResizeFactor)) *
+            kResizeFactor;
+  };
   const auto rounded_pixels = std::uint64_t{height} * width;
   if (rounded_pixels > kMaxPixels) {
     const double beta =
@@ -194,15 +208,32 @@ core::Image ResizeImage(const core::Image& image) {
                                         image.width / beta / kResizeFactor)) *
                                         kResizeFactor);
   } else if (rounded_pixels < kMinPixels) {
-    const double beta =
-        std::sqrt(static_cast<double>(kMinPixels) /
-                  (static_cast<double>(image.width) * image.height));
-    height = static_cast<std::uint32_t>(
-                 std::ceil(image.height * beta / kResizeFactor)) *
-             kResizeFactor;
-    width = static_cast<std::uint32_t>(
-                std::ceil(image.width * beta / kResizeFactor)) *
-            kResizeFactor;
+    raise_to_minimum();
+  }
+  if (detail == tokenization::ChatMessage::ImageDetail::kLow &&
+      (width > kLowDetailMaxSide || height > kLowDetailMaxSide)) {
+    // A floating-point scale can land just below 512 on the longest side and
+    // floor it to 480, so the bound uses integer arithmetic.
+    const std::uint64_t longest = std::max(image.width, image.height);
+    const auto bound = [&](std::uint32_t side) {
+      const auto scaled = static_cast<std::uint32_t>(
+          std::uint64_t{side} * kLowDetailMaxSide / longest);
+      return std::max(kResizeFactor, scaled / kResizeFactor * kResizeFactor);
+    };
+    const auto automatic_height = height;
+    const auto automatic_width = width;
+    height = bound(image.height);
+    width = bound(image.width);
+    // For extreme aspect ratios the model's minimum overrides the bound, but
+    // rounding that minimum up must not make 'low' larger than 'auto'.
+    if (std::uint64_t{height} * width < kMinPixels) {
+      raise_to_minimum();
+      if (std::uint64_t{height} * width >
+          std::uint64_t{automatic_height} * automatic_width) {
+        height = automatic_height;
+        width = automatic_width;
+      }
+    }
   }
   if (width == image.width && height == image.height)
     return image;
@@ -250,7 +281,8 @@ Prompt Prepare(const tokenization::QwenTokenizer& tokenizer,
                std::span<const tokenization::ChatMessage> messages,
                std::span<const tokenization::ChatTool> tools,
                const tokenization::ChatTemplateOptions& options,
-               std::string_view encoder_identity, std::uint32_t max_context) {
+               std::string_view encoder_identity, std::uint32_t max_context,
+               ImageCache* image_cache) {
   std::vector<std::size_t> offsets;
   std::vector<tokenization::ContentSpan> content_spans;
   std::size_t stable_prefix_bytes = 0;
@@ -276,7 +308,7 @@ Prompt Prepare(const tokenization::QwenTokenizer& tokenizer,
     prompt.tokens.insert(prompt.tokens.end(), tokens.begin(), tokens.end());
   };
   crypto::Sha256Hasher identity;
-  constexpr std::string_view version = "qwen38-image-bicubic-rgb8-bf16-v1";
+  constexpr auto version = kImagePreprocessingVersion;
   identity.Update(
       {reinterpret_cast<const std::uint8_t*>(version.data()), version.size()});
   identity.Update(
@@ -293,10 +325,13 @@ Prompt Prepare(const tokenization::QwenTokenizer& tokenizer,
       if (index >= offsets.size())
         throw std::logic_error("image rendering lost a part");
       append(cursor, offsets[index]);
-      auto pixels = ResizeImage(core::DecodeImage(*image.bytes));
+      auto pixels = image_cache
+                        ? image_cache->Get(image.bytes, image.detail)
+                        : std::make_shared<const core::Image>(ResizeImage(
+                              core::DecodeImage(*image.bytes), image.detail));
       const ImageGrid grid{static_cast<std::uint32_t>(prompt.tokens.size()),
-                           pixels.height / kResizeFactor,
-                           pixels.width / kResizeFactor};
+                           pixels->height / kResizeFactor,
+                           pixels->width / kResizeFactor};
       const auto count = std::size_t{grid.height} * grid.width;
       if (count > max_context - prompt.tokens.size()) {
         throw std::length_error("image tokens exceed model context");
@@ -304,7 +339,7 @@ Prompt Prepare(const tokenization::QwenTokenizer& tokenizer,
       HashU32(identity, grid.offset);
       HashU32(identity, grid.height);
       HashU32(identity, grid.width);
-      identity.Update(pixels.pixels);
+      identity.Update(pixels->pixels);
       prompt.tokens.insert(prompt.tokens.end(), count, kImageToken);
       prompt.rope.images.push_back(grid);
       prompt.images.push_back({std::move(pixels), grid, identity.Digest()});

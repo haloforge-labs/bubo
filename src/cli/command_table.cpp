@@ -2,7 +2,15 @@
 
 #include <iostream>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #include "src/cli/arg_parser.hpp"
+#include "src/cli/machine_adapter.hpp"
 #include "src/cli/prepare/prepare.hpp"
 #include "src/cli/prepare/runtime_location.hpp"
 #include "src/cli/prepared_default.hpp"
@@ -20,11 +28,22 @@ int Prepare(std::span<const char* const> args, const CommandContext&) {
 }
 int Status(std::span<const char* const> args, const CommandContext&) {
   const auto local = bubo::cli::EnvironmentUtf8("LOCALAPPDATA");
-  return bubo::cli::RunStatus(args.subspan(1), local,
-                              bubo::prepare::ResolveProcessRuntime(
-                                  local, bubo::cli::ExecutableDirectory())
-                                  .dir,
-                              std::cout, std::cerr);
+  const int code = bubo::cli::RunStatus(
+      args.subspan(1), local,
+      bubo::prepare::ResolveProcessRuntime(local,
+                                           bubo::cli::ExecutableDirectory())
+          .dir,
+      std::cout, std::cerr);
+#ifdef _WIN32
+  // A driver call that never answered is still running on its own thread. It
+  // can hold the loader lock, and a normal exit would wait for it.
+  if (bubo::cli::MachineProbeHasAbandonedCall()) {
+    std::cout.flush();
+    std::cerr.flush();
+    TerminateProcess(GetCurrentProcess(), static_cast<UINT>(code));
+  }
+#endif
+  return code;
 }
 int Stop(std::span<const char* const> args, const CommandContext&) {
   return bubo::cli::RunStop(args.subspan(1),

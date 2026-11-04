@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <stddef.h>
@@ -31,3 +32,6 @@
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
+#include "src/models/qwen38_flash_next/iq_decode_bits.hpp"
+#include "src/models/qwen38_flash_next/dense_gemv.hpp"
+#include "src/models/qwen38_flash_next/kquant_stage.hpp"

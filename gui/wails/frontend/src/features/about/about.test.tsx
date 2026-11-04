@@ -78,9 +78,33 @@ test('rollback pending names the previous version, and the privacy line shows on
   expect(document.body.textContent).not.toContain('GitHub release feed')
 })
 
-test('the privacy line is beside the Check button', async () => {
+test('the update hint is one short line; the privacy facts are behind its info icon', async () => {
   cleanup = renderView(<AboutPage />, fixture('update-current')).cleanup
+  await expect.element(page.getByText('Checks GitHub releases.')).toBeVisible()
+  await page.getByRole('button', { name: 'About update checks' }).click()
   await expect.element(page.getByText(/GitHub release feed/)).toBeVisible()
+  await expect
+    .element(page.getByText(/It sends only your installed version/))
+    .toBeVisible()
+  expect(document.body.textContent).not.toContain('User-Agent')
+})
+
+test('Updates is a plain section beside This build in the page grid, not a card', async () => {
+  cleanup = renderView(<AboutPage />, fixture('update-current')).cleanup
+  const updates = page.getByRole('region', { name: 'Updates', exact: true })
+  await expect.element(updates).toBeVisible()
+  expect(updates.element().getAttribute('data-slot')).toBeNull()
+  expect(document.querySelector('[data-slot="card"]')).toBeNull()
+  expect(updates.element().querySelector('h2')!.className).toBe(
+    page
+      .getByRole('region', { name: 'This build', exact: true })
+      .element()
+      .querySelector('h2')!.className,
+  )
+  expect(updates.element().parentElement).toBe(
+    page.getByRole('region', { name: 'This build', exact: true }).element()
+      .parentElement,
+  )
 })
 
 test('About renders the canonical inventory as component, version and licence rows', async () => {
@@ -185,7 +209,7 @@ for (const state of [
       await page
         .getByText(
           view.update.available_version
-            ? `Update to ${view.update.available_version}`
+            ? `Release notes for ${view.update.available_version}`
             : 'Update details',
           {
             exact: true,

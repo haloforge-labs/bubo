@@ -31,10 +31,10 @@ test('job: edit two settings, keep drafts across polls, save once, become clean'
   const button = page.getByRole('button', { name: 'Save changes', exact: true })
   await expect.element(button).not.toBeInTheDocument()
   await page
-    .getByRole('textbox', { name: 'Temperature', exact: true })
+    .getByRole('spinbutton', { name: 'Temperature', exact: true })
     .fill('0.61')
   await page
-    .getByRole('textbox', {
+    .getByRole('spinbutton', {
       name: 'Top-p',
       exact: true,
     })
@@ -44,8 +44,8 @@ test('job: edit two settings, keep drafts across polls, save once, become clean'
     .toBeVisible()
   await mounted.client.invalidateQueries()
   await expect
-    .element(page.getByRole('textbox', { name: 'Temperature', exact: true }))
-    .toHaveValue('0.61')
+    .element(page.getByRole('spinbutton', { name: 'Temperature', exact: true }))
+    .toHaveValue(0.61)
   await button.click()
   expect(save).toHaveBeenCalledExactlyOnceWith({
     set: {},
@@ -64,7 +64,7 @@ test('job: edit two settings, keep drafts across polls, save once, become clean'
 test('tab and route navigation warn, Keep editing preserves values, discard leaves', async () => {
   mountCorePage('/settings', coreView())
   await page.getByRole('tab', { name: 'App', exact: true }).click()
-  const runtime = page.getByRole('textbox', { name: 'Runtime folder' })
+  const runtime = page.getByRole('textbox', { name: 'Engine folder' })
   await runtime.fill('D:/fixture/draft')
   await page.getByRole('tab', { name: 'Advanced', exact: true }).click()
   await expect
@@ -109,7 +109,8 @@ test('model preference row routes to Models without a free-text model control', 
     .not.toBeInTheDocument()
 })
 
-// This test starts from an unset Disk cache ("Not set" and a Set button). The
+// This test starts from an unset Disk cache (a "Default" button named Change
+// Disk cache). The
 // release exe's Ready idle status reports it as the default text "Off", which
 // the page reads as unset (registry.ts effectiveValue).
 test('a rejected transaction retains all unsaved fields for correction', async () => {
@@ -130,19 +131,21 @@ test('a rejected transaction retains all unsaved fields for correction', async (
   await page
     .getByRole('spinbutton', { name: 'Context per session' })
     .fill('1234')
-  await page.getByRole('button', { name: 'Set Disk cache' }).click()
+  await page.getByRole('button', { name: 'Change Disk cache' }).click()
   await page
     .getByRole('textbox', { name: 'Disk cache', exact: true })
     .fill('D:/fixture/cache')
   await page.getByRole('button', { name: 'Save changes' }).click()
+  // One transaction with both edits; the order is the order they were edited in.
   expect(patch).toHaveBeenCalledExactlyOnceWith({
     set: {},
     clear: [],
-    switch_values: [
+    switch_values: expect.arrayContaining([
       { name: '--cache-disk', value: 'D:/fixture/cache' },
       { name: '--context', value: '1234' },
-    ],
+    ]),
   })
+  expect(patch.mock.calls[0]![0].switch_values).toHaveLength(2)
   expect(override).not.toHaveBeenCalled()
   await expect
     .element(page.getByText('2 unsaved changes', { exact: true }))
@@ -166,7 +169,10 @@ test('reset is a draft change and can clear an invalid edit only on Save', async
   ).cleanup
   await page.getByRole('spinbutton', { name: row.label! }).fill('-1')
   await page
-    .getByRole('button', { name: 'Reset to default', exact: true })
+    .getByRole('button', {
+      name: `Reset ${row.label} to default`,
+      exact: true,
+    })
     .click()
   expect(patch).not.toHaveBeenCalled()
   await expect

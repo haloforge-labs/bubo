@@ -24,7 +24,7 @@ struct BlasLt::Plan {
   hipblasLtMatrixLayout_t input{nullptr};
   hipblasLtMatrixLayout_t output{nullptr};
   hipblasLtMatmulAlgo_t algorithm{};
-  // DenseBf16Gemm reproduces the library kernel's summation order bitwise.
+  // BF16 uses one fixed K chain, including mixed-session batches (#714).
   bool own_bf16{false};
 
   ~Plan() {
@@ -150,12 +150,25 @@ bool BlasLt::Gemm(const void* weights, const void* input, float* out,
     return UnquantizedF16Gemm(weights, static_cast<const __half*>(input), out,
                               n, m, k, stream_);
   }
+  if (type == HIP_R_16BF && k == 2560)
+    return DenseBf16Gemm(weights, input, out, n, m, k, stream_, token_offset_);
   Plan* p = FindPlan(type, m, n, k, error);
   if (p == nullptr)
     return false;
   if (p->own_bf16)
     return DenseBf16Gemm(weights, input, out, n, m, k, stream_, token_offset_);
   return Run(*p, weights, input, out, error);
+}
+
+bool BlasLt::Prepare(hipDataType type, int m, int n, int k,
+                     std::string* error) {
+  if (m <= 0 || n <= 0 || k <= 0) {
+    AssignError(error, "hipBLASLt dimensions must be positive");
+    return false;
+  }
+  return (type == HIP_R_16F && k == 2560 && (m == 96 || m == 513)) ||
+         (type == HIP_R_16BF && k == 2560) ||
+         FindPlan(type, m, n, k, error) != nullptr;
 }
 
 BlasLt::Plan* BlasLt::FindPlan(hipDataType type, int m, int n, int k,
@@ -171,8 +184,10 @@ BlasLt::Plan* BlasLt::FindPlan(hipDataType type, int m, int n, int k,
 
 bool BlasLt::UsesOwnKernel(hipDataType type, int m, int n, int k,
                            std::string* error) {
-  const Plan* p = FindPlan(type, m, n, k, error);
-  return p != nullptr && p->own_bf16;
+  (void)n;
+  (void)error;
+  return (type == HIP_R_16F && k == 2560 && (m == 96 || m == 513)) ||
+         (type == HIP_R_16BF && k == 2560);
 }
 
 bool BlasLt::LibraryGemm(const void* weights, const void* input, float* out,

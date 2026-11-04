@@ -3,6 +3,12 @@
   "sites": [
     {
       "file": "src/models/qwen38_flash_next/kernels/rocm/trace.hpp",
+      "call": "std::fprintf(stderr,\n                   \"qwen38_flash_next: stages %s %llux:%s sum %.3f body %.3f \"\n                   \"launch+tail %.3f\\n\",\n                   name.c_str(), static_cast<unsigned long long>(a.n),\n                   line.c_str(), sum, body_ms, body_ms - sum);",
+      "reason": "Opt-in GUFO_TRACE_STAGES aggregate stage timing; only enabled with the decode timeline.",
+      "occurrence": "1"
+    },
+    {
+      "file": "src/models/qwen38_flash_next/kernels/rocm/trace.hpp",
       "call": "std::fprintf(stderr,\n                 \"qwen38_flash_next: trace %.1f s, %llu cycles: GPU busy \"\n                 \"%.1f%% (%.2f ms/cycle busy, %.2f idle) | GPU ms per \"\n                 \"phase:%s\\n\",\n                 span_ms * 1e-3, static_cast<unsigned long long>(cycles),\n                 100.0 * busy_total / span_ms, busy_total * per_cycle,\n                 (span_ms - busy_total) * per_cycle, line.c_str());",
       "reason": "Opt-in GUFO_TRACE aggregate summary; cold shutdown diagnostic retains its existing bytes.",
       "occurrence": "1"

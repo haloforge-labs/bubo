@@ -190,6 +190,8 @@ void SamplingConfig::Validate() const {
   if (constraint && (!constraint->grammar || !constraint->vocabulary ||
                      constraint->vocabulary->size() == 0))
     throw std::invalid_argument("sampling constraint is incomplete");
+  if (reasoning_budget && reasoning_budget->forced.empty())
+    throw std::invalid_argument("reasoning budget has no forced end");
   if (!std::isfinite(temperature) || temperature < 0.0F) {
     throw std::invalid_argument(
         "sampling temperature must be finite and nonnegative");
@@ -228,11 +230,15 @@ bool SamplingConfig::uses_random_sampling() const noexcept {
 }
 
 bool SamplingConfig::can_use_unmodified_argmax() const noexcept {
-  return !constraint && (!behaviour || !behaviour->enabled()) && temperature == 0.0F && !penalties_enabled();
+  return !constraint && !reasoning_budget &&
+         (!behaviour || !behaviour->enabled()) && temperature == 0.0F &&
+         !penalties_enabled();
 }
 
 bool SamplerState::CanSelectArgmax(TokenId token,
                                    bool penalties_applied) const {
+  if (const auto forced = ForcedToken())
+    return !pending_sample_ && token == *forced;
   if (BehaviourEnabled()) {
     const auto& b=*config_.behaviour;
     const auto& st=behaviour_state_;
@@ -253,8 +259,9 @@ bool SamplerState::CanSelectArgmax(TokenId token,
     if(st.thinking && b.marker_bias!=0 && (b.marker_bias>0||
        std::ranges::find(b.marker_ids,token)!=b.marker_ids.end()))return fail("marker_greedy_choice_needs_full_row");
     if(b.loop_breaker&&st.loop.nudging())return fail("loop_nudge_needs_probability_row");
-    if(!st.forcing() && eog && st.thinking && (b.think_eog_guard||
-       eog_closes_think(b,st)))return fail("thinking_eog_greedy_needs_full_row");
+    if (!st.forcing() && eog && st.thinking &&
+        (b.think_eog_guard || b.think_nudge || eog_closes_think(b, st)))
+      return fail("thinking_eog_greedy_needs_full_row");
     if (!st.thinking && !st.forcing()) {
       // Only an EOG intervention needs the global grammar-mask predicate.
       // Ordinary winners are checked individually below; asking for the mask
@@ -447,7 +454,7 @@ SamplingDistribution BuildDistribution(
     std::span<const float> logits, const SamplingConfig& config,
     std::span<const TokenId> prompt_tokens,
     std::span<const TokenId> generated_tokens) {
-  if (config.constraint) {
+  if (config.constraint || config.reasoning_budget) {
     SamplerState sampler(config, prompt_tokens);
     sampler.Accept(generated_tokens);
     return sampler.Distribution(logits);
@@ -490,6 +497,7 @@ SamplerState::SamplerState(SamplingConfig config,
   if (config_.behaviour) behaviour_state_.Reset(*config_.behaviour);
   if (config_.constraint)
     constraint_state_ = config_.constraint->grammar->Start();
+  StartReasoning();
   TrimHistory();
   RebuildPenaltyCounts();
 }
@@ -505,7 +513,10 @@ SamplerState::SamplerState(const SamplerState& other)
       history_(other.history_),
       penalty_counts_(other.penalty_counts_),
       rng_state_(other.rng_state_),
-      pending_sample_(other.pending_sample_) {}
+      pending_sample_(other.pending_sample_),
+      reasoning_phase_(other.reasoning_phase_),
+      reasoning_remaining_(other.reasoning_remaining_),
+      reasoning_forced_(other.reasoning_forced_) {}
 
 SamplerState& SamplerState::operator=(const SamplerState& other) {
   if (this == &other) {
@@ -523,6 +534,9 @@ SamplerState& SamplerState::operator=(const SamplerState& other) {
   candidate_scratch_.clear();
   rng_state_ = other.rng_state_;
   pending_sample_ = other.pending_sample_;
+  reasoning_phase_ = other.reasoning_phase_;
+  reasoning_remaining_ = other.reasoning_remaining_;
+  reasoning_forced_ = other.reasoning_forced_;
   return *this;
 }
 
@@ -535,6 +549,10 @@ SamplerState SamplerState::WithoutConstraint() const {
 }
 
 bool SamplerState::NeedsConstraintMask() const {
+  // Executors that sample on the GPU fall back to Sample/Distribution here,
+  // which return the forced reasoning end.
+  if (ForcedToken())
+    return true;
   if (BehaviourEnabled() && behaviour_state_.thinking) return false;
   if (!config_.constraint)
     return false;
@@ -600,6 +618,7 @@ void SamplerState::CopyDrawStateFrom(const SamplerState& other) {
   behaviour_state_.deferred_at = other.behaviour_state_.deferred_at;
   behaviour_state_.close_at = other.behaviour_state_.close_at;
   behaviour_state_.guard_blocked_at = other.behaviour_state_.guard_blocked_at;
+  behaviour_state_.think_nudge_at = other.behaviour_state_.think_nudge_at;
   behaviour_state_.think_markers = other.behaviour_state_.think_markers;
 }
 
@@ -609,6 +628,7 @@ void SamplerState::ResetHistory(std::span<const TokenId> tokens) {
     constraint_state_ = config_.constraint->grammar->Start();
   constraint_mask_.reset();
   pending_sample_.reset();
+  StartReasoning();
   penalty_counts_.clear();
   history_.assign(tokens.begin(), tokens.end());
   TrimHistory();
@@ -619,7 +639,99 @@ void SamplerState::Accept(TokenId token) {
   Accept(std::span<const TokenId>(&token, 1));
 }
 
+std::optional<TokenId> SamplerState::ForcedToken() const noexcept {
+  if (reasoning_phase_ == ReasoningPhase::kForcing)
+    return config_.reasoning_budget->forced[reasoning_forced_];
+  if (ForcingThinkNudge()) {
+    const auto& st = behaviour_state_;
+    return st.forcing() ? st.forced[st.force_pos]
+                        : config_.behaviour->think_nudge_prefix.front();
+  }
+  return std::nullopt;
+}
+
+bool SamplerState::ForcingThinkNudge() const noexcept {
+  if (!BehaviourEnabled() || reasoning_phase_ == ReasoningPhase::kForcing)
+    return false;
+  const auto& st = behaviour_state_;
+  return (st.forcing() && st.force_reason == "think_nudge") ||
+         (can_nudge_think(*config_.behaviour, st) &&
+          std::ranges::find(st.think_nudge_at, st.accepted_count + 1) !=
+              st.think_nudge_at.end());
+}
+
+void SamplerState::ObserveThinkingEog(TokenId token) {
+  if (!BehaviourEnabled() || reasoning_phase_ == ReasoningPhase::kForcing)
+    return;
+  const auto& b = *config_.behaviour;
+  auto& st = behaviour_state_;
+  if (!can_nudge_think(b, st) ||
+      std::ranges::find(b.eog_ids, token) == b.eog_ids.end())
+    return;
+  const auto ordinal = st.accepted_count + 1;
+  if (std::ranges::find(st.think_nudge_at, ordinal) == st.think_nudge_at.end())
+    st.think_nudge_at.push_back(ordinal);
+}
+
+void SamplerState::StartReasoning() {
+  reasoning_phase_ = ReasoningPhase::kOff;
+  const auto& budget = config_.reasoning_budget;
+  if (!budget)
+    return;
+  reasoning_remaining_ = budget->tokens;
+  reasoning_forced_ = 0;
+  reasoning_phase_ = budget->tokens == 0 ? ReasoningPhase::kForcing
+                                         : ReasoningPhase::kCounting;
+  for (const auto token : budget->prompt)
+    AdvanceReasoning(token);
+}
+
+// Mirrors llama.cpp common_reasoning_budget_accept: the forcing phase advances
+// one forced token per accepted token, and a spent budget waits for a token
+// that completes its UTF-8 character.
+void SamplerState::AdvanceReasoning(TokenId token) {
+  const auto& budget = *config_.reasoning_budget;
+  switch (reasoning_phase_) {
+    case ReasoningPhase::kOff:
+      return;
+    case ReasoningPhase::kForcing:
+      if (++reasoning_forced_ >= budget.forced.size())
+        reasoning_phase_ = ReasoningPhase::kOff;
+      return;
+    case ReasoningPhase::kCounting:
+    case ReasoningPhase::kWaitingUtf8:
+      break;
+  }
+  if (std::ranges::find(budget.ends, token) != budget.ends.end()) {
+    reasoning_phase_ = ReasoningPhase::kOff;
+    return;
+  }
+  const bool complete = !budget.partial_utf8 ||
+                        token >= budget.partial_utf8->size() ||
+                        !(*budget.partial_utf8)[token];
+  if (reasoning_phase_ == ReasoningPhase::kCounting &&
+      --reasoning_remaining_ != 0)
+    return;
+  if (complete) {
+    reasoning_phase_ = ReasoningPhase::kForcing;
+    reasoning_forced_ = 0;
+  } else {
+    reasoning_phase_ = ReasoningPhase::kWaitingUtf8;
+  }
+}
+
 void SamplerState::Accept(std::span<const TokenId> tokens) {
+  std::vector<bool> externally_forced;
+  if (BehaviourEnabled() && config_.behaviour->think_nudge &&
+      config_.reasoning_budget) {
+    externally_forced.reserve(tokens.size());
+    for (const auto token : tokens) {
+      externally_forced.push_back(reasoning_phase_ == ReasoningPhase::kForcing);
+      AdvanceReasoning(token);
+    }
+  } else if (reasoning_phase_ != ReasoningPhase::kOff)
+    for (const auto token : tokens)
+      AdvanceReasoning(token);
   // Preserve the native all-unset span transaction, including failures.
   if(!BehaviourEnabled()&&config_.constraint) {
     auto next=constraint_state_;
@@ -629,7 +741,11 @@ void SamplerState::Accept(std::span<const TokenId> tokens) {
   }
   // O/common/sampling.cpp:940/965: lazy tool grammar is suspended in think,
   // and the end sequence is replayed so a closing sequence can own a trigger.
+  std::size_t token_index = 0;
   for(auto token:tokens) {
+    const bool forced_by_budget =
+        !externally_forced.empty() && externally_forced[token_index];
+    ++token_index;
     // Terminal EOG is an engine stop, not a byte accepted by the unfinished
     // tool grammar. Engines normally test IsStopToken before Accept.
     if (ToolArgumentStopping() && token == behaviour_state_.forced[behaviour_state_.force_pos]) continue;
@@ -638,8 +754,11 @@ void SamplerState::Accept(std::span<const TokenId> tokens) {
         config_.behaviour->loop_tool_args && config_.behaviour->loop_exempt && config_.constraint;
     const bool tool_active = tool_enabled && !before_think &&
         config_.constraint->grammar->InsideToolCall(constraint_state_);
-    if(BehaviourEnabled())behaviour_state_.Accept(*config_.behaviour,token,
-      config_.constraint!=nullptr||config_.behaviour->loop_exempt, tool_active);
+    if (BehaviourEnabled())
+      behaviour_state_.Accept(
+          *config_.behaviour, token,
+          config_.constraint != nullptr || config_.behaviour->loop_exempt,
+          tool_active, forced_by_budget);
     const bool after_think=BehaviourEnabled()&&behaviour_state_.thinking;
     if(!config_.constraint||!BehaviourEnabled())continue;
     auto next=constraint_state_;
@@ -679,6 +798,11 @@ void SamplerState::Accept(std::span<const TokenId> tokens) {
 
 SamplingDistribution SamplerState::Distribution(
     std::span<const float> logits) const {
+  if (const auto forced = ForcedToken()) {
+    if (*forced >= logits.size())
+      throw std::invalid_argument("forced token exceeds vocabulary");
+    return SamplingDistribution({{*forced, 1.0}}, 1.0);
+  }
   if (BehaviourEnabled()) return BehaviourDistributionFor(logits);
   if (NeedsConstraintMask()) {
     if (config_.temperature == 0) {
@@ -699,7 +823,11 @@ SamplingDistribution SamplerState::Distribution(
     return LinearDistribution(logits);
   auto working = *this;
   working.PrepareSelected(logits);
-  auto& candidates = working.candidate_scratch_;
+  return working.SelectedDistribution();
+}
+
+SamplingDistribution SamplerState::SelectedDistribution() {
+  auto& candidates = candidate_scratch_;
   const double maximum = candidates.front().value;
   double total = 0;
   for (auto& candidate : candidates) {
@@ -710,8 +838,55 @@ SamplingDistribution SamplerState::Distribution(
   return SamplingDistribution(std::move(candidates), total);
 }
 
+SamplingDistribution SamplerState::DistributionFromCandidates(
+    std::span<const LogitCandidate> logits) const {
+  config_.Validate();
+  if (config_.temperature <= 0 || config_.top_k <= 0 || NeedsConstraintMask())
+    throw std::invalid_argument("compact target requires unconstrained top-k");
+  auto working = *this;
+  auto& candidates = working.candidate_scratch_;
+  candidates.reserve(logits.size());
+  for (const auto& candidate : logits) {
+    if (!std::isfinite(candidate.value))
+      continue;
+    const double adjusted = AdjustedLogit(candidate.token, candidate.value);
+    if (!std::isfinite(adjusted))
+      throw std::runtime_error(
+          "sampling penalties produced a non-finite logit");
+    candidates.push_back({candidate.token, adjusted});
+  }
+  if (candidates.empty())
+    throw std::runtime_error("logit distribution contains no finite values");
+  const auto keep =
+      std::min(candidates.size(),
+               std::max<std::size_t>(
+                   config_.top_k, std::max<std::size_t>(config_.min_keep, 1)));
+  std::partial_sort(candidates.begin(), candidates.begin() + keep,
+                    candidates.end(), IsBetterProbability);
+  candidates.resize(keep);
+  working.FilterSelected();
+  return working.SelectedDistribution();
+}
+
 SamplingDistribution SamplerState::Distribution(
     std::span<const float> logits, std::span<const TokenId> token_ids) const {
+  if (const auto forced = ForcedToken()) {
+    const auto found = std::ranges::find(token_ids, *forced);
+    if (found != token_ids.end())
+      return SamplingDistribution(
+          {{static_cast<TokenId>(found - token_ids.begin()), 1.0}}, 1.0);
+    // An MTP draft shortlist may miss the forced end. The proposal then
+    // follows the shortlist, and the target's forced distribution rejects it
+    // and emits the end as its correction.
+    auto unforced = *this;
+    unforced.reasoning_phase_ = ReasoningPhase::kOff;
+    unforced.behaviour_state_.think_nudge_at.clear();
+    if (unforced.behaviour_state_.force_reason == "think_nudge") {
+      unforced.behaviour_state_.forced.clear();
+      unforced.behaviour_state_.force_pos = 0;
+    }
+    return unforced.Distribution(logits, token_ids);
+  }
   if (BehaviourEnabled()) return BehaviourDistributionFor(logits,token_ids);
   if (NeedsConstraintMask()) {
     const auto masked = ConstrainedLogits(logits, token_ids);
@@ -825,7 +1000,7 @@ std::optional<TokenId> SamplerState::SampleFromTop(
   const auto before=rng_state_;
   const auto token=distribution->Sample(&rng_state_);
   ObserveBehaviour(*distribution,token,before);
-  return token;
+  return ForcedToken().value_or(token);
 }
 
 void SamplerState::DeferSample(TokenId token) {
@@ -843,6 +1018,12 @@ TokenId SamplerState::Sample(std::span<const float> logits) {
   if (logits.size() >
       static_cast<std::size_t>(std::numeric_limits<TokenId>::max())) {
     throw std::invalid_argument("logit distribution exceeds token ID range");
+  }
+  if (const auto forced = ForcedToken()) {
+    if (*forced >= logits.size())
+      throw std::invalid_argument("forced token exceeds vocabulary");
+    pending_sample_.reset();
+    return *forced;
   }
   // A draw deferred before the last committed token cannot override a stop
   // detected on that token. The forced row below supplies the terminal EOG.
@@ -863,7 +1044,7 @@ TokenId SamplerState::Sample(std::span<const float> logits) {
     const auto before=rng_state_;
     const auto token=distribution.behaviour()->random ? distribution.Sample(&rng_state_) : distribution.best_token();
     ObserveBehaviour(distribution,token,before);
-    return token;
+    return ForcedToken().value_or(token);
   }
   if (config_.constraint) {
     const auto distribution = Distribution(logits);
@@ -1176,7 +1357,12 @@ void SamplerState::FinishSelected(double full_softmax_sum,
   if (candidate_scratch_.empty()) {
     throw std::runtime_error("logit distribution contains no finite values");
   }
+  FilterSelected(full_softmax_sum, has_full_softmax_sum, proof);
+}
 
+void SamplerState::FilterSelected(double full_softmax_sum,
+                                  bool has_full_softmax_sum,
+                                  SelectionProof* proof) {
   std::size_t keep = candidate_scratch_.size();
   const std::size_t minimum = MinimumKept(config_, candidate_scratch_.size());
   if (config_.top_p < 1.0F && keep > 1) {
@@ -1354,7 +1540,7 @@ std::optional<SamplingDistribution> SamplerState::InertEogDistribution(
       stage("eog_min_prob", b.eog_min_prob_exact
                                 ? "raw_full_probability_below_threshold"
                                 : "raw_topk_upper_bound_below_threshold");
-  } else if (b.think_eog_guard) {
+  } else if (b.think_eog_guard && !can_nudge_think(b, st)) {
     stage("think_eog_guard", "eog_inside_open_think");
   }
   current.behaviour_ = std::move(metadata);
@@ -1367,10 +1553,96 @@ SamplerState SamplerState::WithoutBehaviour() const {
 bool SamplerState::BehaviourEnabled() const noexcept {
   return config_.behaviour && config_.behaviour->enabled();
 }
+ShortlistSupport SamplerState::HeadSupport() const {
+  ShortlistSupport out;
+  const auto add = [&](auto&& ids) {
+    out.ids.insert(out.ids.end(), ids.begin(), ids.end());
+  };
+  if (config_.penalties_enabled())
+    for (const auto& p : penalty_counts_)
+      if ((p.repeated && config_.repeat_penalty != 1) ||
+          (p.generated_count &&
+           (config_.frequency_penalty != 0 || config_.presence_penalty != 0)))
+        out.ids.push_back(p.token);
+  if (config_.reasoning_budget) {
+    add(config_.reasoning_budget->forced);
+    add(config_.reasoning_budget->ends);
+  }
+  if (BehaviourEnabled()) {
+    const auto& b = *config_.behaviour;
+    // Include both phases and every force sequence: a verification pass can
+    // cross a phase boundary before its later rows are consumed.
+    add(b.eog_ids);
+    add(b.think_end);
+    add(b.budget_forced);
+    add(b.loop_prefix);
+    add(behaviour_state_.forced);
+    if (b.marker_bias != 0)
+      add(b.marker_ids);
+    if (b.model_suppress_tokens)
+      add(b.suppress_ids);
+    if (b.logit_bias_enabled)
+      for (auto [id, bias] : b.logit_bias)
+        out.ids.push_back(id);
+    const bool probability =
+        b.eog_min_prob > 0 || (b.eog_boundary && b.eog_defer_p > 0);
+    const auto needs_full = [&](int k, float temperature) {
+      return (probability && (b.eog_min_prob_exact || k <= 0)) ||
+             (b.marker_entropy_gate && k <= 0) || (temperature > 0 && k <= 0) ||
+             (b.loop_breaker && k <= 0);
+    };
+    out.full_normalizer = needs_full(config_.top_k, config_.temperature);
+    if (b.production_sampling) {
+      out.full_normalizer |= needs_full(b.native_top_k, b.native_temperature);
+      out.wide_counterfactual = b.native_top_k > 128 || b.native_min_keep > 128;
+      // The counterfactual rebuilds repetition from this retained history.
+      if (b.native_repeat_penalty != 1)
+        add(history_);
+      if (b.native_frequency_penalty != 0 || b.native_presence_penalty != 0)
+        for (const auto& p : penalty_counts_)
+          if (p.generated_count)
+            out.ids.push_back(p.token);
+    }
+  }
+  std::ranges::sort(out.ids);
+  out.ids.erase(std::unique(out.ids.begin(), out.ids.end()), out.ids.end());
+  return out;
+}
 std::vector<std::string> SamplerState::BehaviourSummary() const {
   auto lines=behaviour_state_.Summary();
   if(!BehaviourEnabled()) return lines;
   const auto& b=*config_.behaviour;
+  if (b.think_nudge) {
+    lines.push_back("BEHAVIOUR_ENGAGE name=think_nudge taken=" +
+                    std::to_string(behaviour_state_.think_nudge_insertions) +
+                    " fallback=0 reason=" +
+                    (behaviour_state_.think_nudge_insertions
+                         ? "eog_inside_open_think"
+                         : "none") +
+                    " scope=request");
+    lines.push_back("BEHAVIOUR_ENGAGE name=closed_after_nudge taken=" +
+                    std::to_string(behaviour_state_.closed_after_nudge) +
+                    " fallback=0 reason=" +
+                    (behaviour_state_.closed_after_nudge
+                         ? "model_close_within_256_tokens"
+                         : "none") +
+                    " scope=request");
+    for (std::size_t i = 0; i < behaviour_state_.think_nudges.size(); ++i) {
+      const auto& nudge = behaviour_state_.think_nudges[i];
+      lines.push_back(
+          "THINK_NUDGE insertion=" + std::to_string(i + 1) +
+          " prefix_end_token=" + std::to_string(nudge.prefix_end) +
+          " span_closed=" + (nudge.span_closed ? "1" : "0") +
+          " natural_close=" + (nudge.natural_close ? "1" : "0") +
+          " close_distance_tokens=" + std::to_string(nudge.close_distance) +
+          " closed_within_256=" +
+          (nudge.natural_close &&
+                   nudge.close_distance <= BehaviourState::kNudgeCloseWindow
+               ? "1"
+               : "0") +
+          " scope=request");
+    }
+  }
   if (b.marker_entropy_gate) {
     const ThinkMarkerCounts empty;
     const auto& counts = behaviour_state_.think_markers
@@ -1687,7 +1959,8 @@ BehaviourLogits TransformBehaviour(
             "raw_topk_upper_bound_below_threshold", !changed_finite);
     }
   }
-  if(st.thinking&&b.think_eog_guard&&!st.forcing()&&!eog_closes_think(b,st)) {
+  if (st.thinking && b.think_eog_guard && !st.forcing() &&
+      !eog_closes_think(b, st) && !can_nudge_think(b, st)) {
     bool changed_finite = false;
     for (auto token : b.eog_ids) changed_finite |= mask(token);
     stage("think_eog_guard", "eog_inside_open_think", !changed_finite);
@@ -2160,6 +2433,7 @@ void SamplerState::ObserveBehaviour(const SamplingDistribution& distribution,
     // the exact token ordinal at which a multi-token close starts.
     behaviour_state_.close_at.push_back(behaviour_state_.accepted_count+1);
   }
+  ObserveThinkingEog(actual);
 }
 
 std::uint64_t NextRandom(std::uint64_t* state) {

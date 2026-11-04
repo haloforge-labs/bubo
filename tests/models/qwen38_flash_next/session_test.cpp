@@ -349,7 +349,8 @@ void CheckImageSnapshotAttachment(const std::shared_ptr<qfn::Model>& model) {
     pixels.pixels.resize(64 * 64 * 3);
     for (std::size_t i = blue ? 2 : 0; i < pixels.pixels.size(); i += 3)
       pixels.pixels[i] = 255;
-    prompt->images.push_back({std::move(pixels), grid});
+    prompt->images.push_back(
+        {std::make_shared<const gufo::core::Image>(std::move(pixels)), grid});
     prompt->images.back().prefix_identity.fill(blue ? 2 : 1);
     prompt->cache_identity.assign(32, blue ? 2 : 1);
     return prompt;
@@ -848,7 +849,8 @@ void CheckExecutionModes(const std::shared_ptr<qfn::Model>& model,
     pixels.pixels.resize(64 * 64 * 3);
     for (std::size_t i = 0; i < pixels.pixels.size(); ++i)
       pixels.pixels[i] = static_cast<std::uint8_t>((i * 37 + i / 64) % 256);
-    image->images.push_back({std::move(pixels), grid});
+    image->images.push_back(
+        {std::make_shared<const gufo::core::Image>(std::move(pixels)), grid});
     image->images.back().prefix_identity.fill(3);
     image->cache_identity.assign(32, 3);
     ar->ConfigureVision(image);
@@ -1178,6 +1180,21 @@ int main(int argc, char** argv) {
     _putenv_s("GUFO_PLATFORM_TUNING", spec.c_str());
   }
 #endif
+  auto cache_type = qfn::KvCacheType::kF16;
+  if (argc >= 3 && std::string_view(argv[argc - 2]) == "--kv-cache-type") {
+    const std::string_view value(argv[argc - 1]);
+    if (value == "q8_0")
+      cache_type = qfn::KvCacheType::kQ8_0;
+    else if (value == "q8_0-rotated")
+      cache_type = qfn::KvCacheType::kQ8_0Rotated;
+    else if (value != "f16") {
+      std::cerr << "--kv-cache-type requires f16 or q8_0"
+                   " or q8_0-rotated"
+                   "\n";
+      return 2;
+    }
+    argc -= 2;
+  }
   const bool execution_only =
       argc == 7 && std::string_view(argv[5]) == "--execution-only";
   std::uint32_t execution_tokens = 4096;
@@ -1196,7 +1213,11 @@ int main(int argc, char** argv) {
       std::string_view(argv[3]) != "--mtp-model") {
     std::cerr << "Usage: session_test --model FIRST.gguf --mtp-model MTP.gguf "
                  "[--batch-only | --prefill-only | --sampling-only | "
-                 "--cache-only | --eos-only | --execution-only TOKENS]\n";
+                 "--cache-only | --eos-only | "
+                 "--execution-only TOKENS] "
+                 "[--kv-cache-type f16|q8_0"
+                 "|q8_0-rotated"
+                 "]\n";
     return 77;
   }
   if (execution_only) {
@@ -1216,7 +1237,8 @@ int main(int argc, char** argv) {
         {.max_context = execution_only ? execution_tokens + 16 : 6145,
          .mtp_model_path = argv[4],
          .max_draft_tokens = 7,
-         .decode_concurrency = DecodeConcurrency()},
+         .decode_concurrency = DecodeConcurrency(),
+         .kv_cache_type = cache_type},
         &error);
     Require(model != nullptr, error);
     if (execution_only) {
@@ -1433,13 +1455,13 @@ int main(int argc, char** argv) {
     // Recreate device weights, executor and plans. Reverse request order so
     // a previous shape cannot silently determine this request's arithmetic.
     model.reset();
-    model = qfn::Model::Load(
-        argv[2],
-        {.max_context = 6145,
-         .mtp_model_path = argv[4],
-         .max_draft_tokens = 7,
-         .decode_concurrency = DecodeConcurrency()},
-        &error);
+    model = qfn::Model::Load(argv[2],
+                             {.max_context = 6145,
+                              .mtp_model_path = argv[4],
+                              .max_draft_tokens = 7,
+                              .decode_concurrency = DecodeConcurrency(),
+                              .kv_cache_type = cache_type},
+                             &error);
     Require(model != nullptr, error);
     std::reverse(replays.begin(), replays.end());
     for (const auto& saved : replays) {

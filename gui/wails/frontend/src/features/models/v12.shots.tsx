@@ -22,7 +22,7 @@ test('review Cyber-Tiel card shows its abliterated base and licence once', async
   await commands.captureFeature('models', 'review-cyber-card')
 })
 
-test('V12 Models Import header, published rows and CLI lower-memory model info', async () => {
+test('V12 Models Import section, published rows and CLI lower-memory model info', async () => {
   document.documentElement.dataset.theme = inject('theme')
   const view = coreView('ready-busy')
   const entry = view.models!.catalogue.find((entry) =>
@@ -35,7 +35,7 @@ test('V12 Models Import header, published rows and CLI lower-memory model info',
   ])
   mountCorePage('/models', view)
   await expect
-    .element(page.getByRole('button', { name: 'Import', exact: true }))
+    .element(page.getByRole('button', { name: 'Browse model file…' }))
     .toBeVisible()
   await document.fonts.ready
   expect(await commands.captureFeature('models', 'v12-import-header')).toMatch(

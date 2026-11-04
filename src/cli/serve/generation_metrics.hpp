@@ -59,6 +59,14 @@ inline std::atomic<std::uint64_t>& TotalDraftAcceptedTokens() {
   static std::atomic<std::uint64_t> count{0};
   return count;
 }
+inline std::atomic<std::uint64_t>& TotalLookupTokens() {
+  static std::atomic<std::uint64_t> count{0};
+  return count;
+}
+inline std::atomic<std::uint64_t>& TotalLookupAcceptedTokens() {
+  static std::atomic<std::uint64_t> count{0};
+  return count;
+}
 inline std::atomic<double>& LastPromptSpeed() {
   static std::atomic<double> val{0.0};
   return val;
@@ -169,6 +177,10 @@ inline void RecordRequestMetrics(const TextGenerationBackend::Result& result) {
                                        std::memory_order_relaxed);
   detail::TotalDraftAcceptedTokens().fetch_add(result.draft_accepted_tokens,
                                                std::memory_order_relaxed);
+  detail::TotalLookupTokens().fetch_add(result.lookup_tokens,
+                                        std::memory_order_relaxed);
+  detail::TotalLookupAcceptedTokens().fetch_add(result.lookup_accepted_tokens,
+                                                std::memory_order_relaxed);
   const double prompt_per_second = PrefillTokensPerSecond(result);
   const double tok_per_sec =
       (result.decode_ms > 0.0 && result.completion_tokens > 0)
@@ -256,12 +268,25 @@ inline std::string GenerationLogDetails(
       << " draft_accepted=" << result.draft_accepted_tokens
       << " draft_proposed=" << result.draft_tokens
       << " draft_rounds=" << result.draft_rounds;
+  if (result.component_cache)
+    out << " cache_schema=component-cache-v1 cache_reuse="
+        << result.component_cache->reuse
+        << " cache_captures=" << result.component_cache->captures
+        << " cache_captured_capacity_bytes="
+        << result.component_cache->captured_bytes
+        << " cache_global_ledger_bytes="
+        << result.component_cache->ledger.total_bytes;
   if (result.draft_tokens > 0)
     out << " acceptance_pct="
         << 100.0 * result.draft_accepted_tokens / result.draft_tokens;
   if (result.lookup_tokens > 0)
     out << " lookup_accepted=" << result.lookup_accepted_tokens
         << " lookup_proposed=" << result.lookup_tokens;
+  if (result.ngram_rows > 0)
+    out << " ngram_rows=" << result.ngram_rows
+        << " ngram_dedup_rows=" << result.ngram_dedup_rows
+        << " ngram_cache_hits=" << result.ngram_cache_hits
+        << " ngram_disk_reads=" << result.ngram_disk_reads;
   if (result.cache_snapshot_bytes > 0)
     out << " cache_snapshot_bytes=" << result.cache_snapshot_bytes;
   if (result.cache_retained_bytes > 0)
@@ -314,6 +339,8 @@ inline json::Value GenerationTimings(
   timings["draft_rounds"] = result.draft_rounds;
   timings["draft_n"] = result.draft_tokens;
   timings["draft_n_accepted"] = result.draft_accepted_tokens;
+  if (result.component_cache)
+    timings["component_cache"] = ComponentCacheJson(*result.component_cache);
   if (result.lookup_tokens > 0) {
     timings["lookup_n"] = result.lookup_tokens;
     timings["lookup_n_accepted"] = result.lookup_accepted_tokens;

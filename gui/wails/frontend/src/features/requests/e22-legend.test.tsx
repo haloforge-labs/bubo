@@ -15,7 +15,7 @@ afterEach(() => cleanup())
 //  10b. With one absent value in a row the clause is there (it explains a dash
 //       the reader can see).
 //  10c. With no rows there is no table and no dash clause.
-const clause = 'a dash means no value'
+const clause = 'means no value'
 
 function complete(view: ReturnType<typeof fixture>) {
   view.requests = view.requests.map((row, index) => ({
@@ -40,9 +40,8 @@ test('10a: a table with every value shows no dash clause', async () => {
     .toBeGreaterThan(0)
   expect(document.querySelector('tbody')!.textContent).not.toContain('—')
   expect(document.body.textContent).not.toContain(clause)
-  await expect
-    .element(page.getByText(/Rates are for that one request\./))
-    .toBeVisible()
+  // The column titles carry the definitions; no paragraph repeats them.
+  expect(document.body.textContent).not.toContain('Rates are for that one')
 })
 
 test('10b: a dash in the table brings its explanation', async () => {
@@ -53,7 +52,7 @@ test('10b: a dash in the table brings its explanation', async () => {
     .poll(() => document.querySelectorAll('tbody tr').length)
     .toBeGreaterThan(0)
   expect(document.querySelector('tbody')!.textContent).toContain('—')
-  await expect.element(page.getByText(new RegExp(clause))).toBeVisible()
+  await expect.element(page.getByText('— means no value.')).toBeVisible()
 })
 
 test('10c: no rows, no dash clause', async () => {

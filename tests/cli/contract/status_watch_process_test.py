@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -204,6 +205,9 @@ def main():
     env = dict(os.environ, LOCALAPPDATA=str(root / 'local'), NO_COLOR='1',
                TERM='xterm-256color')
     env.pop('BUBO_MANIFEST', None)
+    # Records from earlier runs (a reused artifacts folder) would take part in
+    # automatic discovery below; start from an empty folder.
+    shutil.rmtree(env['LOCALAPPDATA'], ignore_errors=True)
     Path(env['LOCALAPPDATA']).mkdir(parents=True, exist_ok=True)
     bridge = None
     verdicts = []
@@ -332,6 +336,15 @@ def main():
             verdicts.append(f'{name}: PASS ({len(polls)} real status polls)')
         # A stalled status call also occupies the bridge during the next
         # handshake. Auto discovery must not mistake that timeout for stopped.
+        # Windows reuses PIDs. A stopped record whose PID now belongs to another
+        # process (this one: alive, different creation time) is a gone server,
+        # not a live candidate; it must not stop the watch from finding the
+        # real one. The record keeps its owner-only ACL: it is edited in place.
+        recycled_path = Path(env['LOCALAPPDATA']) / 'Bubo' / 'instances' / f'{stopped_id}.json'
+        recycled = json.loads(recycled_path.read_text(encoding='utf-8'))
+        assert recycled['phase'] == 'stopped', recycled
+        recycled['identity']['pid'] = os.getpid()
+        recycled_path.write_text(json.dumps(recycled), encoding='utf-8')
         with lock:
             position[0] = next(i for i, frame in enumerate(frames) if frame['name'] == 'idle')
             stall_next[0] = True

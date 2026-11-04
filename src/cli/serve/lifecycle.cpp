@@ -4,9 +4,7 @@
 #include <random>
 
 #include "src/cli/machine_adapter.hpp"
-#ifdef _WIN32
-#include <unistd.h>
-#endif
+#include "src/core/platform/os_info.hpp"
 
 namespace bubo::cli {
 namespace {
@@ -240,15 +238,14 @@ void ServeLifecycle::SampleLocked() {
   const auto sampled_at = std::chrono::steady_clock::now();
   const auto time = UtcTime();
   auto metrics = sampler ? sampler() : Value::object();
-#ifdef _WIN32
   if (!metrics.find("memory") || metrics.find("memory")->is_null()) {
     const auto bytes = [](std::uint64_t amount) {
       return amount > 0 && amount <= 9007199254740991ULL ? Value(amount)
                                                          : Value();
     };
     auto memory = Value::object();
-    memory["rss_bytes"] = bytes(gufo_resident_bytes());
-    memory["host_available_bytes"] = bytes(gufo_available_physical_bytes());
+    memory["rss_bytes"] = bytes(gufo::platform::ResidentMemoryBytes());
+    memory["host_available_bytes"] = bytes(gufo::platform::AvailableMemoryBytes());
     memory["unit"] = "bytes";
     memory["evidence"] = memory["rss_bytes"].is_null() &&
                                  memory["host_available_bytes"].is_null()
@@ -256,7 +253,6 @@ void ServeLifecycle::SampleLocked() {
                              : "measured";
     metrics["memory"] = std::move(memory);
   }
-#endif
   std::lock_guard lock(mutex_);
   for (const auto& [key, item] : metrics.members())
     snapshot_[key] = item;

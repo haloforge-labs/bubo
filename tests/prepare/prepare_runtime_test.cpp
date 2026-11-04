@@ -412,6 +412,26 @@ int main(int argc, char** argv) {
             "build B exact runtime notice bytes");
       Check(RuntimeReadyErrorForTesting(install, updated).empty(),
             "build B runtime marker is ready");
+      // Startup repair: a runtime prepared by build A (other notice set, same
+      // members) starts under build B without any prepare run, network or wheel
+      // cache; the members stay byte for byte; a changed member keeps the refusal.
+      Check(Run(refresh, env).code == 0, "restore build A before the startup repair");
+      {
+        const auto before = Snap(install, env);
+        const auto repaired = RuntimeReadyErrorForTesting(install, updated);
+        Check(repaired.empty() && stub.records().size() == requests,
+              "startup repairs a runtime prepared by the previous notice set offline: " + repaired);
+        const auto after = Snap(install, updated);
+        for (const auto& member : env.members)
+          Check(after.at(member.destination) == before.at(member.destination),
+                "startup repair preserves member hash, identity and timestamp");
+        for (const auto& notice : updated.notices)
+          Check(Read(install / "licenses" / fs::u8path(notice.path)) == notice.text,
+                "startup repair writes the exact notice bytes of the new build");
+        Check(RuntimeReadyErrorForTesting(install, updated).empty() &&
+                  !fs::exists(install / ".bubo/runtime/journal.json"),
+              "the second start needs no repair and leaves no journal");
+      }
       fs::remove(install / ".bubo/runtime-ready.json");
       Check(Run(refresh, updated).code == 0 &&
                 RuntimeReadyErrorForTesting(install, updated).empty() &&
@@ -455,6 +475,49 @@ int main(int argc, char** argv) {
       Check(Run(refresh, env).code == 0,
             "restore A after process death recovery");
 #endif
+      {
+        // The licenses folder comes out equal to the embedded set: a file an older
+        // notice set wrote (listed in the old readiness entry) and the new set no longer
+        // has is removed by the start repair and by `prepare runtime`; a file of the user stays.
+        auto older = env;
+        older.notices.push_back({"OLD-ITEMS.md", kAbcHash, "abc"});
+        older.notices.push_back({"old-dir/OLD-NOTE.txt", kAbcHash, "abc"});
+        const auto old_file = install / "licenses/OLD-ITEMS.md";
+        const auto old_nested = install / "licenses/old-dir/OLD-NOTE.txt";
+        const auto user_file = install / "licenses/user-note.txt";
+        Check(Run(refresh, older).code == 0 && fs::exists(old_file) && fs::exists(old_nested),
+              "state with an older, larger notice set");
+        WriteFixture(user_file, "mine");
+        const auto stale_start = RuntimeReadyErrorForTesting(install, env);
+        Check(stale_start.empty() && !fs::exists(old_file) && !fs::exists(old_nested) &&
+                  !fs::exists(install / "licenses/old-dir") && fs::exists(user_file),
+              "start repair removes the files the new notice set dropped, keeps a user file: " + stale_start);
+        Check(Run(refresh, older).code == 0 && fs::exists(old_file), "older, larger notice set again");
+        Check(Run(refresh, env).code == 0 && !fs::exists(old_file) && !fs::exists(old_nested) &&
+                  fs::exists(user_file),
+              "prepare runtime removes the files the new notice set dropped");
+        fs::remove(user_file);
+        for (const auto& notice : env.notices)
+          Check(Read(install / "licenses" / fs::u8path(notice.path)) == notice.text,
+                "the folder holds exactly the embedded notice bytes");
+      }
+      {
+        // A changed member keeps today's refusal for a notice-only difference and leaves the
+        // readiness entry alone (done last: it replaces a member file, which changes its identity).
+        Check(Run(refresh, env).code == 0, "state A before the damaged-member case");
+        const auto member = install / fs::u8path(env.members.front().destination);
+        const auto original = Read(member);
+        auto damaged = original;
+        damaged[0] = static_cast<char>(damaged[0] ^ 1);
+        WriteFixture(member, damaged);
+        const auto marker_before = Read(install / ".bubo/runtime-ready.json");
+        const auto refused = RuntimeReadyErrorForTesting(install, updated);
+        Check(refused.find("runtime readiness entry mismatch") != std::string::npos &&
+                  Read(install / ".bubo/runtime-ready.json") == marker_before,
+              "a changed member keeps today's refusal and leaves the readiness entry alone: " + refused);
+        WriteFixture(member, original);
+        Check(Run(refresh, env).code == 0, "state A after the damaged-member case");
+      }
     }
     auto offline = options("offline");
     offline.offline = true;

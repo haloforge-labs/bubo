@@ -9,8 +9,16 @@
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
+#include "src/models/qwen38_flash_next/rope_scaling.hpp"
 
 namespace gufo::models::qwen38_flash_next {
+
+/// Most rows a prefill pass may run past an in-pass checkpoint boundary. A chat
+/// prompt's stable boundary lies the assistant framing (about seven rows) before
+/// the prompt end, and a snapshot at a multiple of the attention query group
+/// (four) rounds it down by up to three more; a window of eight left aligned
+/// boundaries outside it and cost an extra pass.
+inline constexpr std::uint32_t kPrefillCheckpointSuffix = 12;
 
 /// Architecture parameters of a `qwen4exp` GGUF artifact. Every value is read
 /// from the file; the fixed limits below only bound what this runtime was
@@ -38,6 +46,10 @@ struct Config {
   std::uint32_t rotary_dim{0};               ///< 64
   float rope_theta{0.0F};                    ///< 1e7
   std::array<std::uint32_t, 4> rope_sections{};
+  /// Static YaRN, set by `ModelOptions::rope_scaling`; the GGUF loader sets
+  /// no rope-scaling keys of its own today. The native `context_length`
+  /// above is never rewritten.
+  RopeScaling rope_scaling{};
 
   // Qwen Sparse Attention indexer (block top-k selection).
   std::uint32_t indexer_heads{0};     ///< 4
@@ -53,7 +65,7 @@ struct Config {
   std::uint32_t ssm_inner_size{0};   ///< 6144
 
   // Mixture of experts with one always-on shared expert.
-  std::uint32_t num_experts{0};       ///< 512
+  std::uint32_t num_experts{0};       ///< 256 (compact pruned) or 512
   std::uint32_t num_experts_used{0};  ///< 10
   std::uint32_t expert_ff{0};         ///< 640
   std::uint32_t shared_expert_ff{0};  ///< 640
@@ -108,6 +120,18 @@ struct Config {
     return ple_layer >= 0 && layer == static_cast<std::uint32_t>(ple_layer);
   }
 
+  /// Longest session the rope configuration supports.
+  [[nodiscard]] std::uint32_t MaxContextLength() const noexcept {
+    return ScaledContextLength(rope_scaling, context_length);
+  }
+  /// uint32 words per sparse-mask row: one bit per compress_ratio block.
+  [[nodiscard]] std::uint32_t SparseMaskWords(
+      std::uint32_t context) const noexcept {
+    const std::uint32_t blocks =
+        (context + compress_ratio - 1) / compress_ratio;
+    return (blocks + 31) / 32;
+  }
+
   /// The draft executes with trunk constants and shared vocabulary weights.
   /// PLE/SSM parameters are intentionally excluded: the draft is full
   /// attention.
@@ -124,7 +148,9 @@ struct Config {
            indexer_head_dim == trunk.indexer_head_dim &&
            indexer_top_k == trunk.indexer_top_k &&
            compress_ratio == trunk.compress_ratio &&
-           num_experts == trunk.num_experts &&
+           // The draft block binds and runs with its own routed expert count (a
+           // pruned trunk such as the 256-expert Coder can draft with the
+           // 512-expert sidecar); top-k and the expert width must still agree.
            num_experts_used == trunk.num_experts_used &&
            expert_ff == trunk.expert_ff &&
            shared_expert_ff == trunk.shared_expert_ff;

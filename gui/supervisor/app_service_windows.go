@@ -38,6 +38,7 @@ type LanState struct {
 type AppService struct {
 	view              ViewBuilder
 	estimate          savedEstimateState
+	caps              capabilityState
 	appliedSettings   *Settings
 	appliedGeneration uint64
 	mu                sync.RWMutex
@@ -70,13 +71,41 @@ type AppService struct {
 	folders           FolderOpener
 	updates           *UpdateService
 	windowReady       chan struct{}
+	showOnReady       bool
 	readyOnce         sync.Once
 	// folderMu serialises changes of the model folder list and Save.
 	folderMu sync.Mutex
 }
 
 func NewAppService(b Backend, settings Settings, lease *SingleInstance, warning string, hooks AppHooks) *AppService {
-	return &AppService{backend: b, settings: settings, lease: lease, done: make(chan struct{}), windowReady: make(chan struct{}), warning: warning, warningCode: "internal_error", quit: hooks.Quit, show: hooks.Show, hide: hooks.Hide, trayAvailable: true, tray: hooks.Tray, keys: NewKeyManager(nil), adapters: winAdapters{}, events: hooks.Events, dialogs: hooks.Dialogs, folders: hooks.Folders}
+	a := &AppService{backend: b, settings: settings, lease: lease, done: make(chan struct{}), windowReady: make(chan struct{}), warning: warning, warningCode: "internal_error", quit: hooks.Quit, show: hooks.Show, hide: hooks.Hide, trayAvailable: true, tray: hooks.Tray, keys: NewKeyManager(nil), adapters: winAdapters{}, events: hooks.Events, dialogs: hooks.Dialogs, folders: hooks.Folders}
+	if g, ok := b.(interface {
+		SetSwitchGuard(func(Settings) map[string]string)
+	}); ok {
+		g.SetSwitchGuard(a.dropUnavailableSwitches)
+	}
+	return a
+}
+
+// RememberWindowSize keeps the size the user left the window at, so the next
+// start opens the same. Nothing else about the settings changes.
+func (a *AppService) RememberWindowSize(width, height int) {
+	if width < 100 || height < 100 || width > 20000 || height > 20000 {
+		return
+	}
+	a.mu.RLock()
+	next := a.settings
+	a.mu.RUnlock()
+	if next.WindowWidth == width && next.WindowHeight == height {
+		return
+	}
+	next.WindowWidth, next.WindowHeight = width, height
+	if err := a.backend.Save(next); err != nil {
+		return
+	}
+	a.mu.Lock()
+	a.settings.WindowWidth, a.settings.WindowHeight = width, height
+	a.mu.Unlock()
 }
 
 func (a *AppService) SetStartupNotice(code, detail string) {
@@ -332,8 +361,27 @@ func (a *AppService) Startup(ctx context.Context) {
 	}()
 }
 
-func (a *AppService) DOMReady(context.Context) {
-	a.readyOnce.Do(func() { close(a.windowReady) })
+// ShowOnDOMReady makes the window show itself when the page is ready. The
+// updater's helper starts the new GUI with a hidden-window start request, which
+// the system applies to the first ShowWindow call, so the window of an update
+// launch stays hidden until it is shown again.
+func (a *AppService) ShowOnDOMReady(show bool) {
+	a.mu.Lock()
+	a.showOnReady = show
+	a.mu.Unlock()
+}
+
+func (a *AppService) DOMReady(ctx context.Context) {
+	a.readyOnce.Do(func() {
+		a.mu.RLock()
+		show := a.showOnReady
+		a.mu.RUnlock()
+		if show && a.show != nil {
+			a.show(ctx)
+			a.backend.SetVisible(true)
+		}
+		close(a.windowReady)
+	})
 }
 
 // The supervisor stopped owned work and handed off to the helper. Bypass the

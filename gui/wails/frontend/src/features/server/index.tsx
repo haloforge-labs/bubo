@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { Link } from '@tanstack/react-router'
 import { Page } from '@/components/page'
 import { DesktopView } from '@/components/desktop-view'
 import { Preparation } from '@/components/preparation'
@@ -24,6 +25,8 @@ import { Button } from '@/components/ui/button'
 import { effectiveValue } from '@/lib/registry-view'
 import { liveSessionSummary } from '@/lib/live-sessions'
 import { modelAlias } from '@/lib/server-values'
+import { figureGrid } from '@/components/page-grid'
+import { Disclosure } from '@/components/disclosure'
 import {
   serverAddresses,
   activeModelName,
@@ -35,7 +38,7 @@ import {
 
 export default function ServerPage() {
   return (
-    <Page title="Server">
+    <Page title="Server" inlineTitle>
       <DesktopView>{(view) => <ServerContent view={view} />}</DesktopView>
     </Page>
   )
@@ -130,8 +133,65 @@ function ServerContent({ view }: { view: View }) {
     },
   ] as const
 
+  // The setup form says nothing while the CLI cannot run, as on cli-missing.
+  // While the server runs, the facts of the run come first and the setup follows.
+  const setup = view.failure?.code !== 'vcredist_missing' && (
+    <section aria-label="Server setup" className="space-y-2 border-t pt-3">
+      <h2 className="flex flex-wrap items-baseline gap-x-3 text-lg">
+        Server setup
+        <span className="text-xs text-muted-foreground">
+          Client access:{' '}
+          <Link to="/connect" className="underline">
+            Connect
+          </Link>
+        </span>
+      </h2>
+      <ServerSetup
+        view={view}
+        onDirtyChange={setSetupDirty}
+        actionRef={setupAction}
+        suggestionSignal={suggestionSignal}
+        addresses={
+          <>
+            {' '}
+            {(addresses.openai_base_url || addresses.anthropic_base_url) && (
+              <section
+                aria-label="Addresses"
+                className="flex flex-wrap items-baseline gap-x-6 gap-y-1"
+              >
+                <h2 className="text-lg">Addresses</h2>
+                {(
+                  [
+                    ['OpenAI', addresses.openai_base_url],
+                    ['Anthropic', addresses.anthropic_base_url],
+                  ] as const
+                ).map(
+                  ([label, url]) =>
+                    url && (
+                      <div
+                        key={label}
+                        className="flex min-w-0 flex-wrap items-center gap-3 text-sm"
+                      >
+                        <span>{label}</span>
+                        <code className="min-w-0 break-all">{url}</code>
+                        <CopyText
+                          iconOnly
+                          label={`Copy ${label} address`}
+                          text={url}
+                        />
+                      </div>
+                    ),
+                )}
+              </section>
+            )}
+          </>
+        }
+      />
+    </section>
+  )
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-3 [&>*:not(:first-child)]:clear-both">
       <div className="space-y-2">
         <div
           className="flex flex-wrap items-center gap-x-4 gap-y-2"
@@ -235,62 +295,23 @@ function ServerContent({ view }: { view: View }) {
         {(view.failure?.code === 'port_occupied' ||
           view.reason === 'port_occupied') && <BusyPort view={view} />}
       </div>
-      {/* The setup form says nothing while the CLI cannot run, as on cli-missing. */}
-      {view.failure?.code !== 'vcredist_missing' && (
-        <section aria-label="Server setup" className="space-y-3 border-t pt-4">
-          <h2 className="text-xl">Server setup</h2>
-          <ServerSetup
-            view={view}
-            onDirtyChange={setSetupDirty}
-            actionRef={setupAction}
-            suggestionSignal={suggestionSignal}
-            addresses={
-              <>
-                {' '}
-                {(addresses.openai_base_url ||
-                  addresses.anthropic_base_url) && (
-                  <section aria-label="Addresses" className="space-y-2">
-                    <h2 className="text-lg">Addresses</h2>
-                    {(
-                      [
-                        ['OpenAI', addresses.openai_base_url],
-                        ['Anthropic', addresses.anthropic_base_url],
-                      ] as const
-                    ).map(
-                      ([label, url]) =>
-                        url && (
-                          <div
-                            key={label}
-                            className="flex min-w-0 flex-wrap items-center gap-3 text-sm"
-                          >
-                            <span>{label}</span>
-                            <code className="min-w-0 break-all">{url}</code>
-                            <CopyText
-                              iconOnly
-                              label={`Copy ${label} address`}
-                              text={url}
-                            />
-                          </div>
-                        ),
-                    )}
-                  </section>
-                )}
-              </>
-            }
-          />
-        </section>
-      )}
+      {!running && setup}
       {running && (
-        <section aria-label="Model in use" className="space-y-1">
+        <section
+          aria-label="Model in use"
+          className="flex flex-wrap items-baseline gap-x-5 gap-y-1"
+        >
           <p>
             Model: {modelName || 'not identified'}
             {!modelName && servedName ? ` (server name: ${servedName})` : ''}
           </p>
           {modelPath && (
-            <details className="text-sm text-muted-foreground">
-              <summary>Model folder</summary>
+            <Disclosure
+              summary="Model folder"
+              className="text-sm text-muted-foreground"
+            >
               <PathText path={folderPath(modelPath)} />
-            </details>
+            </Disclosure>
           )}
           {servedName && (
             <p className="text-sm text-muted-foreground">
@@ -354,7 +375,7 @@ function ServerContent({ view }: { view: View }) {
               )}
             </p>
             {request && (
-              <div className="grid gap-4 sm:grid-cols-3">
+              <div className={figureGrid}>
                 {metrics.map((metric) => (
                   <figure key={metric.key} aria-label={metric.label}>
                     {metric.key === 'prefill' &&
@@ -367,7 +388,7 @@ function ServerContent({ view }: { view: View }) {
                       </p>
                     ) : (
                       <>
-                        <p className="text-3xl tabular-nums">
+                        <p className="text-2xl tabular-nums">
                           {metric.value == null ? '—' : rate(metric.value)}{' '}
                           <span className="text-sm">tok/s</span>
                         </p>
@@ -393,7 +414,7 @@ function ServerContent({ view }: { view: View }) {
                 ))}
                 {request.ttft_ms != null && (
                   <figure aria-label="Time to first token">
-                    <p className="text-3xl tabular-nums">
+                    <p className="text-2xl tabular-nums">
                       {request.ttft_ms < 1000
                         ? `${number(request.ttft_ms, 0)} ms`
                         : duration(request.ttft_ms / 1000)}
@@ -472,6 +493,7 @@ function ServerContent({ view }: { view: View }) {
           )}
         </section>
       )}
+      {running && setup}
     </div>
   )
 }

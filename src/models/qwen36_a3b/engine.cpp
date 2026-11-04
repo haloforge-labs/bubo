@@ -1,27 +1,21 @@
 #include "src/models/qwen36_a3b/engine.hpp"
 
-#ifdef _WIN32
-#include <fcntl.h>
-#include <unistd.h>
-#endif
-
 #include <algorithm>
-#include <atomic>
-#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
-#include <thread>
 
 #include "qfn_mmq.h"
+#include "src/cli/serve/logging.hpp"
+#include "src/core/hip/weight_upload.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
 #include "src/core/session_state_bytes.hpp"
 #include "src/models/qwen/vision/device_input.hpp"
 #include "src/models/qwen36_a3b/attention.hpp"
 #include "src/models/qwen36_a3b/kernels.hpp"
+#include "src/models/qwen36_a3b/prefill_failure.hpp"
 #include "src/models/qwen36_a3b/weight_format.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
@@ -32,6 +26,12 @@ namespace fn = gufo::models::qwen38_flash_next::rocm;
 using core::GgmlType;
 
 constexpr std::uint32_t kAttnSplits = 8;
+
+[[noreturn]] void PrefillExpertFailure(std::string_view detail) {
+  FailPrefillExperts(detail, [](std::string_view message) {
+    gufo::server::Logger::Diagnostic("prefill-diag", message);
+  });
+}
 
 void Fail(std::string* error, std::string message) {
   if (error != nullptr && error->empty())
@@ -60,96 +60,38 @@ WeightKind Kind(const Tensor& t) {
   }
 }
 
-#ifdef _WIN32
-// The 27B loader's approach: one hipMalloc per mapped region (dedicated VRAM
-// carve-out), filled by 16 readers through a cached overlapped handle
-// (O_CONCURRENT_RANDOM). O_DIRECT reads of a mapped file serialize on NTFS.
+// Use the shared bounded upload pipeline and its native platform file handles.
 bool UploadRegions(std::span<const core::GgufMappedRegion> src,
                    std::vector<void*>& dst, std::string* error_msg) {
   constexpr std::size_t kTail = 4096;
-  constexpr std::size_t kChunk = 16ULL << 20;
-  constexpr std::size_t kReaders = 16;
   const auto started = std::chrono::steady_clock::now();
-  std::mutex error_mutex;
   std::string error;
-  std::atomic<bool> failed{false};
-  const auto fail = [&](std::string message) {
-    std::lock_guard lock(error_mutex);
-    if (!failed.exchange(true))
-      error = std::move(message);
-  };
+  auto uploader = hip::WeightUpload::Create(src, &error);
+  if (!uploader) {
+    Fail(error_msg, "A3B weight upload failed: " + error);
+    return false;
+  }
   dst.assign(src.size(), nullptr);
-  std::vector<int> fds(src.size(), -1);
-  struct Chunk {
-    std::size_t region;
-    std::size_t offset;
-  };
-  std::vector<Chunk> chunks;
   std::size_t total = 0;
-  for (std::size_t i = 0; i < src.size() && !failed; ++i) {
+  bool copied = true;
+  for (std::size_t i = 0; i < src.size(); ++i) {
     if (hipMalloc(&dst[i], src[i].size + kTail) != hipSuccess) {
-      fail("hipMalloc failed for " + std::to_string(src[i].size) + " bytes");
+      error = "hipMalloc failed for " + std::to_string(src[i].size) + " bytes";
+      copied = false;
       break;
     }
-    (void)hipMemset(static_cast<std::uint8_t*>(dst[i]) + src[i].size, 0, kTail);
-    const auto path = "/proc/self/fd/" + std::to_string(src[i].file_descriptor);
-    fds[i] = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_CONCURRENT_RANDOM);
-    if (fds[i] < 0) {
-      fail(std::string("cannot reopen GGUF: ") + std::strerror(errno));
+    if (!Ok(hipMemset(static_cast<std::uint8_t*>(dst[i]) + src[i].size, 0,
+                       kTail), "upload tail", &error) ||
+        !uploader->Copy(static_cast<std::uint32_t>(i), 0, src[i].size, dst[i],
+                         &error)) {
+      copied = false;
       break;
     }
-    for (std::size_t off = 0; off < src[i].size; off += kChunk)
-      chunks.push_back({i, off});
     total += src[i].size;
   }
-  std::atomic<std::size_t> next{0};
-  const auto reader = [&] {
-    void* staging = nullptr;
-    hipStream_t stream = nullptr;
-    if (hipHostMalloc(&staging, kChunk) != hipSuccess ||
-        hipStreamCreateWithFlags(&stream, hipStreamNonBlocking) != hipSuccess)
-      fail("upload staging allocation failed");
-    while (!failed) {
-      const auto index = next.fetch_add(1);
-      if (index >= chunks.size())
-        break;
-      const auto [region, offset] = chunks[index];
-      const auto bytes = std::min(kChunk, src[region].size - offset);
-      for (std::size_t got = 0; got < bytes && !failed;) {
-        const auto n = ::pread(fds[region], static_cast<char*>(staging) + got,
-                               bytes - got, static_cast<off_t>(offset + got));
-        if (n <= 0) {
-          fail(std::string("GGUF read failed: ") +
-               (n == 0 ? "unexpected end of file" : std::strerror(errno)));
-          break;
-        }
-        got += static_cast<std::size_t>(n);
-      }
-      if (failed)
-        break;
-      auto status =
-          hipMemcpyAsync(static_cast<std::uint8_t*>(dst[region]) + offset,
-                         staging, bytes, hipMemcpyHostToDevice, stream);
-      if (status == hipSuccess)
-        status = hipStreamSynchronize(stream);
-      if (status != hipSuccess)
-        fail(std::string("upload failed: ") + hipGetErrorString(status));
-    }
-    if (stream != nullptr)
-      (void)hipStreamDestroy(stream);
-    if (staging != nullptr)
-      (void)hipHostFree(staging);
-  };
-  if (!failed) {
-    std::vector<std::jthread> readers;
-    for (std::size_t i = 1; i < kReaders; ++i)
-      readers.emplace_back(reader);
-    reader();
-  }
-  for (const int fd : fds)
-    if (fd >= 0)
-      (void)::close(fd);
-  if (failed) {
+  // Always settle queued copies before any owning engine can free dst.
+  const bool finished = uploader->Finish(&error);
+  if (!copied || !finished) {
     Fail(error_msg, "A3B weight upload failed: " + error);
     return false;
   }
@@ -161,7 +103,6 @@ bool UploadRegions(std::span<const core::GgufMappedRegion> src,
                gib, s, s > 0 ? gib / s : 0.0);
   return true;
 }
-#endif
 
 }  // namespace
 
@@ -302,13 +243,8 @@ bool Engine::Upload(std::string* error) {
   if (!Ok(hipStreamCreateWithFlags(&stream_, hipStreamNonBlocking), "stream",
           error))
     return false;
-#ifdef _WIN32
   if (!UploadRegions(gguf_->GetMappedRegions(), regions_, error))
     return false;
-#else
-  Fail(error, "the A3B exploration runtime is Windows-only for now");
-  return false;
-#endif
   // Bind every tensor against the device copy.
   bool ok = Get("token_embd.weight", &token_embd_, error) &&
             Get("output_norm.weight", &output_norm_, error);
@@ -840,7 +776,94 @@ void Engine::Attention(const Layer& l, std::uint32_t idx, std::uint32_t n) {
     Dense(l.attn_out, ctx_, blk_, n);
 }
 
-void Engine::Moe(const Layer& l, std::uint32_t n) {
+const qfn::PrefillExpertsSettings* Engine::BeginPrefillExperts(
+    std::uint32_t n) {
+  const auto& settings = PrefillExperts();
+  if (!settings.active)
+    return nullptr;
+  if (c_.experts_used != 8 || c_.layers != 40)
+    PrefillExpertFailure(
+        "A3B prefill experts requires used=8 and 40 trunk layers");
+  prefill_totals_ = {};
+  if (static_cast<std::uint64_t>(n) * c_.experts_used * c_.layers > UINT32_MAX)
+    PrefillExpertFailure("A3B prefill expert audit row overflow");
+  if (settings.audit == qfn::PrefillExpertsAudit::kFull) {
+    if (prefill_audit_ == nullptr) {
+      void* p = nullptr;
+      if (hipMalloc(&p, sizeof(qfn::RoutedExpertAudit)) != hipSuccess)
+        PrefillExpertFailure("A3B prefill audit allocation failed");
+      owned_.push_back(p);
+      prefill_audit_ = static_cast<qfn::RoutedExpertAudit*>(p);
+    }
+    if (hipMemsetAsync(prefill_audit_, 0, sizeof(*prefill_audit_), stream_) !=
+        hipSuccess)
+      PrefillExpertFailure("A3B prefill audit reset failed");
+  }
+  return &settings;
+}
+
+void Engine::RecordPrefillCounts(std::span<const std::uint32_t> counts,
+                                 std::uint32_t n) {
+  for (auto count : counts)
+    if (count > n)
+      PrefillExpertFailure("A3B invalid live expert count");
+  prefill_totals_.routed_experts.active_slots +=
+      qfn::CountRoutedExpertSlots(counts);
+  prefill_totals_.routed_experts.offered_slots +=
+      static_cast<std::uint64_t>(n) * c_.experts_used;
+}
+
+void Engine::RecordPrefillIds(std::uint32_t n) {
+  std::array<std::int32_t, kMaxRows * 8> ids{};
+  if (n > kMaxRows ||
+      hipMemcpyAsync(ids.data(), ids_,
+                     n * c_.experts_used * sizeof(std::int32_t),
+                     hipMemcpyDeviceToHost, stream_) != hipSuccess ||
+      hipStreamSynchronize(stream_) != hipSuccess)
+    PrefillExpertFailure("A3B prefill ids download failed");
+  std::vector<std::uint32_t> counts(c_.experts);
+  for (std::uint32_t i = 0; i < n * c_.experts_used; ++i) {
+    if (ids[i] < -1 || ids[i] >= static_cast<std::int32_t>(c_.experts))
+      PrefillExpertFailure("A3B invalid routed expert id");
+    if (ids[i] >= 0)
+      ++counts[ids[i]];
+  }
+  RecordPrefillCounts(counts, n);
+}
+
+void Engine::FinishPrefillExperts(const qfn::PrefillExpertsSettings* settings,
+                                  std::uint32_t start, std::uint32_t n,
+                                  qfn::DiagClock::time_point began) {
+  if (settings == nullptr)
+    return;
+  qfn::RoutedExpertAudit audit;
+  if (settings->audit == qfn::PrefillExpertsAudit::kFull &&
+      hipMemcpyAsync(&audit, prefill_audit_, sizeof(audit),
+                     hipMemcpyDeviceToHost, stream_) != hipSuccess)
+    PrefillExpertFailure("A3B prefill audit download failed");
+  if (hipStreamSynchronize(stream_) != hipSuccess)
+    PrefillExpertFailure("A3B prefill expert sync failed");
+  auto& c = prefill_totals_.routed_experts;
+  c.executed_rows = audit.ExecutedRows();
+  c.invalid_rows = audit.InvalidRows();
+  const auto rows = static_cast<std::uint64_t>(n) * c_.layers;
+  const bool counts_ok = c.offered_slots == rows * c_.experts_used &&
+                         c.active_slots >= rows &&
+                         c.active_slots <= rows * settings->keep &&
+                         (settings->mode == qfn::PrefillExpertsMode::kMass ||
+                          c.active_slots == rows * settings->keep);
+  const bool ok =
+      counts_ok && (settings->audit != qfn::PrefillExpertsAudit::kFull ||
+                    (c.executed_rows == c.active_slots && c.invalid_rows == 0));
+  const auto line = qfn::PrefillExpertLogLine(
+      *settings, prefill_totals_, start, n,
+      qfn::DiagMicroseconds(qfn::DiagClock::now() - began), ok);
+  std::fprintf(stderr, "[prefill-diag] %s\n", line.c_str());
+  if (!ok)
+    PrefillExpertFailure("A3B prefill expert counters disagree");
+}
+
+void Engine::Moe(const Layer& l, std::uint32_t n, PrefillLayer prefill) {
   const std::uint32_t E = c_.experts;
   const std::uint32_t U = c_.experts_used;
   const std::uint32_t H = c_.hidden;
@@ -853,8 +876,16 @@ void Engine::Moe(const Layer& l, std::uint32_t n) {
     F32Gemv(static_cast<const float*>(l.router), xn_, router_, n, E + 1, H,
             stream_);
   }
-  if (!Skip(kPhRouter))
-    fn::RouterTopK(router_, E + 1, ids_, weights_, n, E, U, stream_);
+  if (!Skip(kPhRouter)) {
+    if (prefill) {
+      const auto& policy = *prefill.settings;
+      fn::RouterTopK(router_, E + 1, ids_, weights_, n, E, U, stream_,
+                     policy.keep, policy.mode, policy.mass, prefill.Fold());
+      RecordPrefillIds(n);
+    } else {
+      fn::RouterTopK(router_, E + 1, ids_, weights_, n, E, U, stream_);
+    }
+  }
 
   // Shared expert: silu(gate x) * (up x), then down.
   Mark(kPhShared);
@@ -903,8 +934,17 @@ void Engine::Moe(const Layer& l, std::uint32_t n) {
   }
   // One (token, slot) row per expert id.
   Mark(kPhDown);
+  if (prefill)
+    fn::PrepareRoutedExpertRows(e_down_, false, ids_, n * U, H, stream_,
+                                prefill.settings->audit);
   if (!Skip(kPhDown))
     experts(l.down_exps, e_act_, e_down_, n * U, 1);
+  if (prefill && prefill.settings->audit == qfn::PrefillExpertsAudit::kFull)
+    fn::CountRoutedExpertRows(
+        e_down_, false, ids_, n * U, H, prefill_audit_, stream_,
+        l.down_exps.type == GgmlType::kQ8_0 || IsKQuant(l.down_exps.type)
+            ? qfn::RoutedExpertDroppedRows::kZeroOrUntouched
+            : qfn::RoutedExpertDroppedRows::kUntouched);
   Mark(kPhEpilogue);
   if (!Skip(kPhEpilogue))
     fn::MoeEpilogue(e_down_, weights_, sh_out_, router_ + E, E + 1, blk_, n, U,
@@ -1136,11 +1176,12 @@ void Engine::FusedAttention(const Layer& l, __half* k_cache, __half* v_cache,
   }
 }
 
-void Engine::FusedMoe(const Layer& l, float* res, std::uint32_t n) {
+void Engine::FusedMoe(const Layer& l, float* res, std::uint32_t n,
+                      PrefillLayer prefill) {
   if (IsKQuant(l.gate_exps.type) || IsKQuant(l.up_exps.type) ||
       IsKQuant(l.down_exps.type)) {
     // Preserve the fused Q8/BF16 kernels; K-quants use typed vendor MMVQ.
-    Moe(l, n);
+    Moe(l, n, prefill);
     AddInPlace(res, blk_, static_cast<std::size_t>(n) * c_.hidden, stream_);
     return;
   }
@@ -1157,22 +1198,35 @@ void Engine::FusedMoe(const Layer& l, float* res, std::uint32_t n) {
                             {l.sh_gate.data, l.sh_up.data, sh_act_, sf,
                              Kind(l.sh_up), GemvMode::kGated, sf}};
     MultiGemv(segs, Skip(kPhShared) ? 1 : 2, aq_, xn_, n, H, stream_);
-    fn::RouterTopK(router_, E + 1, ids_, weights_, n, E, U, stream_);
+    if (prefill) {
+      const auto& policy = *prefill.settings;
+      fn::RouterTopK(router_, E + 1, ids_, weights_, n, E, U, stream_,
+                     policy.keep, policy.mode, policy.mass, prefill.Fold());
+      RecordPrefillIds(n);
+    } else {
+      fn::RouterTopK(router_, E + 1, ids_, weights_, n, E, U, stream_);
+    }
   }
   Mark(kPhGateUp);
   if (!Skip(kPhGateUp))
     ExpertsGated(l.gate_exps.data, l.up_exps.data, Kind(l.gate_exps), aq_, xn_,
-                 ids_, e_act_, n, U, l.gate_exps.rows, H, stream_);
+                 ids_, e_act_, n, U, l.gate_exps.rows, H, stream_,
+                 static_cast<bool>(prefill));
   Mark(kPhDown);
   if (!Skip(kPhDown))
-    ExpertsDown(l.down_exps.data, Kind(l.down_exps), l.sh_down.data,
-                Kind(l.sh_down), e_act_, sh_act_, act_q_, ids_, weights_,
-                router_, E + 1, E, res, n, U, H, l.down_exps.cols, stream_);
+    ExpertsDown(
+        l.down_exps.data, Kind(l.down_exps), l.sh_down.data, Kind(l.sh_down),
+        e_act_, sh_act_, act_q_, ids_, weights_, router_, E + 1, E, res, n, U,
+        H, l.down_exps.cols, stream_, static_cast<bool>(prefill),
+        prefill && prefill.settings->audit == qfn::PrefillExpertsAudit::kFull
+            ? prefill_audit_
+            : nullptr);
 }
 
 void Engine::BodyFused(std::uint32_t n, std::uint32_t rows,
                        const std::int32_t* tokens, const std::uint32_t* pos,
-                       bool capture, bool snapshots, std::uint32_t inject_pos) {
+                       bool capture, bool snapshots, std::uint32_t inject_pos,
+                       const qfn::PrefillExpertsSettings* experts) {
   const std::uint32_t H = c_.hidden;
   Mark(kPhEmbed);
   fn::EmbedTokens(token_embd_.data, Small(token_embd_.type), tokens, res_, n, H,
@@ -1204,9 +1258,9 @@ void Engine::BodyFused(std::uint32_t n, std::uint32_t rows,
       AddNormQuant(res_, nullptr, l.post_norm.f32(), xn_, aq_, n, H, c_.eps,
                    stream_);
     if (parts & 4u) {
-      FusedMoe(l, res_, n);
+      FusedMoe(l, res_, n, {experts, i});
     } else {
-      Moe(l, n);
+      Moe(l, n, {experts, i});
       AddInPlace(res_, blk_, static_cast<std::size_t>(n) * H, stream_);
     }
     if (df_)
@@ -1286,7 +1340,7 @@ void Engine::MtpPass(const std::int32_t* tokens, const float* hidden,
                draft_out, 1, vocab, stream_);
     if (pruned)
       fn::RemapIds(reinterpret_cast<std::uint32_t*>(draft_out), 1, draft_map_,
-                   stream_);
+                   draft_vocab_, stream_);
   }
   if (candidates) {
     fn::MtpTopCandidates(
@@ -1294,7 +1348,8 @@ void Engine::MtpPass(const std::int32_t* tokens, const float* hidden,
         reinterpret_cast<float*>(cand_ws_ + Candidates::kCount), vocab,
         stream_);
     if (pruned)
-      fn::RemapIds(cand_ws_, Candidates::kCount, draft_map_, stream_);
+      fn::RemapIds(cand_ws_, Candidates::kCount, draft_map_, draft_vocab_,
+                   stream_);
     fn::CopyMapped(cand_ws_, draft_host_, sizeof(Candidates), stream_);
   }
 }
@@ -1398,7 +1453,12 @@ bool Engine::SpecPrefill(std::span<const std::int32_t> tokens, Candidates* last,
                            hipMemcpyHostToDevice, stream_),
             "position upload", error))
       return false;
-    BodyFused(n, final ? 1 : 0, tokens_dev_, pos_dev_, mtp, false, pos_);
+    const auto* experts = BeginPrefillExperts(n);
+    const auto began =
+        experts ? qfn::DiagClock::now() : qfn::DiagClock::time_point{};
+    BodyFused(n, final ? 1 : 0, tokens_dev_, pos_dev_, mtp, false, pos_,
+              experts);
+    FinishPrefillExperts(experts, pos_, n, began);
     if (df_ && !DFlashInject(n, pos_, end, false, pos_dev_, error))
       return false;
     if (mtp) {

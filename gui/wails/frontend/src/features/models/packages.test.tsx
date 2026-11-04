@@ -18,6 +18,12 @@ test('the same package in two folders is two rows, each with its own folder', as
   const { view } = packagesView()
   mountCorePage('/models', view)
   const installed = page.getByRole('region', { name: 'Installed models' })
+  // Each row keeps its folder behind a "Model folder" fold.
+  const folds = installed.getByText('Model folder')
+  await expect.element(folds.first()).toBeVisible()
+  expect(folds.elements()).toHaveLength(2)
+  await folds.nth(0).click()
+  await folds.nth(1).click()
   await expect
     .element(installed)
     .toHaveTextContent('AppData\\Local\\Bubo\\models')
@@ -266,18 +272,73 @@ async function installedActionsShareOneLine() {
   const installed = page.getByRole('region', { name: 'Installed models' })
   await expect.element(installed).toBeVisible()
   const first = installed.getByRole('row').nth(1)
-  const names = ['Open folder', 'Copy folder path', 'Check or repair files']
+  await first.getByText('Model folder').click()
+  // The folder actions share one line; the repair action is visible beside the
+  // row's name and status, outside the fold.
+  const names = ['Open folder', 'Copy folder path']
+  const repair = first.getByRole('button', { name: 'Check or repair files' })
+  await expect.element(repair).toBeVisible()
+  expect(getComputedStyle(repair.element()).borderTopWidth).toBe('0px')
   const tops = names.map((name) => {
     const button = first.getByRole('button', { name }).element()
     expect(getComputedStyle(button).borderTopWidth).toBe('0px')
     return Math.round(button.getBoundingClientRect().top)
   })
-  expect(tops, `tops of ${names.join(', ')}`).toEqual([
-    tops[0],
-    tops[0],
-    tops[0],
-  ])
+  expect(tops, `tops of ${names.join(', ')}`).toEqual([tops[0], tops[0]])
 }
+
+// "Incomplete" is for a package or model that is missing parts. A loose file the
+// engine cannot run for another reason is "Cannot run", with the CLI's reason
+// word for word under Details.
+test('Incomplete is only for missing parts; other unrunnable files say Cannot run with the CLI reason', async () => {
+  const { view, rows } = packagesView()
+  const partial = { ...rows[1]!, prepared_state: 'partial' }
+  view.models!.prepared_models = [rows[0]!, partial]
+  view.prepared_models = view.models!.prepared_models
+  const reason =
+    "The engine in this build does not support the 'dflash' architecture. The Qwen loader said: Model config failed Qwen structural validation (head_dim=128, layers=5)"
+  view.models!.scanned = [
+    {
+      path: 'E:\\Loose\\half.gguf',
+      file_name: 'half.gguf',
+      folder: 'E:\\Loose',
+      size_bytes: 5 * 1024 ** 3,
+      shards_found: 1,
+      shards_expected: 3,
+      kind: 'model',
+      runnable: false,
+      reason: 'Shards are missing.',
+    },
+    {
+      path: 'E:\\Loose\\draft.gguf',
+      file_name: 'draft.gguf',
+      folder: 'E:\\Loose',
+      size_bytes: 1024 ** 3,
+      shards_found: 1,
+      shards_expected: 1,
+      kind: 'model',
+      runnable: false,
+      reason,
+    },
+  ] as unknown as NonNullable<typeof view.models>['scanned']
+  mountCorePage('/models', view)
+  const installed = page.getByRole('region', { name: 'Installed models' })
+  await expect.element(installed).toBeVisible()
+  const rowOf = (name: string) =>
+    installed
+      .getByRole('row')
+      .elements()
+      .find((row) => row.textContent!.includes(name))!
+  expect(rowOf('half').textContent).toContain('Incomplete')
+  expect(rowOf('draft').textContent).toContain('Cannot run')
+  expect(rowOf('draft').textContent).not.toContain('Not a model')
+  expect(rowOf('draft').textContent).not.toContain('Incomplete')
+  expect(rowOf('draft').querySelector('details')!.textContent).toContain(reason)
+  // The package with its side files missing is still the only other Incomplete.
+  expect(installed.element().textContent!.split('Incomplete').length - 1).toBe(
+    2,
+  )
+})
 
 // UX14 N14-01 (Tufte): one word for an incomplete package and one size rule.
 test('an incomplete package, prepared or loose, says Incomplete and shows no size', async () => {

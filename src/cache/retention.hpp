@@ -2,7 +2,10 @@
 #define GUFO_CACHE_RETENTION_HPP_
 
 #include <array>
+#include <bitset>
 #include <functional>
+#include <limits>
+#include <optional>
 #include <stop_token>
 
 #include "src/cache/adapter.hpp"
@@ -26,7 +29,14 @@ struct CapturePlanRequest {
   Rows prompt{}, reused{}, stable{}, common{};
   bool grid{true}, learn{true};
   std::span<const Rows> already_retained;
+  // Keeps the shallowest eligible grid points, including retained ones.
+  std::size_t grid_limit{4};
 };
+// One optional grid point per twelve private states the RAM budget holds,
+// up to four. Speculative edit boundaries then cannot crowd out the
+// conversations a small budget is meant to keep.
+[[nodiscard]] std::size_t GridLimit(std::size_t ram_bytes,
+                                    std::size_t private_bytes);
 // Queries the adapter once. Required stable/prompt/reused boundaries remain
 // exact. Optional grids reuse a preceding pass end within 128 tokens; learned
 // points coalesce with a planned capture within the existing 64-token slack.
@@ -91,12 +101,42 @@ struct RetentionRequest {
   // bound on newly owned payload capacity. An impossible payload refuses
   // without evicting. Shared complete chunks contribute zero.
   std::size_t new_payload_bytes{};
+  // Keep edit boundaries captured by this turn available until it commits.
+  // This protects them from the turn's later captures, without changing ranks.
+  std::span<const CheckpointId> protected_checkpoints{};
+  // The turn restored or continued a cached prefix. Its admitted checkpoint
+  // marks the conversation as reused (see RetentionPolicy byte pressure).
+  bool reused{false};
+  // Frontier actually reused by this turn, before its new prefill. This
+  // distinguishes a short retry tail from a larger continuation/compaction.
+  Rows reused_tokens{};
+  // Optional typed execution identity, borrowed for this synchronous call.
+  // Whole checkpoint identities differ after a policy transition, while an
+  // earlier consumed prefix can still be compatible with this history.
+  const InputIdentity* input_history{};
+  // Bytes the backing can still commit (zero while it refuses to grow, for
+  // example under a host or device-heap reserve), asked after a failed
+  // capture so it is current. Eviction frees records, not headroom: when the
+  // payload cannot fit even after every record this request may take is gone,
+  // Reclaim returns false and erases none. Empty means unknown or unlimited.
+  std::function<std::size_t()> growable_bytes;
 };
 // Caller serializes policy, index and history operations. Ledger and index
 // outlive this object; sink, if present, does too. Callbacks/sinks cannot
-// reenter. Policy owns only its index entries. Returned lookup/reader pins
+// reenter. Policy owns resident retention; durable entries stay index-owned
+// after RAM removal. Returned lookup/reader pins
 // remain valid after removal and their ledger charges cannot be spent again
 // prematurely.
+//
+// Record-capacity removal keeps the ported rank-then-LRU order. Byte
+// pressure removes, in order: retry copies; cheap checkpoints, whose private
+// state exceeds eight times the rows they restore; conversations not reused
+// within one RAM-budget turnover, least recently used first; then reused
+// ones. A conversation's recency includes its retained descendants. An
+// unreused conversation gives up covered near-duplicates, then its leaf,
+// then its shallowest history boundary, which other prompts may share. A
+// reused conversation gives up covered records, then leaves. In both, a
+// fork that two continuations extended directly outlives those leaves.
 class RetentionPolicy {
 public:
   static constexpr std::size_t kRecordLimit = 128;
@@ -115,6 +155,9 @@ public:
   // No overwrite/next prefill pass occurs during this synchronous call. There
   // is no per-checkpoint payload charge.
   [[nodiscard]] bool Admit(const RetentionRequest&, const Capture&);
+  // Reclaim one eligible record for a caller that captures outside its index
+  // lock. The caller retries the same frozen frontier before publication.
+  [[nodiscard]] bool Reclaim(const RetentionRequest&);
   void Touch(CheckpointId);
   void Remove(CheckpointId);
   [[nodiscard]] std::uint32_t Rank(CheckpointId) const;
@@ -128,10 +171,44 @@ private:
     RetentionPurpose purpose{};
     Rows stable{};
     std::uint64_t last_used{};
+    // admitted_bytes_ at the last reuse of this record's conversation.
+    std::optional<std::uint64_t> reused_at;
+    // Two continuations once extended this record directly.
+    bool forked{false};
+    // Retained records extending this one, by slot.
+    std::bitset<kRecordLimit> below;
   };
   std::size_t Find(CheckpointId) const;
   bool Branch(std::size_t) const;
   std::uint32_t Priority(std::size_t, const RetentionRequest* = nullptr) const;
+  bool Related(std::size_t, std::size_t) const;
+  void Relate(std::size_t);
+  std::array<std::uint64_t, 4> PressureOrder(std::size_t,
+                                             const RetentionRequest&,
+                                             std::uint32_t priority) const;
+  std::size_t UniqueBytes(std::size_t) const;
+  std::size_t UniquePayloadBytes(std::size_t) const noexcept;
+  bool Persisting(std::size_t) const;
+  // What Victim may take for one request, fixed while records do not change.
+  struct TakePlan {
+    std::size_t source{};
+    bool resumed_tail{false}, reused_source{false}, replaces_source{false};
+  };
+  TakePlan Plan(const RetentionRequest&, bool record_pressure) const;
+  // Protected, disk-pinned or empty: no eviction takes this slot.
+  bool Pinned(std::size_t, const RetentionRequest&) const;
+  // Whether a rank-`level` record is open to this request (the rank limit of
+  // its purpose, or the retry rules for its own prefix). Victim's only test.
+  bool Eligible(const TakePlan&, const RetentionRequest&, bool record_pressure,
+                std::size_t, std::uint32_t level) const;
+  // Bytes freed once every record Victim may take is erased: chunks shared
+  // with a record that stays, held by the capture's restored history, or
+  // counted for an earlier erased record, are not counted again. Stops early
+  // once `enough` bytes are found.
+  std::size_t ErasableBytes(const RetentionRequest&, std::size_t enough) const;
+  // False when the request's payload cannot fit even after every record
+  // Victim may take for it is erased: Reclaim then erases nothing.
+  bool EvictionCanFit(const RetentionRequest&) const;
   std::size_t Victim(const RetentionRequest&, bool records) const;
   void Erase(std::size_t, RetentionReason, std::uint32_t rank);
   void Emit(RetentionAction, RetentionReason, CheckpointId, Rows,
@@ -144,6 +221,11 @@ private:
   std::array<Record, kRecordLimit> records_;
   std::size_t limit_, size_{};
   std::uint64_t clock_{}, sequence_{};
+  // Unique payload bytes admitted so far; measures budget turnover.
+  std::uint64_t admitted_bytes_{};
+  // Payload capacities are immutable. Only record membership changes this
+  // total; access recency and borrowed-row preservation do not.
+  mutable std::optional<std::size_t> retained_payload_bytes_;
 };
 }  // namespace gufo::cache
 #endif

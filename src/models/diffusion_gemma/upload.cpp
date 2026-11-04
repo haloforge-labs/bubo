@@ -1,9 +1,5 @@
 #include "src/models/diffusion_gemma/upload.hpp"
 
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
 #include <algorithm>
 #include <map>
 #include <stdexcept>
@@ -12,6 +8,7 @@
 
 #include "src/core/gguf_reader.hpp"
 #include "src/core/hip/weight_upload.hpp"
+#include "src/core/platform/mapped_file.hpp"
 #include "src/models/diffusion_gemma/hip_check.hpp"
 
 namespace gufo::models::diffusion_gemma {
@@ -28,22 +25,23 @@ public:
     for (const auto& range : ranges) {
       if (index_.contains(range.file))
         continue;
-      const int fd = ::open(range.file.c_str(), O_RDONLY | O_CLOEXEC);
-      struct stat info{};
-      if (fd < 0 || ::fstat(fd, &info) != 0) {
-        if (fd >= 0)
-          ::close(fd);
+      const auto file = platform::OpenReadFile(range.file);
+      const auto bytes = platform::FileValid(file)
+                             ? platform::FileSizeBytes(file)
+                             : std::nullopt;
+      if (!bytes) {
+        platform::CloseFile(file);
         throw std::runtime_error("cannot open " + range.file.string());
       }
       index_.emplace(range.file, static_cast<std::uint32_t>(regions_.size()));
       regions_.push_back({.data = nullptr,
-                          .size = static_cast<std::size_t>(info.st_size),
-                          .file_descriptor = fd});
+                          .size = static_cast<std::size_t>(*bytes),
+                          .file_descriptor = file});
     }
   }
   ~OpenFiles() {
     for (const auto& region : regions_)
-      ::close(region.file_descriptor);
+      platform::CloseFile(region.file_descriptor);
   }
   OpenFiles(const OpenFiles&) = delete;
   OpenFiles& operator=(const OpenFiles&) = delete;

@@ -29,7 +29,9 @@ for (const running of [false, true]) {
       }),
     )
     mountCorePage('/', view)
-    await page.getByLabelText('Context per session').fill('65536')
+    await page
+      .getByRole('spinbutton', { name: 'Context per session', exact: true })
+      .fill('65536')
     const button = page.getByRole('button', {
       name: running ? 'Restart server' : 'Start server',
       exact: true,
@@ -56,7 +58,9 @@ test('a rejected save never starts the server', async () => {
   )
   const start = vi.spyOn(actions, 'Start').mockResolvedValue({})
   const { replaceView } = mountCorePage('/', view)
-  await page.getByLabelText('Context per session').fill('65536')
+  await page
+    .getByRole('spinbutton', { name: 'Context per session', exact: true })
+    .fill('65536')
   await page.getByRole('button', { name: 'Start server', exact: true }).click()
   await expect.poll(() => document.body.textContent).toContain('Cannot save.')
   expect(start).not.toHaveBeenCalled()
@@ -86,7 +90,9 @@ test('a fresh healthy status keeps an in-flight save and Start pending', async (
     bridgeReply({ estimate: view.saved_estimate, fit: view.fit }),
   )
   const { replaceView } = mountCorePage('/', view)
-  await page.getByLabelText('Context per session').fill('65536')
+  await page
+    .getByRole('spinbutton', { name: 'Context per session', exact: true })
+    .fill('65536')
   const button = page.getByRole('button', { name: 'Start server', exact: true })
   await button.click()
   await expect.poll(() => patch.mock.calls.length).toBe(1)
@@ -153,7 +159,9 @@ test('Start saves a changed Tight setup and requests fresh consent before launch
       },
     }),
   )
-  await page.getByLabelText('Context per session').fill('65536')
+  await page
+    .getByRole('spinbutton', { name: 'Context per session', exact: true })
+    .fill('65536')
   await page.getByRole('button', { name: 'Start server', exact: true }).click()
   await expect.poll(() => start.mock.calls.length).toBe(1)
   expect(patch).toHaveBeenCalledTimes(1)

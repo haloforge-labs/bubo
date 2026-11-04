@@ -1,5 +1,6 @@
 import { RequestPointChart } from '@/components/request-point-chart'
 import type { View } from '@/lib/bindings'
+import { pageGrid } from '@/components/page-grid'
 import { requestSamples } from './history'
 
 const metrics = [
@@ -15,18 +16,24 @@ const metrics = [
 
 export function RequestCharts({ view }: { view: View }) {
   const relativeToCompletion = view.last_completed_request?.age_ms == null
+  const charts = metrics.map((metric) => ({
+    metric,
+    points: requestSamples(view, metric.key),
+  }))
+  // Nothing to plot (every request failed or none reported a value): the table
+  // below carries the rows, so no chart section and no per-metric notes.
+  if (!charts.some((chart) => chart.points.length)) return null
   return (
     <section aria-label="Request performance" className="space-y-2">
       <p className="text-xs text-muted-foreground">
-        Each point is one completed request. Oldest requests are on the left.
+        One point per completed request · Oldest → newest
         {relativeToCompletion &&
           view.requests.some((row) => row.outcome === 'completed') &&
-          ' Times are relative to the latest completion.'}
+          ' · Times are relative to the latest completion'}
       </p>
-      <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,18rem),1fr))] gap-4">
-        {metrics.map((metric) => {
-          const points = requestSamples(view, metric.key)
-          return points.length ? (
+      <div className={pageGrid}>
+        {charts.map(({ metric, points }) =>
+          points.length ? (
             <RequestPointChart
               key={metric.key}
               label={`${metric.label} per completed request`}
@@ -37,18 +44,11 @@ export function RequestCharts({ view }: { view: View }) {
               relativeToCompletion={relativeToCompletion}
             />
           ) : (
-            <div key={metric.key} className="text-sm text-muted-foreground">
-              <p>{metric.label}</p>
-              <p>
-                {metric.key === 'decode'
-                  ? 'No decode rates reported for completed requests.'
-                  : metric.key === 'prefill'
-                    ? 'No prefill rates reported for completed requests.'
-                    : 'No time to first token reported for completed requests.'}
-              </p>
-            </div>
-          )
-        })}
+            <p key={metric.key} className="text-sm text-muted-foreground">
+              {metric.label}: none reported
+            </p>
+          ),
+        )}
       </div>
     </section>
   )

@@ -36,6 +36,13 @@ def request(model, api, thinking=False):
         "Call record exactly once, with text, count, and values matching the "
         "constants in its schema. Keep all literal characters. No visible prose."
     )
+    if thinking:
+        # Asked to match the constants, greedy reasoning transcribes the long
+        # text (DeepSeek loops on its repeats); the call is what this streams.
+        prompt = (
+            "Call record exactly once. Its arguments are fixed by the constants "
+            "in its schema; copy them exactly in the call. No visible prose."
+        )
     common = dict(model=model, temperature=0)
     if api == "chat":
         return {**common, "messages": [{"role": "user", "content": prompt}],
@@ -63,9 +70,7 @@ def request(model, api, thinking=False):
 
 
 def collect(client, api, body):
-    # perf_counter: Windows' monotonic clock ticks every 15.6 ms, so the last
-    # argument fragment and the terminal event could share one timestamp.
-    started = time.perf_counter()
+    started = time.monotonic()
     if api == "chat":
         stream = client.chat.completions.create(
             **body, stream=True, stream_options={"include_usage": True})
@@ -80,7 +85,7 @@ def collect(client, api, body):
         for item in stream:
             event = item if isinstance(item, dict) else item.to_dict()
             events.append(event)
-            arrivals.append((time.perf_counter() - started) * 1000)
+            arrivals.append((time.monotonic() - started) * 1000)
     return analyze(api, events, arrivals)
 
 
@@ -153,32 +158,18 @@ def analyze(api, events, arrivals):
                 fragments=fragments, terminal_ms=arrivals[-1])
 
 
-def check_tool_streaming(client, model, checks, chat_result, known_model_cases=()):
+def check_tool_streaming(client, model, checks, chat_result):
     for api in ("chat", "responses", "messages"):
         for thinking in (False, True):
-            arm = f"{api}_{'thinking' if thinking else 'plain'}"
             body = request(model, api, thinking)
             result = collect(client, api, body)
-            checks[f"tool_streaming_{arm}"] = result
+            checks[f"tool_streaming_{api}_{'thinking' if thinking else 'plain'}"] = result
             assert result["finish"] == {
                 "chat": "tool_calls", "responses": "completed", "messages": "tool_use"}[api], result
             assert len(result["arguments"]) == 1, result
             assert json.loads(result["arguments"][0]) == EXPECTED, result
-            if arm in known_model_cases:
-                # The model may write the real end-of-reasoning token while it
-                # quotes the "</think>" constant; reasoning then ends there and
-                # its tail arrives as content. Keep the outcome on record and let
-                # the later arms run. Thinking must still have happened, and the
-                # content must not carry a second copy of the call.
-                assert result["reasoning"].strip(), result
-                assert "<function=" not in result["content"], result
-                assert '"count":42' not in result["content"].replace(" ", ""), result
-                result["known_model_case"] = {
-                    "content_empty": not result["content"].strip(),
-                    "content_head": result["content"][:200]}
-            else:
-                assert not result["content"].strip(), result
-                assert bool(result["reasoning"].strip()) == thinking, result
+            assert not result["content"].strip(), result
+            assert bool(result["reasoning"].strip()) == thinking, result
             assert len(result["fragments"]) > 3, ("tool arguments were buffered", result)
             assert result["fragments"][0]["ms"] < result["fragments"][-1]["ms"] < result["terminal_ms"], result
 
@@ -239,10 +230,4 @@ def check_tool_streaming(client, model, checks, chat_result, known_model_cases=(
         checks[f"tool_streaming_after_cancel_{thinking}"] = resumed
         assert resumed["finish"] == "tool_calls" and len(resumed["tools"]) == 1, resumed
         assert json.loads(resumed["tools"][0]["function"]["arguments"]) == EXPECTED, resumed
-        if thinking and "chat_thinking" in known_model_cases:
-            assert "<function=" not in resumed["text"], resumed
-            assert '"count":42' not in resumed["text"].replace(" ", ""), resumed
-            resumed["known_model_case"] = {"content_empty": not resumed["text"].strip(),
-                                           "content_head": resumed["text"][:200]}
-        else:
-            assert not resumed["text"].strip(), resumed
+        assert not resumed["text"].strip(), resumed

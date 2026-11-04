@@ -31,6 +31,8 @@ type PreferenceValues struct {
 	LANAccess          *bool   `json:"lan_access,omitempty"`
 	StallSeconds       *int    `json:"stall_seconds,omitempty"`
 	CheckForUpdates    *bool   `json:"check_for_updates,omitempty"`
+	LastSeenVersion    *string `json:"last_seen_version,omitempty"`
+	Font               *string `json:"font,omitempty"`
 }
 
 type PreferencesPatch struct {
@@ -176,6 +178,9 @@ func ApplyPreferencesPatch(current Settings, patch PreferencesPatch) (Settings, 
 		return current, err
 	}
 	next.Version = DefaultSettings().Version
+	if next.Font != "" && next.Font != "serif" && next.Font != "sans" {
+		return current, appError("invalid_arguments", "The font is serif or sans.")
+	}
 	if tightSetupChanged(current, next) {
 		next.AllowTightSetup = false
 		next.TightSetupFingerprint = ""

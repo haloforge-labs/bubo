@@ -153,11 +153,12 @@ __device__ __forceinline__ void RowDot(WeightKind type, const void* w,
 __device__ __forceinline__ void QuantizeLane(float v, Q8_1Block* out,
                                              int lane) {
   const float amax = WaveMax(fabsf(v));
-  const float sum = WaveSum(v);
   const float d = amax / 127.0f;
-  out->qs[lane] =
+  const auto q =
       amax == 0.0f ? 0 : static_cast<std::int8_t>(roundf(v / d));
-  if (lane == 0) out->ds = __floats2half2_rn(d, sum);
+  out->qs[lane] = static_cast<std::int8_t>(q);
+  const float sumq = WaveSum(static_cast<float>(q));
+  if (lane == 0) out->ds = __floats2half2_rn(d, d * sumq);
 }
 
 // ---------------------------------------------------------------------------
@@ -216,11 +217,9 @@ __global__ __launch_bounds__(kNormThreads) void AddNormQuantKernel(
     // Eight adjacent threads hold one 32-value block.
     float amax =
         fmaxf(fmaxf(fabsf(y.x), fabsf(y.y)), fmaxf(fabsf(y.z), fabsf(y.w)));
-    float sum = y.x + y.y + y.z + y.w;
 #pragma unroll
     for (int off = 1; off < 8; off <<= 1) {
       amax = fmaxf(amax, __shfl_xor(amax, off, 32));
-      sum += __shfl_xor(sum, off, 32);
     }
     const float d = amax / 127.0f;
     Q8_1Block* b = xq + static_cast<std::size_t>(t) * xq_stride + i / 32;
@@ -229,10 +228,16 @@ __global__ __launch_bounds__(kNormThreads) void AddNormQuantKernel(
       return static_cast<std::uint32_t>(
           amax == 0.0f ? 0 : static_cast<int>(roundf(x / d)));
     };
-    const std::uint32_t packed = (q(y.x) & 0xffu) | ((q(y.y) & 0xffu) << 8) |
-                                 ((q(y.z) & 0xffu) << 16) | (q(y.w) << 24);
+    const auto qx = q(y.x), qy = q(y.y), qz = q(y.z), qw = q(y.w);
+    const std::uint32_t packed = (qx & 0xffu) | ((qy & 0xffu) << 8) |
+                                 ((qz & 0xffu) << 16) | (qw << 24);
     *reinterpret_cast<std::uint32_t*>(b->qs + o) = packed;
-    if (o == 0) b->ds = __floats2half2_rn(d, sum);
+    int sumq = static_cast<int>(qx) + static_cast<int>(qy) +
+               static_cast<int>(qz) + static_cast<int>(qw);
+#pragma unroll
+    for (int off = 1; off < 8; off <<= 1)
+      sumq += __shfl_xor(sumq, off, 32);
+    if (o == 0) b->ds = __floats2half2_rn(d, d * static_cast<float>(sumq));
   }
 }
 
@@ -289,15 +294,23 @@ __global__ __launch_bounds__(32) void MultiGemvKernel(
   }
 }
 
+template<bool Cut>
 __global__ __launch_bounds__(32) void ExpertsGatedKernel(
-    const void* __restrict__ gate, const void* __restrict__ up,
-    WeightKind type, const Q8_1Block* __restrict__ xq,
-    const float* __restrict__ xf, const std::int32_t* __restrict__ ids,
-    float* __restrict__ act, std::uint32_t used, std::uint32_t m,
-    std::uint32_t k) {
+    const void* __restrict__ gate, const void* __restrict__ up, WeightKind type,
+    const Q8_1Block* __restrict__ xq, const float* __restrict__ xf,
+    const std::int32_t* __restrict__ ids, float* __restrict__ act,
+    std::uint32_t used, std::uint32_t m, std::uint32_t k) {
   const std::uint32_t row = blockIdx.x, slot = blockIdx.y, t = blockIdx.z;
   const int lane = threadIdx.x;
   const std::int32_t e = ids[t * used + slot];
+  if constexpr (Cut) {
+    if (e < 0) {
+      // QuantizeActs also reads dropped rows; give it finite zeros.
+      if (lane == 0)
+        act[(static_cast<std::size_t>(t) * used + slot) * m + row] = 0;
+      return;
+    }
+  }
   const std::uint32_t r = static_cast<std::uint32_t>(e) * m + row;
   float g[1] = {0.0f}, u[1] = {0.0f};
   const Q8_1Block* x = xq + static_cast<std::size_t>(t) * (k / 32);
@@ -332,7 +345,7 @@ __global__ __launch_bounds__(256) void QuantizeActsKernel(
   QuantizeLane(v, out + b, lane);
 }
 
-template <int N>
+template<int N, bool Cut>
 __global__ __launch_bounds__(kDownWaves * 32) void ExpertsDownKernel(
     const void* __restrict__ down, WeightKind down_type,
     const void* __restrict__ sh_down, WeightKind sh_type,
@@ -341,7 +354,7 @@ __global__ __launch_bounds__(kDownWaves * 32) void ExpertsDownKernel(
     const float* __restrict__ weights, const float* __restrict__ router,
     std::uint32_t router_stride, std::uint32_t shared_gate,
     float* __restrict__ res, std::uint32_t used, std::uint32_t h,
-    std::uint32_t f) {
+    std::uint32_t f, qwen38_flash_next::RoutedExpertAudit* audit) {
   const int wave = threadIdx.x / 32, lane = threadIdx.x & 31;
   const std::uint32_t fb = f / 32;
   const std::uint32_t slots = used + 1;
@@ -351,6 +364,10 @@ __global__ __launch_bounds__(kDownWaves * 32) void ExpertsDownKernel(
   for (int t = 0; t < N; ++t) {
     float acc = 0.0f;
     for (std::uint32_t s = 0; s < used; ++s) {
+      if constexpr (Cut) {
+        if (ids[t * used + s] < 0)
+          continue;
+      }
       const std::uint32_t r =
           static_cast<std::uint32_t>(ids[t * used + s]) * h + row;
       float p[1] = {0.0f};
@@ -363,6 +380,19 @@ __global__ __launch_bounds__(kDownWaves * 32) void ExpertsDownKernel(
                           static_cast<std::size_t>(r) * f,
                       act + (static_cast<std::size_t>(t) * used + s) * f, f, f,
                       lane, p);
+      }
+      if constexpr (Cut) {
+        // Observe the first scalar of each live down row before its fused
+        // weighted accumulation. No extra reduction when audit is lean.
+        if (audit != nullptr && row == 0) {
+          const float first = WaveSum(p[0]);
+          if (lane == 0) {
+            const auto bits = __float_as_uint(first);
+            const unsigned long long invalid =
+                (bits & 0x7f800000u) == 0x7f800000u;
+            atomicAdd(&audit->packed, 1ULL | (invalid << 32));
+          }
+        }
       }
       acc = fmaf(weights[t * used + s], p[0], acc);
     }
@@ -389,22 +419,22 @@ void LaunchMulti(const MultiArgs& a, const Q8_1Block* xq, const float* xf,
                      stream, a, xq, xf, k);
 }
 
-template <int N>
+template<int N, bool Cut>
 void LaunchDown(const void* down, WeightKind down_type, const void* sh_down,
                 WeightKind sh_type, const float* act, const float* sh_act,
-                Q8_1Block* act_q, const std::int32_t* ids,
-                const float* weights, const float* router,
-                std::uint32_t router_stride, std::uint32_t shared_gate,
-                float* res, std::uint32_t used, std::uint32_t h,
-                std::uint32_t f, hipStream_t stream) {
+                Q8_1Block* act_q, const std::int32_t* ids, const float* weights,
+                const float* router, std::uint32_t router_stride,
+                std::uint32_t shared_gate, float* res, std::uint32_t used,
+                std::uint32_t h, std::uint32_t f, hipStream_t stream,
+                qwen38_flash_next::RoutedExpertAudit* audit) {
   const std::uint32_t total = N * (used + 1) * (f / 32);
   hipLaunchKernelGGL(QuantizeActsKernel, dim3((total + 7) / 8), dim3(256), 0,
                      stream, act, sh_act, act_q, total, used, f);
-  hipLaunchKernelGGL(ExpertsDownKernel<N>,
+  hipLaunchKernelGGL((ExpertsDownKernel<N, Cut>),
                      dim3((h + kDownWaves - 1) / kDownWaves),
-                     dim3(kDownWaves * 32), 0, stream, down, down_type,
-                     sh_down, sh_type, act, sh_act, act_q, ids, weights, router,
-                     router_stride, shared_gate, res, used, h, f);
+                     dim3(kDownWaves * 32), 0, stream, down, down_type, sh_down,
+                     sh_type, act, sh_act, act_q, ids, weights, router,
+                     router_stride, shared_gate, res, used, h, f, audit);
 }
 
 }  // namespace
@@ -449,28 +479,40 @@ void MultiGemv(const GemvSeg* segs, int count, const Q8_1Block* xq,
 }
 
 void ExpertsGated(const void* gate, const void* up, WeightKind type,
-                  const Q8_1Block* xq, const float* xf,
-                  const std::int32_t* ids, float* act, std::uint32_t rows,
-                  std::uint32_t used, std::uint32_t m, std::uint32_t k,
-                  hipStream_t stream) {
-  hipLaunchKernelGGL(ExpertsGatedKernel, dim3(m, used, rows), dim3(32), 0,
-                     stream, gate, up, type, xq, xf, ids, act, used, m, k);
+                  const Q8_1Block* xq, const float* xf, const std::int32_t* ids,
+                  float* act, std::uint32_t rows, std::uint32_t used,
+                  std::uint32_t m, std::uint32_t k, hipStream_t stream,
+                  bool prefill_cut) {
+  if (prefill_cut) {
+    hipLaunchKernelGGL(ExpertsGatedKernel<true>, dim3(m, used, rows), dim3(32),
+                       0, stream, gate, up, type, xq, xf, ids, act, used, m, k);
+  } else {
+    hipLaunchKernelGGL(ExpertsGatedKernel<false>, dim3(m, used, rows), dim3(32),
+                       0, stream, gate, up, type, xq, xf, ids, act, used, m, k);
+  }
 }
 
 void ExpertsDown(const void* down, WeightKind down_type, const void* sh_down,
                  WeightKind sh_type, const float* act, const float* sh_act,
                  Q8_1Block* act_q, const std::int32_t* ids,
-                 const float* weights,
-                 const float* router, std::uint32_t router_stride,
-                 std::uint32_t shared_gate, float* res, std::uint32_t rows,
-                 std::uint32_t used, std::uint32_t h, std::uint32_t f,
-                 hipStream_t stream) {
+                 const float* weights, const float* router,
+                 std::uint32_t router_stride, std::uint32_t shared_gate,
+                 float* res, std::uint32_t rows, std::uint32_t used,
+                 std::uint32_t h, std::uint32_t f, hipStream_t stream,
+                 bool prefill_cut,
+                 qwen38_flash_next::RoutedExpertAudit* audit) {
   switch (rows) {
-#define A3B_DOWN(n)                                                          \
-  case n:                                                                    \
-    return LaunchDown<n>(down, down_type, sh_down, sh_type, act, sh_act,     \
-                         act_q, ids, weights, router, router_stride,         \
-                         shared_gate, res, used, h, f, stream);
+#define A3B_DOWN(n)                                                            \
+  case n:                                                                      \
+    return prefill_cut                                                         \
+               ? LaunchDown<n, true>(down, down_type, sh_down, sh_type, act,   \
+                                     sh_act, act_q, ids, weights, router,      \
+                                     router_stride, shared_gate, res, used, h, \
+                                     f, stream, audit)                         \
+               : LaunchDown<n, false>(down, down_type, sh_down, sh_type, act,  \
+                                      sh_act, act_q, ids, weights, router,     \
+                                      router_stride, shared_gate, res, used,   \
+                                      h, f, stream, nullptr);
     A3B_DOWN(1)
     A3B_DOWN(2)
     A3B_DOWN(3)
@@ -480,9 +522,15 @@ void ExpertsDown(const void* down, WeightKind down_type, const void* sh_down,
     A3B_DOWN(7)
 #undef A3B_DOWN
     default:
-      return LaunchDown<8>(down, down_type, sh_down, sh_type, act, sh_act,
-                           act_q, ids, weights, router, router_stride,
-                           shared_gate, res, used, h, f, stream);
+      return prefill_cut
+                 ? LaunchDown<8, true>(down, down_type, sh_down, sh_type, act,
+                                       sh_act, act_q, ids, weights, router,
+                                       router_stride, shared_gate, res, used, h,
+                                       f, stream, audit)
+                 : LaunchDown<8, false>(down, down_type, sh_down, sh_type, act,
+                                        sh_act, act_q, ids, weights, router,
+                                        router_stride, shared_gate, res, used,
+                                        h, f, stream, nullptr);
   }
 }
 

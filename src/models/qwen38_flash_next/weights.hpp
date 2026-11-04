@@ -63,6 +63,15 @@ struct TensorRef {
   }
 };
 
+/// Compact routed stack: router row e addresses stack entry e in all three
+/// projections. Allocation-file original expert indices are provenance only.
+struct RoutedWeights {
+  TensorRef router, gate, up, down;
+  [[nodiscard]] static std::optional<RoutedWeights> Bind(
+      const core::GgufReader& reader, const Config& config, std::uint32_t layer,
+      std::string* error_msg = nullptr);
+};
+
 /// Two hyper-connection mixers per layer plus the output head mixer share
 /// this shape; `inject` is absent on the head mixer.
 struct HcMixer {
@@ -139,23 +148,27 @@ struct ModelWeights {
       const core::GgufReader& reader, std::string* error_msg = nullptr);
 };
 
-/// DECODE TWIN (GUFO_DENSE_TWIN_MODEL, default OFF): a 4-bit copy of the dense (non-expert) projections that small passes (decode / MTP verify, n <= 8, never prefill)
-/// read, while the 8-bit trunk copy keeps serving prefill. The twin file holds ONLY blk.N.* tensors of the set below, each Q4_K, Q5_K or Q5_1 (the types the
-/// vector MMVQ tier handles) with exactly the shape of its Q8_0 trunk tensor. The MTP block, token embedding, output head, output hyper-connection mixer,
-/// routers, PLE and the experts are never twinned.
-///   linear layers : attn_qkv + attn_gate (both or neither), ssm_out
-///   attention     : attn_q + attn_k + attn_v (all or none), attn_output
-///   every layer   : hc_attn_down / hc_attn_up / hc_ffn_down / hc_ffn_up, ffn_gate_shexp / ffn_up_shexp / ffn_down_shexp
-/// A trunk tensor of the set that is Q8_0 MUST have its twin (missing = error, no silent fallback to the 8-bit copy), unless the twin file lists it in its string KV
-/// `gufo.dense_twin.keep_q8` (comma-separated tensor names): a listed tensor must be absent from the twin file and is then read from the 8-bit trunk copy by every pass
-/// (counted in kept_tensors / kept_bytes and printed in the [twin] loaded line; a listed name that is not a Q8_0 trunk tensor of the set is an error). A trunk tensor that is
-/// not Q8_0 is left alone and must not appear in the twin file.
+/// Dense replacements for decode and verification passes of at most eight rows.
+/// Shapes match the corresponding trunk tensor. Native quantized and floating
+/// trunk tensors are supported; prefill continues to use the trunk. Supported
+/// replacements are Q8_0, Q6_K, Q5_K, Q5_1, Q4_K, IQ4_XS, IQ4_NL, IQ3_S,
+/// BF16, F16 and F32. No tensor is converted during twin upload.
+///   linear: attn_qkv, attn_gate (both or neither), ssm_out
+///   attention: attn_q, attn_k, attn_v (all or none), attn_output
+///   all layers: hc_attn_down/up, hc_ffn_down/up, ffn_gate/up/down_shexp
+/// Output HC down/up are optional. Norms, MTP, embeddings, routers, PLE,
+/// experts and the target output projection retain their existing paths.
+/// Missing Q8_0 block tensors require a legacy gufo.dense_twin.keep_q8 entry.
+/// Listed names must be absent from the twin and retain their native trunk
+/// encoding. Missing non-Q8 block tensors also retain their trunk encoding.
 struct TwinWeights {
   std::vector<LayerWeights> layers;  ///< only the twinned TensorRefs are populated
+  HcMixer hc_head;  ///< optional output HC projections; norm stays in the trunk
   std::size_t tensors{0};
   std::size_t bytes_4bit{0};  ///< encoded bytes of the twin tensors
   std::size_t bytes_8bit{0};  ///< encoded bytes of the trunk tensors they mirror
-  std::size_t kept_tensors{0};  ///< Q8_0 trunk tensors the twin file explicitly keeps (keep_q8 list)
+  std::size_t kept_tensors{
+      0};  ///< native trunk tensors explicitly retained by the legacy keep list
   std::size_t kept_bytes{0};
 
   [[nodiscard]] static std::optional<TwinWeights> Bind(

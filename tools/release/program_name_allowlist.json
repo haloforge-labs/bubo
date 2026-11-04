@@ -133,13 +133,6 @@
     "reason": "Installed engine model, evaluation or license resource keeps its existing path."
   },
   {
-    "file": ".devops/nix/scope.nix",
-    "line": "  gufo = self.callPackage ./package.nix { inherit releaseVersion revision; };",
-    "count": 1,
-    "category": "build-target",
-    "reason": "Nix engine package attribute or function argument is retained independently of the executable."
-  },
-  {
     "file": "CMakeLists.txt",
     "line": "        $<TARGET_FILE:gufo>",
     "count": 1,
@@ -400,13 +393,6 @@
   },
   {
     "file": "CMakeLists.txt",
-    "line": "  message(FATAL_ERROR \"Gufo requires Linux or Windows x86-64 with an AMD gfx1151 GPU\")",
-    "count": 1,
-    "category": "engine",
-    "reason": "Build metadata or diagnostics identify the unchanged gufo engine."
-  },
-  {
-    "file": "CMakeLists.txt",
     "line": "  message(STATUS \"gufo: HIP target ${CMAKE_HIP_ARCHITECTURES}\")",
     "count": 1,
     "category": "engine",
@@ -502,13 +488,6 @@
     "count": 1,
     "category": "compatibility",
     "reason": "Existing upstream engine-brand build option is preserved; release defaults to Bubo."
-  },
-  {
-    "file": "cmake/Checks.cmake",
-    "line": "  DEPENDS gufo ${gufo_pr_targets} cache_disk_faults",
-    "count": 1,
-    "category": "build-target",
-    "reason": "CMake references the unchanged gufo engine target; OUTPUT_NAME supplies Bubo."
   },
   {
     "file": "docs/BENCHMARKS.md",
@@ -1852,28 +1831,7 @@
   },
   {
     "file": "docs/models/qwen3.8-27b/BENCHMARKS.md",
-    "line": "AMD Strix Halo `gfx1151`, 128 GB unified memory. Gufo `628ed18e`",
-    "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
-    "category": "historic-fixture"
-  },
-  {
-    "file": "docs/models/qwen3.8-27b/BENCHMARKS.md",
-    "line": "Both use the Q4_K_M DFlash2 draft; Gufo uses its adaptive controller.",
-    "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
-    "category": "historic-fixture"
-  },
-  {
-    "file": "docs/models/qwen3.8-27b/BENCHMARKS.md",
     "line": "Positive gain favors Gufo.",
-    "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
-    "category": "historic-fixture"
-  },
-  {
-    "file": "docs/models/qwen3.8-27b/BENCHMARKS.md",
-    "line": "text. Gufo retains AR output; llama.cpp differs in some controls",
     "count": 1,
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
@@ -1977,31 +1935,31 @@
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/loading-gufo.json",
-    "sha256": "1e9081e841e4a2cd01d069691019a66cb0dbabdc1988cff7c529b6297fd83801",
+    "sha256": "25b3af891cff8af7e36beb8bdeeb44bcb9d314fc6b97c2e405cfdfea5b8e15a4",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/memory-q4-gufo.json",
-    "sha256": "2f8a9a184b2ac8a4eef715b02f5f49a8ec0c50cd646eafdb1fe6ea033d704eeb",
+    "sha256": "3f93e5e753c93e75e06a8a5f071426f144af0ce668ea74fdca296cc6dbbfc399",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/memory-q8-gufo.json",
-    "sha256": "e59e7edc042e654b3cef44068ac85520aefe5ab85a398151c9792d9c091d73b3",
+    "sha256": "1af8f4249a24cbd2efe7bd1da48a1acb2ec4029deae7501e4be802b50cb8a640",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/model-identities.json",
-    "sha256": "fd358cb1201b420de718c5010b5ac6b1faab8cb9077f21e09530f55c27ca4b35",
+    "sha256": "b0016470c34477ea0c60e209665391bd4e1fe57e7cf0a2d203d3148885b70fdb",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/multi-ar-q4-gufo-ar.json",
-    "sha256": "14c3e87e7af27749e2404f1e725ed9e804738c4230b8e50aa558c3d471141ff6",
+    "sha256": "dd2d169c9c6a514527dc83102112c7910ee5ff1707198c8d61f254928526c7bb",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
@@ -2013,7 +1971,7 @@
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/multi-ar-q8-gufo-ar.json",
-    "sha256": "f70f4f5e98efa0ff60194f454bb0121340a972120eae1435a0709bd0b047b31c",
+    "sha256": "fd4ec9c8a6ef5d3baf9c5e64e6a41062b65ba1a18d6a8e89b699a45195a91446",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
@@ -2025,13 +1983,13 @@
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/multi-mixed-q4-gufo-ar.json",
-    "sha256": "d02a56418a0dae1e1a72d53efb906aec41626e932a697da264ced60fe688c49b",
+    "sha256": "3d2ed028b403dfae8aa4993b504834cae21f72115590b184c4c34164070486fc",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/multi-mixed-q4-gufo-dflash2.json",
-    "sha256": "b9f188215fb1a8735292df9f2b8877781fdc2278f6ce8eda69b024cbfc948f15",
+    "sha256": "ba90340c941da0248391848c8e51c20555470874cc6f269cc79c63fc12da0b51",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
@@ -2043,13 +2001,13 @@
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/multi-mixed-q8-gufo-ar.json",
-    "sha256": "caade151fc08d433671e9ac436fb235ed830046471b8f9e87a5a1f6c58376876",
+    "sha256": "70cadcf633f122e0ba99e457da1c06e243664ca32f7214a2349695310277361e",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/multi-mixed-q8-gufo-dflash2.json",
-    "sha256": "b5c9a1a0b7a0fd5825dd04706725025847c89d2a09a2051bb58ba3addf20087b",
+    "sha256": "f795512dab6e14ca22b81b0fa283438ad2cca08d759b24d1bd16f095ab6d623b",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
@@ -2061,13 +2019,13 @@
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/multi-repetition-q4-gufo-ar.json",
-    "sha256": "fb454db1fd80c76deaac6c9da4c9433da7c655b56cdfc5b3221b4a50523750a1",
+    "sha256": "f410fb9b4fbe72e64a27ea95989f3c5273fccb60e07e6a0289ba8b88e2013df0",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/multi-repetition-q4-gufo-dflash2.json",
-    "sha256": "fc438a01bda0582d0a3ce8c29b4be1bad2fa9af10ce2de6abec9ee06a6fa8e78",
+    "sha256": "b573c86fe3592125a35c13719b460fa991177128d24e7473a95b4e1da2439304",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
@@ -2079,13 +2037,13 @@
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/multi-repetition-q8-gufo-ar.json",
-    "sha256": "37952e6000f4146da602a1494d574d604b5f9fb81dbf14cd017139e7a7a7589c",
+    "sha256": "3c52206818ea751ba47a62aad420c3f2b587aba10c8fcbf57acafba10432ddb6",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/multi-repetition-q8-gufo-dflash2.json",
-    "sha256": "75d0f48c54737ea59ea0168e7b1b863de7bb8b7b79e315731cf22a907bb43305",
+    "sha256": "df96d908b1dea6fce2fbf014b5cd747a7a7637094b8fc902d3b897cdf42ce587",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
@@ -2121,37 +2079,37 @@
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/single-ar-q4-gufo.json",
-    "sha256": "0816806abfd38da92eccd2cc901d4e8bc80c1dc86001ba2a5a4bee6b52fa7b64",
+    "sha256": "b1c98c84ae157e821785b4f0c4ea568c7a340a3a80a6398cfd9eb8498be6cabe",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/single-ar-q8-gufo.json",
-    "sha256": "c46e19c5f766cb6076d167fe7461bf0d349735effae06ba77e5c375a3464b7f2",
+    "sha256": "ffe3b97149130d4f184d01db97be0e06e49948a7a7d39f5adac85432054e96a1",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/single-dflash2-q4-gufo.json",
-    "sha256": "206e4b5b3abbf35d71b3b28d2d336fa8757b302a26a0c6b9c9c80f68722bf068",
+    "sha256": "990141b6586a9ec56fc00d0822e5aa624f04956e3f1b33959bce20578f05f3d4",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/single-dflash2-q8-gufo.json",
-    "sha256": "dae32f460cb4302ea50bfaf0f6857ee4f901e005d034ab33fa29e988ed8e1630",
+    "sha256": "4577873640678ca23009bbde3bb7f81a3ebaa87bde508fb6bc983e81ad527cf2",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/single-dflash2-repetition-q4-gufo.json",
-    "sha256": "e782a6f88ceb1e24bcf807d08668912ee73f725dbdb6dcc16db3e753f7669ad1",
+    "sha256": "921ecc130beab2e963f36ec56edda12108d126a75c5826e9d280d1ffd5818978",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-27b/artifacts/single-dflash2-repetition-q8-gufo.json",
-    "sha256": "f2e552c961047b1d506ce218a9519d5429147eefe3824524416dcba878b72487",
+    "sha256": "d51c648c773ff10b065e5a674d520416b9618a211ce8f7f6d9dc7e5599f5e79f",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
@@ -2164,27 +2122,6 @@
   {
     "file": "docs/models/qwen3.8-27b/artifacts/speculative-corpus.json",
     "sha256": "b88da26d719c0fa810935f91ea03109e4019c4da6ae35fa339776446dfc049e7",
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
-    "category": "historic-fixture"
-  },
-  {
-    "file": "docs/models/qwen3.8-flash-next/BENCHMARKS.md",
-    "line": "Gufo pp/tg, concurrency and memory: October 8–9, 2026, production Nix build.",
-    "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
-    "category": "historic-fixture"
-  },
-  {
-    "file": "docs/models/qwen3.8-flash-next/BENCHMARKS.md",
-    "line": "Positive gain favors Gufo.",
-    "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
-    "category": "historic-fixture"
-  },
-  {
-    "file": "docs/models/qwen3.8-flash-next/BENCHMARKS.md",
-    "line": "shared-Q8_0 MTP sidecar; Gufo uses adaptive MTP. HTTP, greedy, thinking off.",
-    "count": 1,
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
@@ -2252,20 +2189,6 @@
     "category": "historic-fixture"
   },
   {
-    "file": "docs/models/qwen3.8-flash-next/QUALITY.md",
-    "line": "Gufo pp/tg, concurrency and memory refreshed October 8–9, 2026 using the production",
-    "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
-    "category": "historic-fixture"
-  },
-  {
-    "file": "docs/models/qwen3.8-flash-next/QUALITY.md",
-    "line": "workloads. Gufo capacity is 133760; reference capacity is 35456 through 32K,",
-    "count": 1,
-    "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
-    "category": "historic-fixture"
-  },
-  {
     "file": "docs/models/qwen3.8-flash-next/artifacts/bench.json",
     "sha256": "a8c70e48be58ff68e54651014030deb6298589e42fee0530e6463bd467cd9ff3",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
@@ -2273,19 +2196,19 @@
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/loading-gufo.json",
-    "sha256": "8eb90346cbe84bf04b8213a0f04fbf1660c235ce26a7e72c7323765042ace37d",
+    "sha256": "c223e906c09ace33ef77188cc34ab960dc4dbf2aeecda6ba0493b7188abddfc4",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/memory-gufo.json",
-    "sha256": "22cfd279fdef8b7a4aa564a55ded69f5472d2e9b14d2c96956efe3547fe3cbb2",
+    "sha256": "bc7d4b32b9e7bcf06d1efcd8e79b53e527126dd35b8fe9a746198881c70bb97d",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/model-identities.json",
-    "sha256": "acd284229417f012fc853beab75c729ed4aa78764b253fa4de7e2d66c9b329f4",
+    "sha256": "62da03595f6f63289e4dd22efd961e4727b4621f178e780302c067b474b2bdce",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
@@ -2297,7 +2220,7 @@
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/multi-ar-gufo-ar.json",
-    "sha256": "e8093bd24c1946cfae8c54fd59ae80eccc451a0bb0ae1dc6246f7688e95a312a",
+    "sha256": "e665b97f8ee58a49faecda9e0d0539b72b90f2f244c8d31a3715d19c1a3ca9ca",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
@@ -2309,13 +2232,13 @@
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/multi-mixed-gufo-ar.json",
-    "sha256": "8fa35f117ba43c2d8441f21b2b7d405224f72fab08c2a558a61e3265ae75c623",
+    "sha256": "22178a4afcf5062e025c14589eab7cd0e5c77b4ac4d30e0545c920d68b801cc7",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/multi-mixed-gufo-mtp.json",
-    "sha256": "f310c02581c3f3049c95efb189e5dfd119449c2de4afdca69ad2164c1229b49d",
+    "sha256": "4a739b19a1dc1d6aea009252ef8875cd8b49facec89a3774c693a1c05d805a6d",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
@@ -2327,13 +2250,13 @@
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/multi-repetition-gufo-ar.json",
-    "sha256": "6af8b865fa5d6ef68268df11ebe743ac53358ac5e11441e92ded17fd1bab5e69",
+    "sha256": "7ee48a952f4291a6de3311812d5f4588754cffbda2a7fb57b3c092aed1dad361",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/multi-repetition-gufo-mtp.json",
-    "sha256": "f8182c6778523f883d6813d3e43e4fc15df39a78a2a6aabe6568c18f4d03d5bc",
+    "sha256": "e237ed4ee2175dde1680c2c6fb64d141b8f634d7537bee5a84a6e6f0f303b92e",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
@@ -2375,19 +2298,19 @@
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/single-ar-gufo.json",
-    "sha256": "94ce9dcb5ba54abc4170d079d89832f68b1571a848328aa4fa7f511360b8b73c",
+    "sha256": "ab8d8ca5607336cf3306ae0207fd069a818375e25d4aabc2821e043ab61aff2a",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/single-mtp-gufo.json",
-    "sha256": "f9a4fe0d12112b0e868667c576016b69faa76c87f5741504ddc9c9a14e5f8da6",
+    "sha256": "727bd59966dce0601f6b23e1432e2d4ef8551a08ec103ae8096565249228bdaa",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
   {
     "file": "docs/models/qwen3.8-flash-next/artifacts/single-mtp-repetition-gufo.json",
-    "sha256": "65be277af4bacf90783b4160924cfb9deb0fa1d7e67c3fb8c38a7b7e2306de41",
+    "sha256": "2a78c8e63d4ae8f165029e0340763bb8a7444c10b74302d26cd78aa9a1dbfc8c",
     "reason": "Historic engine measurement/fixture: retain original engine attribution, commands, and artifact identity.",
     "category": "historic-fixture"
   },
@@ -3152,5 +3075,1021 @@
     "count": 1,
     "category": "engine",
     "reason": "Public main user documentation identifies the upstream engine, compatibility settings, or its attribution."
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/artifacts/gfx1151-2026-10-23-gemm-ab.json",
+    "sha256": "f571eae8c271e052b7fe228b89f1f2860c7eb21d398f68ebe937a802b5466c0f",
+    "reason": "Post-0.1.1 upstream merge: measurement or review record, does not ship.",
+    "category": "historic-fixture"
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/artifacts/gfx1151-2026-10-23-nix.json",
+    "sha256": "61085e08daedcac30d308c1d7f5129ab9ee453666b3f204fe457bf057a4be974",
+    "reason": "Post-0.1.1 upstream merge: measurement or review record, does not ship.",
+    "category": "historic-fixture"
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/artifacts/gfx1151-2026-10-24-attention-ab.json",
+    "sha256": "6706532b3fe1830b95b80ae66f7f75e7a8c20feeb004ec3476e889456340a904",
+    "reason": "Post-0.1.1 upstream merge: measurement or review record, does not ship.",
+    "category": "historic-fixture"
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/artifacts/gfx1151-2026-10-24-batching-ab.json",
+    "sha256": "9558c48d3db5a13fc28bbd88ed219e2ca83c5e8e5ca8ce2d1cd01bbfa073ab5a",
+    "reason": "Post-0.1.1 upstream merge: measurement or review record, does not ship.",
+    "category": "historic-fixture"
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/artifacts/gfx1151-2026-10-24-images.json",
+    "sha256": "66f7484fd20ab08e1f8dc4184bc8539fe5b237719485e54a8e223e37dea1614d",
+    "reason": "Post-0.1.1 upstream merge: measurement or review record, does not ship.",
+    "category": "historic-fixture"
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/artifacts/gfx1151-2026-10-26-audio.json",
+    "sha256": "8bcb2b22d3c2021e35dc3532c33d9117d57752091278375abe700ad76a14b6c8",
+    "reason": "Post-0.1.1 upstream merge: measurement or review record, does not ship.",
+    "category": "historic-fixture"
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/artifacts/gfx1151-pr759-review.json",
+    "sha256": "2e21df650b442312b71d888236703662dd92aa307129bcbdeeb997495cbebc90",
+    "reason": "Post-0.1.1 upstream merge: measurement or review record, does not ship.",
+    "category": "historic-fixture"
+  },
+  {
+    "file": "docs/models/qwen3.8-27b/artifacts/component-cache-review.json",
+    "sha256": "59b5f082bd07957fc9e5becee06a2d7161bd7af186a293880edaded59aa7473e",
+    "reason": "Post-0.1.1 upstream merge: measurement or review record, does not ship.",
+    "category": "historic-fixture"
+  },
+  {
+    "file": "docs/models/qwen3.8-27b/artifacts/recurrent-fork-review.json",
+    "sha256": "bf104ba118d933b945e9de314cec4236f5331103fd5c60bce121c6b2d3262fe8",
+    "reason": "Post-0.1.1 upstream merge: measurement or review record, does not ship.",
+    "category": "historic-fixture"
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/artifacts/cache-checkpoint-review.json",
+    "sha256": "d93c5ba563396c5b5dbfc8dbe009f5e869c5ddf22fa3144fa71b611ad9db5c95",
+    "reason": "Post-0.1.1 upstream merge: measurement or review record, does not ship.",
+    "category": "historic-fixture"
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/artifacts/decode-kernels-review.json",
+    "sha256": "02e996ed384dffb02553f6271facde12a436462c654186d1257314c8ef7e41ab",
+    "reason": "Post-0.1.1 upstream merge: measurement or review record, does not ship.",
+    "category": "historic-fixture"
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/artifacts/functional-fixes.json",
+    "sha256": "0ecee816e9820ca11014963be5a71bc4bf8a7a3a5e5a963c8519b1dff9021aac",
+    "reason": "Post-0.1.1 upstream merge: measurement or review record, does not ship.",
+    "category": "historic-fixture"
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/artifacts/host-memory-stalls-review.json",
+    "sha256": "e5d1ef5da8617fe0f7633eac0fb1bcb665f2cc3a048798cc96d6061bd3a3a9d5",
+    "reason": "Post-0.1.1 upstream merge: measurement or review record, does not ship.",
+    "category": "historic-fixture"
+  },
+  {
+    "file": ".devops/nix/package.nix",
+    "line": "    ccache_dir=/tmp/gufo-ccache",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Post-0.1.1 upstream merge: build, Nix or CMake text, does not ship."
+  },
+  {
+    "file": ".devops/nix/package.nix",
+    "line": "  # CI exposes a persistent /tmp/gufo-ccache through extra-sandbox-paths for",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Post-0.1.1 upstream merge: build, Nix or CMake text, does not ship."
+  },
+  {
+    "file": ".devops/nix/scope.nix",
+    "line": "  gufo = self.callPackage ./package.nix { inherit releaseVersion revision rocmPackages; };",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Post-0.1.1 upstream merge: build, Nix or CMake text, does not ship."
+  },
+  {
+    "file": ".devops/nix/windows-platform-tests.nix",
+    "line": "    ccache_dir=/tmp/gufo-ccache",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Post-0.1.1 upstream merge: build, Nix or CMake text, does not ship."
+  },
+  {
+    "file": ".devops/nix/windows-platform-tests.nix",
+    "line": "  # /tmp/gufo-ccache through extra-sandbox-paths; without it the compiler",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Post-0.1.1 upstream merge: build, Nix or CMake text, does not ship."
+  },
+  {
+    "file": ".devops/nix/windows-platform-tests.nix",
+    "line": "  pname = \"gufo-windows-platform-tests\";",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Post-0.1.1 upstream merge: build, Nix or CMake text, does not ship."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "    message(STATUS \"gufo: ROCr runtime ${GUFO_ROCR_LIBRARY}\")",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Post-0.1.1 upstream merge: build, Nix or CMake text, does not ship."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "    message(STATUS \"gufo: compiling HIP through ${GUFO_CCACHE_PROGRAM}\")",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Post-0.1.1 upstream merge: build, Nix or CMake text, does not ship."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "    message(STATUS \"gufo: staging ${GUFO_HIP_RUNTIME_DLLS}\")",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Post-0.1.1 upstream merge: build, Nix or CMake text, does not ship."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  # It reads the code objects of an ELF gufo binary; the Windows binary is a PE file the script cannot parse.",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Post-0.1.1 upstream merge: build, Nix or CMake text, does not ship."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  # Nix package wraps `gufo` for this). With GUFO_ROCR_LIBRARY_DIR (the Nix",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Post-0.1.1 upstream merge: build, Nix or CMake text, does not ship."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  add_test(NAME gufo_serve_embedding_help COMMAND gufo serve embedding --help)",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Post-0.1.1 upstream merge: build, Nix or CMake text, does not ship."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  if(ENGINE_ENABLE_HIP AND TARGET gufo AND NOT WIN32)",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Post-0.1.1 upstream merge: build, Nix or CMake text, does not ship."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  message(FATAL_ERROR \"Gufo requires Linux or Windows on x86-64 with an AMD gfx1151 GPU\")",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Post-0.1.1 upstream merge: build, Nix or CMake text, does not ship."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  message(STATUS \"gufo: ccache not found, compiling without a launcher\")",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Post-0.1.1 upstream merge: build, Nix or CMake text, does not ship."
+  },
+  {
+    "file": "CMakeLists.txt",
+    "line": "  message(STATUS \"gufo: compiling C and CXX through ${GUFO_CCACHE_PROGRAM}\")",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Post-0.1.1 upstream merge: build, Nix or CMake text, does not ship."
+  },
+  {
+    "file": "cmake/Checks.cmake",
+    "line": "  DEPENDS gufo ${gufo_pr_targets}",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Post-0.1.1 upstream merge: build, Nix or CMake text, does not ship."
+  },
+  {
+    "file": "docs/CI.md",
+    "line": "Toolboxes must use `gufo-org/gufo/.github/workflows/windows-build.yml@main` after",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/CI.md",
+    "line": "the renamed workflow reaches Gufo main; its caller change must not land first.",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/CI.md",
+    "line": "| `devlab-windows.yml` | Windows validation | Run Windows model checks | Devlab Windows Strix Halo | After the build on Gufo PR/manual runs. Downloads the same run’s Windows bundle and runs GPU diagnostics and model smoke checks. |",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/DEVELOPMENT.md",
+    "line": "`gufo: compiling C and CXX through ...` or `gufo: ccache not found`. HIP kernels",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/KV-CACHE.md",
+    "line": "Flash-Next also reports `usage.gufo.component_cache.captured_checkpoint_ids`.",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/KV-CACHE.md",
+    "line": "still works, and the per-response `gufo.component_cache` block stays present",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/RELEASING.md",
+    "line": "In parallel with the OCI builds, Toolboxes calls Gufo's reusable Windows",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/RELEASING.md",
+    "line": "Merge the reusable Windows workflow in Gufo before enabling its Toolboxes",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/RELEASING.md",
+    "line": "Toolboxes then attaches `gufo-vX.Y.Z-windows-x86_64.zip` and its `.sha256`",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/RELEASING.md",
+    "line": "`GITHUB_TOKEN` cannot upload assets to Gufo. The upload job creates a fresh app",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/RELEASING.md",
+    "line": "`gufo.exe --version` and platform diagnosis with only the bundled runtime on",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/RELEASING.md",
+    "line": "checksum to the existing Gufo GitHub Release. The ZIP includes `gufo.exe`,",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/RELEASING.md",
+    "line": "entire archive before running the executable; use `gufo.exe serve` for the",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/RELEASING.md",
+    "line": "installed on Gufo with Contents write permission; Toolboxes' own",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/RFC.md",
+    "line": "integration is under qualification in [PR #543](https://github.com/gufo-org/gufo/pull/543).",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/12-streamed-transfers.md",
+    "line": "three sanitizer checks. Draft PR: [#515](https://github.com/gufo-org/gufo/pull/515).",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/13-tiered-lookup-and-eviction.md",
+    "line": "[#517](https://github.com/gufo-org/gufo/pull/517).",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/14-flash-next-adapter.md",
+    "line": "Card 19 ([PR #543](https://github.com/gufo-org/gufo/pull/543)) now attaches",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/14-flash-next-adapter.md",
+    "line": "`/home/mixer/gufo-qualification/cache-card14-2026-10-10/`, excluding generated",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/14-flash-next-adapter.md",
+    "line": "retained outside the repository under `/tmp/gufo-card14-*` and copied to",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/15-qwen27b-ar-adapter.md",
+    "line": "`/home/mixer/gufo-qualification/cache-card15-2026-10-10`.",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/15-qwen27b-ar-adapter.md",
+    "line": "`/home/mixer/gufo-qualification/qwen27b-component-2026-10-13`.",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/19-switch-over.md",
+    "line": "Evidence: `/home/mixer/gufo-qualification/pr543-review-2026-10-11`,",
+    "count": 6,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/19-switch-over.md",
+    "line": "Git at `/home/mixer/gufo-qualification/pr543-followup`. The initial measured",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/19-switch-over.md",
+    "line": "The `candidate-r3-gufo` AR run passed all 54 growth requests, then exposed",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/19-switch-over.md",
+    "line": "The restarted matrix uses `candidate-r4-gufo`, SHA-256",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/19-switch-over.md",
+    "line": "The revised production build is `candidate-r7-gufo`, SHA-256",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/19-switch-over.md",
+    "line": "[Issue #542's PR reproduction](https://github.com/gufo-org/gufo/issues/542#issuecomment-6105542426)",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/19-switch-over.md",
+    "line": "`/home/mixer/gufo-qualification/pr543-claude-2026-10-11`. The gap-clearing",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/19-switch-over.md",
+    "line": "`/home/mixer/gufo-qualification/pr543-followup/cache-crc-review.json`.",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/19-switch-over.md",
+    "line": "`/home/mixer/gufo-qualification/pr543-followup/cache-ram-review.json` make the",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/19-switch-over.md",
+    "line": "`candidate-r6-gufo` (SHA-256",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/19-switch-over.md",
+    "line": "`candidate-r8-gufo`, SHA-256",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/19-switch-over.md",
+    "line": "at `/home/mixer/gufo-qualification/pr543-borrowed-2026-10-11`.",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/19-switch-over.md",
+    "line": "candidate was `candidate-r3-gufo`, SHA-256",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/19-switch-over.md",
+    "line": "in `/home/mixer/gufo-qualification/pr543-review-2026-10-11`) records 106 cache",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/21-edit-boundary-admission.md",
+    "line": "Evidence: `/home/mixer/gufo-qualification/pr543-review-2026-10-11`,",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/22-small-budget-retention.md",
+    "line": "Evidence: `/home/mixer/gufo-qualification/pr543-pressure-2026-10-12` (drivers,",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/d4-options-and-budgets.md",
+    "line": "Evidence: `/home/mixer/gufo-qualification/d4-options-2026-10-12` (`smoke.py`,",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/d4-options-and-budgets.md",
+    "line": "Evidence: `/home/mixer/gufo-qualification/issue562-2026-10-12`",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/d4-options-and-budgets.md",
+    "line": "Production-build smoke runs (release `gufo serve llm`, one session, context",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/todo.md",
+    "line": "Unfinished acceptance gates for [PR #543](https://github.com/gufo-org/gufo/pull/543), the",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/cache-redesign/cards/todo.md",
+    "line": "| Medium | Complete issue reproduction coverage | The **160-issue inventory is complete** and retained in `/home/mixer/gufo-qualification/pr543-review-2026-10-11`; its pressure rows (#331, #335, #451, #462) predate `f9528f3c`. Partially verified and unverified cache reproductions still need evidence. Update each assessment with its revision, result and limits. Keep unsupported features and issues outside Flash scope explicit. |",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/BENCHMARKS.md",
+    "line": "Measured on 2026-10-23 on Linux with a Radeon 8060S GPU of architecture gfx1151, using BF16 safetensors, a resident model, and the production `gufo` from a Nix container image.  The baseline build is #700 at its current head, which includes the device turns.  Each build ran its rows in two passes on one node, the only GPU pod on it, with passes of builds from the sibling changes between them.  Each row is 60 requests per pass, the table shows the mean of the two passes' medians, and token counts include `<bos>` and `<eos>`.",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/BENCHMARKS.md",
+    "line": "Measured on 2026-10-24 on the node gpuworker01 with a Radeon 8060S GPU of architecture gfx1151, using BF16 safetensors and the production `gufo` from one Nix container image that holds both builds.  Main is commit 194db882, which has the hipBLASLt GEMMs from #751, image inputs from #759, and matrix-core attention from #770.  This PR is commit 9a06aa43, which differs from the PR head only in documentation, a removed include, and a rewrite of the return path of `EmbedMultimodal` that does not change behavior.  The pod was the only GPU pod on the node.  Each build ran its nine EmbeddingGemma 2 GPU test binaries, then four HTTP passes in the order main, this PR, this PR, main, main, this PR, this PR, main, each with a new server and 60 requests per row.  The table shows the mean of the four passes' medians, and speedup is main's median divided by this PR's median.  The text rows use `http_bench.py` with the labels of the HTTP table above, including the new 16 × 1 × 16 row.  The image rows send one 320 × 180 PNG followed by a newline in the typed `content` format, which is 269 tokens, at 1, 4, and 16 clients.  The earlier tables predate cross-request batching, so in them concurrent requests take turns one batch at a time.  With this change, text requests that wait for the device share batches of up to 8,192 tokens, oldest first, and a lone request runs at once.",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/BENCHMARKS.md",
+    "line": "Measured on 2026-10-24 on the node gpuworker01 with a Radeon 8060S GPU of architecture gfx1151, using BF16 safetensors and the production `gufo` from one Nix container image that holds both builds.  Main is commit 479162ed, which has the hipBLASLt GEMMs from #751 and image inputs from #759.  This PR is commit ec21a41f, which differs from the PR head only in documentation.  The pod was the only GPU pod on the node.  The builds ran in the order main, this PR, this PR, main, with 60 requests per row in each pass, and the table shows the mean of the two passes' medians.  Speedup is main's median divided by this PR's median.  The text rows use `http_bench.py` with the labels of the HTTP table above.  The image rows send one 320 × 180 PNG followed by a newline in the typed `content` format, which is 269 tokens, at concurrency 1 and 4 after one warm-up request.",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/BENCHMARKS.md",
+    "line": "These rows time `gufo serve embedding` on loopback with [`http_bench.py`](../../../tools/models/embedding_gemma2/http_bench.py).  Each input is a run of distinct `word<N>` words.",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/EXPERIMENTS.md",
+    "line": "| BF16 safetensors only | Retained.  The text backbone is 540 MB and 268 MB of that is the token table, which is a row lookup, so quantizing saves little memory or time.  GGUF quants wait for published quality measurements in [discussion 478](https://github.com/gufo-org/gufo/discussions/478). |",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/EXPERIMENTS.md",
+    "line": "| hipBLASLt instead of hipBLAS | Retained.  hipBLAS has no matrix-core kernel for this BF16-in, float32-out transposed GEMM and runs at 4.5 to 5 TFLOPS in `gemm_bench_hip_test`, while hipBLASLt reaches 17 to 27 TFLOPS at 1,024 rows.  No fixed heuristic rank wins across shapes, because the best rank moves between 4 and 8, so Gufo times each shape and row bucket once at load.  Against #700 over HTTP, a 404-token request drops from 41.4 ms to 20.5 ms, which is 2.0 times faster.  Concurrent single-input requests of 404 tokens are 2.0 to 2.1 times faster, and batches of 8 and 32 inputs are 2.2 to 2.3 times faster.  A request of about 8,000 tokens is 1.3 times faster, and load time grows from 0.53 s to 2.2 s. |",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/QUALITY.md",
+    "line": "Google published the retrieval accuracy of this checkpoint on MTEB, code, and multilingual tasks, and Gufo did not re-measure it.  Video embeddings are unsupported; image and audio qualification is below.  Quantized variants are unsupported and unmeasured.  The model card states a 1,024-token sliding window.  The checkpoint's configuration and the Hugging Face code use a radius of 512 positions on each side, or 1,025 keys, and Gufo follows them.  Hugging Face's `sliding_window_bidirectional_overlay` in `transformers/masking_utils.py` keeps keys where `abs(q_idx - kv_idx) <= sliding_window`, and `create_bidirectional_sliding_window_mask` passes `config.sliding_window` (512).  The `+ 1` in `modeling_embedding_gemma2.py` applies only to the flash-attention path.",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/QUALITY.md",
+    "line": "The probes are English, Spanish, and Chinese queries and passages, code, emoji, whitespace runs, literal special-token text, and one long document.  They measure agreement with the reference implementation, not retrieval quality on a benchmark, and Gufo reports no MTEB score.  Activations stay float32 between BF16 matrix products, so Gufo is closer to the float32 reference than the model's BF16 execution is.",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/QUALITY.md",
+    "line": "mean-pools/L2-normalizes its outputs independently of Gufo. The script records",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/QUALITY.md",
+    "line": "| GPU versus Gufo float32 CPU reference | Cosine 0.999992 or better on four sequences |",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/README.md",
+    "line": "  PAPERLESS_AI_LLM_EMBEDDING_ENDPOINT=http://gufo-host:8080/v1",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/README.md",
+    "line": "- **Match the model ID.**  A request for any other model returns 404 `model_not_found`.  Configure the client with the served ID, or start Gufo with `--served-model-name` set to the name the client sends.  paperless-ngx's OpenAI-compatible backend sends `text-embedding-3-small` unless `PAPERLESS_AI_LLM_EMBEDDING_MODEL` is set:",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/README.md",
+    "line": "- **Send strings.**  Gufo refuses token-array input (400 `unsupported_input`), because the token IDs come from another model's tokenizer.  LangChain's `OpenAIEmbeddings` tokenizes with tiktoken and sends token arrays by default.  Set `check_embedding_ctx_length=False`, as LangChain itself advises for OpenAI-compatible servers:",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/README.md",
+    "line": "./result/bin/gufo serve embedding --model models/embeddinggemma-2",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/README.md",
+    "line": "Clients that cannot change their input can let the server add a prefix from the checkpoint's `config_sentence_transformers.json` `prompts` instead: a request field `\"prompt_name\": \"query\"` (or `\"document\"`, `\"Retrieval-query\"`, ...) prefixes every input of that request, and `--default-prompt-name NAME` applies one to the text inputs of requests that name none.  The default skips image-only and audio-only inputs, which the model card embeds without a prefix.  Gufo adds no prefix unless asked.  Changing the prefix changes every vector, so an existing index needs a rebuild.",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/README.md",
+    "line": "Gufo's reference-matched resize differs from llama.cpp's preprocessing.",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/README.md",
+    "line": "Native safetensors text, image and audio embeddings on gfx1151. Gufo runs [google/embeddinggemma-2](https://huggingface.co/google/embeddinggemma-2), a 768-dimensional embedding model for 100+ languages and code, through `POST /v1/embeddings`. Text, images and audio share one vector space. Video inputs remain unsupported. Python runs only in offline reference checks.",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/README.md",
+    "line": "One device batch of up to 8,192 tokens runs at a time.  Text requests that wait for the device share a batch, oldest first, and a lone request runs at once.  A request with images or audio runs in a batch of its own, in arrival order, and its soft tokens count toward the batch.  A request that fits in one batch never spans two.  A larger request is split, and after each of its batches the requests that arrived meanwhile go first, so a short request waits for at most one batch of a long one.  A device failure that a probe confirms answers 503 `device_lost` and shuts the server down for its supervisor to restart, as the text server does.  Attention is bidirectional, so there is no cache to reuse between requests.  Gufo checks for cancellation before each batch that would take a request's inputs, so a cancelled request does not use the device again.  `--served-model-name` sets the public model ID.  Gufo supports only BF16 safetensors, not GGUF or quantized variants.",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/README.md",
+    "line": "The model is trained with short prefixes, and Gufo does not add them by default.  Send the prefix as part of the input:",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/README.md",
+    "line": "`dimensions` selects a Matryoshka size of 128, 256, 512, or 768, and defaults to 768.  Gufo keeps the first components of the full vector and renormalizes.  Quality falls slowly down to 256 and faster at 128, which Google recommends only for text.  Vectors of different sizes, or from different models, are not comparable.  Changing either requires re-embedding an index.",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/embeddinggemma-2/ROCM.md",
+    "line": "./result-rocm10/bin/gufo serve embedding --model models/embeddinggemma-2 \\",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3-asr/ROCM.md",
+    "line": "Raw results are retained under `gufo-models-rocm101-20261023/port-models` on",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3-tts/ROCM.md",
+    "line": "`gufo-models-rocm101-20261023/port-models` on the test host.",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-27b/BENCHMARKS.md",
+    "line": "AMD Strix Halo `gfx1151`, 128 GB unified memory. Gufo versus llama.cpp",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-27b/BENCHMARKS.md",
+    "line": "All Gufo rows were refreshed October 19, 2026 on `11813e51` (wave64",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-27b/BENCHMARKS.md",
+    "line": "Gufo uses its adaptive controller. HTTP, greedy, thinking off.",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-27b/BENCHMARKS.md",
+    "line": "gives the same peaks. Gufo now loads the vision projector by default, and HIP",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-27b/EXPERIMENTS.md",
+    "line": "| CPU image preprocessing reuse, October 18 (#627) | Retained: backend-owned 128 MiB combined encoded/RGB cache, fast lookup hash followed by exact byte equality, immutable request ownership and unchanged continuation hashing. Flash-Next queue medians: 45.01/82.40/161.49 → 9.65/13.25/20.63 ms for 1/2/4 screenshots. Miss median differences: −0.26 ms small PNG, +0.42 ms 6.2 MB PNG; individual stalls and broad timing flags remain inconclusive. Rejected: SHA-256 lookup added about 6.7 ms for large PNG misses; unconditional reuse changed forced-cold behavior, so `cache_prompt:false` bypasses reuse. [Evidence](https://github.com/gufo-org/gufo/pull/645). |",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-27b/QUALITY.md",
+    "line": "All Gufo rows refreshed October 19, 2026 on `11813e51` (#660, rebased on",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-27b/QUALITY.md",
+    "line": "October 19 rows; all concurrency completions match Gufo AR. The Q4 DFlash2",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-27b/QUALITY.md",
+    "line": "These are Gufo execution-consistency checks. They do not extend upstream or",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-27b/QUALITY.md",
+    "line": "[#678](https://github.com/gufo-org/gufo/issues/678). Disk requests queue less than on main. See the",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-27b/QUALITY.md",
+    "line": "`/home/mixer/gufo-qualification/qwen27b-component-2026-10-13`.",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-27b/QUALITY.md",
+    "line": "`/tmp/gufo-qwen27b-dflash2-20261021` on the test host, with reports copied to",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-27b/QUALITY.md",
+    "line": "under `/tmp/gufo-qwen27b-dflash2-20261021` on the development host.",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-27b/ROCM.md",
+    "line": "`gufo-models-rocm101-20261023/port-models` on the development host.",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/BENCHMARKS.md",
+    "line": "(September 22–23). Positive gain favors Gufo.",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/BENCHMARKS.md",
+    "line": "Gufo `fec4759d` (October 18, 2026); llama.cpp `b11069` AR and `6fcaa16f` MTP",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/EXPERIMENTS.md",
+    "line": "- llama.cpp b11382 on Gufo's rendered prompt ranks `<` first (log",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/EXPERIMENTS.md",
+    "line": "Batching several sequences into one prefill pass is not ported: Gufo",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/EXPERIMENTS.md",
+    "line": "`gufo bench -n 0 -r 3` on the `rocm10` toolchain, main `8b52b42c` as",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/EXPERIMENTS.md",
+    "line": "`gufo bench -n 0 -r 3`, two round-robin rounds (pp512 from two dedicated",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/EXPERIMENTS.md",
+    "line": "they still shorten short passes. `gufo bench -n 0 -r 3`, two alternated",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/EXPERIMENTS.md",
+    "line": "| Benchmark tokens drawn like llama-bench (seeded random vocabulary) | Diagnostic: 1,335/1,925/1,997 against 1,345/1,934/2,008 tok/s for Gufo's sequential ids, so expert coverage does not explain the gap to the reference numbers. |",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/EXPERIMENTS.md",
+    "line": "| CPU image preprocessing reuse, October 18 (#627) | Retained: backend-owned 128 MiB combined encoded/RGB cache, fast lookup hash followed by exact byte equality, immutable request ownership and unchanged continuation hashing. Flash-Next queue medians: 45.01/82.40/161.49 → 9.65/13.25/20.63 ms for 1/2/4 screenshots. Miss median differences: −0.26 ms small PNG, +0.42 ms 6.2 MB PNG; individual stalls and broad timing flags remain inconclusive. Rejected: SHA-256 lookup added about 6.7 ms for large PNG misses; unconditional reuse changed forced-cold behavior, so `cache_prompt:false` bypasses reuse. [Evidence](https://github.com/gufo-org/gufo/pull/645). |",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/EXPERIMENTS.md",
+    "line": "| Depth profile before porting | Diagnostic: a pp2048 pass takes 1,056 ms at d0 and 1,153 ms at d50K (`prof.py`, timed pass only). Of the +97 ms, attention adds 63 and block scoring 39. The source branch's own d0 → d50K cost is +162 ms, so Gufo already degrades less with depth; its d50K pp2048 is 1,766–1,772 tok/s. |",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/KV-CACHE.md",
+    "line": "gufo chat --model \"$MODEL\" --kv-cache-type q8_0",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/KV-CACHE.md",
+    "line": "gufo serve llm --model \"$MODEL\" --kv-cache-type q8_0-rotated",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/QUALITY.md",
+    "line": "All Gufo tables were refreshed on October 18, 2026, with the clean production",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/QUALITY.md",
+    "line": "Gufo independently re-prefilled each cold prefix; llama.cpp teacher-forced",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/QUALITY.md",
+    "line": "Gufo's historical source was `f2ae34244b939ee7611c9c17612a035a75533450`;",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/QUALITY.md",
+    "line": "The driver is `tools/bench/model-bench.py run --target gufo --fresh`.",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/QUALITY.md",
+    "line": "[PR comparison](https://github.com/gufo-org/gufo/pull/680)",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/QUALITY.md",
+    "line": "`/home/mixer/gufo-qualification/issue678-2026-10-20` (`provenance.json`,",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/QUALITY.md",
+    "line": "`/tmp/gufo-flash-decode-20261021` on the test host and",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/QUALITY.md",
+    "line": "`/tmp/gufo-rocm10-20261023` on the test host. No reference benchmark data change.",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/QUALITY.md",
+    "line": "`/tmp/gufo-rocm10-20261023` on the test host. Sampled text and completion length",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/QUALITY.md",
+    "line": "language-quality result. The Gufo benchmark refresh below retains all llama.cpp",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/QUALITY.md",
+    "line": "llama.cpp also quantizes indexer K; Gufo retains F16 indexer state. The engines'",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/QUALITY.md",
+    "line": "ngram path samples the target directly and compares the token. Gufo retains",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/QUALITY.md",
+    "line": "positions of long prompts), gufo versus llama.cpp agreement is 61/64 top-1",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/QUALITY.md",
+    "line": "tokens with YaRN 1.5625 (KL median 0.008); the divergence there is gufo's",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/QUALITY.md",
+    "line": "| Gufo plain q8 | Cold prefixes | 0.00137127 | 0.0309366 | 0.0825341 | 141/144 |",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "docs/models/qwen3.8-flash-next/QUALITY.md",
+    "line": "| Gufo rotated q8 | Cold prefixes | 0.000946485 | 0.0175448 | 0.0377823 | 141/144 |",
+    "count": 1,
+    "category": "historic-fixture",
+    "reason": "Post-0.1.1 upstream merge: documentation or measurement record, does not ship."
+  },
+  {
+    "file": "flake.nix",
+    "line": "      \"gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=\"",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Post-0.1.1 upstream merge: build, Nix or CMake text, does not ship."
+  },
+  {
+    "file": "flake.nix",
+    "line": "    # ROCm 10.1.0 / HIP Clang 24, with gfx1151 binaries on gufo.cachix.org.",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Post-0.1.1 upstream merge: build, Nix or CMake text, does not ship."
+  },
+  {
+    "file": "flake.nix",
+    "line": "    extra-substituters = [ \"https://gufo.cachix.org\" ];",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Post-0.1.1 upstream merge: build, Nix or CMake text, does not ship."
+  },
+  {
+    "file": "flake.nix",
+    "line": "    nixpkgs-rocm10.url = \"github:gufo-org/nixpkgs/1a6ba8bc6f744f7a843d025e46bc9911b4b6c37d\";",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Post-0.1.1 upstream merge: build, Nix or CMake text, does not ship."
+  },
+  {
+    "file": "flake.nix",
+    "line": "  # Prebuilt outputs that cache.nixos.org lacks (patched ROCr, gufo, the",
+    "count": 1,
+    "category": "developer-tool",
+    "reason": "Post-0.1.1 upstream merge: build, Nix or CMake text, does not ship."
+  },
+  {
+    "file": "src/cli/serve/embeddings_api.cpp",
+    "line": "      {\"X-Gufo-Embedding-Backend\", service.backend_name()},",
+    "count": 1,
+    "category": "api-contract",
+    "reason": "HTTP response header of the /v1/embeddings API; the header name is a wire contract kept for client compatibility."
+  },
+  {
+    "file": "src/cli/serve/embeddings_api.cpp",
+    "line": "      {\"X-Gufo-Schema\", std::string(kEmbeddingsApiSchema)},",
+    "count": 1,
+    "category": "api-contract",
+    "reason": "HTTP response header of the /v1/embeddings API; the header name is a wire contract kept for client compatibility."
+  },
+  {
+    "file": "src/cli/serve/embeddings_api.hpp",
+    "line": "    \"gufo.embeddings-api.v1\";",
+    "count": 1,
+    "category": "schema",
+    "reason": "Schema identifier returned by the /v1/embeddings API; a wire contract kept for client compatibility."
+  },
+  {
+    "file": "src/cli/serve/inference_backend.cpp",
+    "line": "      identity << \"schema=gufo-process-qwen-component-v2\\n\"",
+    "count": 1,
+    "category": "cache-config",
+    "reason": "Cache identity text hashed into cache keys; renaming it would invalidate every existing cache."
+  },
+  {
+    "file": "src/cli/serve/inference_backend.cpp",
+    "line": "      identity << \"schema=gufo-process-text-continuation-v1\\n\"",
+    "count": 1,
+    "category": "cache-config",
+    "reason": "Cache identity text hashed into cache keys; renaming it would invalidate every existing cache."
   }
 ]

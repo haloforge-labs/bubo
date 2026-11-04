@@ -1,0 +1,6 @@
+# Historical pf-kcut 1e8e8a750c3501d711fb463cb432bf2b26a0bc1b.
+# TailDefaultGolden in tests/cli/text_model_runner_legacy_test.cpp.
+# Component-cache default/tail=0 equivalence is tested independently; these
+# original whole-snapshot transcript digests are retained without replacement.
+8bf820219bfe386fde6fd8be14b384bb58ae73125746f0995f10f064dbc595c2  stdout
+1f50176b7e696c299a11b0e8a57c2134349df8a704f76a6f4ac0c71a5fdb6d23  eviction
