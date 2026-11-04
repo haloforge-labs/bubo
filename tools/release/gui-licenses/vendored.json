@@ -12,6 +12,7 @@
   },
   {
     "name": "IBM Plex Sans",
+    "version": "1.1.0",
     "file": "src/fonts/ibm-plex-sans-LICENSE.txt",
     "source": "https://github.com/IBM/plex"
   },
