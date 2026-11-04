@@ -52,7 +52,7 @@ A page file does not replace physical RAM for full-speed operation.
 
 ## Install
 
-1. Download `bubo-v0.1.2-windows-x64-gfx1151.zip` from the [Bubo release page](https://github.com/haloforge-labs/bubo/releases/tag/v0.1.2). The file is 71,949,037 bytes. Its SHA-256 value is `f1a86f1d667c6fd2926f846c3b1cca9f7151791b599a07db9179275ad6117e89`. `bubo --version` prints `bubo 0.1.2 (88eec3ab1), engine gufo 0.26.0`.
+1. Download `bubo-v0.1.2-windows-x64-gfx1151.zip` from the [Bubo release page](https://github.com/haloforge-labs/bubo/releases/tag/v0.1.2). The file is 71,952,963 bytes. Its SHA-256 value is `153903f2a60820e15d126e6db8df7406aba325bbb77378e17d5bea1a87ca1a2d`. `bubo --version` prints `bubo 0.1.2 (53e4c3e4b), engine gufo 0.26.0`.
 2. Extract the complete package into a folder.
 3. To use the app, double-click `start.cmd` in the package folder. See [Use the app](https://haloforgelabs.com/docs/app/).
 4. To use the command line, open PowerShell in the `bin` folder of the package and run `.\bubo.exe prepare`.

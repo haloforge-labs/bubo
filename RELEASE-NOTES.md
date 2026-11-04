@@ -28,6 +28,8 @@ Bubo v0.1.2, standard Flash Next file, default settings, 70 W, tokens/s: prose 5
 - `--cache-ram-bytes off` works: Bubo keeps no RAM checkpoint.
 - Bubo checks a draft, projector or head file that you pick yourself from its headers before the model loads.
 - A Q8 KV cache setting on a model that does not support it falls back to f16 instead of failing.
+- Fixed: DiffusionGemma tool calls without the opening tool-call marker are now read as tool calls when they have the closing marker and a declared tool name (issue #11).
+- Fixed: requests for token log probabilities (logprobs) could fail with a server error on Qwen3.8 Flash Next when MTP was on.
 - `bubo diagnose` reports the revision and the compiler of the build.
 - The lower-memory build writes 19–28 % faster than in v0.1.1, and reads a 32K-token prompt about 7 % faster (same laptop, 70 W).
 
@@ -42,7 +44,7 @@ The full list: [Known issues](https://haloforgelabs.com/docs/known-issues/).
 
 ## Install
 
-Download `bubo-v0.1.2-windows-x64-gfx1151.zip` (71,949,037 bytes, SHA-256 `f1a86f1d667c6fd2926f846c3b1cca9f7151791b599a07db9179275ad6117e89`). After you extract it, `bubo --version` prints `bubo 0.1.2 (88eec3ab1), engine gufo 0.26.0`.
+Download `bubo-v0.1.2-windows-x64-gfx1151.zip` (71,952,963 bytes, SHA-256 `153903f2a60820e15d126e6db8df7406aba325bbb77378e17d5bea1a87ca1a2d`). After you extract it, `bubo --version` prints `bubo 0.1.2 (53e4c3e4b), engine gufo 0.26.0`.
 
 ## Credits and licenses
 
